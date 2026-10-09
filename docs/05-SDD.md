@@ -44,7 +44,7 @@ clinical-compass/
 │               clinician/dashboard, clinician/patient, admin/audit, consent)
 ├── infra/
 │   ├── docker-compose.yml     # postgres api ui seed
-│   ├── nginx.conf / Caddyfile
+│   ├── ui/nginx.conf          # nginx: статика + reverse proxy (TLS на пилоте)
 │   └── backup.sh  (pg_dump, ротация)
 ├── docs/                      # 01–06
 └── README.md
@@ -62,7 +62,10 @@ class ScaleResult:
 
 # scoring.py
 def score(scale: Scale, answers: Mapping[str, int]) -> ScaleResult
-    # raises: UnknownItemError (item_key нет в шкале) — 422 на API
+    # raises:
+    #   UnknownItemError (item_key нет в шкале)              — 422 на API
+    #   IncompleteAnswersError (нет всех item_key шкалы)      — 422 на API
+    #   ValueError (value вне 0..max_value пункта)            — 422 на API
     # invariant: total_score == sum(per_item.values()) по items шкалы
 def risk_flags(scale: Scale, answers: Mapping[str, int]) -> list[RiskFlag]
     # PHQ-9 item 9 (суицидальные мысли) value >= 1 → RiskFlag('SUICIDAL_IDEATION')
@@ -74,6 +77,7 @@ def triage(result: ScaleResult, flags: Sequence[RiskFlag]) -> Triage  # GREEN|YE
     # YELLOW: severity в (MILD, MODERATE)
     # GREEN: severity == NONE и флагов нет
     # таблица порогов severity — в scales.py, медик валидирует [TBD]
+    # порог «item 9 PHQ-9 >= 1 → SUICIDAL_IDEATION» — тоже клиническое число [TBD]
 
 # checkin.py
 def generate_checkin(scale: Scale, last: ScaleResult | None) -> Checkin
@@ -111,20 +115,20 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 
 | FR | Эпик | Ключевой тест (06) |
 |---|---|---|
-| FR-1 | E3 | test_login_2fa_required_for_clinician |
-| FR-2 | E1 | test_scale_items_and_ranges |
-| FR-3 | E4 | test_screening_closes_run_after_finish |
-| FR-4 | E1 | test_triage_boundaries |
-| FR-5 | E4 | test_suicidal_flag_escalation_under_1s |
-| FR-6 | E4 | test_checkin_once_per_day_conflict |
-| FR-7 | E2 | test_trend_moving_average_and_delta |
-| FR-8 | E5 | test_clinician_sees_only_roster_patients |
-| FR-9 | E5 | test_diary_entry_visible_to_clinician |
-| FR-10 | E5 | test_chat_escalates_on_red |
-| FR-11 | E3 | test_no_personal_data_without_consent |
-| FR-12 | E3 | test_audit_log_append_only |
-| FR-13 | E3 | test_patient_cannot_read_others |
-| FR-14 | E6 | test_seed_generates_realistic_trajectory |
+| FR-1 | E3 | `login_clinician_requires_otp`, `register_clinician_returns_totp_secret` |
+| FR-2 | E1 | `questionnaire_catalog` _(добавлен в кодовой фазе — каталог шкал из core)_ |
+| FR-3 | E4 | `run_closed_after_finish`, `screening_flow_phq9` |
+| FR-4 | E1 | `triage_red_suicidal`, `triage_yellow`, `triage_green` |
+| FR-5 | E4 | `escalation_response_under_1s`, `suicidal_answer_escalates` |
+| FR-6 | E4 | `checkin_once_per_day` |
+| FR-7 | E2 | `trend_delta_30`, `trend_moving_avg_same_length`, `trend_slope_linear` |
+| FR-8 | E5 | `clinician_patients_list_and_triage_filter`, `clinician_cannot_see_unrostered` |
+| FR-9 | E5 | `diary_in_report` |
+| FR-10 | E5 | `chat_hotline_on_red`, `chat_faq_for_green` |
+| FR-11 | E3 | `screening_requires_consent`, `consent_create_get_revoke_cycle` |
+| FR-12 | E3 | `audit_log_append_only` |
+| FR-13 | E3 | `patient_cannot_access_clinician_routes`, `foreign_run_hidden` |
+| FR-14 | E6 | покрывается e2e-питч-сценарием (`seed` → RED-траектории), не юнит-тестом |
 
 ## 7. Границы инкремента
 

@@ -6,7 +6,7 @@
 
 ## 1. Стратегия
 
-- Пирамида: unit (ядро) ~60, integration (API+БД) ~20, e2e (UI-флоу) ~5.
+- Пирамида (фактически достигнуто, см. `core/tests` + `api/tests`): unit (ядро) ~24, integration (API+БД) ~36, e2e (UI-флоу) 3. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
 - Ядро: 100% детерминированные чистые функции — табличные параметризованные тесты порогов.
 - Интеграция: реальные HTTP-запросы к тестовому Postgres (отдельная БД), не мок-эхо.
 - Запрещены тесты «на копирование»: только поведение контрактов (вход → выход/инвариант/ошибка).
@@ -26,7 +26,7 @@
 | severity_severe | total 15–27 | score() | SEVERE |
 | severity_boundary_5_9_10 | total 4,5,9,10,14,15 | score() | пограничные значения строго по порогам |
 
-> Пороги PHQ-9: 0–4 NONE, 5–9 MILD, 10–14 MODERATE, 15–27 SEVERE. GAD-7: 0–4/5–9/10–14/15+. HADS: 0–7/8–10/11–21 (по подшкалам). **Подтвердить медиком команды [TBD]** — единственные числа, которые может поменять клиника.
+> Пороги PHQ-9: 0–4 NONE, 5–9 MILD, 10–14 MODERATE, 15–27 SEVERE. GAD-7: 0–4/5–9/10–14/15+. HADS: 0–7/8–10/11–21 (по подшкалам). **Подтвердить медиком команды [TBD]** — клинические числа: пороги severity, порог суицидального флага (item 9 ≥ 1), окна тренда (7/7/30 дней).
 
 ### 2.2 risk_flags и triage
 
@@ -54,7 +54,7 @@
 |---|---|---|---|
 | trend_empty_input | runs = [] | trends() | пустой тренд, без исключений |
 | trend_delta_30 | 30-дневная серия с известной разницей | trends() | delta_30 = конец − начало |
-| trend_moving_avg | серия [1,2,3,4,5] окно 7 | trends() | avg не меняет длину ряда |
+| trend_moving_avg | серия [1,2,3,4,5] окно 7 | trends() | avg = расширяющееся среднее: длина ряда та же, значения = (1/1, 3/2, 6/3, 10/4, 15/5); окно > длины ряда — не ошибка, а полное среднее |
 
 ## 3. Интеграционные тесты (api/tests, реальный Postgres)
 
@@ -69,7 +69,7 @@
 | checkin_once_per_day | 2-й чек-ин в тот же день | 409 RUN_ALREADY_TODAY |
 | roster_enforcement | врач без roster → GET patients/{id} | 403 NO_ROSTER; после /admin/roster → 200 |
 | patient_cannot_read_others | PATIENT → GET diary другого пациента / report | 403 |
-| audit_append_only | попытка UPDATE/DELETE audit_log | ошибка БД-триггера (500 → тест на уровне БД: ожидаем исключение) |
+| audit_append_only | прямой UPDATE/DELETE audit_log на уровне БД | ошибка БД-триггера (исключение) — отдельный БД-тест, вне HTTP-слоя (API не предоставляет UPDATE/DELETE-эндпоинтов для audit_log) |
 | audit_records_access | чтение report | в audit_log появилась запись (actor, action='READ_REPORT') |
 | consent_revoke | revoke → повторное обращение к медданным | 403 CONSENT_REQUIRED |
 
@@ -81,9 +81,11 @@
 
 ## 5. Регрессия и CI
 
-- Команда прогона: `pytest core api` + `playwright test` (e2e, только при изменении UI).
-- Перед коммитом — полный прогон; в CI — Docker build + прогон (локально на демо-ноде).
-- Новая логика (порог, правило) → сначала тест-таблица, красный → реализация.
+- Подготовка (единый venv): `pip install -e "core[dev]" -e "api[dev]"`; тестовый Postgres — `docker compose -f infra/docker-compose.yml up -d postgres` (тестовая БД `compass_test` создаётся фикстурой, URL в `CC_TEST_DATABASE_URL`).
+- Команда прогона: `pytest core api -q` (интеграция — против реального Postgres, не моков).
+- Покрытие ядра (DoD E1, ≥95%): `pytest core --cov=compass --cov-fail-under=95 --cov-report=term-missing` (нужен `pytest-cov` в dev-extra).
+- e2e (UI-флоу): `cd e2e && npx playwright test` — запускать при изменении `ui/` или контрактов API; против поднятого `docker compose up -d postgres api ui`.
+- Перед каждым коммитом — полный прогон `pytest core api -q` + (при изменении UI) e2e.
 
 ## 6. Ключевые негативные проверки (обязательны к демо)
 
