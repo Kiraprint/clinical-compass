@@ -1,0 +1,211 @@
+"""Сервис: скрининг, чек-ины, эскалации. Домен — движок core (чистые функции).
+
+Инварианты (docs/04 §6): assessment считает сервер; эскалация RED — в той же
+транзакции finish; чек-ин не чаще 1 раза в сутки (по времени Москвы).
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from typing import Mapping
+from zoneinfo import ZoneInfo
+
+from sqlalchemy import delete, select
+from sqlalchemy.orm import Session
+
+from compass.checkin import generate_checkin
+from compass.models import ScaleResult
+from compass.scales import ALL_SCALES, PHQ9
+from compass.scoring import score, risk_flags
+from compass.triage import triage
+
+from app.errors import Problem
+from app.models import Answer, Assessment, Escalation, Run
+
+from .audit import record as audit_record
+
+MOSCOW = ZoneInfo("Europe/Moscow")
+
+# Контакты помощи — показываются пациенту при эскалации RED
+HELP_RESOURCES = [
+    {"title": "Единый телефон доверия", "phone": "8-800-2000-122"},
+    {"title": "Экстренная служба", "phone": "112"},
+]
+
+
+def _scale(code: str):
+    scale = ALL_SCALES.get(code)
+    if scale is None:
+        raise Problem(404, "NOT_FOUND", f"Неизвестная шкала: {code}")
+    return scale
+
+
+def _moscow_today() -> tuple[datetime, datetime]:
+    now = datetime.now(MOSCOW)
+    start = datetime(now.year, now.month, now.day, tzinfo=MOSCOW)
+    return start, start + timedelta(days=1)
+
+
+def _own_run(db: Session, run_id, patient_id) -> Run:
+    run = db.get(Run, run_id)
+    if run is None or run.patient_id != patient_id:
+        raise Problem(404, "NOT_FOUND", "Прогон не найден")
+    return run
+
+
+def start_screening(db: Session, patient_id, questionnaire_code: str) -> Run:
+    scale = _scale(questionnaire_code)
+    open_run = db.scalar(
+        select(Run).where(Run.patient_id == patient_id, Run.mode == "SCREENING", Run.finished_at.is_(None))
+    )
+    if open_run is not None:
+        raise Problem(409, "CONFLICT", "Уже есть незавершённый скрининг")
+    run = Run(patient_id=patient_id, questionnaire_code=scale.code, mode="SCREENING")
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+def _validate_answers(db: Session, run: Run, answers: Mapping[str, int]) -> None:
+    scale = _scale(run.questionnaire_code)
+    for key, value in answers.items():
+        if key not in scale.item_keys():
+            raise Problem(422, "VALIDATION", f"Пункт {key} отсутствует в шкале {scale.code}")
+        if not isinstance(value, int) or value < 0 or value > scale.item(key).max_value:
+            raise Problem(422, "VALIDATION", f"Значение {value} вне диапазона для пункта {key}")
+
+
+def add_answers(db: Session, run_id, patient_id, answers: Mapping[str, int]) -> None:
+    run = _own_run(db, run_id, patient_id)
+    if run.finished_at is not None:
+        raise Problem(409, "RUN_CLOSED", "Прогон уже завершён")
+    _validate_answers(db, run, answers)
+    existing = set(db.scalars(select(Answer.item_key).where(Answer.run_id == run_id)))
+    overlap = set(answers) & existing
+    if overlap:
+        db.execute(delete(Answer).where(Answer.run_id == run_id, Answer.item_key.in_(overlap)))
+    for key, value in answers.items():
+        db.add(Answer(run_id=run_id, item_key=key, value=value))
+    db.commit()
+
+
+def finish_screening(db: Session, run_id, patient_id) -> dict:
+    run = _own_run(db, run_id, patient_id)
+    if run.finished_at is not None:
+        raise Problem(409, "RUN_CLOSED", "Прогон уже завершён")
+    scale = _scale(run.questionnaire_code)
+    rows = db.scalars(select(Answer).where(Answer.run_id == run_id)).all()
+    answers = {a.item_key: a.value for a in rows}
+    try:
+        result = score(scale, answers)
+    except ValueError as exc:
+        raise Problem(422, "VALIDATION", str(exc))
+    flags = risk_flags(scale, answers)
+    level = triage(result, flags)
+
+    assessment = Assessment(
+        run_id=run_id,
+        patient_id=patient_id,
+        total_score=result.total_score,
+        severity=result.severity,
+        triage=level,
+        risk_flags=[{"kind": f.kind, "item_key": f.item_key} for f in flags],
+    )
+    db.add(assessment)
+    db.flush()  # назначает assessment.id до создания escalation
+    run.finished_at = datetime.now(timezone.utc)
+
+    escalation = None
+    if level == "RED":
+        kind = "SUICIDAL" if any(f.kind == "SUICIDAL_IDEATION" for f in flags) else "SEVERE"
+        escalation = Escalation(assessment_id=assessment.id, patient_id=patient_id, kind=kind)
+        db.add(escalation)
+    audit_record(db, patient_id, "SCREENING_FINISH", "assessment", str(run_id))
+    db.commit()
+    db.refresh(assessment)
+
+    resp: dict = {
+        "assessment_id": str(assessment.id),
+        "questionnaire_code": scale.code,
+        "total_score": assessment.total_score,
+        "severity": assessment.severity,
+        "triage": assessment.triage,
+        "risk_flags": assessment.risk_flags,
+        "computed_at": assessment.computed_at.isoformat(),
+    }
+    if escalation is not None:
+        db.refresh(escalation)
+        resp["escalation"] = {
+            "id": str(escalation.id),
+            "kind": escalation.kind,
+            "help_resources": HELP_RESOURCES,
+        }
+    return resp
+
+
+def _last_scale_result(db: Session, patient_id) -> tuple:
+    """Последние assessment+run пациента для генерации чек-ина (None, None если нет)."""
+    row = db.execute(
+        select(Assessment, Run)
+        .join(Run, Run.id == Assessment.run_id)
+        .where(Assessment.patient_id == patient_id)
+        .order_by(Assessment.computed_at.desc())
+        .limit(1)
+    ).first()
+    if row is None:
+        return None, None
+    assessment, run = row
+    rows = db.scalars(select(Answer).where(Answer.run_id == run.id)).all()
+    per_item = {a.item_key: a.value for a in rows}
+    result = ScaleResult(
+        code=run.questionnaire_code,
+        total_score=assessment.total_score,
+        severity=assessment.severity,
+        per_item=per_item,
+    )
+    return result, run.questionnaire_code
+
+
+def today_checkin(db: Session, patient_id) -> dict:
+    scale = _scale(_last_scale_result(db, patient_id)[1] or PHQ9.code)
+    last_result, _ = _last_scale_result(db, patient_id)
+    checkin = generate_checkin(scale, last_result)
+    items = checkin.items
+    start, end = _moscow_today()
+    done = db.scalar(
+        select(Run).where(
+            Run.patient_id == patient_id, Run.mode == "CHECKIN", Run.started_at >= start, Run.started_at < end
+        )
+    )
+    return {
+        "items": [{"key": i.key, "text": i.text, "max_value": i.max_value} for i in items],
+        "done": done is not None,
+    }
+
+
+def complete_checkin(db: Session, patient_id, answers: Mapping[str, int]) -> dict:
+    start, end = _moscow_today()
+    existing = db.scalar(
+        select(Run).where(
+            Run.patient_id == patient_id, Run.mode == "CHECKIN", Run.started_at >= start, Run.started_at < end
+        )
+    )
+    if existing is not None:
+        raise Problem(409, "RUN_ALREADY_TODAY", "Чек-ин за сегодня уже выполнен")
+    scale = _scale(_last_scale_result(db, patient_id)[1] or PHQ9.code)
+    last_result, _ = _last_scale_result(db, patient_id)
+    checkin = generate_checkin(scale, last_result)
+    items = checkin.items
+    item_keys = {i.key for i in items}
+    for key in answers:
+        if key not in item_keys:
+            raise Problem(422, "VALIDATION", f"Пункт {key} не входит в сегодняшний чек-ин")
+    run = Run(patient_id=patient_id, questionnaire_code=scale.code, mode="CHECKIN", finished_at=datetime.now(timezone.utc))
+    db.add(run)
+    db.flush()
+    for key, value in answers.items():
+        db.add(Answer(run_id=run.id, item_key=key, value=value))
+    audit_record(db, patient_id, "CHECKIN_COMPLETE", "run", str(run.id))
+    db.commit()
+    return {"run_id": str(run.id), "items": [i.key for i in items], "answered": sorted(answers)}
