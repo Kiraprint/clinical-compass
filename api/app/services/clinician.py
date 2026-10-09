@@ -34,23 +34,26 @@ def list_patients(db: Session, clinician_id, triage: str | None = None) -> list[
             .where(Assessment.patient_id == row.patient_id)
             .order_by(Assessment.computed_at.desc())
         )
+
+        last_triage = last.triage if last else None
+        if triage is not None and last_triage != triage:
+            continue  # игнорируем, если фильтр не совпадает
+
         open_esc = db.scalar(
             select(func.count())
             .select_from(Escalation)
             .where(Escalation.patient_id == row.patient_id, Escalation.resolved_at.is_(None))
         )
-        card = {
+        cards.append({
             "patient_id": str(row.patient_id),
             "email": patient.email,
             "fio": patient.fio,
-            "last_triage": last.triage if last else None,
+            "last_triage": last_triage,
             "last_score": last.total_score if last else None,
             "last_severity": last.severity if last else None,
             "last_assessment_at": last.computed_at.isoformat() if last else None,
             "open_escalations": open_esc or 0,
-        }
-        if triage is None or card["last_triage"] == triage:
-            cards.append(card)
+        })
     return cards
 
 

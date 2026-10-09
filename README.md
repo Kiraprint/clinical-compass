@@ -14,6 +14,47 @@
 | [05-SDD](docs/05-SDD.md) | контракты ядра → эпики → реализация, трейсабельность |
 | [06-TDD](docs/06-TDD.md) | тесты по контрактам, red-green, регрессия |
 
+## Структура
+
+```
+core/   — клинический движок (SDK): шкалы, скоринг, триаж, риск-флаги, чек-ины, тренды (чистый Python)
+api/    — FastAPI: auth/2FA, RBAC, consent (152-ФЗ), аудит (append-only), скрининг, эскалации,
+          дневник, чат, панель врача, ростер, симулятор демо-данных
+ui/     — React + Vite: пациент (скрининг/чек-ин/дневник/чат/тренд), панель врача, админ-аудит
+infra/  — docker compose (postgres + api + ui + seed)
+e2e/    — Playwright: питч-сценарий (docs/04 §6)
+docs/   — 01–06
+```
+
+## Запуск (демо / демо-день)
+
+```bash
+docker compose -f infra/docker-compose.yml up -d --build
+# seed выполняется автоматически (12 пациентов × 14 дней)
+# UI:   http://localhost:8090
+# API:  http://localhost:8000 (OpenAPI: /docs)
+```
+
+**Демо-доступы** (создаёт симулятор):
+
+| Роль | Логин | Пароль | 2FA (TOTP) |
+|---|---|---|---|
+| Админ | admin@compass.demo | Demo-Pass-1 | JBSWY3DPEHPK3PXP |
+| Врач | doc@compass.demo | Demo-Pass-1 | JBSWY3DPEHPK3PXP |
+| Пациенты | p1@compass.demo … p12@compass.demo | Demo-Pass-1 | — |
+
+RED-траектории: p3 (суицидальный пункт, 11-й день), p7 (тяжёлая депрессия), p12 — для демонстрации эскалаций.
+
+## Локальная разработка
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -e "core" -e "api[dev]"
+docker compose -f infra/docker-compose.yml up -d postgres   # тестовая БД
+.venv/bin/pytest core api                                    # 33 + 36 тестов
+cd ui && npm install && npm run dev                          # UI на :5173 (proxy → :8000)
+cd e2e && npx playwright install chromium && npx playwright test
+```
+
 ## Дорожная карта
 
 - [x] Бизнес-анализ
@@ -22,5 +63,9 @@
 - [x] Спецификация
 - [x] SDD
 - [x] TDD
+- [x] E1–E2: клинический движок (33 юнит-теста)
+- [x] E3–E5: API (36 интеграционных тестов)
+- [x] E6: UI, симулятор, docker compose, e2e (Playwright)
 
 Ключевые ограничения: см. красные линии в 01 §4 и 02 §7.2 (без «автодиагноза», без биометрии, 152-ФЗ).
+Открытые вопросы метрик — 15.10 (открытие чемпионата).

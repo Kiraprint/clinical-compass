@@ -23,6 +23,21 @@ class AnswersBody(BaseModel):
     answers: dict[str, int]
 
 
+@router.get("/questionnaires")
+def list_questionnaires(user: User = Depends(require_consent), db: Session = Depends(get_db)):
+    """Каталог шкал (FR-2). Единый источник текстов — core/compass/scales.py."""
+    from compass.scales import ALL_SCALES
+
+    return [
+        {
+            "code": s.code,
+            "title": s.title,
+            "items": [{"key": i.key, "text": i.text, "max_value": i.max_value} for i in s.items],
+        }
+        for s in ALL_SCALES.values()
+    ]
+
+
 @router.post("/screenings", status_code=201)
 def create_screening(body: ScreeningBody, user: User = Depends(require_consent), db: Session = Depends(get_db)):
     run = services.screening.start_screening(db, user.id, body.questionnaire_code)

@@ -15,5 +15,40 @@ services:
       timeout: 3s
       retries: 10
 
+  api:
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+    environment:
+      CC_DATABASE_URL: postgresql+psycopg://compass:compass@postgres:5432/compass
+      CC_JWT_SECRET: demo-jwt-secret-0123456789abcdefghij
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  ui:
+    build:
+      context: ..
+      dockerfile: ui/Dockerfile
+    depends_on:
+      - api
+    ports:
+      - "8090:80"
+
+  seed:
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+    command: ["python", "-m", "app.seed", "--reset", "--patients", "12", "--days", "14"]
+    environment:
+      CC_DATABASE_URL: postgresql+psycopg://compass:compass@postgres:5432/compass
+      CC_DEMO_TOTP: JBSWY3DPEHPK3PXP
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
 volumes:
   pgdata:
