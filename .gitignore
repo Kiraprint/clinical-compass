@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+dist/
+build/
+
+# Node/UI
+node_modules/
+ui/dist/
+
+# Env / secrets
+.env
+*.env
+
+# DB
+*.sqlite

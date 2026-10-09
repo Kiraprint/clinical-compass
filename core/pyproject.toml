@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clinical-compass-core"
+version = "0.1.0"
+description = "Клинический движок: шкалы, скоринг, триаж, риск-флаги. Чистый Python SDK без I/O."
+requires-python = ">=3.12"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools]
+packages = ["compass"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

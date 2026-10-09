@@ -1,0 +1,97 @@
+"""Модели клинического движка. Чистые dataclass без I/O. Контракт: docs/05-SDD.md §3."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Mapping, Sequence
+
+
+class Severity:
+    NONE = "NONE"
+    MILD = "MILD"
+    MODERATE = "MODERATE"
+    SEVERE = "SEVERE"
+
+
+class Triage:
+    GREEN = "GREEN"
+    YELLOW = "YELLOW"
+    RED = "RED"
+
+
+@dataclass(frozen=True)
+class ScaleItem:
+    key: str
+    text: str
+    max_value: int = 3
+    reverse: bool = False  # HADS: обратные пункты (raw 0 → max балл)
+
+
+@dataclass(frozen=True)
+class Scale:
+    code: str
+    title: str
+    items: tuple[ScaleItem, ...]
+    severity_bounds: tuple[tuple[int, str], ...]  # сортировано по возрастанию (min, severity)
+    suicidal_item: str | None = None
+
+    def item_keys(self) -> frozenset[str]:
+        return frozenset(i.key for i in self.items)
+
+    def item(self, key: str) -> ScaleItem:
+        for i in self.items:
+            if i.key == key:
+                return i
+        raise KeyError(key)
+
+    def severity_for(self, total: int) -> str:
+        result: str | None = None
+        for lo, sev in self.severity_bounds:
+            if total >= lo:
+                result = sev
+            else:
+                break
+        return result or Severity.NONE
+
+
+@dataclass(frozen=True)
+class ScaleResult:
+    code: str
+    total_score: int
+    severity: str
+    per_item: dict[str, int]
+
+
+@dataclass(frozen=True)
+class RiskFlag:
+    kind: str
+    item_key: str | None = None
+
+
+@dataclass(frozen=True)
+class Checkin:
+    scale_code: str
+    items: tuple[ScaleItem, ...]
+
+
+@dataclass(frozen=True)
+class Trend:
+    moving_avg: tuple[float, ...]
+    delta_7: float | None
+    delta_30: float | None
+    slope: float | None
+
+
+# Контрактные сигнатуры для читателей SDK: Mapping/Sequence — только typing.
+__all__ = [
+    "Severity",
+    "Triage",
+    "ScaleItem",
+    "Scale",
+    "ScaleResult",
+    "RiskFlag",
+    "Checkin",
+    "Trend",
+    "Mapping",
+    "Sequence",
+]
