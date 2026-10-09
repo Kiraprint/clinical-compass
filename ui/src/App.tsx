@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { api, getToken, setToken, ApiError } from "./api";
+import { useEffect, useState } from "react";
+import { api, getToken, setToken, setRefreshToken, setOnAuthFail, ApiError } from "./api";
 import PatientView from "./views/PatientView";
 import ClinicianView from "./views/ClinicianView";
 import AdminView from "./views/AdminView";
@@ -22,6 +22,21 @@ export default function App() {
 
   if (session && !getToken()) return null; // защита от неконсистентного состояния
 
+  const logout = () => {
+    setToken(null);
+    setRefreshToken(null);
+    localStorage.removeItem("cc_role");
+    localStorage.removeItem("cc_email");
+    setSession(null);
+  };
+  const clearSession = logout;
+
+  // При неудачном refresh (истёкший refresh-токен) — принудительный логаут.
+  useEffect(() => {
+    setOnAuthFail(() => clearSession);
+    return () => setOnAuthFail(null);
+  }, []);
+
   const login = async () => {
     setBusy(true);
     setError("");
@@ -29,6 +44,7 @@ export default function App() {
       const body = { email, password, ...(otp ? { otp } : {}) };
       const data = await api.login(body);
       setToken(data.access_token);
+      setRefreshToken(data.refresh_token);
       localStorage.setItem("cc_role", data.role);
       localStorage.setItem("cc_email", email);
       setSession({ role: data.role, email });
@@ -51,13 +67,6 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  };
-
-  const logout = () => {
-    setToken(null);
-    localStorage.removeItem("cc_role");
-    localStorage.removeItem("cc_email");
-    setSession(null);
   };
 
   if (!session) {

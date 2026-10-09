@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     jwt_secret: str = "dev-secret-change-me-0123456789abcdef"  # >= 32 байт (RFC 7518)
     access_ttl_minutes: int = 15
     refresh_ttl_days: int = 7
+    rate_max: int = 5  # попыток захода на /auth/login за окно (перебор 2FA)
+    rate_window: int = 60  # сек
     model_config = {"env_prefix": "CC_"}
 
 

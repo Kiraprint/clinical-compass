@@ -143,6 +143,22 @@ def finish_screening(db: Session, run_id, patient_id) -> dict:
         }
     return resp
 
+def abandon_open(db: Session, patient_id) -> dict:
+    """Закрывает открытый (незавершённый) скрининг пациента без assessment.
+
+    Нужно пациенту, который бросил скрининг на полпути: иначе повторный
+    /screenings вернёт 409 CONFLICT (runs_screening_open) навсегда.
+    """
+    run = db.scalar(
+        select(Run).where(Run.patient_id == patient_id, Run.mode == "SCREENING", Run.finished_at.is_(None))
+    )
+    if run is None:
+        return {"abandoned": False}
+    run.finished_at = datetime.now(timezone.utc)
+    audit_record(db, patient_id, "SCREENING_ABANDON", "run", str(run.id))
+    db.commit()
+    return {"abandoned": True, "run_id": str(run.id)}
+
 
 def _last_scale_result(db: Session, patient_id) -> tuple:
     """Последние assessment+run пациента для генерации чек-ина (None, None если нет)."""
@@ -198,9 +214,13 @@ def complete_checkin(db: Session, patient_id, answers: Mapping[str, int]) -> dic
     checkin = generate_checkin(scale, last_result)
     items = checkin.items
     item_keys = {i.key for i in items}
+    max_by_key = {i.key: i.max_value for i in items}
     for key in answers:
         if key not in item_keys:
             raise Problem(422, "VALIDATION", f"Пункт {key} не входит в сегодняшний чек-ин")
+        value = answers[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0 or value > max_by_key[key]:
+            raise Problem(422, "VALIDATION", f"Значение {value!r} для пункта {key} вне диапазона 0..{max_by_key[key]}")
     run = Run(patient_id=patient_id, questionnaire_code=scale.code, mode="CHECKIN", finished_at=datetime.now(timezone.utc))
     db.add(run)
     db.flush()

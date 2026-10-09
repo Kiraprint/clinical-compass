@@ -4,18 +4,26 @@ import { api, AuditEvent } from "../api";
 export default function AdminView() {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
-    api.adminAudit().then((data) => {
-      setEvents(data.items);
-      setLoaded(true);
-    });
+    api
+      .adminAudit()
+      .then((data) => {
+        setEvents(data.items);
+        setLoaded(true);
+      })
+      .catch((e: unknown) => {
+        setLoaded(true);
+        setError(e instanceof Error ? e.message : String(e));
+      });
   }, []);
 
   return (
     <div className="card">
       <h2>Журнал аудита (append-only)</h2>
       {!loaded && <p style={{ color: "#5a6478" }}>Загрузка…</p>}
+      {error && <p className="error">Не удалось загрузить журнал: {error}</p>}
       <table>
         <thead>
           <tr>

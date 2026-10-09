@@ -16,6 +16,13 @@ def test_checkin_len_between_2_and_5():
     assert 2 <= len(generate_checkin(PHQ9).items) <= 5
     assert 2 <= len(generate_checkin(PHQ9, last_with_worst("q5")).items) <= 5
 
+def test_checkin_can_reach_five_items():
+    # 5 worst-пунктов + суицидальный → потолок MAX_ITEMS=5 достижим (не мёртвый код)
+    per_item = {f"q{i}": 3 for i in range(1, 10)}
+    last = ScaleResult(code="PHQ-9", total_score=27, severity=Severity.SEVERE, per_item=per_item)
+    checkin = generate_checkin(PHQ9, last)
+    assert len(checkin.items) == 5
+
 
 def test_checkin_focuses_worst():
     # Worst-пункт последнего прохождения попадает в вопросы
@@ -45,4 +52,10 @@ def test_checkin_includes_suicidal_item_when_flagged():
 
 @pytest.mark.parametrize("last", [None, last_with_worst("q2")])
 def test_checkin_deterministic(last):
-    assert generate_checkin(PHQ9, last) == generate_checkin(PHQ9, last)
+    # Не «f(x)==f(x)»: фиксированное ожидание — worst + суицидальный пункт.
+    checkin = generate_checkin(PHQ9, last)
+    keys = [i.key for i in checkin.items]
+    if last is None:
+        assert keys == ["q1", "q2", "q3"]  # нет данных → первые 3 пункта
+    else:
+        assert keys == ["q2", "q9"]  # worst q2 + суицидальный q9

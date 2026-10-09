@@ -95,7 +95,8 @@ def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: bool = 
             s.add(patient)
             s.flush()
             pid = patient.id
-            s.add(Consent(user_id=pid, version=1, text_hash="consent-v1"))
+            s.add(Consent(user_id=pid, version=1, text_hash="consent-v1",
+                         signed_at=datetime.now(timezone.utc) - timedelta(days=days)))
             s.execute(
                 text(f"INSERT INTO clinician_roster(clinician_id, patient_id) VALUES ('{doc_id}', '{pid}') ON CONFLICT DO NOTHING")
             )
@@ -108,21 +109,25 @@ def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: bool = 
                 run = screening_service.start_screening(s, pid, code)
                 answers = _answers_for(profile, rng, total, day)
                 screening_service.add_answers(s, run.id, pid, answers)
-                screening_service.finish_screening(s, run.id, pid)
-                # backdate на (days - day) дней назад
+                assessment = screening_service.finish_screening(s, run.id, pid)
+                # backdate на (days - day) дней назад: согласованные time-метки всей цепочки
                 offset = days - day
                 if offset:
-                    for table, col in (("runs", "started_at"), ("assessments", "computed_at")):
+                    for table, col in (("runs", "started_at"), ("runs", "finished_at"), ("assessments", "computed_at")):
                         s.execute(text(f"UPDATE {table} SET {col} = {col} - interval '{offset} days' WHERE id = '{run.id}'"))
-            # Дневник: 3 записи по настроению из траектории
+                    s.execute(text(
+                        f"UPDATE answers SET answered_at = answered_at - interval '{offset} days' WHERE run_id = '{run.id}'"
+                    ))
+            # Дневник: 3 записи по настроению из траектории (created_at — в прошлые дни)
             for day in (3, 8, days - 1):
                 mood = max(1, min(10, round(5 + (totals[-1] - totals[0]) / 4 + rng.uniform(-1.5, 1.5))))
                 s.add(DiaryEntry(
                     patient_id=pid,
                     content=f"День {day} демо-записи{' — стало сложнее' if mood < 4 else ('' if mood < 7 else ' — заметно лучше')}",
                     mood=mood, sleep_h=round(rng.uniform(5, 8), 1), tags=["демо"],
+                    created_at=datetime.now(timezone.utc) - timedelta(days=days - day),
                 ))
-            print(f"[seed] patient {email} ({fio}) scale={code} 1..{days}d: {totals[0]}→{totals[-1]} triage-last=None")
+            print(f"[seed] patient {email} ({fio}) scale={code} 1..{days}d: {totals[0]}→{totals[-1]} triage-last={assessment['triage']}")
         s.commit()
     finally:
         s.close()

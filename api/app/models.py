@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Identity, Index, String, text
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Identity, Index, String, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -14,6 +14,10 @@ from .db import Base
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint("role in ('PATIENT','CLINICIAN','ADMIN')", name="users_role"),
+        CheckConstraint("role = 'PATIENT' or totp_secret is not null", name="users_totp_role"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     email: Mapped[str] = mapped_column(String, unique=True, index=True)
@@ -41,6 +45,7 @@ class Consent(Base):
 
 class AuditLog(Base):
     __tablename__ = "audit_log"
+    __table_args__ = (Index("audit_log_occurred", "occurred_at"),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     actor_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
@@ -62,11 +67,19 @@ class Run(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
+        CheckConstraint("mode in ('SCREENING','CHECKIN','FOLLOW_UP')", name="runs_mode"),
         Index(
             "runs_screening_open",
             "patient_id",
             unique=True,
             postgresql_where=text("mode = 'SCREENING' AND finished_at IS NULL"),
+        ),
+        Index(
+            "runs_checkin_daily",
+            "patient_id",
+            text("((started_at AT TIME ZONE 'Europe/Moscow')::date)"),
+            unique=True,
+            postgresql_where=text("mode = 'CHECKIN'"),
         ),
     )
 
@@ -97,6 +110,7 @@ class Assessment(Base):
 
 class Escalation(Base):
     __tablename__ = "escalations"
+    __table_args__ = (Index("escalations_patient", "patient_id", "resolved_at"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     assessment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("assessments.id"))
@@ -121,6 +135,10 @@ class DiaryEntry(Base):
 
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
+    __table_args__ = (
+        CheckConstraint("sender in ('PATIENT','SYSTEM','CLINICIAN')", name="chat_sender"),
+        CheckConstraint("kind in ('TEXT','FAQ','HOTLINE','LLM')", name="chat_kind"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     no: Mapped[int] = mapped_column(BigInteger, Identity(), unique=True)  # детерминированный порядок

@@ -31,12 +31,12 @@ function totp(secret: string): string {
   return code;
 }
 
-async function login(page, email: string, password: string, otp?: string) {
+async function login(page, email: string, password: string, totpSecret?: string) {
   await page.goto("/");
   await page.getByRole("button", { name: "Вход" }).click();
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Пароль").fill(password);
-  if (otp) await page.getByLabel("Код 2FA").fill(otp);
+  if (totpSecret) await page.getByLabel("Код 2FA").fill(totp(totpSecret));
   await page.getByRole("button", { name: "Войти" }).click();
 }
 
@@ -71,7 +71,7 @@ test.describe("Питч-сценарий", () => {
   });
 
   test("врач: входит с 2FA и видит RED-пациентов", async ({ page }) => {
-    await login(page, "doc@compass.demo", "Demo-Pass-1", totp("JBSWY3DPEHPK3PXP"));
+    await login(page, "doc@compass.demo", "Demo-Pass-1", "JBSWY3DPEHPK3PXP");
     await expect(page.getByRole("button", { name: "Все" })).toBeVisible();
 
     await page.getByRole("button", { name: "RED", exact: true }).click();

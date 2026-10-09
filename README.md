@@ -43,7 +43,7 @@ docker compose -f infra/docker-compose.yml up -d --build
 | Врач | doc@compass.demo | Demo-Pass-1 | JBSWY3DPEHPK3PXP |
 | Пациенты | p1@compass.demo … p12@compass.demo | Demo-Pass-1 | — |
 
-RED-траектории: p3 (суицидальный пункт, 11-й день), p7 (тяжёлая депрессия), p12 — для демонстрации эскалаций.
+RED-траектории (демонстрация эскалаций): p2 (Игорь К., GAD-7 → 17, RED по баллу), p3 (Мария Л., PHQ-9, суицидальный пункт на 11-й день), p7 (Елена В., PHQ-9 → 15, RED по баллу).
 
 ## Локальная разработка
 

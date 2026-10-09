@@ -59,3 +59,8 @@ def submit_answers(
 @router.post("/runs/{run_id}/finish", status_code=201)
 def finish_run(run_id: uuid.UUID, user: User = Depends(require_consent), db: Session = Depends(get_db)):
     return services.screening.finish_screening(db, run_id, user.id)
+
+@router.post("/screenings/abandon", status_code=200)
+def abandon_open(user: User = Depends(require_consent), db: Session = Depends(get_db)):
+    """Закрывает брошенный открытый скрининг пациента (иначе новый /screenings → 409)."""
+    return services.screening.abandon_open(db, user.id)

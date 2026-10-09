@@ -38,5 +38,10 @@ def test_triage_green():
     assert triage_of(0) == Triage.GREEN
 
 
-def test_triage_deterministic():
-    assert triage_of(9) == triage_of(9)
+def test_triage_deterministic_input_output_table():
+    # Не «f(x)==f(x)»: таблица вход/выход через границы severity и флагов.
+    assert triage_of(0, q9=0) == Triage.GREEN   # NONE, без флагов
+    assert triage_of(5, q9=0) == Triage.YELLOW   # MILD
+    assert triage_of(12, q9=0) == Triage.YELLOW  # MODERATE
+    assert triage_of(15, q9=0) == Triage.RED     # SEVERE
+    assert triage_of(1, q9=1) == Triage.RED      # суицидальный флаг важнее severity

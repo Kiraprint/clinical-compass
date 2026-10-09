@@ -66,3 +66,29 @@ def test_finish_incomplete_422(client):
     assert resp.status_code == 204
     resp = client.post(f"/api/v1/runs/{run_id}/finish", headers=h)
     assert resp.status_code == 422
+
+def test_abandon_open_screening_allows_restart(client):
+    h, _ = patient_ctx(client, "abandon@test.ru")
+    assert client.post("/api/v1/screenings", json={"questionnaire_code": "PHQ-9"}, headers=h).status_code == 201
+    # брошенный открытый скрининг не даёт начать новый → abandon → снова ок
+    resp = client.post("/api/v1/screenings", json={"questionnaire_code": "PHQ-9"}, headers=h)
+    assert resp.status_code == 409
+    cresp = client.post("/api/v1/screenings/abandon", headers=h)
+    assert cresp.status_code == 200
+    assert cresp.json()["abandoned"] is True
+    assert client.post("/api/v1/screenings", json={"questionnaire_code": "PHQ-9"}, headers=h).status_code == 201
+
+def test_abandon_no_open_run_is_noop(client):
+    h, _ = patient_ctx(client, "abandon2@test.ru")
+    resp = client.post("/api/v1/screenings/abandon", headers=h)
+    assert resp.status_code == 200
+    assert resp.json()["abandoned"] is False
+
+def test_finish_out_of_range_422(client):
+    h, _ = patient_ctx(client, "oor@test.ru")
+    run_id = client.post("/api/v1/screenings", json={"questionnaire_code": "PHQ-9"}, headers=h).json()["run_id"]
+    resp = client.post(
+        f"/api/v1/runs/{run_id}/answers", json={"answers": {**PHQ_ALL, "q1": 4}}, headers=h
+    )
+    assert resp.status_code == 422  # _validate_answers: значение вне 0..max_value
+    assert resp.json()["code"] == "VALIDATION"

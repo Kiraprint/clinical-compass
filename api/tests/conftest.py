@@ -43,6 +43,8 @@ def client(engine):
 @pytest.fixture(autouse=True)
 def clean(engine):
     yield
+    from app.ratelimit import reset_rate_limits
+    reset_rate_limits()
     db.truncate_all()
 
 

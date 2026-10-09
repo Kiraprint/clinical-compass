@@ -62,6 +62,13 @@ class ScaleResult:
     per_item: dict[str, int]
 
 
+class FlagKind:
+    """Обобщённые виды риск-флагов. Выводятся из структуры шкалы,
+    без привязки к конкретному расстройству (диагноз — функция врача)."""
+    SUICIDAL_IDEATION = "SUICIDAL_IDEATION"  # любой scale.suicidal_item (пункт о суициде) >= 1
+    SEVERE_SYMPTOMS = "SEVERE_SYMPTOMS"      # сумма баллов шкалы достигла собственного порога SEVERE
+
+
 @dataclass(frozen=True)
 class RiskFlag:
     kind: str
@@ -90,6 +97,7 @@ __all__ = [
     "Scale",
     "ScaleResult",
     "RiskFlag",
+    "FlagKind",
     "Checkin",
     "Trend",
     "Mapping",

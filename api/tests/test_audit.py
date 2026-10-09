@@ -11,7 +11,7 @@ from .conftest import auth_header, login, register
 
 def test_audit_log_append_only(engine):
     with db.SessionLocal() as s:
-        user = User(email="au@test.ru", password_hash="x", role="ADMIN")
+        user = User(email="au@test.ru", password_hash="x", role="ADMIN", totp_secret="ABCDEFGHIJKLMNOP")
         s.add(user)
         s.flush()
         s.add(AuditLog(actor_id=user.id, action="TEST", object_type="user", object_id=str(user.id)))
@@ -21,6 +21,19 @@ def test_audit_log_append_only(engine):
         s.rollback()
         assert s.query(AuditLog).count() == 1
 
+
+def test_audit_log_truncate_blocked(engine):
+    # docs/04 §5: append-only — TRUNCATE audit_log запрещён на уровне БД (statement-триггер)
+    with db.SessionLocal() as s:
+        user = User(email="au2@test.ru", password_hash="x", role="ADMIN", totp_secret="ABCDEFGHIJKLMNOP")
+        s.add(user)
+        s.flush()
+        s.add(AuditLog(actor_id=user.id, action="TEST", object_type="user", object_id=str(user.id)))
+        s.commit()
+        with pytest.raises(Exception):
+            s.execute(text("TRUNCATE audit_log"))
+        s.rollback()
+        assert s.query(AuditLog).count() == 1
 
 def test_admin_audit_list(client):
     reg = register(client, "adm@test.ru", role="ADMIN")

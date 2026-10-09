@@ -68,8 +68,10 @@ def score(scale: Scale, answers: Mapping[str, int]) -> ScaleResult
     #   ValueError (value вне 0..max_value пункта)            — 422 на API
     # invariant: total_score == sum(per_item.values()) по items шкалы
 def risk_flags(scale: Scale, answers: Mapping[str, int]) -> list[RiskFlag]
-    # PHQ-9 item 9 (суицидальные мысли) value >= 1 → RiskFlag('SUICIDAL_IDEATION')
-    # PHQ-9 total >= 15 → RiskFlag('SEVERE_DEPRESSION')  [порог — подтвердить медиком]
+    # Обобщённые сигналы из структуры шкалы (без привязки к расстройству — диагноз за врачом):
+    #   любой scale.suicidal_item (пункт о суициде, PHQ-9 item 9) value >= 1 → RiskFlag('SUICIDAL_IDEATION')
+    #   сумма баллов достигла собственного порога SEVERE шкалы → RiskFlag('SEVERE_SYMPTOMS')
+    #   [пороги severity и суицидального пункта — подтвердить медиком команды]
 
 # triage.py
 def triage(result: ScaleResult, flags: Sequence[RiskFlag]) -> Triage  # GREEN|YELLOW|RED
@@ -116,7 +118,7 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | FR | Эпик | Ключевой тест (06) |
 |---|---|---|
 | FR-1 | E3 | `login_clinician_requires_otp`, `register_clinician_returns_totp_secret` |
-| FR-2 | E1 | `questionnaire_catalog` _(добавлен в кодовой фазе — каталог шкал из core)_ |
+| FR-2 | E1 | `questionnaire_catalog_serves_scales` |
 | FR-3 | E4 | `run_closed_after_finish`, `screening_flow_phq9` |
 | FR-4 | E1 | `triage_red_suicidal`, `triage_yellow`, `triage_green` |
 | FR-5 | E4 | `escalation_response_under_1s`, `suicidal_answer_escalates` |

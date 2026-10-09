@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Mapping
 
-from compass.models import RiskFlag, Scale, ScaleResult
+from compass.models import FlagKind, RiskFlag, Scale, ScaleResult, Severity
 
 
 class UnknownItemError(ValueError):
@@ -31,6 +31,8 @@ def score(scale: Scale, answers: Mapping[str, int]) -> ScaleResult:
     total = 0
     for item in scale.items:
         raw = answers[item.key]
+        if not isinstance(raw, int) or isinstance(raw, bool):
+            raise ValueError(f"value {raw!r} for item {item.key} is not an int (ожидается 0..{item.max_value})")  # → 422
         if raw < 0 or raw > item.max_value:
             raise ValueError(f"value {raw} out of range 0..{item.max_value} for item {item.key}")
         value = item.max_value - raw if item.reverse else raw
@@ -40,10 +42,26 @@ def score(scale: Scale, answers: Mapping[str, int]) -> ScaleResult:
 
 
 def risk_flags(scale: Scale, answers: Mapping[str, int]) -> list[RiskFlag]:
-    """Клинические риск-флаги по ответам. Сейчас: суицидальные мысли (PHQ-9, п.9)."""
+    """Риск-флаги, выводимые из структуры шкалы — без привязки к расстройству:
+
+    - SUICIDAL_IDEATION: scale.suicidal_item (пункт о суициде) >= 1
+    - SEVERE_SYMPTOMS: сумма баллов достигла собственного порога SEVERE шкалы
+    """
+    flags: list[RiskFlag] = []
     if scale.suicidal_item and answers.get(scale.suicidal_item, 0) >= 1:
-        return [RiskFlag(kind="SUICIDAL_IDEATION", item_key=scale.suicidal_item)]
-    return []
+        flags.append(RiskFlag(kind=FlagKind.SUICIDAL_IDEATION, item_key=scale.suicidal_item))
+    if scale.severity_for(total_for(scale, answers)) == Severity.SEVERE:
+        flags.append(RiskFlag(kind=FlagKind.SEVERE_SYMPTOMS, item_key=None))
+    return flags
+
+
+def total_for(scale: Scale, answers: Mapping[str, int]) -> int:
+    """Балл по ответам (для risk_flags — вне скоринга, без повторной валидации)."""
+    total = 0
+    for item in scale.items:
+        raw = answers.get(item.key, 0)
+        total += item.max_value - raw if item.reverse else raw
+    return total
 
 
 __all__ = ["score", "risk_flags", "UnknownItemError", "IncompleteAnswersError"]

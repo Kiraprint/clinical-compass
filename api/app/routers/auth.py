@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -12,6 +12,7 @@ from app import security
 from app.db import get_db
 from app.errors import Problem
 from app.models import User
+from app.ratelimit import check_rate
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -54,8 +55,14 @@ def register(body: RegisterBody, db: Session = Depends(get_db)):
 
 
 @router.post("/login")
-def login(body: LoginBody, db: Session = Depends(get_db)):
-    user = db.scalar(select(User).where(User.email == body.email.strip().lower()))
+def login(body: LoginBody, request: Request, db: Session = Depends(get_db)):
+    email = body.email.strip().lower()
+    client = request.client.host if request.client else "unknown"
+    allowed, retry_after = check_rate((client, email))
+    if not allowed:
+        raise Problem(429, "TOO_MANY_REQUESTS",
+                      f"Слишком много попыток входа, повторите через {retry_after} с")
+    user = db.scalar(select(User).where(User.email == email))
     if user is None or not security.verify_password(body.password, user.password_hash):
         raise Problem(401, "UNAUTHORIZED", "Неверный email или пароль")
     if user.role != "PATIENT":

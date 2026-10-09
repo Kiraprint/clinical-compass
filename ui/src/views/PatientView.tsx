@@ -109,12 +109,21 @@ function ScreeningTab() {
 
   const start = async () => {
     setError("");
-    const run = await api.startScreening({ questionnaire_code: code });
-    const scale = scales.find((s) => s.code === run.questionnaire_code);
-    setRunId(run.run_id);
-    setQuestions((scale?.items ?? []).map((i) => ({ key: i.key, text: i.text, max: i.max_value })));
-    setAnswers({});
-    setResult(null);
+    try {
+      const run = await api.startScreening({ questionnaire_code: code });
+      const scale = scales.find((s) => s.code === run.questionnaire_code);
+      setRunId(run.run_id);
+      setQuestions((scale?.items ?? []).map((i) => ({ key: i.key, text: i.text, max: i.max_value })));
+      setAnswers({});
+      setResult(null);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        // Открытый брошенный скрининг: закрываем его и пробуем ещё раз.
+        await api.abandonScreening();
+        return start();
+      }
+      setError(e instanceof ApiError ? e.detail : String(e));
+    }
   };
 
   const pick = (key: string, value: number) => setAnswers((a) => ({ ...a, [key]: value }));

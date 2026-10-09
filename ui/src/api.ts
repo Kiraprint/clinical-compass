@@ -20,6 +20,39 @@ export function setToken(token: string | null) {
 export function getToken(): string | null {
   return localStorage.getItem("cc_token");
 }
+export function setRefreshToken(token: string | null) {
+  if (token) localStorage.setItem("cc_refresh", token);
+  else localStorage.removeItem("cc_refresh");
+}
+export function getRefreshToken(): string | null {
+  return localStorage.getItem("cc_refresh");
+}
+
+// Регистрируется App-ом: при неудачном refresh требуется логаут (страница входа).
+let onAuthFail: (() => void) | null = null;
+export function setOnAuthFail(fn: (() => void) | null) {
+  onAuthFail = fn;
+}
+
+async function refreshAccessToken(): Promise<boolean> {
+  const refreshToken = getRefreshToken();
+  if (!refreshToken) return false;
+  try {
+    const resp = await fetch(`${BASE}/api/v1/auth/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+    if (!resp.ok) return false;
+    const body = (await resp.json()) as { access_token: string };
+    setToken(body.access_token);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+let refreshing = false;
 
 async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = { ...(init.headers as Record<string, string>) };
@@ -27,6 +60,18 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (token) headers["Authorization"] = `Bearer ${token}`;
   if (init.body) headers["Content-Type"] = "application/json";
   const resp = await fetch(`${BASE}${path}`, { ...init, headers });
+  // 401 после истечения access-токена: одна попытка refresh, затем повтор исходного запроса.
+  if (resp.status === 401 && !refreshing) {
+    refreshing = true;
+    try {
+      if (await refreshAccessToken()) {
+        return req<T>(path, init);
+      }
+    } finally {
+      refreshing = false;
+    }
+    onAuthFail?.();
+  }
   if (resp.status === 204) return undefined as T;
   const body = await resp.json().catch(() => ({}));
   if (!resp.ok) {
@@ -74,6 +119,8 @@ export const api = {
     }),
   finishRun: (runId: string) =>
     req<Assessment>(`/api/v1/runs/${runId}/finish`, { method: "POST" }),
+  abandonScreening: () =>
+    req<{ abandoned: boolean }>("/api/v1/screenings/abandon", { method: "POST" }),
   getTodayCheckin: () => req<CheckinToday>("/api/v1/checkins/today"),
   completeCheckin: (answers: Record<string, number>) =>
     req<{ run_id: string }>("/api/v1/checkins", { method: "POST", body: JSON.stringify({ answers }) }),

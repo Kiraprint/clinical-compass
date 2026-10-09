@@ -27,13 +27,21 @@ services:
         condition: service_healthy
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
 
   ui:
     build:
       context: ..
       dockerfile: ui/Dockerfile
     depends_on:
-      - api
+      api:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
     ports:
       - "8090:80"
 
@@ -46,7 +54,7 @@ services:
       CC_DATABASE_URL: postgresql+psycopg://compass:compass@postgres:5432/compass
       CC_DEMO_TOTP: JBSWY3DPEHPK3PXP
     depends_on:
-      postgres:
+      api:
         condition: service_healthy
     restart: "no"
 

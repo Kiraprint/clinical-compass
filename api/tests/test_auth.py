@@ -47,6 +47,16 @@ def test_login_wrong_password(client):
     resp = client.post("/api/v1/auth/login", json={"email": "wp@test.ru", "password": "WrongPass-1"})
     assert resp.status_code == 401
 
+def test_login_rate_limited_429(client):
+    # Перебор пароля/2FA: > rate_max попыток на (IP, email) → 429 TOO_MANY_REQUESTS
+    register(client, "rl@test.ru")
+    for _ in range(5):
+        resp = client.post("/api/v1/auth/login", json={"email": "rl@test.ru", "password": "WrongPass-1"})
+        assert resp.status_code == 401
+    resp = client.post("/api/v1/auth/login", json={"email": "rl@test.ru", "password": "WrongPass-1"})
+    assert resp.status_code == 429
+    assert resp.json()["code"] == "TOO_MANY_REQUESTS"
+
 
 def test_refresh_returns_new_access(client):
     register(client, "rf@test.ru")

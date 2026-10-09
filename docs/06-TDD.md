@@ -32,21 +32,28 @@
 
 | Тест | Given | When | Then |
 |---|---|---|---|
-| suicidal_item_flags | PHQ-9 item 9 = 1 | risk_flags() | SUICIDAL_IDEATION присутствует |
-| suicidal_zero_no_flag | item 9 = 0 | risk_flags() | флага нет |
+| phq9_suicidal_item_flags | PHQ-9 item 9 = 1 | risk_flags() | SUICIDAL_IDEATION присутствует (item_key=q9) |
+| phq9_green_no_flags | PHQ-9 total 0, item 9 = 0 | risk_flags() | флагов нет |
+| phq9_severe_symptoms_flag_at_boundary | PHQ-9 total 15 / 14 | risk_flags() | SEVERE_SYMPTOMS при 15, нет при 14 |
+| phq9_severe_symptoms_with_nonzero_q9 | total 15 + item 9 = 1 | risk_flags() | оба флага |
+| gad7_no_suicidal_flag_but_severe_symptoms | GAD-7 total 15 | risk_flags() | SUICIDAL_IDEATION нет, SEVERE_SYMPTOMS есть |
+| hads_has_no_severe_bound_no_severe_flag | HADS-A/HADS-D максимум баллов | risk_flags() | SEVERE_SYMPTOMS нет (потолок MODERATE) |
+| gad7_severity_boundaries | GAD-7 total 0/5/10/15 | score() | NONE/MILD/MODERATE/SEVERE |
 | triage_red_suicidal | flag SUICIDAL, severity MILD | triage() | RED (флаг важнее severity) |
 | triage_red_severe | severity SEVERE, флагов нет | triage() | RED |
 | triage_yellow | severity MODERATE, флагов нет | triage() | YELLOW |
 | triage_green | severity NONE, флагов нет | triage() | GREEN |
-| triage_deterministic | одинаковый вход дважды | triage() | идентичный результат (без рандома) |
+| triage_deterministic_input_output_table | таблица вход/выход по границам | triage() | GREEN/YELLOW/RED по таблице |
 
 ### 2.3 checkin (генерация)
 
 | Тест | Given | When | Then |
 |---|---|---|---|
 | checkin_len_2_5 | last = None / last = ScaleResult(MODERATE) | generate_checkin() | 2 ≤ items ≤ 5 |
+| test_checkin_can_reach_five_items | 5+ worst-пунктов + суицидальный | generate_checkin() | items == 5 (потолок достижим) |
 | checkin_focuses_worst | per_item имеет worst-пункт (макс балл) | generate_checkin() | worst-пункт входит в вопросы |
 | checkin_bounded | любой вход | generate_checkin() | item_keys ⊆ keys шкалы |
+| checkin_deterministic | last = None / worst q2 | generate_checkin() | конкретный набор: [q1,q2,q3] / [q2,q9] |
 
 ### 2.4 trend
 
@@ -70,14 +77,21 @@
 | roster_enforcement | врач без roster → GET patients/{id} | 403 NO_ROSTER; после /admin/roster → 200 |
 | patient_cannot_read_others | PATIENT → GET diary другого пациента / report | 403 |
 | audit_append_only | прямой UPDATE/DELETE audit_log на уровне БД | ошибка БД-триггера (исключение) — отдельный БД-тест, вне HTTP-слоя (API не предоставляет UPDATE/DELETE-эндпоинтов для audit_log) |
+| audit_truncate_blocked | прямой TRUNCATE audit_log на уровне БД | ошибка БД-триггера (statement-уровень `trg_audit_no_truncate`) |
 | audit_records_access | чтение report | в audit_log появилась запись (actor, action='READ_REPORT') |
 | consent_revoke | revoke → повторное обращение к медданным | 403 CONSENT_REQUIRED |
+| questionnaire_catalog | GET /questionnaires (FR-2) | каталог шкал PHQ-9/GAD-7/HADS-A/HADS-D из core; тексты не дублируются в UI |
+| checkin_out_of_range | значение ответа чек-ина вне 0..max_value | 422 VALIDATION (не 500) |
+| checkin_daily_unique_index | 2 CHECKIN в один день МСК на уровне БД | уникальный индекс `runs_checkin_daily` отклоняет второй (TOCTOU-защита) |
+| screening_abandon | открытый скрининг → POST /screenings (409) → /screenings/abandon → снова 201 | повторный старт возможен после abandon |
+| abandon_no_open_run | abandon при отсутствии открытого скрининга | 200 `{abandoned: false}` (идемпотентно) |
+| login_rate_limited | > rate_max попыток входа с (IP, email) | 429 TOO_MANY_REQUESTS |
 
-## 4. e2e (UI-флоу, playwright против docker compose)
+## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/pitch.spec.ts`)
 
-1. `seed` → пациент веб-флоу: согласие → скрининг → жёлтый/зелёный тренд; врач видит карточку.
-2. Красный флаг от симулятора → у врача в панели первым в списке с бейджем RED.
-3. Питч-сценарий 04 §6 целиком (5 шагов) за один прогон.
+1. Пациент: скрининг с суицидальным ответом (PHQ-9 item 9 = 3) → RED + контакты помощи (8-800-2000-122, 112).
+2. Пациент с RED-историей: чат с горячей линией отвечает контактами.
+3. Врач: вход с 2FA (TOTP), фильтр RED, открытие отчёта первого RED-пациента.
 
 ## 5. Регрессия и CI
 

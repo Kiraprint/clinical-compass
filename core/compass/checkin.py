@@ -20,7 +20,7 @@ def generate_checkin(scale: Scale, last: ScaleResult | None = None) -> Checkin:
             scale.item(key)
             for key, _ in sorted(last.per_item.items(), key=lambda kv: (-kv[1], kv[0]))
         ]
-        chosen = [item for item in ordered if last.per_item[item.key] > 0][:3]
+        chosen = [item for item in ordered if last.per_item[item.key] > 0][: MAX_ITEMS - 1]
         if scale.suicidal_item:
             suicidal = scale.item(scale.suicidal_item)
             if suicidal not in chosen:

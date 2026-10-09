@@ -9,6 +9,7 @@ export default function ClinicianView() {
   const [cards, setCards] = useState<PatientCard[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [report, setReport] = useState<Report | null>(null);
+  const [reportError, setReportError] = useState("");
 
   const load = async (f: string) => {
     const data = await api.clinicianPatients(f || undefined);
@@ -21,7 +22,13 @@ export default function ClinicianView() {
 
   const open = async (patientId: string) => {
     setSelected(patientId);
-    setReport(await api.clinicianReport(patientId));
+    setReportError("");
+    try {
+      setReport(await api.clinicianReport(patientId));
+    } catch (e: unknown) {
+      setReport(null);
+      setReportError(e instanceof Error ? e.message : String(e));
+    }
   };
 
   return (
@@ -69,13 +76,23 @@ export default function ClinicianView() {
           </table>
         </div>
       ) : (
-        <ReportView report={report} onBack={() => setSelected(null)} />
+        <ReportView report={report} error={reportError} onBack={() => setSelected(null)} />
       )}
     </>
   );
 }
 
-function ReportView({ report, onBack }: { report: Report | null; onBack: () => void }) {
+function ReportView({ report, error, onBack }: { report: Report | null; error: string; onBack: () => void }) {
+  if (error) {
+    return (
+      <div className="card">
+        <button className="ghost" onClick={onBack}>
+          ← Назад к списку
+        </button>
+        <p className="alert-danger">Не удалось загрузить отчёт: {error}</p>
+      </div>
+    );
+  }
   if (!report) return <div className="card">Загрузка…</div>;
   const last = report.last_assessment;
   return (
