@@ -44,36 +44,38 @@ export default function ClinicianView() {
         <div className="card">
           <h2>Мои пациенты ({cards.length})</h2>
           {cards.length === 0 && <p style={{ color: "#5a6478" }}>Нет пациентов в выбранном фильтре.</p>}
-          <table>
-            <thead>
-              <tr>
-                <th>Пациент</th>
-                <th>Триаж</th>
-                <th>Балл</th>
-                <th>Эскалации</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {cards.map((c) => (
-                <tr key={c.patient_id}>
-                  <td>
-                    {c.fio ?? c.email}
-                    <br />
-                    <small>{c.email}</small>
-                  </td>
-                  <td>{c.last_triage ? <span className={`badge ${c.last_triage}`}>{c.last_triage}</span> : "—"}</td>
-                  <td>{c.last_score ?? "—"}</td>
-                  <td>{c.open_escalations}</td>
-                  <td>
-                    <button className="ghost" onClick={() => open(c.patient_id)}>
-                      Открыть
-                    </button>
-                  </td>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Пациент</th>
+                  <th>Триаж</th>
+                  <th>Балл</th>
+                  <th>Эскалации</th>
+                  <th></th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {cards.map((c) => (
+                  <tr key={c.patient_id}>
+                    <td>
+                      {c.fio ?? c.email}
+                      <br />
+                      <small>{c.email}</small>
+                    </td>
+                    <td>{c.last_triage ? <span className={`badge ${c.last_triage}`}>{c.last_triage}</span> : "—"}</td>
+                    <td>{c.last_score ?? "—"}</td>
+                    <td>{c.open_escalations}</td>
+                    <td>
+                      <button className="ghost" onClick={() => open(c.patient_id)}>
+                        Открыть
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : (
         <ReportView report={report} error={reportError} onBack={() => setSelected(null)} />
@@ -123,28 +125,30 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
       <TrendChart timeline={{ runs: report.history, trend: report.trend }} />
 
       <h3>История скринингов</h3>
-      <table>
-        <thead>
-          <tr>
-            <th>Дата</th>
-            <th>Балл</th>
-            <th>Severity</th>
-            <th>Триаж</th>
-          </tr>
-        </thead>
-        <tbody>
-          {report.history.map((h, i) => (
-            <tr key={i}>
-              <td>{h.computed_at.slice(0, 10)}</td>
-              <td>{h.total_score}</td>
-              <td>{h.severity}</td>
-              <td>
-                <span className={`badge ${h.triage}`}>{h.triage}</span>
-              </td>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Дата</th>
+              <th>Балл</th>
+              <th>Severity</th>
+              <th>Триаж</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {report.history.map((h, i) => (
+              <tr key={i}>
+                <td>{h.computed_at.slice(0, 10)}</td>
+                <td>{h.total_score}</td>
+                <td>{h.severity}</td>
+                <td>
+                  <span className={`badge ${h.triage}`}>{h.triage}</span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
 
       <h3>Дневник пациента</h3>
       {report.diary.length === 0 && <p style={{ color: "#5a6478" }}>Записей нет</p>}

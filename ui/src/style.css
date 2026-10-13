@@ -42,5 +42,6 @@ th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eef1f6; 
 .msg { margin-bottom: 8px; }
 .msg.system { color: #5a6478; font-style: italic; }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.table-wrap { overflow-x: auto; }
 @media (max-width: 700px) { .two { grid-template-columns: 1fr; } }
 small { color: #8a94a8; }

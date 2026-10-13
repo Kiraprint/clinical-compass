@@ -24,30 +24,32 @@ export default function AdminView() {
       <h2>Журнал аудита (append-only)</h2>
       {!loaded && <p style={{ color: "#5a6478" }}>Загрузка…</p>}
       {error && <p className="error">Не удалось загрузить журнал: {error}</p>}
-      <table>
-        <thead>
-          <tr>
-            <th>Время</th>
-            <th>Действие</th>
-            <th>Объект</th>
-            <th>Актор</th>
-            <th>IP</th>
-          </tr>
-        </thead>
-        <tbody>
-          {events.map((e) => (
-            <tr key={e.id}>
-              <td>{e.occurred_at.slice(0, 19).replace("T", " ")}</td>
-              <td>{e.action}</td>
-              <td>
-                {e.object_type} {e.object_id ?? ""}
-              </td>
-              <td>{e.actor_id ? e.actor_id.slice(0, 8) : "—"}</td>
-              <td>{e.ip ?? "—"}</td>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Время</th>
+              <th>Действие</th>
+              <th>Объект</th>
+              <th>Актор</th>
+              <th>IP</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {events.map((e) => (
+              <tr key={e.id}>
+                <td>{e.occurred_at.slice(0, 19).replace("T", " ")}</td>
+                <td>{e.action}</td>
+                <td>
+                  {e.object_type} {e.object_id ?? ""}
+                </td>
+                <td>{e.actor_id ? e.actor_id.slice(0, 8) : "—"}</td>
+                <td>{e.ip ?? "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
       <p style={{ color: "#8a94a8", fontSize: 12 }}>
         Журнал защищён от правки на уровне БД (триггер append-only). Привязка врач→пациент выполняется
         через симулятор/API.
