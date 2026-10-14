@@ -46,12 +46,24 @@ docker compose -f infra/docker-compose.yml up -d --build
 
 RED-траектории (демонстрация эскалаций): p2 (Игорь К., GAD-7 → 17, RED по баллу), p3 (Мария Л., PHQ-9, суицидальный пункт на 11-й день), p7 (Елена В., PHQ-9 → 15, RED по баллу).
 
+**Внешний доступ за 0 ₽** (показ жюри, предзащита, «дай потрогать»):
+
+```bash
+./tools/tunnel.sh          # распечатает публичный https://*.trycloudflare.com
+./tools/tunnel.sh status   # показать текущий URL
+./tools/tunnel.sh --stop   # остановить
+```
+
+Это Cloudflare quick tunnel (без аккаунта, без платы): стек остаётся в Docker Compose на твоей машине, наружу выставляется только UI-порт `:8090` (nginx проксирует `/api/`). URL эфемерный — меняется при каждом перезапуске туннеля. Двоичник `cloudflared` и рантайм-файлы не в git.
+
+⚠️ Быстрый туннель подходит только для демо-данных (симулятор). Реальные персональные данные — только на хостинге РФ.
+
 ## Локальная разработка
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e "core" -e "api[dev]"
 docker compose -f infra/docker-compose.yml up -d postgres   # тестовая БД
-.venv/bin/pytest core api                                    # 33 + 36 тестов
+.venv/bin/pytest core api                                    # 41 + 44 теста
 cd ui && npm install && npm run dev                          # UI на :5173 (proxy → :8000)
 cd e2e && npx playwright install chromium && npx playwright test
 ```

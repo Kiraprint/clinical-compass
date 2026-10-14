@@ -21,3 +21,9 @@ e2e/test-results/
 
 # DB
 *.sqlite
+
+# Demo tunnel (Cloudflare quick tunnel)
+tools/bin/
+tools/.tunnel.pid
+tools/.tunnel.log
+tools/.tunnel.url
