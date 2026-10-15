@@ -20,7 +20,7 @@ from compass.scoring import score, risk_flags
 from compass.triage import triage
 
 from app.errors import Problem
-from app.models import Answer, Assessment, Escalation, Run
+from app.models import Answer, Assessment, Escalation, Run, User
 
 from .audit import record as audit_record
 
@@ -53,7 +53,20 @@ def _own_run(db: Session, run_id, patient_id) -> Run:
     return run
 
 
-def start_screening(db: Session, patient_id, questionnaire_code: str) -> Run:
+# Шкала первой линии при отсутствии предписания врача (item 1: пациент не выбирает шкалу).
+DEFAULT_SCALE = PHQ9.code
+
+def prescribed_scale(db: Session, patient_id) -> str:
+    """Шкала назначается врачом (User.prescribed_scale), иначе — дефолт первой линии."""
+    user = db.get(User, patient_id)
+    if user is None:
+        raise Problem(404, "NOT_FOUND", "Пациент не найден")
+    code = user.prescribed_scale or DEFAULT_SCALE
+    _scale(code)  # валидация кода (404, если такой шкалы нет)
+    return code
+
+def start_screening(db: Session, patient_id) -> Run:
+    questionnaire_code = prescribed_scale(db, patient_id)
     scale = _scale(questionnaire_code)
     open_run = db.scalar(
         select(Run).where(Run.patient_id == patient_id, Run.mode == "SCREENING", Run.finished_at.is_(None))

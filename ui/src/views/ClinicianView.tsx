@@ -85,6 +85,25 @@ export default function ClinicianView() {
 }
 
 function ReportView({ report, error, onBack }: { report: Report | null; error: string; onBack: () => void }) {
+  const [scale, setScale] = useState("");
+  const [scaleSaved, setScaleSaved] = useState<number | null>(null);
+  const [scaleError, setScaleError] = useState("");
+  useEffect(() => {
+    if (report) setScale(report.prescribed_scale ?? "");
+  }, [report]);
+
+  const saveScale = async () => {
+    if (!report || !scale) return;
+    setScaleError("");
+    try {
+      const res = await api.setPrescribedScale(report.patient_id, scale);
+      setScaleSaved(Date.now());
+      setScale(res.questionnaire_code);
+    } catch (e: unknown) {
+      setScaleError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   if (error) {
     return (
       <div className="card">
@@ -104,6 +123,21 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
       </button>
       <h2>{report.fio ?? report.email}</h2>
       <p style={{ color: "#5a6478" }}>{report.email}</p>
+
+      <div className="row" style={{ alignItems: "center" }}>
+        <label style={{ margin: 0 }}>Шкала скрининга</label>
+        <select value={scale} onChange={(e) => setScale(e.target.value)}>
+          <option value="">— не задана (дефолт PHQ-9) —</option>
+          {report.available_scales.map((s) => (
+            <option key={s.code} value={s.code}>
+              {s.title}
+            </option>
+          ))}
+        </select>
+        <button onClick={saveScale}>Назначить</button>
+        {scaleSaved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
+      </div>
+      {scaleError && <p className="error">{scaleError}</p>}
 
       {report.open_escalations.length > 0 && (
         <div className="alert-danger">

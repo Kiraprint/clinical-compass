@@ -18,6 +18,11 @@ test.describe("Пациент: первый запуск и ежедневные
     await page.getByRole("button", { name: "Даю согласие" }).click();
     await expect(page.getByText("Согласие активно")).toBeVisible();
     await expect(page.getByRole("button", { name: "Скрининг", exact: true })).toBeVisible();
+
+    // item 1: пациент не выбирает шкалу — селекта нет, назначена врачом (дефолт PHQ-9).
+    await expect(page.locator("select")).toHaveCount(0);
+    await expect(page.getByText("Шкала назначена вашим врачом")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Начать скрининг" })).toBeVisible();
   });
 
   test("ежедневный чек-ин: вопросы → ответы → выполнено за сегодня", async ({ page }) => {

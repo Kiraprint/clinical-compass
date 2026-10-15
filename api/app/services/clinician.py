@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from compass.models import ScaleResult
+from compass.scales import ALL_SCALES
 from compass.trend import trends
 
 from app.errors import Problem
@@ -20,6 +21,18 @@ def _require_roster(db: Session, clinician_id, patient_id) -> None:
     row = db.get(ClinicianRoster, (clinician_id, patient_id))
     if row is None:
         raise Problem(403, "NO_ROSTER", "Пациент не закреплён за этим врачом")
+
+def prescribe_scale(db: Session, clinician_id, patient_id, scale_code: str) -> dict:
+    """Врач назначает пациенту шкалу скрининга (item 1). Validity через _scale (404)."""
+    from app.services.screening import _scale
+
+    _scale(scale_code)  # 404, если неизвестная шкала
+    _require_roster(db, clinician_id, patient_id)
+    patient = db.get(User, patient_id)
+    patient.prescribed_scale = scale_code
+    audit_record(db, clinician_id, "PRESCRIBE_SCALE", "user", str(patient_id))
+    db.commit()
+    return {"patient_id": str(patient_id), "questionnaire_code": scale_code}
 
 
 def list_patients(db: Session, clinician_id, triage: str | None = None) -> list[dict]:
@@ -121,6 +134,7 @@ def report(db: Session, clinician_id, patient_id) -> dict:
         "patient_id": str(patient_id),
         "email": patient.email,
         "fio": patient.fio,
+        "prescribed_scale": patient.prescribed_scale,
         "last_assessment": (
             {
                 "assessment_id": str(last.id),
@@ -140,6 +154,9 @@ def report(db: Session, clinician_id, patient_id) -> dict:
         "diary": [
             {"id": str(e.id), "content": e.content, "mood": e.mood, "sleep_h": e.sleep_h, "created_at": e.created_at.isoformat()}
             for e in diary
+        ],
+        "available_scales": [
+            {"code": s.code, "title": s.title} for s in ALL_SCALES.values()
         ],
         "open_escalations": [
             {"id": str(e.id), "kind": e.kind, "notified_at": e.notified_clinician_at.isoformat() if e.notified_clinician_at else None}

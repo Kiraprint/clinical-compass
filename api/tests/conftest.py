@@ -96,9 +96,10 @@ def admin_ctx(client, email: str, password: str = "Str0ng-Pass!") -> tuple[dict,
     return auth_header(data["access_token"]), reg["id"]
 
 
-def finish_screening(client, h, answers: dict, code: str = "PHQ-9") -> dict:
-    """Полный скрининг: создание → ответы → finish. Возвращает assessment."""
-    run = client.post("/api/v1/screenings", json={"questionnaire_code": code}, headers=h)
+def finish_screening(client, h, answers: dict) -> dict:
+    """Полный скрининг: создание → ответы → finish. Возвращает assessment.
+    Шкала — серверный дефолт (PHQ-9), пациент её не передаёт (item 1)."""
+    run = client.post("/api/v1/screenings", json={}, headers=h)
     assert run.status_code == 201, run.text
     run_id = run.json()["run_id"]
     assert client.post(f"/api/v1/runs/{run_id}/answers", json={"answers": answers}, headers=h).status_code == 204

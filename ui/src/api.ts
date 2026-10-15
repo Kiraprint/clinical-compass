@@ -111,7 +111,7 @@ export const api = {
   postConsent: verb<Consent>("POST")("/api/v1/consent"),
   revokeConsent: () => req<void>("/api/v1/consent/revoke", { method: "POST" }),
   getQuestionnaires: () => req<Questionnaire[]>("/api/v1/questionnaires"),
-  startScreening: verb<ScreeningRun>("POST")("/api/v1/screenings"),
+  startScreening: () => req<ScreeningRun>("/api/v1/screenings", { method: "POST", body: "{}" }),
   submitAnswers: (runId: string, answers: Record<string, number>) =>
     req<void>(`/api/v1/runs/${runId}/answers`, {
       method: "POST",
@@ -135,6 +135,12 @@ export const api = {
   clinicianReport: (patientId: string) =>
     req<Report>(`/api/v1/clinician/patients/${patientId}/report`),
   adminAudit: () => req<{ items: AuditEvent[] }>("/api/v1/admin/audit"),
+  prescribedScale: () => req<{ questionnaire_code: string }>("/api/v1/me/prescribed-scale"),
+  setPrescribedScale: (patientId: string, scale: string) =>
+    req<{ patient_id: string; questionnaire_code: string }>(`/api/v1/clinician/patients/${patientId}/prescribed-scale`, {
+      method: "PUT",
+      body: JSON.stringify({ scale }),
+    }),
 };
 
 // --- Типы (зеркало контрактов docs/04 §3.2) ---
@@ -204,6 +210,7 @@ export interface Report {
   patient_id: string;
   email: string;
   fio: string | null;
+  prescribed_scale: string | null;
   last_assessment: {
     assessment_id: string;
     total_score: number;
@@ -214,6 +221,7 @@ export interface Report {
   history: { total_score: number; severity: string; triage: string; computed_at: string }[];
   trend: Timeline["trend"];
   diary: { id: string; content: string; mood: number | null; created_at: string }[];
+  available_scales: { code: string; title: string }[];
   open_escalations: { id: string; kind: string; notified_at: string | null }[];
 }
 export interface AuditEvent {

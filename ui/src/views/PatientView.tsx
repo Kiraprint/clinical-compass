@@ -93,7 +93,7 @@ export default function PatientView() {
 
 function ScreeningTab() {
   const [scales, setScales] = useState<Questionnaire[]>([]);
-  const [code, setCode] = useState("");
+  const [assignedTitle, setAssignedTitle] = useState("");
   const [runId, setRunId] = useState<string | null>(null);
   const [questions, setQuestions] = useState<{ key: string; text: string; max: number }[]>([]);
   const [answers, setAnswers] = useState<Record<string, number>>({});
@@ -101,16 +101,23 @@ function ScreeningTab() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    api.getQuestionnaires().then((q) => {
-      setScales(q);
-      if (q.length) setCode(q[0].code);
-    });
+    api
+      .prescribedScale()
+      .then((p) => {
+        const catalog = api.getQuestionnaires();
+        return catalog.then((q) => {
+          setScales(q);
+          const s = q.find((x) => x.code === p.questionnaire_code);
+          setAssignedTitle(s ? s.title : p.questionnaire_code);
+        });
+      })
+      .catch((e) => setError(e instanceof ApiError ? e.detail : String(e)));
   }, []);
 
   const start = async () => {
     setError("");
     try {
-      const run = await api.startScreening({ questionnaire_code: code });
+      const run = await api.startScreening();
       const scale = scales.find((s) => s.code === run.questionnaire_code);
       setRunId(run.run_id);
       setQuestions((scale?.items ?? []).map((i) => ({ key: i.key, text: i.text, max: i.max_value })));
@@ -171,16 +178,13 @@ function ScreeningTab() {
       <h2>Скрининг тревоги и депрессии</h2>
       {!runId ? (
         <>
-          <label>Шкала</label>
-          <select value={code} onChange={(e) => setCode(e.target.value)}>
-            {scales.map((s) => (
-              <option key={s.code} value={s.code}>
-                {s.title}
-              </option>
-            ))}
-          </select>
+          <p style={{ color: "#5a6478", fontSize: 14 }}>
+            Шкала назначена вашим врачом: <b>{assignedTitle || "…"}</b>
+          </p>
           <div style={{ marginTop: 12 }}>
-            <button onClick={start}>Начать скрининг</button>
+            <button onClick={start} disabled={!assignedTitle}>
+              Начать скрининг
+            </button>
           </div>
         </>
       ) : (

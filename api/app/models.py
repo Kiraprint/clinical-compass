@@ -25,6 +25,9 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String)
     role: Mapped[str] = mapped_column(String)  # PATIENT | CLINICIAN | ADMIN
     totp_secret: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Шкала скрининга назначается врачом (roster), не выбирается пациентом.
+    # None → серверный дефолт (первая линия — PHQ-9, см. services/screening.py DEFAULT_SCALE).
+    prescribed_scale: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
 
 

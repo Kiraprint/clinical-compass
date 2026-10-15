@@ -91,7 +91,10 @@ def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: bool = 
         for idx, profile in enumerate(profiles, start=1):
             fio, code, base, slope, noise, _ = profile
             email = f"p{idx}@compass.demo"
-            patient = User(email=email, fio=fio, password_hash=security.hash_password("Demo-Pass-1"), role="PATIENT")
+            patient = User(
+                email=email, fio=fio, password_hash=security.hash_password("Demo-Pass-1"),
+                role="PATIENT", prescribed_scale=code,
+            )
             s.add(patient)
             s.flush()
             pid = patient.id
@@ -106,7 +109,7 @@ def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: bool = 
                 total = base + slope * day + rng.gauss(0, noise)
                 total = int(max(1, min(27, round(total))))
                 totals.append(total)
-                run = screening_service.start_screening(s, pid, code)
+                run = screening_service.start_screening(s, pid)
                 answers = _answers_for(profile, rng, total, day)
                 screening_service.add_answers(s, run.id, pid, answers)
                 assessment = screening_service.finish_screening(s, run.id, pid)

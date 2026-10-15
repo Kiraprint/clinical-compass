@@ -16,7 +16,7 @@ router = APIRouter(tags=["screenings"])
 
 
 class ScreeningBody(BaseModel):
-    questionnaire_code: str = Field(min_length=1)
+    """Тело пустое: шкала назначается врачом (item 1), пациент её не передаёт."""
 
 
 class AnswersBody(BaseModel):
@@ -38,9 +38,15 @@ def list_questionnaires(user: User = Depends(require_consent), db: Session = Dep
     ]
 
 
+@router.get("/me/prescribed-scale")
+def my_prescribed_scale(user: User = Depends(require_consent), db: Session = Depends(get_db)):
+    """Шкала, назначенная пациенту врачом (item 1). Без предписания — дефолт первой линии."""
+    code = services.screening.prescribed_scale(db, user.id)
+    return {"questionnaire_code": code}
+
 @router.post("/screenings", status_code=201)
 def create_screening(body: ScreeningBody, user: User = Depends(require_consent), db: Session = Depends(get_db)):
-    run = services.screening.start_screening(db, user.id, body.questionnaire_code)
+    run = services.screening.start_screening(db, user.id)
     return {
         "run_id": str(run.id),
         "questionnaire_code": run.questionnaire_code,

@@ -119,7 +119,7 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 |---|---|---|
 | FR-1 | E3 | `login_clinician_requires_otp`, `register_clinician_returns_totp_secret` |
 | FR-2 | E1 | `questionnaire_catalog_serves_scales` |
-| FR-3 | E4 | `run_closed_after_finish`, `screening_flow_phq9` |
+| FR-3 | E4 | `screening_flow_phq9`, `patient_cannot_choose_scale`, `prescribe_scale_applies_to_patient` |
 | FR-4 | E1 | `triage_red_suicidal`, `triage_yellow`, `triage_green` |
 | FR-5 | E4 | `escalation_response_under_1s`, `suicidal_answer_escalates` |
 | FR-6 | E4 | `checkin_once_per_day` |

@@ -7,7 +7,7 @@ PHQ_ALL = {f"q{i}": 0 for i in range(1, 10)}
 
 
 def _finish(client, h, answers) -> dict:
-    run_id = client.post("/api/v1/screenings", json={"questionnaire_code": "PHQ-9"}, headers=h).json()["run_id"]
+    run_id = client.post("/api/v1/screenings", json={}, headers=h).json()["run_id"]
     assert client.post(f"/api/v1/runs/{run_id}/answers", json={"answers": answers}, headers=h).status_code == 204
     resp = client.post(f"/api/v1/runs/{run_id}/finish", headers=h)
     assert resp.status_code == 201, resp.text
