@@ -3,6 +3,8 @@ import { api, getToken, setToken, setRefreshToken, setOnAuthFail, ApiError } fro
 import PatientView from "./views/PatientView";
 import ClinicianView from "./views/ClinicianView";
 import AdminView from "./views/AdminView";
+import NotificationsBell from "./NotificationsBell";
+import { initPush } from "./push";
 
 type Session = { role: string; email: string };
 
@@ -33,9 +35,14 @@ export default function App() {
 
   // При неудачном refresh (истёкший refresh-токен) — принудительный логаут.
   useEffect(() => {
-    setOnAuthFail(() => clearSession);
+    setOnAuthFail(clearSession);
     return () => setOnAuthFail(null);
   }, []);
+
+  // Web Push для CLINICIAN/ADMIN после входа.
+  useEffect(() => {
+    if (session && session.role !== "PATIENT") initPush(session.role);
+  }, [session]);
 
   const login = async () => {
     setBusy(true);
@@ -125,6 +132,7 @@ export default function App() {
       <header className="top">
         <h1>Клинический компас</h1>
         <div className="row">
+          {session.role !== "PATIENT" && <NotificationsBell />}
           <span style={{ fontSize: 13, opacity: 0.85 }}>
             {session.email} · {session.role}
           </span>

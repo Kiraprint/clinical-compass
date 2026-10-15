@@ -131,7 +131,8 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | FR-12 | E3 | `audit_log_append_only` |
 | FR-13 | E3 | `patient_cannot_access_clinician_routes`, `foreign_run_hidden` |
 | FR-14 | E6 | покрывается e2e-питч-сценарием (`seed` → RED-траектории), не юнит-тестом |
+| FR-15 | E5/E6 | `red_escalation_notifies_rostered_clinician`, `push_subscribe_unsubscribe` (API) + e2e «колокол уведомлений» |
 
 ## 7. Границы инкремента
 
-- Не реализуем заранее: push, мобильные клиенты, реальные LLM/TTS-адаптеры, интеграцию МИС (см. 04 §7). Реальные адаптеры — за SPI, mock-и остаются по умолчанию до отдельного решения.
+- Не реализуем заранее: **мобильные клиенты**, реальные LLM/TTS-адаптеры, интеграцию МИС (см. 04 §7). Push (Web Push VAPID + уведомления в приложении) реализованы в FR-15; мобильный клиент с пушами — отдельная задача (item 4). Реальные адаптеры — за SPI, mock-и остаются по умолчанию до отдельного решения.

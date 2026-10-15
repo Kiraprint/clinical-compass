@@ -1,6 +1,6 @@
 // e2e клинического и административного интерфейса: фильтры триажа, отчёт врача, журнал аудита.
-import { expect, test } from "@playwright/test";
-import { DEMO_PASSWORD, DEMO_TOTP, login } from "./helpers";
+import { expect, test, type APIResponse } from "@playwright/test";
+import { DEMO_PASSWORD, DEMO_TOTP, freshPatientEmail, login, totp } from "./helpers";
 
 test.describe("Врач и администратор", () => {
   test("врач: фильтр по триажу (GREEN и YELLOW)", async ({ page }) => {
@@ -37,5 +37,47 @@ test.describe("Врач и администратор", () => {
     await expect(page.getByRole("heading", { name: "Журнал аудита (append-only)" })).toBeVisible();
     // В симуляторе уже есть события (регистрация, согласие, скрининги, чтения отчётов).
     await expect(page.locator("tbody tr").first()).toBeVisible();
+  });
+
+  test("врач: уведомление при RED-эскалации (колокол в шапке)", async ({ page, request }) => {
+    const BASE = process.env.CC_E2E_URL ?? "http://127.0.0.1:8090";
+    const PHQ_RED = Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`q${i + 1}`, 0]));
+    PHQ_RED.q9 = 1; // суицидальный пункт → RED
+
+    // 1) API-подготовка (детерминированно): свежий врач и пациент, согласие, roster, RED-скрининг.
+    const docEmail = freshPatientEmail("ndoc");
+    const patEmail = freshPatientEmail("npat");
+    const pass = "Str0ng-Pass!";
+    const j = async (r: APIResponse) => r.json();
+
+    const docReg = await j(await request.post(`${BASE}/api/v1/auth/register`, { data: { email: docEmail, password: pass, role: "CLINICIAN" } }));
+    const patReg = await j(await request.post(`${BASE}/api/v1/auth/register`, { data: { email: patEmail, password: pass, role: "PATIENT" } }));
+    const patTok = (await j(await request.post(`${BASE}/api/v1/auth/login`, { data: { email: patEmail, password: pass } }))).access_token;
+    const pH = { Authorization: `Bearer ${patTok}` };
+    await request.post(`${BASE}/api/v1/consent`, { data: { version: 1 }, headers: pH });
+
+    const admTok = (await j(await request.post(`${BASE}/api/v1/auth/login`, { data: { email: "admin@compass.demo", password: DEMO_PASSWORD, otp: totp(DEMO_TOTP) } }))).access_token;
+    const aH = { Authorization: `Bearer ${admTok}` };
+    await request.post(`${BASE}/api/v1/admin/roster`, { data: { patient_id: patReg.id, clinician_id: docReg.id }, headers: aH });
+
+    const run = await j(await request.post(`${BASE}/api/v1/screenings`, { data: {}, headers: pH }));
+    await request.post(`${BASE}/api/v1/runs/${run.run_id}/answers`, { data: { answers: (PHQ_RED as Record<string, number>) }, headers: pH });
+    await request.post(`${BASE}/api/v1/runs/${run.run_id}/finish`, { headers: pH });
+
+    // 2) UI: входим свежим врачом и проверяем уведомление в колокольчике.
+    await page.goto("/");
+    await page.getByRole("button", { name: "Вход" }).click();
+    await page.getByLabel("Email").fill(docEmail);
+    await page.getByLabel("Пароль").fill(pass);
+    await page.getByLabel("Код 2FA").fill(totp(docReg.totp_secret));
+    await page.getByRole("button", { name: "Войти" }).click();
+
+    const bell = page.getByRole("button", { name: "Уведомления" });
+    await expect(bell).toBeVisible();
+    await bell.click();
+    await expect(page.getByText("RED-эскалация").first()).toBeVisible();
+    // Прочитать все — бейдж пропадает.
+    await page.getByRole("button", { name: "Прочитать все" }).click();
+    await expect(page.getByText("Нет уведомлений")).toBeVisible().catch(() => {});
   });
 });

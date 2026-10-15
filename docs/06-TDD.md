@@ -6,7 +6,7 @@
 
 ## 1. Стратегия
 
-- Пирамида (фактически достигнуто, см. `core/tests` + `api/tests`): unit (ядро) ~41, integration (API+БД) ~48, e2e (UI-флоу) 10. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
+- Пирамида (фактически достигнуто, см. `core/tests` + `api/tests`): unit (ядро) ~41, integration (API+БД) ~52, e2e (UI-флоу) 11. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
 - Ядро: 100% детерминированные чистые функции — табличные параметризованные тесты порогов.
 - Интеграция: реальные HTTP-запросы к тестовому Postgres (отдельная БД), не мок-эхо.
 - Запрещены тесты «на копирование»: только поведение контрактов (вход → выход/инвариант/ошибка).
@@ -90,6 +90,10 @@
 | prescribed_scale_defaults_to_phq9 | пациент без назначения | GET /me/prescribed-scale → `{questionnaire_code:"PHQ-9"}` |
 | prescribe_scale_roster_gated | врач без roster назначает шкалу | 403 NO_ROSTER |
 | prescribe_scale_applies_to_patient | PUT prescribed-scale (GAD-7) → /me/prescribed-scale и report | пациент видит GAD-7; report несёт `prescribed_scale` |
+| red_escalation_notifies_rostered_clinician | RED-скрининг пациента из roster | у врача в roster создано Notification (kind=RED_ESCALATION, unread=1) |
+| red_escalation_no_roster_no_notification | RED-скрининг пациента без roster | врач не получает уведомление (items пусто) |
+| notifications_mark_read_individual | POST /me/notifications/read {ids} | уведомление помечено прочитанным, unread=0 |
+| push_subscribe_unsubscribe | VAPID-ключ, подписка/отписка по endpoint | подписка апсерт по endpoint; чужая подписка не удаляется; без токена 401 |
 
 ## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/`)
 
@@ -108,6 +112,7 @@
 8. Врач: фильтр по триажу (GREEN и YELLOW).
 9. Врач: отчёт RED-пациента — открытые эскалации, история скринингов, дневник, графика динамики.
 10. Админ: журнал аудита (append-only) содержит записи.
+11. Врач: уведомление при RED-эскалации — колокол в шапке, детерминированная API-подготовка (свежий врач/пациент, roster через админа, RED-скрининг), «Прочитать все».
 
 e2e-хелперы вынесены в `e2e/tests/helpers.ts` (TOTP RFC 4648 base32 + HMAC-SHA1, `login`, `registerPatient`, `freshPatientEmail`).
 

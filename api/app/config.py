@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     refresh_ttl_days: int = 7
     rate_max: int = 5  # попыток захода на /auth/login за окно (перебор 2FA)
     rate_window: int = 60  # сек
+    push_enabled: bool = True
+    vapid_private_key: str = ""  # base64(PKCS8 PEM); пусто → генерируется в памяти (демо)
     model_config = {"env_prefix": "CC_"}
 
 

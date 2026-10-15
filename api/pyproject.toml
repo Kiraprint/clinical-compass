@@ -12,6 +12,7 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "sqlalchemy>=2.0.30",
     "alembic>=1.13",
+    "pywebpush>=2.0",
     "psycopg[binary]>=3.2",
     "PyJWT>=2.8",
     "argon2-cffi>=23.1",

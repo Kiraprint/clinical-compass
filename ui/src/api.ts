@@ -141,6 +141,18 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ scale }),
     }),
+  vapidPublicKey: () => req<{ public_key: string }>("/api/v1/push/vapid-public-key"),
+  subscribePush: (endpoint: string, keys: { p256dh: string; auth: string }) =>
+    req<{ subscribed: boolean }>("/api/v1/push/subscribe", {
+      method: "POST",
+      body: JSON.stringify({ endpoint, keys }),
+    }),
+  getNotifications: () => req<{ items: NotificationItem[]; unread: number }>("/api/v1/me/notifications"),
+  readNotifications: (ids?: string[]) =>
+    req<{ read: boolean }>("/api/v1/me/notifications/read", {
+      method: "POST",
+      body: JSON.stringify({ ids: ids ?? null }),
+    }),
 };
 
 // --- Типы (зеркало контрактов docs/04 §3.2) ---
@@ -232,4 +244,14 @@ export interface AuditEvent {
   object_id: string | null;
   ip: string | null;
   occurred_at: string;
+}
+export interface NotificationItem {
+  id: string;
+  kind: string;
+  title: string;
+  body: string;
+  patient_id: string | null;
+  escalation_id: string | null;
+  read: boolean;
+  created_at: string;
 }

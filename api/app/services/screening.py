@@ -23,6 +23,7 @@ from app.errors import Problem
 from app.models import Answer, Assessment, Escalation, Run, User
 
 from .audit import record as audit_record
+from . import push as push_service
 
 MOSCOW = ZoneInfo("Europe/Moscow")
 
@@ -130,13 +131,25 @@ def finish_screening(db: Session, run_id, patient_id) -> dict:
     run.finished_at = datetime.now(timezone.utc)
 
     escalation = None
+    recipient_ids: list = []
     if level == "RED":
         kind = "SUICIDAL" if any(f.kind == "SUICIDAL_IDEATION" for f in flags) else "SEVERE"
         escalation = Escalation(assessment_id=assessment.id, patient_id=patient_id, kind=kind)
         db.add(escalation)
+        db.flush()  # escalation.id до создания Notification
+        recipient_ids = push_service.notify_escalation_clinicians(db, patient_id, escalation)
     audit_record(db, patient_id, "SCREENING_FINISH", "assessment", str(run_id))
     db.commit()
     db.refresh(assessment)
+
+    # Web Push — после коммита (сбои не пробрасываются).
+    if escalation is not None and recipient_ids:
+        push_service.push_to_clinicians(
+            db,
+            recipient_ids,
+            "RED-эскалация",
+            "Уведомление врачу: у пациента RED-триаж, см. карточку пациента",
+        )
 
     resp: dict = {
         "assessment_id": str(assessment.id),
