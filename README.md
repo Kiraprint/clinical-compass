@@ -63,10 +63,13 @@ RED-траектории (демонстрация эскалаций): p2 (Иг
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e "core" -e "api[dev]"
 docker compose -f infra/docker-compose.yml up -d postgres   # тестовая БД
-.venv/bin/pytest core api                                    # 41 + 44 теста
-cd ui && npm install && npm run dev                          # UI на :5173 (proxy → :8000)
+cd api && alembic upgrade head                                # схема из миграций (не create_all)
+.venv/bin/pytest core api                                     # 41 + 44 теста
+cd ui && npm install && npm run dev                           # UI на :5173 (proxy → :8000)
 cd e2e && npx playwright install chromium && npx playwright test
 ```
+
+Изменения схемы — только через `cd api && alembic revision --autogenerate -m "..."` + проверка `alembic upgrade head`. `Base.metadata.create_all` не используется: он не альтерирует существующие таблицы и копит дрейф.
 
 ## Дорожная карта
 

@@ -54,8 +54,27 @@ def install_audit_trigger(engine_=None) -> None:
 
 
 def init_db() -> None:
+    """Приводим схему к актуальной: alembic upgrade head + гарантия триггера аудита.
+
+    create_all здесь намеренно не используется: он не альтерирует существующие
+    таблицы, из-за чего демо-БД ловила устаревшую схему (недостающие индексы
+    runs_checkin_daily/audit_log_occurred/escalations_patient и CHECK-ограничения).
+    Единственный источник истины — миграции в api/alembic.
+    """
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
     from . import models  # noqa: F401  (регистрация моделей в метаданных)
-    Base.metadata.create_all(engine)
+
+    api_dir = Path(__file__).resolve().parent.parent
+    cfg = Config(str(api_dir / "alembic.ini"))
+    cfg.set_main_option("script_location", str(api_dir / "alembic"))
+    # URL берём из уже настроенного engine (соответствует CC_DATABASE_URL).
+    # str(engine.url) маскирует пароль как *** — нужен render_as_string без маски.
+    cfg.set_main_option("sqlalchemy.url", engine.url.render_as_string(hide_password=False))
+    command.upgrade(cfg, "head")
     install_audit_trigger(engine)
 
 

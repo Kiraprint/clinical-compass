@@ -23,10 +23,15 @@ TEST_URL = os.environ.get(
 @pytest.fixture(scope="session")
 def engine():
     from app import models  # noqa: F401 — регистрирует таблицы в Base.metadata
+    from sqlalchemy import text
 
     db.setup(TEST_URL)
-    db.Base.metadata.drop_all(db.engine)  # свежая схема: create_all не альтерирует таблицы
-    db.init_db()
+    # Полный сброс схемы: модельные таблицы + alembic_version (иначе upgrade head
+    # увидит версию 'head' и не создаст таблицы, оставив БД пустой).
+    with db.engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
+    db.init_db()  # alembic upgrade head + триггер аудита
     yield db.engine
     db.engine.dispose()
 
