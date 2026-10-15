@@ -71,6 +71,20 @@ cd e2e && npx playwright install chromium && npx playwright test
 
 Изменения схемы — только через `cd api && alembic revision --autogenerate -m "..."` + проверка `alembic upgrade head`. `Base.metadata.create_all` не используется: он не альтерирует существующие таблицы и копит дрейф.
 
+## CI и релизы
+
+Локально (тесты ядра + API против реального Postgres + сборка образов; опционально `--e2e` — полный стек + Playwright):
+
+```bash
+./tools/ci.sh            # тесты + сборка
+./tools/ci.sh --e2e      # + подъём стека и e2e-прогон
+```
+
+GitHub Actions (запускаются после пуша в репозиторий; сейчас remote не задан):
+
+- `.github/workflows/ci.yml` — на push/PR: тесты ядра и API (Postgres в service-контейнере) + сборка docker-образов; e2e-джоб на `master`/`main`.
+- `.github/workflows/release.yml` — на тег `v*`: сборка и публикация образов в GHCR (`compass-api`, `compass-ui`) + черновой GitHub Release.
+
 ## Дорожная карта
 
 - [x] Бизнес-анализ
