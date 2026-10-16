@@ -32,6 +32,7 @@ require_ngrok_url() {
 
 start() {
   require_ngrok_url
+  NGROK_URL="${NGROK_URL#https://}"   # стерпим и полный URL, и голый домен
   if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
     echo "Уже запущен: $(cat "$URLFILE" 2>/dev/null || echo '(URL ещё не готов)')"
     return 0

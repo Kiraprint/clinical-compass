@@ -60,6 +60,10 @@ export NGROK_URL=<ваш>.ngrok-free.app           # dev-домен из dashboa
 
 Адрес статичен (не меняется между перезапусками) и имеет HTTPS с автоматическим сертификатом. Это понадобится, если адрес зашивается в APK (`VITE_API_BASE`). Если твой ISP режет даже HTTPS до ngrok — гони исходящий через свой Xray: `export NGROK_PROXY=socks5://127.0.0.1:1080`.
 
+Текущий демо-адрес: **https://devoted-perch-easily.ngrok-free.app**
+
+⚠️ На free-тарифе ngrok показывает разовую страницу-предупреждение «served for free through ngrok.com» на **первом** заходе браузера (кнопка перехода). API-вызовы (`Accept: application/json`) не перехватываются — приложение работает сразу после одного клика. Чтобы убрать интерститиал у жюри, можно отдать заголовок `ngrok-skip-browser-warning` на фронте или держать демо на платном/своём домене.
+
 **Без аккаунта (эфемерный URL)** — Cloudflare quick tunnel:
 
 ```bash
@@ -105,12 +109,12 @@ GitHub Actions (запускаются после пуша в репозитор
 `mobile/` — Capacitor-обёртка веб-клиента (`ui/`), universal APK `dev.compass.assistant`:
 
 ```bash
-cd ui && npm run build                          # собрать SPA
+cd ui && VITE_API_BASE=https://devoted-perch-easily.ngrok-free.app npm run build   # SPA с адресом демо
 cd ../mobile && npm ci && npx cap sync android  # скопировать в нативный проект
 cd android && ./gradlew assembleDebug           # APK: app/build/outputs/apk/debug/
 ```
 
-- **API-хост**: сборка веб-части идёт с `VITE_API_BASE=<публичный https-URL API>` (в нативном приложении нет same-origin). В CI это `vars.VITE_API_BASE`.
+- **API-хост**: сборка веб-части идёт с `VITE_API_BASE=<публичный https-URL API>` (в нативном приложении нет same-origin). Стабильный демо-адрес — `https://devoted-perch-easily.ngrok-free.app` (см. «Внешний доступ»); в CI это `vars.VITE_API_BASE`.
 - **Пуши**: нативно приложение использует не Web Push, а FCM. Регистрация токена устройства: `POST /api/v1/push/device-token`, одноразовый апгрейд `POST /api/v1/push/fcm/upgrade` (cooldown 60 мин → `429 FCM_COOLDOWN`, статус в колоколе уведомлений).
 - **Firebase**: для реальной доставки пушей нужен Firebase-проект (`google-services.json` в `mobile/android/app/`, в CI — из `secrets.FCM_GOOGLE_SERVICES_JSON`); без файла APK собирается, но пуши не работают. Серверная отправка — FCM HTTP v1 по `CC_FCM_SERVICE_ACCOUNT_B64` (base64 service-account JSON); без неё сервер шлёт только Web Push.
 - **Подпись**: debug-APK подписывается автоматически; release — из `ANDROID_KEYSTORE_B64` + паролей (см. workflow).
