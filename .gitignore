@@ -30,6 +30,9 @@ tools/.tunnel.url
 tools/.ngrok.pid
 tools/.ngrok.log
 tools/.ngrok.url
+tools/.xtunnel.pid
+tools/.xtunnel.log
+tools/.xtunnel.url
 # Реальный ngrok-конфиг может содержать authtoken — не коммитим; пример в *.example
 tools/ngrok.yml
 
