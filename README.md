@@ -48,18 +48,28 @@ RED-траектории (демонстрация эскалаций): p2 (Иг
 
 **Внешний доступ за 0 ₽** (показ жюри, предзащита, «дай потрогать»):
 
-**Основной канал демо — `xTunnel`** (xtunnel.ru, РФ-резидент: точка входа РФ, свой TLS):
+**Основной канал демо — `fxTunnel`** (fxtun.ru, RU-сервис, открытый код):
+
+```bash
+cp tools/.fxtun.env.example tools/.fxtun.env   # впиши токен из https://fxtun.ru
+./tools/fxtun.sh          # Docker-агент; распечатает публичный https://<sub>.fxtun.ru
+./tools/fxtun.sh status
+./tools/fxtun.sh --stop
+```
+
+Текущий демо-адрес: **https://compass.fxtun.ru**
+
+Адрес — **твой субдомен** (не UUID), стабилен между перезапусками (проверено: `docker restart` и полный `--stop`/`start` возвращают тот же адрес; при выключенном клиенте — 404). Агент запускается **в Docker** обязательно: на этой машине transparent-proxy xray (fake-ip + TUN `throne-tun`) ломает хостовые туннели, а контейнер выходит напрямую через FORWARD. Free-тариф: **без лимитов на запросы и трафик, без таймаута сессий**, 1 активный туннель, свой субдомен бесплатно (0 зарезервированных). Скорость: **200 за 0.43–0.51с** (быстрее ngrok и xTunnel), логины PATIENT/CLINICIAN работают.
+
+**Альтернатива — `xTunnel`** (xtunnel.ru, РФ-вход, свой TLS):
 
 ```bash
 export XTUNNEL_KEY=<ключ>   # из cabinet.xtunnel.ru (FREE_KEY / PERSONAL_KEY / ...)
 ./tools/xtunnel.sh          # Docker-агент; распечатает стабильный https://<uuid>.tunnel4.com
-./tools/xtunnel.sh status
 ./tools/xtunnel.sh --stop
 ```
 
-Текущий демо-адрес: **https://56243ecf-a55c-467a-9098-bfd9cf85af2c.tunnel4.com**
-
-Адрес стабилен между рестартами (free-план отдаёт лицензии постоянный UUID). Агент запускается **в Docker** обязательно: на этой машине transparent-proxy xray (fake-ip + TUN `throne-tun`) ломает хостовый mux-канал xtunnel — каждый запрос ~135с; в Docker (egress через FORWARD мимо host-TUN) тот же туннель отвечает за ~1с (200 за 1.14–1.30с, логин работает). Лимиты free: 1 ГБ/сутки, 100 req/мин.
+Адрес: **https://56243ecf-a55c-467a-9098-bfd9cf85af2c.tunnel4.com** (стабилен между рестартами, но free-тариф называет адрес «временным»). Лимиты free: 1 ГБ/сутки, 100 req/мин. В Docker отвечает за ~1с.
 
 **Резерв — `ngrok`** (free, статический dev-домен, авто-TLS; зарубежная инфраструктура):
 
@@ -67,7 +77,6 @@ export XTUNNEL_KEY=<ключ>   # из cabinet.xtunnel.ru (FREE_KEY / PERSONAL_K
 ./tools/bin/ngrok config add-authtoken <TOKEN>  # разово: token из dashboard.ngrok.com
 export NGROK_URL=<ваш>.ngrok-free.app           # dev-домен из dashboard (статичный)
 ./tools/ngrok.sh          # распечатает стабильный https://<ваш>.ngrok-free.app
-./tools/ngrok.sh status
 ./tools/ngrok.sh --stop
 ```
 
@@ -120,12 +129,12 @@ GitHub Actions (запускаются после пуша в репозитор
 `mobile/` — Capacitor-обёртка веб-клиента (`ui/`), universal APK `dev.compass.assistant`:
 
 ```bash
-cd ui && VITE_API_BASE=https://56243ecf-a55c-467a-9098-bfd9cf85af2c.tunnel4.com npm run build   # SPA с адресом демо
+cd ui && VITE_API_BASE=https://compass.fxtun.ru npm run build   # SPA с адресом демо
 cd ../mobile && npm ci && npx cap sync android  # скопировать в нативный проект
 cd android && ./gradlew assembleDebug           # APK: app/build/outputs/apk/debug/
 ```
 
-- **API-хост**: сборка веб-части идёт с `VITE_API_BASE=<публичный https-URL API>` (в нативном приложении нет same-origin). Стабильный демо-адрес — `https://56243ecf-a55c-467a-9098-bfd9cf85af2c.tunnel4.com` (см. «Внешний доступ»); в CI это `vars.VITE_API_BASE`.
+- **API-хост**: сборка веб-части идёт с `VITE_API_BASE=<публичный https-URL API>` (в нативном приложении нет same-origin). Стабильный демо-адрес — `https://compass.fxtun.ru` (см. «Внешний доступ»); в CI это `vars.VITE_API_BASE`.
 - **Пуши**: нативно приложение использует не Web Push, а FCM. Регистрация токена устройства: `POST /api/v1/push/device-token`, одноразовый апгрейд `POST /api/v1/push/fcm/upgrade` (cooldown 60 мин → `429 FCM_COOLDOWN`, статус в колоколе уведомлений).
 - **Firebase**: для реальной доставки пушей нужен Firebase-проект (`google-services.json` в `mobile/android/app/`, в CI — из `secrets.FCM_GOOGLE_SERVICES_JSON`); без файла APK собирается, но пуши не работают. Серверная отправка — FCM HTTP v1 по `CC_FCM_SERVICE_ACCOUNT_B64` (base64 service-account JSON); без неё сервер шлёт только Web Push.
 - **Подпись**: debug-APK подписывается автоматически; release — из `ANDROID_KEYSTORE_B64` + паролей (см. workflow).
