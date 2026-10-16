@@ -22,11 +22,16 @@ e2e/test-results/
 # DB
 *.sqlite
 
-# Demo tunnel (Cloudflare quick tunnel)
+# Demo tunnel (Cloudflare quick tunnel + ngrok стабильный)
 tools/bin/
 tools/.tunnel.pid
 tools/.tunnel.log
 tools/.tunnel.url
+tools/.ngrok.pid
+tools/.ngrok.log
+tools/.ngrok.url
+# Реальный ngrok-конфиг может содержать authtoken — не коммитим; пример в *.example
+tools/ngrok.yml
 
 # Android (item 4): Firebase-конфиг приложения приходит из CI-секрета
 mobile/android/app/google-services.json
