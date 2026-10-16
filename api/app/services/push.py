@@ -21,9 +21,19 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.errors import Problem
-from app.models import ClinicianRoster, Escalation, Notification, PushSubscription, User
+from app.models import (
+    ClinicianRoster,
+    DeviceToken,
+    Escalation,
+    FcmState,
+    Notification,
+    PushSubscription,
+    User,
+)
 
 log = logging.getLogger(__name__)
+
+FCM_COOLDOWN_SECONDS = 3600  # окно «попробуйте через час» после одноразового апгрейда
 
 # --- VAPID-ключи -------------------------------------------------------------
 
@@ -94,6 +104,62 @@ def delete_subscription(db: Session, user_id: uuid.UUID, endpoint: str) -> None:
     if sub is not None:
         db.delete(sub)
         db.commit()
+
+# --- FCM-токены нативного приложения (item 4) --------------------------------
+
+def upsert_device_token(db: Session, user_id: uuid.UUID, token: str, platform: str) -> None:
+    """Регистрация FCM-токена (один на устройство, апсерт по токену)."""
+    row = db.scalar(select(DeviceToken).where(DeviceToken.token == token))
+    if row is None:
+        db.add(DeviceToken(user_id=user_id, token=token, platform=platform))
+    else:
+        row.user_id = user_id
+        row.platform = platform
+    db.commit()
+
+def delete_device_token(db: Session, user_id: uuid.UUID, token: str) -> None:
+    row = db.scalar(
+        select(DeviceToken).where(DeviceToken.token == token, DeviceToken.user_id == user_id)
+    )
+    if row is not None:
+        db.delete(row)
+        db.commit()
+
+def _fcm_remaining(db: Session, user_id: uuid.UUID) -> int:
+    """Оставшиеся секунды cooldown-окна (0 = можно апгрейдить)."""
+    state = db.get(FcmState, user_id)
+    if state is None or state.last_upgraded_at is None:
+        return 0
+    delta = datetime.now(timezone.utc) - state.last_upgraded_at
+    return max(0, FCM_COOLDOWN_SECONDS - int(delta.total_seconds()))
+
+def fcm_status(db: Session, user_id: uuid.UUID) -> dict:
+    """Статус окна перехода на FCM: активное окно + сколько осталось секунд."""
+    remaining = _fcm_remaining(db, user_id)
+    return {"window_active": remaining > 0, "remaining_seconds": remaining}
+
+def upgrade_to_fcm(db: Session, user_id: uuid.UUID, token: str, platform: str) -> None:
+    """Одноразовый переход на FCM-канал (item 4).
+
+    Внутри окна (60 мин после успешного апгрейда) — 429 FCM_COOLDOWN.
+    Апгрейд идемпотентен по токену (апсерт), поэтому повторная подписка
+    на то же устройство после окна не создаёт дублей.
+    """
+    state = db.get(FcmState, user_id, with_for_update=True)
+    remaining = _fcm_remaining(db, user_id)
+    if remaining > 0:
+        raise Problem(429, "FCM_COOLDOWN", f"Попробуйте через {remaining // 60 + 1} мин")
+    if state is None:
+        state = FcmState(user_id=user_id)
+        db.add(state)
+    state.last_upgraded_at = datetime.now(timezone.utc)
+    row = db.scalar(select(DeviceToken).where(DeviceToken.token == token))
+    if row is None:
+        db.add(DeviceToken(user_id=user_id, token=token, platform=platform))
+    else:
+        row.user_id = user_id
+        row.platform = platform
+    db.commit()
 
 
 # --- Уведомления -------------------------------------------------------------
@@ -176,13 +242,100 @@ def mark_read(db: Session, user_id: uuid.UUID, ids: list[str] | None) -> None:
     db.commit()
 
 
-# --- Web Push (best-effort) --------------------------------------------------
+# --- Доставка push (best-effort) ---------------------------------------------
 
+_fcm_sa_cache: dict | None = None
+
+def _fcm_service_account() -> dict | None:
+    """Service account Firebase из env CC_FCM_SERVICE_ACCOUNT_B64 (base64 JSON)."""
+    global _fcm_sa_cache
+    if _fcm_sa_cache is not None:
+        return _fcm_sa_cache or None
+    if not settings.fcm_service_account_b64:
+        _fcm_sa_cache = {}
+        return None
+    try:
+        import json
+
+        sa = json.loads(base64.b64decode(settings.fcm_service_account_b64).decode())
+        _fcm_sa_cache = sa
+        return sa
+    except Exception as exc:  # noqa: BLE001
+        log.warning("не удалось распарсить CC_FCM_SERVICE_ACCOUNT_B64: %s", exc)
+        _fcm_sa_cache = {}
+        return None
+
+def _fcm_access_token(sa: dict) -> str | None:
+    """OAuth2-токен для FCM HTTP v1 (подпись RS256 через PyJWT + cryptography)."""
+    import time
+
+    import jwt
+
+    now = int(time.time())
+    claims = {
+        "iss": sa["client_email"],
+        "scope": "https://www.googleapis.com/auth/firebase.messaging",
+        "aud": "https://oauth2.googleapis.com/token",
+        "iat": now,
+        "exp": now + 3600,
+    }
+    try:
+        assertion = jwt.encode(claims, sa["private_key"], algorithm="RS256")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("FCM: не удалось подписать JWT: %s", exc)
+        return None
+    try:
+        import urllib.parse
+        import urllib.request
+
+        body = urllib.parse.urlencode(
+            {"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": assertion}
+        ).encode()
+        req = urllib.request.Request(
+            "https://oauth2.googleapis.com/token",
+            data=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            import json
+
+            return json.load(resp)["access_token"]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("FCM: не удалось получить access_token: %s", exc)
+        return None
+
+def _fcm_send(token: str, title: str, body: str) -> bool:
+    """Отправка одного FCM-сообщения. True = доставлено/принято; False = сбой."""
+    sa = _fcm_service_account()
+    if sa is None:
+        return False
+    access = _fcm_access_token(sa)
+    if not access:
+        return False
+    try:
+        import json
+        import urllib.request
+
+        payload = json.dumps(
+            {"message": {"token": token, "notification": {"title": title, "body": body}}}
+        ).encode()
+        req = urllib.request.Request(
+            f"https://fcm.googleapis.com/v1/projects/{sa['project_id']}/messages:send",
+            data=payload,
+            headers={"Authorization": f"Bearer {access}", "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except urllib.error.HTTPError as exc:  # noqa: BLE001
+        log.warning("FCM send error %s (token %s...): %s", exc.code, token[:40], exc.read()[:200])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("FCM send сбой (token %s...): %s", token[:40], exc)
+    return False
 
 def push_to_clinicians(
     db: Session, clinician_ids: list[uuid.UUID], title: str, body: str
 ) -> None:
-    """Расслылка Web Push врачам. Сбои не пробрасываются (best-effort)."""
+    """Расслылка pushes врачам (Web Push + FCM). Сбои не пробрасываются (best-effort)."""
     if not settings.push_enabled or not clinician_ids:
         return
     try:
@@ -206,5 +359,12 @@ def push_to_clinicians(
                 log.warning("push не доставлен (%s): %s", s.endpoint[:60], exc)
             except Exception as exc:  # noqa: BLE001 — одна плохая подписка не валит остальные
                 log.warning("push error %s: %s", s.endpoint[:60], exc)
+
+        # Нативные FCM-токены (Android APK).
+        devices = db.scalars(
+            select(DeviceToken).where(DeviceToken.user_id.in_(clinician_ids))
+        ).all()
+        for d in devices:
+            _fcm_send(d.token, title, body)
     except Exception as exc:  # noqa: BLE001
         log.warning("push_to_clinicians сбой: %s", exc)

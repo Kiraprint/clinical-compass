@@ -1,4 +1,5 @@
 # Item 3: уведомления врачу при RED-эскалации + Web Push подписки.
+# Item 4: FCM-токены нативного приложения + cooldown-окно апгрейда.
 # Контракт: docs/04 §3.1; docs/06 §3.
 from .conftest import admin_ctx, auth_header, clinician_ctx, finish_screening, patient_ctx
 
@@ -89,3 +90,42 @@ def test_push_subscribe_unsubscribe_and_vapid_key(client):
     # своя — удаляется
     assert client.request("DELETE", "/api/v1/push/unsubscribe", json={"endpoint": endpoint}, headers=c).status_code == 200
     assert client.request("DELETE", "/api/v1/push/unsubscribe", json={"endpoint": endpoint}, headers=c).status_code == 200
+# --- Item 4: FCM-токены нативного приложения + cooldown -----------------------
+
+def test_fcm_device_token_register_delete(client):
+    """Регистрация FCM-токена идемпотентна; удаление — scoped по владельцу."""
+    h, pid = patient_ctx(client, "fcm@test.ru")
+    body = {"token": "fcm-token-abc", "platform": "android"}
+    assert client.post("/api/v1/push/device-token", json=body, headers=h).status_code == 200
+    # идемпотентный апсерт
+    assert client.post("/api/v1/push/device-token", json=body, headers=h).status_code == 200
+    # чужая запись не удаляется
+    p2, _ = patient_ctx(client, "fcm2@test.ru")
+    assert client.request("DELETE", "/api/v1/push/device-token", json=body, headers=p2).status_code == 200
+    # своя — удаляется
+    assert client.request("DELETE", "/api/v1/push/device-token", json=body, headers=h).status_code == 200
+    # без токена — 401
+    assert client.get("/api/v1/push/fcm/status").status_code == 401
+
+def test_fcm_upgrade_then_cooldown(client):
+    """После успешного апгрейда повторная подписка — 429 FCM_COOLDOWN (окно 60 мин)."""
+    h, pid = patient_ctx(client, "fcmup@test.ru")
+    body = {"token": "fcm-upgrade-tok", "platform": "android"}
+
+    # до апгрейда окно не активно (0 сек)
+    st = client.get("/api/v1/push/fcm/status", headers=h)
+    assert st.status_code == 200
+    assert st.json() == {"window_active": False, "remaining_seconds": 0}
+
+    # первый апгрейд — успех
+    up = client.post("/api/v1/push/fcm/upgrade", json=body, headers=h)
+    assert up.status_code == 200, up.text
+    assert up.json() == {"upgraded": True}
+
+    # окно теперь активно — повторный апгрейд → 429 FCM_COOLDOWN
+    st = client.get("/api/v1/push/fcm/status", headers=h).json()
+    assert st["window_active"] is True
+    assert st["remaining_seconds"] > 0
+    second = client.post("/api/v1/push/fcm/upgrade", json=body, headers=h)
+    assert second.status_code == 429, second.text
+    assert second.json()["code"] == "FCM_COOLDOWN"

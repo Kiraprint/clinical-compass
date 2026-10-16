@@ -1,5 +1,7 @@
 // Типизированный HTTP-клиент. Контракты — docs/04 §3.
-const BASE = "";
+// Пустой BASE = same-origin (веб, nginx-прокси). Для нативной сборки (Capacitor)
+// хост задаётся на этапе сборки через VITE_API_BASE (см. mobile/ и release-android).
+const BASE: string = import.meta.env.VITE_API_BASE ?? "";
 
 export class ApiError extends Error {
   status: number;
@@ -152,6 +154,23 @@ export const api = {
     req<{ read: boolean }>("/api/v1/me/notifications/read", {
       method: "POST",
       body: JSON.stringify({ ids: ids ?? null }),
+    }),
+  registerDeviceToken: (token: string, platform: string = "android") =>
+    req<{ registered: boolean }>("/api/v1/push/device-token", {
+      method: "POST",
+      body: JSON.stringify({ token, platform }),
+    }),
+  unregisterDeviceToken: (token: string) =>
+    req<{ registered: boolean }>("/api/v1/push/device-token", {
+      method: "DELETE",
+      body: JSON.stringify({ token }),
+    }),
+  fcmStatus: () =>
+    req<{ window_active: boolean; remaining_seconds: number }>("/api/v1/push/fcm/status"),
+  fcmUpgrade: (token: string, platform: string = "android") =>
+    req<{ upgraded: boolean }>("/api/v1/push/fcm/upgrade", {
+      method: "POST",
+      body: JSON.stringify({ token, platform }),
     }),
 };
 

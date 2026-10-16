@@ -6,7 +6,7 @@
 
 ## 1. Стратегия
 
-- Пирамида (фактически достигнуто, см. `core/tests` + `api/tests`): unit (ядро) ~41, integration (API+БД) ~52, e2e (UI-флоу) 11. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
+- Пирамида (фактически достигнуто, см. `core/tests` + `api/tests`): unit (ядро) ~41, integration (API+БД) ~54, e2e (UI-флоу) 11. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
 - Ядро: 100% детерминированные чистые функции — табличные параметризованные тесты порогов.
 - Интеграция: реальные HTTP-запросы к тестовому Postgres (отдельная БД), не мок-эхо.
 - Запрещены тесты «на копирование»: только поведение контрактов (вход → выход/инвариант/ошибка).
@@ -94,6 +94,8 @@
 | red_escalation_no_roster_no_notification | RED-скрининг пациента без roster | врач не получает уведомление (items пусто) |
 | notifications_mark_read_individual | POST /me/notifications/read {ids} | уведомление помечено прочитанным, unread=0 |
 | push_subscribe_unsubscribe | VAPID-ключ, подписка/отписка по endpoint | подписка апсерт по endpoint; чужая подписка не удаляется; без токена 401 |
+| fcm_device_token_register_delete | POST/DELETE /push/device-token | апсерт по токену; чужой токен не удаляется; без токена 401 |
+| fcm_upgrade_then_cooldown | POST /push/fcm/upgrade дважды | первый 200 `{upgraded}`; второй 429 `FCM_COOLDOWN`; /push/fcm/status окно активно |
 
 ## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/`)
 

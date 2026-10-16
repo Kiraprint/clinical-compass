@@ -27,3 +27,7 @@ tools/bin/
 tools/.tunnel.pid
 tools/.tunnel.log
 tools/.tunnel.url
+
+# Android (item 4): Firebase-конфиг приложения приходит из CI-секрета
+mobile/android/app/google-services.json
+mobile/android/.gradle/

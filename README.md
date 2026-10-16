@@ -64,7 +64,7 @@ RED-траектории (демонстрация эскалаций): p2 (Иг
 python3 -m venv .venv && .venv/bin/pip install -e "core" -e "api[dev]"
 docker compose -f infra/docker-compose.yml up -d postgres   # тестовая БД
 cd api && alembic upgrade head                                # схема из миграций (не create_all)
-.venv/bin/pytest core api                                     # 41 + 44 теста
+.venv/bin/pytest core api                                     # 41 + 54 теста
 cd ui && npm install && npm run dev                           # UI на :5173 (proxy → :8000)
 cd e2e && npx playwright install chromium && npx playwright test
 ```
@@ -84,6 +84,22 @@ GitHub Actions (запускаются после пуша в репозитор
 
 - `.github/workflows/ci.yml` — на push/PR: тесты ядра и API (Postgres в service-контейнере) + сборка docker-образов; e2e-джоб на `master`/`main`.
 - `.github/workflows/release.yml` — на тег `v*`: сборка и публикация образов в GHCR (`compass-api`, `compass-ui`) + черновой GitHub Release.
+- `.github/workflows/release-android.yml` — универсальный Android APK (Capacitor + FCM) из веб-клиента `mobile/`; APK — артефакт (на `v*` — в релиз).
+
+## Мобильное приложение (Android APK, item 4)
+
+`mobile/` — Capacitor-обёртка веб-клиента (`ui/`), universal APK `dev.compass.assistant`:
+
+```bash
+cd ui && npm run build                          # собрать SPA
+cd ../mobile && npm ci && npx cap sync android  # скопировать в нативный проект
+cd android && ./gradlew assembleDebug           # APK: app/build/outputs/apk/debug/
+```
+
+- **API-хост**: сборка веб-части идёт с `VITE_API_BASE=<публичный https-URL API>` (в нативном приложении нет same-origin). В CI это `vars.VITE_API_BASE`.
+- **Пуши**: нативно приложение использует не Web Push, а FCM. Регистрация токена устройства: `POST /api/v1/push/device-token`, одноразовый апгрейд `POST /api/v1/push/fcm/upgrade` (cooldown 60 мин → `429 FCM_COOLDOWN`, статус в колоколе уведомлений).
+- **Firebase**: для реальной доставки пушей нужен Firebase-проект (`google-services.json` в `mobile/android/app/`, в CI — из `secrets.FCM_GOOGLE_SERVICES_JSON`); без файла APK собирается, но пуши не работают. Серверная отправка — FCM HTTP v1 по `CC_FCM_SERVICE_ACCOUNT_B64` (base64 service-account JSON); без неё сервер шлёт только Web Push.
+- **Подпись**: debug-APK подписывается автоматически; release — из `ANDROID_KEYSTORE_B64` + паролей (см. workflow).
 
 ## Дорожная карта
 

@@ -1,0 +1,115 @@
+name: Android APK
+
+# Сборка универсального APK (Capacitor + FCM) из веб-клиента (item 4).
+# Требуемые secrets/vars (GitHub):
+#   - secrets.FCM_GOOGLE_SERVICES_JSON — содержимое google-services.json (Firebase-проект);
+#     без него APK собирается, но FCM-пуши не работают.
+#   - vars.VITE_API_BASE — публичный HTTPS-URL API для нативной сборки (напр. демо-туннель).
+#   - (release на v* тегах) keystore-подпись: secrets.ANDROID_KEYSTORE_B64,
+#     ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD.
+#     Без них билдится подписанный debug-APK.
+on:
+  push:
+    branches: [master, main]
+    tags: ["v*"]
+
+jobs:
+  build-apk:
+    name: Build APK (Capacitor + FCM)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 21 (Android Gradle requires 21+)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Build web SPA (VITE_API_BASE → нативная сборка)
+        working-directory: ui
+        run: |
+          npm ci
+          VITE_API_BASE="${{ vars.VITE_API_BASE }}" npm run build
+
+      - name: Cache Capacitor android platform
+        uses: actions/cache@v4
+        with:
+          path: mobile/node_modules
+          key: mobile-npm-${{ hashFiles('mobile/package-lock.json') }}
+
+      - name: npm ci + cap sync android
+        working-directory: mobile
+        run: |
+          npm ci
+          npx cap sync android
+
+      - name: Inject google-services.json (Firebase)
+        shell: bash
+        run: |
+          if [ -n "${{ secrets.FCM_GOOGLE_SERVICES_JSON }}" ]; then
+            echo "${{ secrets.FCM_GOOGLE_SERVICES_JSON }}" > mobile/android/app/google-services.json
+            echo "google-services.json injected for FCM"
+          else
+            echo "::warning::FCM_GOOGLE_SERVICES_JSON не задан — APK соберётся, но пуши не будут доставлены"
+          fi
+
+      - name: Configure signing (release on v* tags)
+        id: signing
+        shell: bash
+        run: |
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_B64 }}" ]; then
+            echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 -d > mobile/android/app/release.keystore
+            echo "storeFile=release.keystore" > mobile/android/keystore.properties
+            echo "storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> mobile/android/keystore.properties
+            echo "keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}" >> mobile/android/keystore.properties
+            echo "keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}" >> mobile/android/keystore.properties
+            echo "release=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=no" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build APK (debug by default, release when signed)
+        working-directory: mobile/android
+        env:
+          SIGNING_RELEASE: ${{ steps.signing.outputs.release }}
+        run: |
+          chmod +x gradlew
+          if [ "$SIGNING_RELEASE" = "yes" ]; then
+            ./gradlew assembleRelease
+          else
+            ./gradlew assembleDebug
+          fi
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: compass-apk
+          path: |
+            mobile/android/app/build/outputs/apk/debug/*.apk
+            mobile/android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release (v* tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            mobile/android/app/build/outputs/apk/debug/*.apk
+            mobile/android/app/build/outputs/apk/release/*.apk
+          generate_release_notes: true
+          draft: true
+          body: |
+            ## Компас — Android APK (Capacitor + FCM)
+
+            Собран из веб-клиента; API-хост задан через `VITE_API_BASE`.
+            Для доставки пушей в google-services.json должен быть Firebase-проект.

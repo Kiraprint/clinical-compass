@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     rate_window: int = 60  # сек
     push_enabled: bool = True
     vapid_private_key: str = ""  # base64(PKCS8 PEM); пусто → генерируется в памяти (демо)
+    fcm_service_account_b64: str = ""  # base64(JSON service account Firebase); пусто → FCM выключен
     model_config = {"env_prefix": "CC_"}
 
 

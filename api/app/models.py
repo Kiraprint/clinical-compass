@@ -186,3 +186,31 @@ class Notification(Base):
         CheckConstraint("kind in ('RED_ESCALATION')", name="notifications_kind"),
         Index("notifications_user_read", "user_id", "read_at"),
     )
+
+class DeviceToken(Base):
+    """FCM-токен нативного приложения (Android APK, item 4). Канал: FCM HTTP v1."""
+
+    __tablename__ = "device_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    token: Mapped[str] = mapped_column(String, unique=True)
+    platform: Mapped[str] = mapped_column(String)  # android | ios | web
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
+    __table_args__ = (
+        CheckConstraint("platform in ('android','ios','web')", name="device_tokens_platform"),
+    )
+
+class FcmState(Base):
+    """Одноразовый переход на FCM-канал нативных пушей (item 4).
+
+    Cooldown: после успешного апгрейда повторная подписка возвращает
+    429 FCM_COOLDOWN в течение окна (60 мин), чтобы клиент показал
+    «Попробуйте через час» вместо мгновенного повторного сабскрайба.
+    """
+
+    __tablename__ = "fcm_state"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    last_upgraded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -38,3 +38,37 @@ def subscribe(body: SubscribeBody, user: User = Depends(get_current_user), db: S
 def unsubscribe(body: UnsubscribeBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     push.delete_subscription(db, user.id, body.endpoint)
     return {"subscribed": False}
+
+# --- FCM (нативное приложение, item 4) ---------------------------------------
+
+class DeviceTokenBody(BaseModel):
+    token: str
+    platform: str = "android"  # android | ios | web
+
+@router.post("/push/device-token")
+def register_device_token(
+    body: DeviceTokenBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    """Регистрация FCM-токена устройства (идемпотентный апсерт по токену)."""
+    push.upsert_device_token(db, user.id, body.token, body.platform)
+    return {"registered": True}
+
+@router.delete("/push/device-token")
+def unregister_device_token(
+    body: DeviceTokenBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    push.delete_device_token(db, user.id, body.token)
+    return {"registered": False}
+
+@router.get("/push/fcm/status")
+def fcm_status(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Окно перехода на FCM: активное + сколько секунд осталось до повторной попытки."""
+    return push.fcm_status(db, user.id)
+
+@router.post("/push/fcm/upgrade")
+def fcm_upgrade(
+    body: DeviceTokenBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    """Одноразовый переход на FCM. Внутри окна (60 мин) — 429 FCM_COOLDOWN."""
+    push.upgrade_to_fcm(db, user.id, body.token, body.platform)
+    return {"upgraded": True}

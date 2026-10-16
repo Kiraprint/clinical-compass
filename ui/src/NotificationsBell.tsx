@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Capacitor } from "@capacitor/core";
 import { api, NotificationItem } from "./api";
 
 export default function NotificationsBell() {
@@ -6,6 +7,7 @@ export default function NotificationsBell() {
   const [unread, setUnread] = useState(0);
   const [open, setOpen] = useState(false);
   const [error, setError] = useState("");
+  const [fcm, setFcm] = useState<null | { window_active: boolean; remaining_seconds: number }>(null);
   const box = useRef<HTMLDivElement>(null);
 
   const load = async () => {
@@ -19,9 +21,22 @@ export default function NotificationsBell() {
     }
   };
 
+  const loadFcm = async () => {
+    if (!Capacitor.isNativePlatform()) return;
+    try {
+      setFcm(await api.fcmStatus());
+    } catch {
+      // окно недоступно — не показываем статус
+    }
+  };
+
   useEffect(() => {
     load();
-    const t = setInterval(load, 30000);
+    loadFcm();
+    const t = setInterval(() => {
+      load();
+      loadFcm();
+    }, 30000);
     return () => clearInterval(t);
   }, []);
 
@@ -81,6 +96,11 @@ export default function NotificationsBell() {
               <div className="bell-time">{new Date(n.created_at).toLocaleTimeString("ru-RU")}</div>
             </div>
           ))}
+          {fcm?.window_active && (
+            <p className="bell-fcm">
+              Push: окно активно — попробуйте через ~{Math.ceil(fcm.remaining_seconds / 60)} мин
+            </p>
+          )}
         </div>
       )}
     </div>

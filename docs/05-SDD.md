@@ -132,7 +132,8 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | FR-13 | E3 | `patient_cannot_access_clinician_routes`, `foreign_run_hidden` |
 | FR-14 | E6 | покрывается e2e-питч-сценарием (`seed` → RED-траектории), не юнит-тестом |
 | FR-15 | E5/E6 | `red_escalation_notifies_rostered_clinician`, `push_subscribe_unsubscribe` (API) + e2e «колокол уведомлений» |
+| FR-16 | E7 | `fcm_device_token_register_delete`, `fcm_upgrade_then_cooldown` (API) + CI `release-android.yml` (Capacitor-сборка APK) |
 
 ## 7. Границы инкремента
 
-- Не реализуем заранее: **мобильные клиенты**, реальные LLM/TTS-адаптеры, интеграцию МИС (см. 04 §7). Push (Web Push VAPID + уведомления в приложении) реализованы в FR-15; мобильный клиент с пушами — отдельная задача (item 4). Реальные адаптеры — за SPI, mock-и остаются по умолчанию до отдельного решения.
+- Не реализуем заранее: реальные LLM/TTS-адаптеры, интеграцию МИС (см. 04 §7). Push реализованы в FR-15/FR-16 (Web Push VAPID + уведомления в приложении + нативный FCM-канал Android APK, `mobile/`); реальные адаптеры — за SPI, mock-и остаются по умолчанию до отдельного решения.
