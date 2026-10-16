@@ -16,6 +16,7 @@
 | [06-TDD](docs/06-TDD.md) | тесты по контрактам, red-green, регрессия |
 | [07-векторная-БД](docs/07-векторная-БД.md) | ADR: выбор векторной БД (Qdrant) для ИИ-агента врача, гибридный поиск |
 | [08-база-знаний](docs/08-база-знаний.md) | дизайн базы знаний: состав корпуса, chunking, эмбеддинги bge-m3, пайплайн индексации |
+| [bench/](bench/README.md) | бенчмарк качества поиска: выбор эмбеддера для RU-EN психиатрии на реальных мета-анализах и гайдлайнах ВОЗ |
 
 ## Структура
 
@@ -108,7 +109,7 @@ export NGROK_URL=<ваш>.ngrok-free.app           # dev-домен из dashboa
 python3 -m venv .venv && .venv/bin/pip install -e "core" -e "api[dev]"
 docker compose -f infra/docker-compose.yml up -d postgres   # тестовая БД
 cd api && alembic upgrade head                                # схема из миграций (не create_all)
-.venv/bin/pytest core api                                     # 50 + 62 теста
+.venv/bin/pytest core api                                     # 50 + 70 тестов
 cd ui && npm install && npm run dev                           # UI на :5173 (proxy → :8000)
 cd e2e && npx playwright install chromium && npx playwright test
 ```

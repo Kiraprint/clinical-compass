@@ -111,3 +111,25 @@ def test_assistant_ask_is_audited(client, kb_collection):
     audit = client.get("/api/v1/admin/audit", headers=ah).json()
     items = audit["items"]
     assert any(i["action"] == "ASK_ASSISTANT" for i in items)
+
+def test_ensure_collection_guards_dense_size_mismatch(client, kb_collection, monkeypatch):
+    """Смена эмбеддера (CC_EMBEDDER hash=512 → bge-m3=1024) не должна тихо
+    записать вектора неверной длины в существующую коллекцию (docs/08 §4)."""
+    from qdrant_client import QdrantClient
+
+    from app.services import kb
+
+    c = QdrantClient(url=settings.qdrant_url)
+    probe = "kb_test_guard"
+    if c.collection_exists(probe):
+        c.delete_collection(probe)
+    from qdrant_client.http import models as qm
+
+    c.create_collection(probe, vectors_config={kb.DENSE_NAME: qm.VectorParams(size=512, distance="Cosine")})
+    monkeypatch.setattr(kb, "COLLECTION", probe)
+    try:
+        with pytest.raises(RuntimeError):
+            kb.ensure_collection(c, 1024)
+    finally:
+        monkeypatch.undo()
+        c.delete_collection(probe)

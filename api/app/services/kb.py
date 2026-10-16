@@ -28,6 +28,16 @@ def _connect(url: str) -> QdrantClient:
 
 def ensure_collection(client: QdrantClient, dense_size: int) -> None:
     if client.collection_exists(COLLECTION):
+        # Защита от несовпадения размерности при смене эмбеддера (CC_EMBEDDER):
+        # hash=512, bge-m3=1024. Иначе upsert тихо запишет вектора неверной длины.
+        info = client.get_collection(COLLECTION)
+        actual = info.config.params.vectors[DENSE_NAME].size
+        if actual != dense_size:
+            raise RuntimeError(
+                f"Коллекция '{COLLECTION}' создана с dense={actual}, а эмбеддер даёт "
+                f"{dense_size}. Пересоздайте коллекцию (kb_seed --reset) или оставьте "
+                f"прежний CC_EMBEDDER."
+            )
         return
     client.create_collection(
         collection_name=COLLECTION,

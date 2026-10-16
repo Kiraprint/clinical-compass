@@ -15,7 +15,7 @@ from qdrant_client import QdrantClient
 
 from app.config import settings
 from app.services import kb
-from app.services.embeddings import HashEmbedder
+from app.services.embeddings import build_embedder
 
 from compass.scales import ALL_SCALES
 from compass.triage import triage
@@ -120,7 +120,7 @@ def main() -> None:
         client.delete_collection(kb.COLLECTION)
 
     docs = build_corpus()
-    n = kb.upsert_documents(client, HashEmbedder(), docs)
+    n = kb.upsert_documents(client, build_embedder(), docs)
     total = kb.count_points(client)
     print(f"Индексировано {n} чанков; всего в коллекции {kb.COLLECTION}: {total}")
 

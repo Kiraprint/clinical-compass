@@ -15,6 +15,12 @@ ui/dist/
 e2e/playwright-report/
 e2e/test-results/
 
+# Bench (эмбеддеры): venv и производные данные бенчмарка в git не тащим
+bench/.venv/
+bench/data/
+bench/sources/
+bench/__pycache__/
+
 # Env / secrets
 .env
 *.env

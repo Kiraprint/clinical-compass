@@ -15,9 +15,9 @@ from langgraph.graph import END, START, StateGraph
 from compass.agent import RAGChunk, build_rag_answer, detect_redline
 
 from app.services import kb as kb_store
-from app.services.embeddings import HashEmbedder
+from app.services.embeddings import build_embedder
 
-_embedder = HashEmbedder()
+_embedder = build_embedder()  # по CC_EMBEDDER: hash (демо/тесты) | bge-m3 (прод)
 
 # GATE: лексическое покрытие (docs/07 §5 — sparse ловит точные термины, dense —
 # смысл, но для демо-эмбеддера минимальный порог на точное совпадение терминов).

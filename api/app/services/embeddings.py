@@ -70,24 +70,47 @@ class HashEmbedder:
 
 
 # Продуктивный эмбеддер — за тем же интерфейсом. Демо/тесты не требуют модели.
+# Выбирается через settings.embedder (CC_EMBEDDER) в build_embedder().
 class BgeM3Embedder:
-    """bge-m3 (dense 1024 + sparse + colbert). Требует сети и тяжёлой модели.
+    """bge-m3 (dense 1024 + sparse + colbert). MIT, 100+ языков, self-host (docs/07).
 
-    Не используется по умолчанию; включить в проде. См. docs/07 §5, docs/08 §4.
+    Требует тяжёлой модели (FlagEmbedding) — импортируется лениво, чтобы тесты и
+    демо без модели не тащили зависимость. Sparse — подлинные лексические веса
+    модели (лучше лексического хеша; docs/08 §4).
     """
 
     dense_size = 1024
 
     def __init__(self) -> None:
-        raise NotImplementedError(
-            "BgeM3Embedder требует модель onnx/torch; используйте HashEmbedder для демо."
-        )
+        from FlagEmbedding import BGEM3FlagModel  # лениво
+
+        self._m = BGEM3FlagModel("BAAI/bge-m3", use_fp16=False)
 
     def dense(self, text: str) -> list[float]:
-        raise NotImplementedError
+        out = self._m.encode([text], return_dense=True, return_sparse=True, max_length=2048)
+        return out["dense_vecs"][0].tolist()
 
     def sparse(self, text: str) -> tuple[list[int], list[float]]:
-        raise NotImplementedError
+        out = self._m.encode([text], return_sparse=True, max_length=2048)
+        w = out["lexical_weights"][0]
+        return list(w.keys()), list(w.values())
 
 
-__all__ = ["Embedder", "HashEmbedder", "BgeM3Embedder", "DENSE_SIZE", "SPARSE_BUCKETS"]
+def build_embedder() -> Embedder:
+    """Фабрика по CC_EMBEDDER: hash | bge-m3. По умолчанию hash (демо/тесты)."""
+    from app.config import settings
+
+    kind = getattr(settings, "embedder", "hash")
+    if kind == "bge-m3":
+        return BgeM3Embedder()
+    return HashEmbedder()
+
+
+__all__ = [
+    "Embedder",
+    "HashEmbedder",
+    "BgeM3Embedder",
+    "build_embedder",
+    "DENSE_SIZE",
+    "SPARSE_BUCKETS",
+]
