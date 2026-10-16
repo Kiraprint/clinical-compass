@@ -9,6 +9,7 @@ import os
 
 os.environ.setdefault("CC_FAST_ARGON2", "1")
 os.environ.setdefault("CC_PUSH_ENABLED", "0")  # тесты без сетевого Web Push (уведомления в БД остаются)
+os.environ.setdefault("CC_QDRANT_COLLECTION", "kb_test")  # не затираем демо-коллекцию kb
 
 import pyotp
 import pytest

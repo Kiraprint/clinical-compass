@@ -68,3 +68,18 @@ small { color: #8a94a8; }
 .bell-title .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #d64545; margin-left: 6px; }
 .bell-body { font-size: 13px; color: #3a4356; margin-top: 2px; }
 .bell-time { font-size: 11px; color: #8a94a8; margin-top: 2px; }
+/* ИИ-агент врача: ответ и источники (item 5) */
+.assistant-answer {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  background: #f7f9fc;
+  border: 1px solid #e3e8f0;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 0;
+}
+.assistant-sources { margin-top: 10px; font-size: 13px; color: #3a4356; }
+.assistant-sources ul { margin: 6px 0 0; padding-left: 18px; }

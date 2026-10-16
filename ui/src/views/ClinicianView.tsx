@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { api, PatientCard, Report } from "../api";
 import TrendChart from "../TrendChart";
+import AssistantTab from "./AssistantTab";
 
 const TRIAGE_FILTERS = ["", "GREEN", "YELLOW", "RED"] as const;
 
 export default function ClinicianView() {
+  const [section, setSection] = useState<"patients" | "assistant">("patients");
   const [filter, setFilter] = useState<(typeof TRIAGE_FILTERS)[number]>("");
   const [cards, setCards] = useState<PatientCard[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -20,6 +22,20 @@ export default function ClinicianView() {
     load(filter);
   }, [filter]);
 
+  if (section === "assistant") {
+    return (
+      <>
+        <div className="tabs">
+          <button onClick={() => setSection("patients")}>Пациенты</button>
+          <button className="active" onClick={() => setSection("assistant")}>
+            Ассистент
+          </button>
+        </div>
+        <AssistantTab />
+      </>
+    );
+  }
+
   const open = async (patientId: string) => {
     setSelected(patientId);
     setReportError("");
@@ -33,6 +49,12 @@ export default function ClinicianView() {
 
   return (
     <>
+      <div className="tabs">
+        <button className="active" onClick={() => setSection("patients")}>
+          Пациенты
+        </button>
+        <button onClick={() => setSection("assistant")}>Ассистент</button>
+      </div>
       <div className="tabs">
         {TRIAGE_FILTERS.map((f) => (
           <button key={f} className={filter === f ? "active" : ""} onClick={() => setFilter(f)}>

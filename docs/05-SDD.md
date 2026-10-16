@@ -103,6 +103,7 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | E4 | API: screenings, checkins, escalation | FR-3, FR-4, FR-5, FR-6 | тест EscalationWithin1s (транзакция finish) |
 | E5 | API: diary, chat (mock gateways), clinician panel, report | FR-8, FR-9, FR-10 | интеграционные тесты roster-доступа и report |
 | E6 | UI: patient app, clinician dashboard, admin; simulator seed | FR-14 + всё | e2e-сценарий питча (04 §6) проходит на docker compose |
+| E7 | ИИ-агент: KB (Qdrant) + гибридный поиск + LangGraph + UI-вкладка | FR-17 | тесты агента (red line, цитаты, offtopic) + e2e вкладки «Ассистент» |
 
 ## 5. DoD (Definition of Done) эпика
 

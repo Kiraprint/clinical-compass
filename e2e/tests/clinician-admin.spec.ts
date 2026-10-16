@@ -24,8 +24,12 @@ test.describe("Врач и администратор", () => {
     const cards = page.locator("tbody tr");
     await expect(cards.first()).toBeVisible();
 
-    // Игорь К. (p2) — RED с открытыми эскалациями и записями дневника.
-    await cards.first().getByRole("button", { name: "Открыть" }).click();
+    // Игорь К. (p2) — сеяный RED с открытыми эскалациями и записями дневника.
+    // Берём конкретную строку, а не first(): параллельные тесты добавляют новых
+    // RED-пациентов, и порядок не детерминирован.
+    const row = page.locator("tbody tr", { hasText: "Игорь" }).first();
+    await expect(row).toBeVisible();
+    await row.getByRole("button", { name: "Открыть" }).click();
     await expect(page.getByText("Открытые эскалации:")).toBeVisible();
     await expect(page.getByRole("heading", { name: "История скринингов" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Дневник пациента" })).toBeVisible();

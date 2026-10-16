@@ -13,11 +13,15 @@ TEST_DB="${CC_TEST_DATABASE_URL:-postgresql+psycopg://compass:compass@127.0.0.1:
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
 # --- Postgres для тестов -----------------------------------------------------
-log "Запуск Postgres (compose service 'postgres')…"
-$COMPOSE up -d postgres
+log "Запуск Postgres + Qdrant (compose services)…"
+$COMPOSE up -d postgres qdrant
 # ожидаем готовности
 for _ in $(seq 1 30); do
   if $COMPOSE exec -T postgres pg_isready -U compass -d compass >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+for _ in $(seq 1 30); do
+  if $COMPOSE exec -T qdrant bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 && printf "GET /healthz HTTP/1.0\r\n\r\n" >&3 && grep -q 200 <&3' >/dev/null 2>&1; then break; fi
   sleep 1
 done
 

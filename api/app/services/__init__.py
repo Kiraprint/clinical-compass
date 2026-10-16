@@ -1,1 +1,1 @@
-from . import audit, chat, clinician, diary, screening  # noqa: F401 — пакет экспонирует сервисы
+from . import agent, audit, chat, clinician, diary, kb, screening  # noqa: F401 — пакет экспонирует сервисы

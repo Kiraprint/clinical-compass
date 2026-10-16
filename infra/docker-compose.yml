@@ -15,6 +15,19 @@ services:
       timeout: 3s
       retries: 10
 
+  qdrant:
+    image: qdrant/qdrant:v1.19.2
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 && printf \"GET /healthz HTTP/1.0\\r\\n\\r\\n\" >&3 && grep -q 200 <&3'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   api:
     build:
       context: ..
@@ -22,9 +35,12 @@ services:
     environment:
       CC_DATABASE_URL: postgresql+psycopg://compass:compass@postgres:5432/compass
       CC_JWT_SECRET: demo-jwt-secret-0123456789abcdefghij
-      CC_VAPID_PRIVATE_KEY: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JR0hBZ0VBTUJNR0J5cUdTTTQ5QWdFR0NDcUdTTTQ5QXdFSEJHMHdhd0lCQVFRZ3dVN2MwMkZiYXBVVndxVmUKWkJFcUMrRTJGZ2NScm9SeDNiZkFmSlVEOHN5aFJBTkNBQVJUaTg4TlpBK3hxaUxVM1c4RGxwNUxrL25WejBSNwptZDZEZkl6aUc2YWZ2a3ZsankwQVlSWFRzVmp3Y2l4SzdSQTAzWlBNbjA5UEg1Smkrbi9SeStkLwotLS0tLUVORCBQUklWQVRFIEtFWS0tLS0tCg==
+      CC_VAPID_PRIVATE_KEY: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JR0hBZ0VBTUJNR0J5cUdTTTQ5QWdFR0NDcUdTTTQ5QXdFSEJHMHdhd0lCQVFRZ3dVN2MwMkZiYXBVVndxVmUKWkJFcUMrRTJGZ2NScm9SeDNiZkFmSlVEOHN5aFJBTkNBQVJUaTg4TlpBK3hxaUxVM1c4RGxwNUxrL25WejBSNwptZDZEZnp6aUc2YWZ2a3ZsankwQVlSWFRzVmp3Y2l4SzdSQTAzWlBNbjA5UEg1Smkrbi9SeStkLwotLS0tLUVORCBQUklWQVRFIEtFWS0tLS0tCg==
+      CC_QDRANT_URL: http://qdrant:6333
     depends_on:
       postgres:
+        condition: service_healthy
+      qdrant:
         condition: service_healthy
     ports:
       - "8000:8000"
@@ -34,6 +50,18 @@ services:
       timeout: 3s
       retries: 12
 
+  kb-seed:
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+    command: ["python", "-m", "app.kb_seed", "--reset"]
+    environment:
+      CC_QDRANT_URL: http://qdrant:6333
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    restart: "no"
+
   ui:
     build:
       context: ..
@@ -42,6 +70,8 @@ services:
       api:
         condition: service_healthy
       seed:
+        condition: service_completed_successfully
+      kb-seed:
         condition: service_completed_successfully
     ports:
       - "8090:80"
@@ -61,3 +91,4 @@ services:
 
 volumes:
   pgdata:
+  qdrant-data:

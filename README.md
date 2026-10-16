@@ -15,16 +15,19 @@
 | [05-SDD](docs/05-SDD.md) | контракты ядра → эпики → реализация, трейсабельность |
 | [06-TDD](docs/06-TDD.md) | тесты по контрактам, red-green, регрессия |
 | [07-векторная-БД](docs/07-векторная-БД.md) | ADR: выбор векторной БД (Qdrant) для ИИ-агента врача, гибридный поиск |
+| [08-база-знаний](docs/08-база-знаний.md) | дизайн базы знаний: состав корпуса, chunking, эмбеддинги bge-m3, пайплайн индексации |
 
 ## Структура
 
 ```
 core/   — клинический движок (SDK): шкалы, скоринг, триаж, риск-флаги, чек-ины, тренды (чистый Python)
 api/    — FastAPI: auth/2FA, RBAC, consent (152-ФЗ), аудит (append-only), скрининг, эскалации,
-          дневник, чат, панель врача, ростер, симулятор демо-данных
-ui/     — React + Vite: пациент (скрининг/чек-ин/дневник/чат/тренд), панель врача, админ-аудит
-infra/  — docker compose (postgres + api + ui + seed)
-e2e/    — Playwright: питч-сценарий (docs/04 §6)
+          дневник, чат, панель врача, ростер, ИИ-агент (гибридный поиск по базе знаний),
+          симулятор демо-данных
+ui/     — React + Vite: пациент (скрининг/чек-ин/дневник/чат/тренд), панель врача
+          (включая вкладку «Ассистент»), админ-аудит
+infra/  — docker compose (postgres + qdrant + api + kb-seed + ui + seed)
+e2e/    — Playwright: питч-сценарий (docs/04 §6), потоки пациента + врача
 docs/   — ТЗ (ГОСТ 19.201-78) + 01–06 (разработочная документация), карта соответствия ГОСТ 19
 ```
 
@@ -105,7 +108,7 @@ export NGROK_URL=<ваш>.ngrok-free.app           # dev-домен из dashboa
 python3 -m venv .venv && .venv/bin/pip install -e "core" -e "api[dev]"
 docker compose -f infra/docker-compose.yml up -d postgres   # тестовая БД
 cd api && alembic upgrade head                                # схема из миграций (не create_all)
-.venv/bin/pytest core api                                     # 41 + 54 теста
+.venv/bin/pytest core api                                     # 50 + 62 теста
 cd ui && npm install && npm run dev                           # UI на :5173 (proxy → :8000)
 cd e2e && npx playwright install chromium && npx playwright test
 ```

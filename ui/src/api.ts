@@ -136,6 +136,12 @@ export const api = {
     req<{ items: PatientCard[] }>(`/api/v1/clinician/patients${triage ? `?triage=${triage}` : ""}`),
   clinicianReport: (patientId: string) =>
     req<Report>(`/api/v1/clinician/patients/${patientId}/report`),
+  assistantAsk: (query: string, topic?: string, limit = 5) =>
+    req<AssistantAnswer>("/api/v1/assistant/ask", {
+      method: "POST",
+      body: JSON.stringify({ query, topic: topic || undefined, limit }),
+    }),
+  assistantStatus: () => req<{ collection: string; points: number }>("/api/v1/assistant/status"),
   adminAudit: () => req<{ items: AuditEvent[] }>("/api/v1/admin/audit"),
   prescribedScale: () => req<{ questionnaire_code: string }>("/api/v1/me/prescribed-scale"),
   setPrescribedScale: (patientId: string, scale: string) =>
@@ -273,4 +279,18 @@ export interface NotificationItem {
   escalation_id: string | null;
   read: boolean;
   created_at: string;
+}
+
+export interface AssistantCitation {
+  source_title: string;
+  guideline_id: string;
+  topic: string;
+  score: number;
+}
+export interface AssistantAnswer {
+  answer: string;
+  grounded: boolean;
+  refused: boolean;
+  refusal_code: string | null;
+  citations: AssistantCitation[];
 }
