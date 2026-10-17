@@ -249,17 +249,19 @@ class BM25Index:
         return out
 
 # ---------- основной прогон ----------
-def run_model(name: str, embedder, corpus, queries, variant: str = "hybrid") -> dict:
+def _embed(embedder, corpus, queries):
     t0 = time.time()
     corpus_texts = [d["text"] for d in corpus]
     doc_emb = embedder.embed(corpus_texts)
     doc_sparse = embedder.sparse(corpus_texts)
     t_embed = time.time() - t0
-
     q_emb = embedder.embed_queries([q["q"] for q in queries])
     q_sparse = embedder.sparse([q["q"] for q in queries])
-    bm25 = BM25Index(corpus_texts) if variant == "bm25" else None
+    return corpus_texts, doc_emb, doc_sparse, q_emb, q_sparse, t_embed
 
+
+def _evaluate(corpus_texts, doc_emb, doc_sparse, q_emb, q_sparse, queries, variant):
+    bm25 = BM25Index(corpus_texts) if variant == "bm25" else None
     agg = {"recall@1": [], "recall@5": [], "recall@10": [], "ndcg@10": [], "mrr@10": []}
     per_query = []
     for qi_idx, q in enumerate(queries):
@@ -283,11 +285,28 @@ def run_model(name: str, embedder, corpus, queries, variant: str = "hybrid") -> 
                       ("ndcg@10", lambda r: ndcg_at(r, qrels, 10)),
                       ("mrr@10", lambda r: mrr_at(r, qrels, 10))):
             agg[m].append(fn(ranked))
-
     avg = {m: sum(v) / len(v) for m, v in agg.items()}
+    return avg, per_query
+
+
+def run_model(name: str, embedder, corpus, queries, variant: str = "hybrid") -> dict:
+    corpus_texts, doc_emb, doc_sparse, q_emb, q_sparse, t_embed = _embed(embedder, corpus, queries)
+    avg, per_query = _evaluate(corpus_texts, doc_emb, doc_sparse, q_emb, q_sparse, queries, variant)
     avg["embed_s"] = round(t_embed, 1)
     avg["model"] = name
     return avg, per_query
+
+
+def run_all_variants(name: str, embedder, corpus, queries):
+    """Одна загрузка/эмбеддинг модели → dense, hybrid, bm25."""
+    corpus_texts, doc_emb, doc_sparse, q_emb, q_sparse, t_embed = _embed(embedder, corpus, queries)
+    out = {}
+    for v in ("dense", "hybrid", "bm25"):
+        avg, _ = _evaluate(corpus_texts, doc_emb, doc_sparse, q_emb, q_sparse, queries, v)
+        avg["embed_s"] = round(t_embed, 1)
+        avg["model"] = name
+        out[v] = avg
+    return out
 
 
 MODELS = {
@@ -327,6 +346,20 @@ def main() -> None:
     for m, variant in selected:
         if m not in MODELS:
             print(f"{m}: неизвестная модель; доступны {list(MODELS)}")
+            continue
+        if variant == "all":
+            try:
+                emb = MODELS[m]()
+                allv = run_all_variants(m, emb, corpus, queries)
+                for v, avg in allv.items():
+                    key = m if v == "hybrid" else f"{m}:{v}"
+                    results[key] = avg
+                    print(f"{key:22s} R@1={avg['recall@1']:.3f} R@5={avg['recall@5']:.3f} "
+                          f"R@10={avg['recall@10']:.3f} nDCG@10={avg['ndcg@10']:.3f} "
+                          f"MRR={avg['mrr@10']:.3f} embed={avg['embed_s']}s")
+            except Exception as e:
+                print(f"{m}:all{' '*12} FAILED: {e}")
+                results[f"{m}:all"] = {"error": str(e)}
             continue
         key = m if variant == "hybrid" else f"{m}:{variant}"
         try:
