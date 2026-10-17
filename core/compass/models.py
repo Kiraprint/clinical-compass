@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Sequence
 
 
 class Severity:
@@ -89,7 +88,6 @@ class Trend:
     slope: float | None
 
 
-# Контрактные сигнатуры для читателей SDK: Mapping/Sequence — только typing.
 __all__ = [
     "Severity",
     "Triage",
@@ -100,6 +98,4 @@ __all__ = [
     "FlagKind",
     "Checkin",
     "Trend",
-    "Mapping",
-    "Sequence",
 ]

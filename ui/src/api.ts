@@ -166,11 +166,6 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ token, platform }),
     }),
-  unregisterDeviceToken: (token: string) =>
-    req<{ registered: boolean }>("/api/v1/push/device-token", {
-      method: "DELETE",
-      body: JSON.stringify({ token }),
-    }),
   fcmStatus: () =>
     req<{ window_active: boolean; remaining_seconds: number }>("/api/v1/push/fcm/status"),
   fcmUpgrade: (token: string, platform: string = "android") =>

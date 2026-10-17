@@ -11,8 +11,8 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from typing import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Sequence
 
 # Красные линии: агент только извлекает справочную информацию из корпуса,
 # но не формирует самостоятельный клинический вывод (диагноз/терапия — врач).

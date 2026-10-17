@@ -31,11 +31,9 @@ export default function App() {
     localStorage.removeItem("cc_email");
     setSession(null);
   };
-  const clearSession = logout;
-
   // При неудачном refresh (истёкший refresh-токен) — принудительный логаут.
   useEffect(() => {
-    setOnAuthFail(clearSession);
+    setOnAuthFail(logout);
     return () => setOnAuthFail(null);
   }, []);
 

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import statistics
 from typing import Sequence
 
 from compass.models import ScaleResult, Trend
@@ -13,14 +14,9 @@ _WINDOW = 7
 
 
 def _slope(values: list[int]) -> float | None:
-    n = len(values)
-    if n < 2:
+    if len(values) < 2:
         return None
-    xs = list(range(n))
-    mx, my = sum(xs) / n, sum(values) / n
-    num = sum((x - mx) * (y - my) for x, y in zip(xs, values))
-    den = sum((x - mx) ** 2 for x in xs)
-    return num / den if den else None
+    return statistics.linear_regression(range(len(values)), values).slope
 
 
 def trends(runs: Sequence[ScaleResult]) -> Trend:

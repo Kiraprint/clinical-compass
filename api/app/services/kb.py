@@ -22,10 +22,6 @@ DENSE_NAME = "dense"
 SPARSE_NAME = "sparse"
 
 
-def _connect(url: str) -> QdrantClient:
-    return QdrantClient(url=url)
-
-
 def ensure_collection(client: QdrantClient, dense_size: int) -> None:
     if client.collection_exists(COLLECTION):
         # Защита от несовпадения размерности при смене эмбеддера (CC_EMBEDDER):

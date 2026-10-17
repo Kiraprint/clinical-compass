@@ -3,7 +3,7 @@
 - Уведомления: строки Notification (внутри транзакции финиша скрининга).
 - Web Push: VAPID-подписи; доставка best-effort (сбой push-сервиса не роняет API).
 
-Ключи VAPID задаются env CC_VAPID_PRIVATE_KEY / CC_VAPID_PUBLIC_KEY.
+Ключи VAPID задаются env CC_VAPID_PRIVATE_KEY (публичный выводится из приватного).
 Демо-ключи генерируются один раз на старте и держатся в памяти —
 при перезапуске контейнера подписки браузера могут стать недействительными
 (для демо приемлемо; в проде — статичные ключи в секретах инсталляции).
@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -41,7 +42,7 @@ _vapid_cache: dict[str, str] | None = None
 
 
 def _load_vapid() -> dict[str, str]:
-    """Возвращает {private_pem, public_pem, public_b64} (env или сгенерированные)."""
+    """Возвращает {private_pem, public_b64} (env или сгенерированные)."""
     global _vapid_cache
     if _vapid_cache is not None:
         return _vapid_cache
@@ -64,13 +65,9 @@ def _load_vapid() -> dict[str, str]:
     private_pem = sk.private_bytes(
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
     ).decode()
-    public_pem = sk.public_key().public_bytes(
-        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
-    ).decode()
     raw = sk.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
     _vapid_cache = {
         "private_pem": private_pem,
-        "public_pem": public_pem,
         "public_b64": base64.urlsafe_b64encode(raw).rstrip(b"=").decode(),
     }
     if not settings.vapid_private_key:
@@ -343,7 +340,7 @@ def push_to_clinicians(
         subs = db.scalars(
             select(PushSubscription).where(PushSubscription.user_id.in_(clinician_ids))
         ).all()
-        payload = '{"title": %r, "body": %r}' % (title, body)
+        payload = json.dumps({"title": title, "body": body})
         from pywebpush import WebPushException, webpush
 
         for s in subs:
