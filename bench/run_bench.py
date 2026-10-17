@@ -183,8 +183,8 @@ def rrf_score(ranked_lists: list[list[str]], k: int = 60) -> list[tuple[str, flo
     return sorted(scores.items(), key=lambda kv: -kv[1])
 
 
-def retrieve(doc_emb, query_emb, doc_sparse, query_sparse, topk=30):
-    """dense-ранжирование + sparse-ранжирование → RRF."""
+def retrieve(doc_emb, query_emb, doc_sparse, query_sparse, topk=30, variant="hybrid"):
+    """dense / dense+sparse-RRF (hybrid) / dense+BM25-RRF (bm25)."""
     # dense
     dense_scores = []
     for i, de in enumerate(doc_emb):
@@ -192,6 +192,8 @@ def retrieve(doc_emb, query_emb, doc_sparse, query_sparse, topk=30):
         dense_scores.append((i, s))
     dense_scores.sort(key=lambda kv: -kv[1])
     dense_ranked = [DOC_IDS[i] for i, _ in dense_scores[:topk]]
+    if variant == "dense":
+        return dense_ranked
 
     # sparse: векторное произведение разреженных весов
     qi, qv = query_sparse
@@ -201,14 +203,53 @@ def retrieve(doc_emb, query_emb, doc_sparse, query_sparse, topk=30):
         s = 0.0
         for idx, w in zip(di, dv):
             s += w * qmap.get(idx, 0.0)
-        sparse_scores.append((i, s))
+        if s > 0:
+            sparse_scores.append((i, s))
+    # только реальные совпадения (s>0): нулевые спарс-доки = тии, они шумят RRF
     sparse_scores.sort(key=lambda kv: -kv[1])
     sparse_ranked = [DOC_IDS[i] for i, _ in sparse_scores[:topk]]
-    return rrf_score([dense_ranked, sparse_ranked], topk)
+    if not sparse_ranked:
+        return dense_ranked
+    return [d for d, _ in rrf_score([dense_ranked, sparse_ranked], topk)]
 
+
+# ---------- BM25: честный лексический sparse для всех моделей ----------
+class BM25Index:
+    """Okapi BM25 без внешних зависимостей (RU/EN, токенизация из _tokens)."""
+
+    def __init__(self, corpus_texts: list[str]):
+        self._toks = [_tokens(t) for t in corpus_texts]
+        self._df: dict[str, int] = {}
+        for toks in self._toks:
+            for tok in set(toks):
+                self._df[tok] = self._df.get(tok, 0) + 1
+        self._n = len(corpus_texts)
+        self._avgdl = sum(len(t) for t in self._toks) / max(1, self._n)
+        self._k1, self._b = 1.5, 0.75
+
+    def scores(self, query: str) -> list[float]:
+        qf: dict[str, int] = {}
+        for tok in _tokens(query):
+            qf[tok] = qf.get(tok, 0) + 1
+        out = [0.0] * self._n
+        for i, dt in enumerate(self._toks):
+            df: dict[str, int] = {}
+            for tok in dt:
+                df[tok] = df.get(tok, 0) + 1
+            dl = len(dt) or 1
+            s = 0.0
+            for tok, cnt in qf.items():
+                f = df.get(tok, 0)
+                if not f:
+                    continue
+                n = self._df.get(tok, 0)
+                idf = math.log(1 + (self._n - n + 0.5) / (n + 0.5))
+                s += idf * cnt * (self._k1 + 1) * f / (f + self._k1 * (1 - self._b + self._b * dl / self._avgdl))
+            out[i] = s
+        return out
 
 # ---------- основной прогон ----------
-def run_model(name: str, embedder, corpus, queries) -> dict:
+def run_model(name: str, embedder, corpus, queries, variant: str = "hybrid") -> dict:
     t0 = time.time()
     corpus_texts = [d["text"] for d in corpus]
     doc_emb = embedder.embed(corpus_texts)
@@ -217,13 +258,24 @@ def run_model(name: str, embedder, corpus, queries) -> dict:
 
     q_emb = embedder.embed_queries([q["q"] for q in queries])
     q_sparse = embedder.sparse([q["q"] for q in queries])
+    bm25 = BM25Index(corpus_texts) if variant == "bm25" else None
 
     agg = {"recall@1": [], "recall@5": [], "recall@10": [], "ndcg@10": [], "mrr@10": []}
     per_query = []
     for qi_idx, q in enumerate(queries):
         qrels = q["qrels"]
-        ranked = [doc for doc, _ in retrieve(doc_emb, q_emb[qi_idx], doc_sparse,
-                                             q_sparse[qi_idx])]
+        if bm25 is not None:
+            # dense + BM25 → RRF (все модели на одной лексической плоскости)
+            sc = bm25.scores(q["q"])
+            order = sorted(range(len(sc)), key=lambda i: -sc[i])
+            bm25_ranked = [DOC_IDS[i] for i in order]
+            dense_scores = [(i, cosine(q_emb[qi_idx], de)) for i, de in enumerate(doc_emb)]
+            dense_scores.sort(key=lambda kv: -kv[1])
+            dense_ranked = [DOC_IDS[i] for i, _ in dense_scores[:30]]
+            ranked = [d for d, _ in rrf_score([dense_ranked, bm25_ranked], 30)]
+        else:
+            ranked = retrieve(doc_emb, q_emb[qi_idx], doc_sparse, q_sparse[qi_idx],
+                              variant=variant)
         per_query.append({"id": q["id"], "ranked": ranked[:10], "qrels": qrels})
         for m, fn in (("recall@1", lambda r: recall_at(r, qrels, 1)),
                       ("recall@5", lambda r: recall_at(r, qrels, 5)),
@@ -252,7 +304,9 @@ MODELS = {
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", choices=list(MODELS) + ["all"])
+    ap.add_argument("--model", help="имя модели или all; формат name[:dense|hybrid|bm25]")
+    ap.add_argument("--variant", default="hybrid", choices=["dense", "hybrid", "bm25"],
+                    help="плоскость sparse-канала (dense = без sparse)")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--topk", type=int, default=10)
     args = ap.parse_args()
@@ -262,19 +316,29 @@ def main() -> None:
     global DOC_IDS
     DOC_IDS = [d["id"] for d in corpus]
 
-    selected = list(MODELS) if args.model in (None, "all") else [args.model]
+    if args.model in (None, "all"):
+        selected = [(m, args.variant) for m in MODELS]
+    elif ":" in args.model:
+        nm, vv = args.model.split(":", 1)
+        selected = [(nm, vv)]
+    else:
+        selected = [(args.model, args.variant)]
     results = {}
-    for m in selected:
+    for m, variant in selected:
+        if m not in MODELS:
+            print(f"{m}: неизвестная модель; доступны {list(MODELS)}")
+            continue
+        key = m if variant == "hybrid" else f"{m}:{variant}"
         try:
             emb = MODELS[m]()
-            avg, perq = run_model(m, emb, corpus, queries)
-            results[m] = avg
-            print(f"{m:16s} R@1={avg['recall@1']:.3f} R@5={avg['recall@5']:.3f} "
+            avg, perq = run_model(m, emb, corpus, queries, variant=variant)
+            results[key] = avg
+            print(f"{key:22s} R@1={avg['recall@1']:.3f} R@5={avg['recall@5']:.3f} "
                   f"R@10={avg['recall@10']:.3f} nDCG@10={avg['ndcg@10']:.3f} "
                   f"MRR={avg['mrr@10']:.3f} embed={avg['embed_s']}s")
         except Exception as e:
-            print(f"{m:16s} FAILED: {e}")
-            results[m] = {"error": str(e)}
+            print(f"{key:22s} FAILED: {e}")
+            results[key] = {"error": str(e)}
 
     if args.json:
         print(json.dumps(results, ensure_ascii=False, indent=2))
