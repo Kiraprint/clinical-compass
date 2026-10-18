@@ -25,6 +25,18 @@ def test_clinician_cannot_see_unrostered(client):
     assert resp.json()["code"] == "NO_ROSTER"
 
 
+def test_report_routing_required_for_suicidal(client):
+    # PHQ-9 q9>=1 → SUICIDAL_IDEATION → RED → маршрутизация ОБЯЗАТЕЛЬНО.
+    suicidal = {**PHQ_ALL, "q9": 2}
+    _, pid = _with_patient(client, "psuic@test.ru", suicidal)
+    c, cid = clinician_ctx(client, "crs@test.ru")
+    a, _ = admin_ctx(client, "ars@test.ru")
+    _grant(client, a, pid, cid)
+    body = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=c).json()
+    assert body["last_assessment"]["triage"] == "RED"
+    assert body["routing"]["category"] == "REQUIRED"
+    assert body["routing"]["label"] == "Обязательно"
+
 def test_report_after_roster_and_audit(client):
     _, pid = _with_patient(client, "pr@test.ru")
     c, cid = clinician_ctx(client, "cr@test.ru")
@@ -36,6 +48,9 @@ def test_report_after_roster_and_audit(client):
     body = resp.json()
     assert body["last_assessment"]["total_score"] == 0
     assert body["last_assessment"]["triage"] == "GREEN"
+    # Маршрутизация (задача кейса 8): GREEN/NONE без флагов → не требуется.
+    assert body["routing"]["category"] == "NONE"
+    assert body["routing"]["target"] == "психиатр"
 
     # Аудит чтения отчёта
     audit = client.get("/api/v1/admin/audit", headers=a).json()["items"]
@@ -117,3 +132,38 @@ def test_prescribe_scale_applies_to_patient(client):
     # Отчёт врача отражает назначение
     report = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=c)
     assert report.json()["prescribed_scales"] == ["GAD-7"]
+
+
+def test_adverse_event_create_list_and_audit(client):
+    """задача кейса 3: регистрация НЯ, roster-гейт, аудит ADVERSE_EVENT."""
+    _, pid = _with_patient(client, "ae@test.ru")
+    c, cid = clinician_ctx(client, "aec@test.ru")
+    a, _ = admin_ctx(client, "aea@test.ru")
+    _grant(client, a, pid, cid)
+
+    body = {
+        "event_text": "Головная боль после начала терапии",
+        "severity": "mild",
+        "onset_date": "2026-10-18",
+        "suspected_drug": "Авиандр",
+        "action_taken": "monitoring",
+    }
+    resp = client.post(f"/api/v1/clinician/patients/{pid}/adverse-events", json=body, headers=c)
+    assert resp.status_code == 201, resp.text
+    ev = resp.json()
+    assert ev["severity"] == "mild" and ev["suspected_drug"] == "Авиандр"
+
+    items = client.get(f"/api/v1/clinician/patients/{pid}/adverse-events", headers=c).json()["items"]
+    assert len(items) == 1 and items[0]["id"] == ev["id"]
+
+    audit = client.get("/api/v1/admin/audit", headers=a).json()["items"]
+    assert any(e["action"] == "ADVERSE_EVENT" and e["object_id"] == str(pid) for e in audit)
+
+
+def test_adverse_event_roster_gated(client):
+    _, pid = _with_patient(client, "ae2@test.ru")
+    c, _ = clinician_ctx(client, "aec2@test.ru")
+    body = {"event_text": "x", "severity": "mild", "onset_date": "2026-10-18"}
+    resp = client.post(f"/api/v1/clinician/patients/{pid}/adverse-events", json=body, headers=c)
+    assert resp.status_code == 403
+    assert resp.json()["code"] == "NO_ROSTER"

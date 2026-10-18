@@ -147,8 +147,16 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
   const [picked, setPicked] = useState<string[]>([]);
   const [scaleSaved, setScaleSaved] = useState<number | null>(null);
   const [scaleError, setScaleError] = useState("");
+  const [aeText, setAeText] = useState("");
+  const [aeSeverity, setAeSeverity] = useState("mild");
+  const [aeDate, setAeDate] = useState(new Date().toISOString().slice(0, 10));
+  const [aeDrug, setAeDrug] = useState("");
+  const [aeAction, setAeAction] = useState("monitoring");
+  const [aeSaved, setAeSaved] = useState<number | null>(null);
+  const [aeError, setAeError] = useState("");
+  const [aeList, setAeList] = useState<Report["adverse_events"]>([]);
   useEffect(() => {
-    if (report) setPicked(report.prescribed_scales ?? []);
+    if (report) { setPicked(report.prescribed_scales ?? []); setAeList(report.adverse_events ?? []); }
   }, [report]);
 
   const saveScale = async () => {
@@ -160,6 +168,21 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
       setPicked(res.scales);
     } catch (e: unknown) {
       setScaleError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const addAdverseEvent = async () => {
+    if (!report || !aeText.trim()) return;
+    setAeError("");
+    try {
+      const ev = await api.createAdverseEvent(report.patient_id, {
+        event_text: aeText.trim(), severity: aeSeverity, onset_date: aeDate,
+        suspected_drug: aeDrug.trim() || undefined, action_taken: aeAction,
+      });
+      setAeList([ev, ...aeList]);
+      setAeText(""); setAeDrug(""); setAeSaved(Date.now());
+    } catch (e: unknown) {
+      setAeError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -226,6 +249,18 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
         </div>
       )}
 
+      {report.routing && report.routing.category !== "NONE" && (
+        <div className={report.routing.category === "REQUIRED" ? "alert-danger" : "alert-warn"}>
+          <b>Маршрутизация: {report.routing.label} — направление к {report.routing.target}</b>
+          <div style={{ fontSize: 13, marginTop: 4 }}>{report.routing.reason}</div>
+        </div>
+      )}
+      {report.routing && report.routing.category === "NONE" && (
+        <div className="row" style={{ color: "#5a6478", fontSize: 13 }}>
+          Маршрутизация: не требуется — динамическое наблюдение
+        </div>
+      )}
+
       {last && (
         <div className="row">
           <span className={`badge ${last.triage}`}>{last.triage}</span>
@@ -234,6 +269,50 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
           </span>
         </div>
       )}
+
+      <h3>Нежелательные явления (задача кейса 3)</h3>
+      {aeList.length > 0 ? (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Дата</th><th>Событие</th><th>Тяжесть</th><th>Препарат</th><th>Действие</th></tr>
+            </thead>
+            <tbody>
+              {aeList.map((e) => (
+                <tr key={e.id}>
+                  <td>{e.onset_date}</td>
+                  <td>{e.event_text}</td>
+                  <td><span className={`badge ${e.severity === "severe" ? "RED" : e.severity === "moderate" ? "YELLOW" : "GREEN"}`}>{e.severity}</span></td>
+                  <td>{e.suspected_drug ?? "—"}</td>
+                  <td>{e.action_taken ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p style={{ color: "#5a6478", fontSize: 13 }}>Нежелательные явления не зарегистрированы.</p>
+      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, maxWidth: 560, marginTop: 8 }}>
+        <input placeholder="Описание нежелательного явления" value={aeText} onChange={(e) => setAeText(e.target.value)} />
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <select value={aeSeverity} onChange={(e) => setAeSeverity(e.target.value)}>
+            <option value="mild">лёгкое</option><option value="moderate">умеренное</option><option value="severe">тяжёлое</option>
+          </select>
+          <input type="date" value={aeDate} onChange={(e) => setAeDate(e.target.value)} style={{ width: "auto" }} />
+          <input placeholder="Препарат (напр. Авиандр)" value={aeDrug} onChange={(e) => setAeDrug(e.target.value)} />
+          <select value={aeAction} onChange={(e) => setAeAction(e.target.value)}>
+            <option value="none">нет действия</option><option value="monitoring">наблюдение</option>
+            <option value="dose_reduced">снижение дозы</option><option value="stopped">отмена</option>
+            <option value="referred">направление</option>
+          </select>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button onClick={addAdverseEvent} disabled={!aeText.trim()}>Зарегистрировать НЯ</button>
+          {aeSaved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
+        </div>
+      </div>
+      {aeError && <p className="error">{aeError}</p>}
 
       <h3>Динамика (90 дней)</h3>
       <TrendChart timeline={{ runs: report.history, trend: report.trend }} />

@@ -9,7 +9,9 @@ CLI: python -m app.kb_seed [--url CC_QDRANT_URL] [--reset]
 from __future__ import annotations
 
 import argparse
+import json
 import time
+from pathlib import Path
 
 from qdrant_client import QdrantClient
 
@@ -85,16 +87,63 @@ def _redlines_docs() -> list[dict]:
             "source_title": "Красная линия: терапия",
             "topic": "РЕКОМЕНДАЦИИ",
             "text": (
-                "Назначение и коррекция терапии — только врачом после очного приёма "
-                "(242-ФЗ). Инструмент — вспомогательный: справочная информация, "
-                "мониторинг динамики, эскалация при ухудшении."
+                "Назначение, изменение и отмена терапии — только врачом (323-ФЗ "
+                "ст.36.2, приказ Минздрава №965н; врач-врач телемедицинские "
+                "консультации и консилиумы допустимы без очного приёма). "
+                "Инструмент — вспомогательный: справка по инструкции/показаниям "
+                "препарата, мониторинг динамики, эскалация при ухудшении."
             ),
         },
     ]
 
+_DRUGS_FILE = Path(__file__).parent / "data" / "drugs.json"
+
+
+def _drug_docs() -> list[dict]:
+    """Чанки по препаратам из api/app/data/drugs.json (источник — ГРЛС, усл.7 кейса).
+
+    На препарат — основной чанк (показания/дозировка/механизм) + отдельный чанк
+    нежелательных явлений и противопоказаний, чтобы retrieval по «побочные эффекты
+    <препарат>» попадал точно. Тема ЛЕКАРСТВА.
+    """
+    if not _DRUGS_FILE.exists():
+        return []
+    data = json.loads(_DRUGS_FILE.read_text(encoding="utf-8"))
+    docs: list[dict] = []
+    for d in data.get("drugs", []):
+        title = f"{d['trade_name']} ({d['inn']})"
+        ru = f"РУ {d['reg_certificate']} от {d['reg_date']}"
+        docs.append(
+            {
+                "guideline_id": f"drug-{d['drug_id']}",
+                "source_title": f"{title} — инструкция",
+                "topic": "ЛЕКАРСТВА",
+                "text": (
+                    f"Препарат {title}. Лекарственная форма: {d['form']}. "
+                    f"{ru}. Механизм действия: {d['pharmacology']} "
+                    f"Показания к применению: {d['indications']} "
+                    f"Режим дозирования: {d['dosage']} "
+                    f"{d['special_notes']}"
+                ),
+            }
+        )
+        docs.append(
+            {
+                "guideline_id": f"drug-{d['drug_id']}-safety",
+                "source_title": f"{title} — нежелательные явления и противопоказания",
+                "topic": "ЛЕКАРСТВА",
+                "text": (
+                    f"Препарат {title}. Противопоказания: {d['contraindications']} "
+                    f"Нежелательные явления: {d['adverse_events']} "
+                    f"{d['special_notes']}"
+                ),
+            }
+        )
+    return docs
+
 
 def build_corpus() -> list[dict]:
-    return _scale_docs() + _triage_docs() + _redlines_docs()
+    return _scale_docs() + _triage_docs() + _redlines_docs() + _drug_docs()
 
 
 def main() -> None:

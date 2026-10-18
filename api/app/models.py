@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Identity, Index, String, text
+from sqlalchemy import BigInteger, CheckConstraint, Date, DateTime, ForeignKey, Identity, Index, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -222,3 +222,33 @@ class FcmState(Base):
 
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
     last_upgraded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AdverseEvent(Base):
+    """Нежелательное явление (задача кейса 3). Спецкатегория ПДн (152-ФЗ).
+
+    Вносит врач (clinician_id) в карточку пациента: событие, тяжесть, предполагаемый
+    препарат (напр. «Авиандр»), дата начала, предпринятое действие. Учёт рисков и НЯ
+    терапии — для мониторинга безопасности (обязательное условие: предупреждения о
+    безопасности терапии визуально выделены, связка с P6 routing в UI).
+    """
+
+    __tablename__ = "adverse_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    clinician_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    event_text: Mapped[str] = mapped_column(Text)
+    severity: Mapped[str] = mapped_column(String(16))   # mild | moderate | severe
+    onset_date: Mapped[datetime] = mapped_column(Date)
+    suspected_drug: Mapped[str | None] = mapped_column(String(128))
+    action_taken: Mapped[str | None] = mapped_column(String(32))  # none|monitoring|dose_reduced|stopped|referred
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)
+
+    __table_args__ = (
+        CheckConstraint("severity in ('mild','moderate','severe')", name="adverse_events_severity"),
+        CheckConstraint(
+            "action_taken is null or action_taken in ('none','monitoring','dose_reduced','stopped','referred')",
+            name="adverse_events_action",
+        ),
+    )

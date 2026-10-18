@@ -153,6 +153,14 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ scales }),
     }),
+  createAdverseEvent: (patientId: string, body: {
+    event_text: string; severity: string; onset_date: string;
+    suspected_drug?: string; action_taken?: string;
+  }) =>
+    req<Report["adverse_events"][number]>(`/api/v1/clinician/patients/${patientId}/adverse-events`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   vapidPublicKey: () => req<{ public_key: string }>("/api/v1/push/vapid-public-key"),
   subscribePush: (endpoint: string, keys: { p256dh: string; auth: string }) =>
     req<{ subscribed: boolean }>("/api/v1/push/subscribe", {
@@ -256,6 +264,16 @@ export interface Report {
   } | null;
   history: { total_score: number; severity: string; triage: string; computed_at: string }[];
   trend: Timeline["trend"];
+  routing: {
+    category: "REQUIRED" | "DESIRABLE" | "NONE" | null;
+    label: string;
+    target: string;
+    reason: string;
+  } | null;
+  adverse_events: {
+    id: string; event_text: string; severity: string; onset_date: string;
+    suspected_drug: string | null; action_taken: string | null; created_at: string;
+  }[];
   diary: { id: string; content: string; mood: number | null; created_at: string }[];
   available_scales: { code: string; title: string }[];
   open_escalations: { id: string; kind: string; notified_at: string | null }[];

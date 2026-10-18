@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from compass.models import ScaleResult
+from compass.models import RiskFlag, ScaleResult
+from compass.routing import routing_for
 from compass.scales import ALL_SCALES
 from compass.trend import trends
 
 from app.errors import Problem
-from app.models import Assessment, ClinicianRoster, Consent, DiaryEntry, Escalation, Prescription, User
+from app.models import AdverseEvent, Assessment, ClinicianRoster, Consent, DiaryEntry, Escalation, Prescription, User
 
 from .audit import record as audit_record
 
@@ -157,6 +158,20 @@ def _patient_card(db: Session, patient_id) -> dict:
     ).all()
     timeline = patient_timeline(db, patient_id, 90)
 
+    # Маршрутизация к психиатру (задача кейса 8, усл.6): детерминированная
+    # рекомендация из последнего assessment + тренда. Категории обязат/желательно.
+    routing = None
+    if last is not None:
+        flags = [RiskFlag(kind=f["kind"], item_key=f.get("item_key")) for f in (last.risk_flags or [])]
+        r_obj = routing_for(
+            last.triage, flags, last.severity,
+            timeline["trend"].get("delta_7"),
+        )
+        routing = {
+            "category": r_obj.category, "label": r_obj.label,
+            "target": r_obj.target, "reason": r_obj.reason,
+        }
+
     return {
         "patient_id": str(patient_id),
         "email": patient.email,
@@ -178,6 +193,15 @@ def _patient_card(db: Session, patient_id) -> dict:
             for a in history
         ],
         "trend": timeline["trend"],
+        "routing": routing,
+        "adverse_events": [
+            _adverse_event_dict(e) for e in db.scalars(
+                select(AdverseEvent)
+                .where(AdverseEvent.patient_id == patient_id)
+                .order_by(AdverseEvent.onset_date.desc(), AdverseEvent.created_at.desc())
+                .limit(20)
+            ).all()
+        ],
         "diary": [
             {"id": str(e.id), "content": e.content, "mood": e.mood, "sleep_h": e.sleep_h, "created_at": e.created_at.isoformat()}
             for e in diary
@@ -222,6 +246,49 @@ def patient_context(db: Session, clinician_id, patient_id) -> dict:
         "prescribed_scales": card["prescribed_scales"],
         "last_assessment": card["last_assessment"],
         "trend": card["trend"],
+        "routing": card["routing"],
         "open_escalations": card["open_escalations"],
         "recent_diary": card["diary"][:3],
+    }
+
+
+def create_adverse_event(
+    db: Session, clinician_id, patient_id,
+    event_text: str, severity: str, onset_date: date,
+    suspected_drug: str | None, action_taken: str | None,
+) -> dict:
+    """Регистрация нежелательного явления (задача кейса 3). Roster + аудит ADVERSE_EVENT."""
+    _require_roster(db, clinician_id, patient_id)
+    ev = AdverseEvent(
+        patient_id=patient_id, clinician_id=clinician_id,
+        event_text=event_text, severity=severity, onset_date=onset_date,
+        suspected_drug=suspected_drug, action_taken=action_taken,
+    )
+    db.add(ev)
+    db.flush()
+    audit_record(db, clinician_id, "ADVERSE_EVENT", "patient", str(patient_id))
+    db.commit()
+    return _adverse_event_dict(ev)
+
+
+def list_adverse_events(db: Session, clinician_id, patient_id) -> list[dict]:
+    """Список НЯ пациента (задача кейса 3). Roster-гейт."""
+    _require_roster(db, clinician_id, patient_id)
+    rows = db.scalars(
+        select(AdverseEvent)
+        .where(AdverseEvent.patient_id == patient_id)
+        .order_by(AdverseEvent.onset_date.desc(), AdverseEvent.created_at.desc())
+    ).all()
+    return [_adverse_event_dict(e) for e in rows]
+
+
+def _adverse_event_dict(e: AdverseEvent) -> dict:
+    return {
+        "id": str(e.id),
+        "event_text": e.event_text,
+        "severity": e.severity,
+        "onset_date": e.onset_date.isoformat(),
+        "suspected_drug": e.suspected_drug,
+        "action_taken": e.action_taken,
+        "created_at": e.created_at.isoformat(),
     }

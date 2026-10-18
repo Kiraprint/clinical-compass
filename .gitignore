@@ -28,6 +28,12 @@ bench/__pycache__/
 # DB
 *.sqlite
 
+# Кейс чемпионата — конфиденциальные материалы (регламент §13, 5 лет).
+# Текст кейса не коммитится в репозиторий. Шаблон *.pdf — кодировко-независимый
+# (имя файла в NFD с combining-символами, паттерн «Кейс_*.pdf» не совпадал).
+/*.pdf
+/*.docx
+
 # Demo tunnel (Cloudflare quick tunnel + ngrok стабильный)
 tools/bin/
 tools/.tunnel.pid

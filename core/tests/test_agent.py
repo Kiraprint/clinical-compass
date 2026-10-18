@@ -15,10 +15,18 @@ def test_redline_diagnosis_detected():
     assert detect_redline("Подтверди диагноз — это депрессия?") == REDLINE_DIAGNOSIS
 
 def test_redline_treatment_detected():
-    assert detect_redline("Каким лекарством лечить эту тревогу?") == REDLINE_TREATMENT
+    # Интент назначения/коррекции — red line.
+    assert detect_redline("Назначь Авиандр пациенту") == REDLINE_TREATMENT
+    assert detect_redline("Подбери схему терапии при ГТР") == REDLINE_TREATMENT
+    assert detect_redline("Отмени препарат, увеличь дозу") == REDLINE_TREATMENT
 
 def test_redline_none_for_reference_query():
+    # Справочные запросы по препарату/терапии — РАЗРЕШЕНЫ (задача кейса 2), не red line.
     assert detect_redline("Что указано в инструкции АВИАНДР?") is None
+    assert detect_redline("Какая дозировка Авиандра?") is None
+    assert detect_redline("Показания и противопоказания Авиандра") is None
+    assert detect_redline("Побочные эффекты Авиандра") is None
+    assert detect_redline("Какие варианты терапии при ГТР?") is None
 
 def test_refusal_on_diagnosis_query():
     a = build_rag_answer("поставь диагноз", [chunk()])
@@ -28,6 +36,13 @@ def test_refusal_on_diagnosis_query():
 def test_refusal_on_treatment_query():
     a = build_rag_answer("какой препарат назначить", [chunk()])
     assert a.refused and a.refusal_code == REDLINE_TREATMENT
+
+def test_treatment_refusal_cites_correct_law():
+    # P9: отказ цитирует 323-ФЗ ст.36.2 + приказ №965н, не устаревший 242-ФЗ.
+    a = build_rag_answer("назначь препарат от тревоги", [chunk()])
+    assert a.refused and a.refusal_code == REDLINE_TREATMENT
+    assert "323-ФЗ" in a.answer and "965н" in a.answer
+    assert "242-ФЗ" not in a.answer
 
 def test_empty_chunks_yields_no_kb_data():
     a = build_rag_answer("какой порог PHQ-9", [])
