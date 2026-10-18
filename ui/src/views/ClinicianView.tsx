@@ -148,22 +148,29 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <label style={{ margin: 0 }}>Шкалы скрининга</label>
-        <div style={{ display: "flex", flexDirection: "column", gap: 6, alignSelf: "flex-end", minWidth: 320 }}>
-          {report.available_scales.map((s) => (
-            <label key={s.code} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 14, gap: 12 }}>
-              <span>{s.title}</span>
-              <input
-                type="checkbox"
-                checked={picked.includes(s.code)}
-                onChange={() =>
-                  setPicked((cur) =>
-                    cur.includes(s.code) ? cur.filter((c) => c !== s.code) : [...cur, s.code],
-                  )
-                }
-              />
-            </label>
-          ))}
-        </div>
+        <table style={{ width: "100%", fontSize: 14, borderCollapse: "collapse" }}>
+          <tbody>
+            {report.available_scales.map((s) => (
+              <tr key={s.code}>
+                <td style={{ padding: "4px 0", textAlign: "left" }}>
+                  <label htmlFor={s.code}>{s.title}</label>
+                </td>
+                <td style={{ padding: "4px 0", textAlign: "right", width: 44, whiteSpace: "nowrap" }}>
+                  <input
+                    id={s.code}
+                    type="checkbox"
+                    checked={picked.includes(s.code)}
+                    onChange={() =>
+                      setPicked((cur) =>
+                        cur.includes(s.code) ? cur.filter((c) => c !== s.code) : [...cur, s.code],
+                      )
+                    }
+                  />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, alignItems: "center" }}>
           <button onClick={saveScale} disabled={picked.length === 0}>Назначить</button>
           {scaleSaved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
