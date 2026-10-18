@@ -22,6 +22,19 @@ test.describe("ИИ-ассистент врача", () => {
     await expect(page.getByText("Я не могу поставить диагноз")).toBeVisible();
   });
 
+  test("справка по препарату Авиандр — не red line, ответ с цитатой инструкции", async ({ page }) => {
+    await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
+    await page.getByRole("button", { name: "Ассистент" }).click();
+    await expect(page.getByRole("heading", { name: "Ассистент врача" })).toBeVisible();
+
+    // Справочный запрос по дозировке — НЕ отбивается red line (задача кейса 2).
+    await page.getByLabel("Вопрос").fill("Какая дозировка Авиандра?");
+    await page.getByRole("button", { name: "Спросить" }).click();
+    await expect(page.getByText("По базе знаний найдено следующее:")).toBeVisible({ timeout: 5000 });
+    // Цитата чанка препарата (АВИАНДР).
+    await expect(page.locator(".assistant-sources")).toContainText(/АВИАНДР|авиандр/i);
+  });
+
   test("@-упоминание пациента подгружает контекст в ответ", async ({ page }) => {
     await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
     await page.getByRole("button", { name: "Ассистент" }).click();

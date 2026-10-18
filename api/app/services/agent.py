@@ -31,10 +31,23 @@ def _content_tokens(text: str) -> set[str]:
 
 
 def _lexical_overlap(query: str, text: str) -> int:
-    """Число значимых токенов запроса, найденных в тексте чанка."""
+    """Число значимых токенов запроса, найденных в тексте чанка.
+
+    Русский сильно флективен: «дозировка» vs «дозирования», «авиандра» vs «авиандр».
+    Для токенов ≥4 символов принимаем совпадение по 4-символьному префиксу (грубый
+    стеммер), иначе — точное равенство.
+    """
     q = _content_tokens(query)
     t = _content_tokens(text)
-    return len(q & t)
+    n = 0
+    for qt in q:
+        if len(qt) >= 4:
+            pref = qt[:4]
+            if any(tt[:4] == pref for tt in t):
+                n += 1
+        elif qt in t:
+            n += 1
+    return n
 
 
 def _relevance_gate(query: str, hits: list[dict], limit: int) -> list[dict]:
@@ -78,6 +91,25 @@ class AgentFactory:
             limit=limit,
         )
         hits = _relevance_gate(query, hits, limit)
+        # Keyword-fallback по полному корпусу: hash-эмбеддер ненадёжен (косинус
+        # шумит), поэтому гарантируем, что чанки с прямым лексическим совпадением
+        # (напр. «Авиандр») всплывают независимо от качества dense-ранжирования.
+        if len(hits) < limit:
+            from app.kb_seed import build_corpus  # lazy: избегаем циклического импорта
+            seen = {h.get("guideline_id") for h in hits}
+            kw = sorted(
+                ((_lexical_overlap(query, d["text"]), d) for d in build_corpus()
+                 if topic is None or d.get("topic") == topic),
+                key=lambda x: x[0],
+            )
+            for ov, d in reversed(kw):
+                if ov < _GATE_MIN_TOKENS or d["guideline_id"] in seen:
+                    continue
+                d = {**d, "score": 0.5}
+                hits.append(d)
+                seen.add(d["guideline_id"])
+                if len(hits) >= limit:
+                    break
         return [
             RAGChunk(text=h["text"], source_title=h["source_title"], guideline_id=h["guideline_id"], topic=h["topic"], score=h["score"])
             for h in hits
