@@ -147,7 +147,7 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
       <p style={{ color: "#5a6478" }}>{report.email}</p>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        <label style={{ margin: 0 }}>Шкалы скрининга</label>
+        <h3 style={{ margin: 0 }}>Шкалы скрининга</h3>
         <table className="scale-table" style={{ fontSize: 14 }}>
           <tbody>
             {report.available_scales.map((s) => (
