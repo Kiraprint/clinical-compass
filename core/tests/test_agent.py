@@ -50,3 +50,48 @@ def test_max_citations_limits():
     many = [chunk(f"ch{i}", f"SRC{i}", f"g{i}") for i in range(5)]
     a = build_rag_answer("вопрос", many)
     assert len(a.citations) == 3
+
+
+def _ctx(pid="42", fio="Иван П."):
+    return {
+        "patient_id": pid,
+        "fio": fio,
+        "prescribed_scale": "PHQ-9",
+        "last_assessment": {
+            "total_score": 18,
+            "severity": "SEVERE",
+            "triage": "RED",
+            "computed_at": "2026-10-17T00:00:00",
+        },
+        "trend": {"moving_avg": [10.0, 18.0], "delta_7": 8.0, "delta_30": None, "slope": 8.0},
+        "open_escalations": [{"kind": "SUICIDAL"}],
+        "recent_diary": [{"content": "плохо сплю", "mood": 2, "sleep_h": 3, "created_at": "2026-10-17"}],
+    }
+
+
+def test_patient_context_grounds_without_kb():
+    """Карта пациента одна — достаточная опора; NO_KB_DATA не возвращается."""
+    a = build_rag_answer("как динамика у пациента", [], patient_context=_ctx())
+    assert a.grounded and not a.refused
+    assert a.answer.startswith("По карте пациента:")
+    assert "Иван П." in a.answer
+    assert any(c.topic == "ПАЦИЕНТ" and c.guideline_id == "patient:42" for c in a.citations)
+
+
+def test_patient_context_combined_with_kb():
+    """Карта пациента + фрагменты корпуса — обе опоры, обе цитируются."""
+    a = build_rag_answer(
+        "порог PHQ-9",
+        [chunk("Порог PHQ-9 = 10.", "КР", "g1", "РЕКОМЕНДАЦИИ", 0.8)],
+        patient_context=_ctx("7", "Мария"),
+    )
+    assert a.grounded
+    assert a.answer.startswith("По базе знаний и карте пациента найдено следующее:")
+    topics = {c.topic for c in a.citations}
+    assert "РЕКОМЕНДАЦИИ" in topics and "ПАЦИЕНТ" in topics
+
+
+def test_patient_context_redline_still_refuses():
+    """Карта пациента не отменяет красную линию: диагноз не ставится."""
+    a = build_rag_answer("поставь диагноз этому пациенту", [chunk()], patient_context=_ctx("1", "X"))
+    assert a.refused and a.refusal_code == REDLINE_DIAGNOSIS

@@ -2,6 +2,8 @@
 # Контракт: docs/04 §3.1 (расширение), docs/07, docs/08; тесты — docs/06 §3.
 from __future__ import annotations
 
+import uuid
+
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
@@ -24,10 +26,21 @@ def _client() -> QdrantClient:
         _qdrant = QdrantClient(url=settings.qdrant_url)
     return _qdrant
 
+_factory: AgentFactory | None = None
+
+def _agent_factory() -> AgentFactory:
+    """Один AgentFactory на процесс — граф LangGraph компилируется один раз
+    (не на каждый запрос). Compiled graph.invoke потокобезопасен."""
+    global _factory
+    if _factory is None:
+        _factory = AgentFactory(_client())
+    return _factory
+
 class AskBody(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
     topic: str | None = Field(default=None, max_length=40)  # фильтр: ШКАЛЫ|ТРИАЖ|РЕКОМЕНДАЦИИ|ПРЕПАРАТЫ
     limit: int = Field(default=5, ge=1, le=20)
+    patient_id: uuid.UUID | None = Field(default=None)  # @-упоминание пациента → контекст в агент
 
 @router.post("/assistant/ask")
 def ask(
@@ -37,15 +50,24 @@ def ask(
     db: Session = Depends(get_db),
 ):
     """Справочный ответ врачу по базе знаний. Только CLINICIAN (roster не нужен:
-    корпус — открытый не-ПДн контент, связи с конкретным пациентом нет).
+    корпус — открытый не-ПДн контент).
 
-    Каждый запрос аудируется (спец-категория не затрагивается, но фиксируем
-    обращение врача к ассистенту — docs/04 §5).
+    При patient_id (функция «@пациент»): загружается компактный контекст пациента
+    (services.clinician.patient_context — roster-gate + согласие + audit
+    ASK_ASSISTANT_WITH_PATIENT, спецкатегория ПДн 152-ФЗ) и подмешивается в ответ
+    как опора; в Qdrant не попадает. Запрос без пациента аудируется ASK_ASSISTANT.
     """
-    result = AgentFactory(_client()).invoke(body.query, topic=body.topic, limit=body.limit)
+    patient_ctx = None
+    if body.patient_id is not None:
+        patient_ctx = services.clinician.patient_context(db, user.id, body.patient_id)
+        db.commit()  # PDn-access audit персистируется ДО вызова агента (152-ФЗ: read уже был)
+    result = _agent_factory().invoke(
+        body.query, topic=body.topic, limit=body.limit, patient_context=patient_ctx
+    )
     ip = request.client.host if request.client else None
-    services.audit.record(db, user.id, "ASK_ASSISTANT", "kb", object_id=None, ip=ip)
-    db.commit()
+    if body.patient_id is None:
+        services.audit.record(db, user.id, "ASK_ASSISTANT", "kb", object_id=None, ip=ip)
+        db.commit()
     return result
 
 @router.get("/assistant/status")

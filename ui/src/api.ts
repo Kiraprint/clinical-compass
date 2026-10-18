@@ -136,10 +136,10 @@ export const api = {
     req<{ items: PatientCard[] }>(`/api/v1/clinician/patients${triage ? `?triage=${triage}` : ""}`),
   clinicianReport: (patientId: string) =>
     req<Report>(`/api/v1/clinician/patients/${patientId}/report`),
-  assistantAsk: (query: string, topic?: string, limit = 5) =>
+  assistantAsk: (query: string, topic?: string, limit = 5, patientId?: string) =>
     req<AssistantAnswer>("/api/v1/assistant/ask", {
       method: "POST",
-      body: JSON.stringify({ query, topic: topic || undefined, limit }),
+      body: JSON.stringify({ query, topic: topic || undefined, limit, patient_id: patientId }),
     }),
   assistantStatus: () => req<{ collection: string; points: number }>("/api/v1/assistant/status"),
   adminAudit: () => req<{ items: AuditEvent[] }>("/api/v1/admin/audit"),

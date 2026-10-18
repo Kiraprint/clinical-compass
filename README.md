@@ -109,7 +109,7 @@ export NGROK_URL=<ваш>.ngrok-free.app           # dev-домен из dashboa
 python3 -m venv .venv && .venv/bin/pip install -e "core" -e "api[dev]"
 docker compose -f infra/docker-compose.yml up -d postgres   # тестовая БД
 cd api && alembic upgrade head                                # схема из миграций (не create_all)
-.venv/bin/pytest core api                                     # 50 + 70 тестов
+.venv/bin/pytest core api                                     # 53 + 74 теста
 cd ui && npm install && npm run dev                           # UI на :5173 (proxy → :8000)
 cd e2e && npx playwright install chromium && npx playwright test
 ```

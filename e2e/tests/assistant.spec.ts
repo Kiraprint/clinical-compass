@@ -21,4 +21,22 @@ test.describe("ИИ-ассистент врача", () => {
     await page.getByRole("button", { name: "Спросить" }).click();
     await expect(page.getByText("Я не могу поставить диагноз")).toBeVisible();
   });
+
+  test("@-упоминание пациента подгружает контекст в ответ", async ({ page }) => {
+    await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
+    await page.getByRole("button", { name: "Ассистент" }).click();
+    await expect(page.getByRole("heading", { name: "Ассистент врача" })).toBeVisible();
+
+    // Печатаем «@» → открывается dropdown с ротстером врача.
+    const ta = page.getByLabel("Вопрос");
+    await ta.fill("@");
+    const dropdown = page.locator(".mention-dropdown");
+    await expect(dropdown).toBeVisible({ timeout: 3000 });
+    await dropdown.locator("button").first().click();
+
+    // Чип контекста + запрос с пациентом → ответ опирается на карту пациента.
+    await expect(page.locator(".patient-chip")).toContainText("Контекст пациента:");
+    await page.getByRole("button", { name: "Спросить" }).click();
+    await expect(page.locator(".assistant-sources").getByText("ПАЦИЕНТ")).toBeVisible({ timeout: 15000 });
+  });
 });

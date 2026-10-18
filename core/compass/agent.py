@@ -116,23 +116,68 @@ def _refusal_answer(code: str) -> RAGAnswer:
     )
 
 
+def _patient_card_text(ctx: dict) -> str:
+    """Компактная текстовая сводка карты пациента для grounding ответа (чисто, без I/O).
+
+    Формат контракта dict — services.clinician.patient_context (API-слой).
+    Используется только как фактическая опора ответа; диагноз/терапию не выводит.
+    """
+    fio = ctx.get("fio") or "без ФИО"
+    scale = ctx.get("prescribed_scale") or "—"
+    last = ctx.get("last_assessment")
+    trend = ctx.get("trend") or {}
+    esc = ctx.get("open_escalations") or []
+    diary = ctx.get("recent_diary") or []
+    parts = [f"Пациент: {fio}. Назначенная шкала: {scale}."]
+    if last:
+        parts.append(
+            f"Последний скрининг: балл {last.get('total_score')}, "
+            f"тяжесть {last.get('severity')}, триаж {last.get('triage')} "
+            f"({last.get('computed_at')})."
+        )
+    avg = trend.get("moving_avg") or []
+    if avg:
+        bits = [f"последнее среднее {round(avg[-1], 1)}"]
+        if trend.get("delta_7") is not None:
+            bits.append(f"дельта 7д {trend['delta_7']}")
+        if trend.get("delta_30") is not None:
+            bits.append(f"дельта 30д {trend['delta_30']}")
+        if trend.get("slope") is not None:
+            bits.append(f"наклон {round(trend['slope'], 2)}")
+        parts.append("Тренд: " + ", ".join(bits) + ".")
+    if esc:
+        kinds = ", ".join(e.get("kind", "?") for e in esc)
+        parts.append(f"Открытые эскалации: {len(esc)} ({kinds}).")
+    if diary:
+        parts.append(
+            "Последние записи дневника: "
+            + " | ".join((d.get("content") or "")[:80] for d in diary)
+        )
+    return " ".join(parts)
+
+
 def build_rag_answer(
     query: str,
     chunks: Sequence[RAGChunk],
     *,
     max_citations: int = 3,
+    patient_context: dict | None = None,
 ) -> RAGAnswer:
     """Собирает ответ из найденных фрагментов (гибридный поиск уже отработал).
 
-    - нет релевантных фрагментов → пустой ответ (NO_KB_DATA);
-    - запрос требует диагноз/терапию → отказ с красной линией;
-    - иначе — связный ответ с обязательной цитатой источника (level—title).
+    - запрос требует диагноз/терапию → отказ с красной линией (даже при наличии
+      карты пациента — агент не ставит диагноз и не назначает терапию);
+    - есть карта пациента → ответ опирается на неё + найденные фрагменты корпуса
+      (карта цитируется особым источником topic=ПАЦИЕНТ, в Qdrant не попадает);
+    - нет ни фрагментов, ни карты → пустой ответ (NO_KB_DATA);
+    - иначе — связный ответ с обязательной цитатой источника.
     """
     redline = detect_redline(query)
     if redline is not None:
         return _refusal_answer(redline)
 
-    if not chunks:
+    has_patient = patient_context is not None
+    if not chunks and not has_patient:
         return _refusal_answer(REDLINE_EMPTY)
 
     top = list(chunks)[:max_citations]
@@ -155,9 +200,30 @@ def build_rag_answer(
         )
         points.append(f"— {snippet}")
 
+    if has_patient:
+        ctx = patient_context or {}
+        patient_gid = f"patient:{ctx.get('patient_id')}"
+        if patient_gid not in seen:
+            seen.add(patient_gid)
+            citations.append(
+                Citation(
+                    source_title=f"Карта пациента: {ctx.get('fio') or 'без ФИО'}",
+                    guideline_id=patient_gid,
+                    topic="ПАЦИЕНТ",
+                    score=1.0,
+                )
+            )
+            points.append(f"— {_patient_card_text(ctx)}")
+
     body = "\n".join(f"{i + 1}. {p}" for i, p in enumerate(points))
+    if has_patient and chunks:
+        lead = "По базе знаний и карте пациента найдено следующее:"
+    elif has_patient:
+        lead = "По карте пациента:"
+    else:
+        lead = "По базе знаний найдено следующее:"
     answer = (
-        "По базе знаний найдено следующее:\n" + body + "\n\n"
+        lead + "\n" + body + "\n\n"
         "Источники: " + ", ".join(f"«{c.source_title}» ({c.guideline_id})" for c in citations) + "."
     )
     return RAGAnswer(answer=answer, citations=tuple(citations), grounded=True)

@@ -8,7 +8,7 @@ import pytest
 
 from app.config import settings
 
-from .conftest import admin_ctx, auth_header, clinician_ctx, patient_ctx, register
+from .conftest import admin_ctx, auth_header, clinician_ctx, finish_screening, login, patient_ctx, register
 
 qdrant = pytest.importorskip("qdrant_client")
 
@@ -133,3 +133,84 @@ def test_ensure_collection_guards_dense_size_mismatch(client, kb_collection, mon
     finally:
         monkeypatch.undo()
         c.delete_collection(probe)
+
+
+# --- @-упоминание пациента: контекст в агент (docs/07 §7) ---
+
+GREEN_ANSWERS = {f"q{i}": 0 for i in range(1, 10)}  # PHQ-9 all-0 → GREEN
+
+
+def _grant(client, admin_h, patient_id, clinician_id) -> None:
+    resp = client.post(
+        "/api/v1/admin/roster",
+        json={"patient_id": patient_id, "clinician_id": clinician_id},
+        headers=admin_h,
+    )
+    assert resp.status_code == 201, resp.text
+
+
+def test_assistant_with_patient_context_grounds_on_card(client, kb_collection):
+    """@-упоминание: контекст пациента подмешивается, цитируется карта (topic=ПАЦИЕНТ)."""
+    ph, pid = patient_ctx(client, "pap@test.ru")
+    ch, cid = clinician_ctx(client, "cap@test.ru")
+    ah, _ = admin_ctx(client, "aap@test.ru")
+    _grant(client, ah, pid, cid)
+    finish_screening(client, ph, GREEN_ANSWERS)  # assessment для карты пациента
+
+    resp = client.post(
+        "/api/v1/assistant/ask",
+        json={"query": "как динамика у пациента", "patient_id": pid},
+        headers=ch,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["grounded"] is True
+    assert any(c["topic"] == "ПАЦИЕНТ" for c in body["citations"]), body["citations"]
+
+
+def test_assistant_patient_context_roster_gated(client, kb_collection):
+    """Пациент не в ротстере врача → 403 NO_ROSTER."""
+    ph, pid = patient_ctx(client, "pap2@test.ru")
+    ch, _ = clinician_ctx(client, "cap2@test.ru")
+    resp = client.post(
+        "/api/v1/assistant/ask",
+        json={"query": "динамика", "patient_id": pid},
+        headers=ch,
+    )
+    assert resp.status_code == 403
+    assert resp.json()["code"] == "NO_ROSTER"
+
+
+def test_assistant_patient_context_consent_gated(client, kb_collection):
+    """Пациент в ротстере, но без активного согласия → 403 CONSENT_REQUIRED (152-ФЗ)."""
+    reg = register(client, "papc@test.ru")
+    ph = auth_header(login(client, "papc@test.ru")["access_token"])  # без consent
+    ch, cid = clinician_ctx(client, "capc@test.ru")
+    ah, _ = admin_ctx(client, "aapc@test.ru")
+    _grant(client, ah, reg["id"], cid)
+    resp = client.post(
+        "/api/v1/assistant/ask",
+        json={"query": "динамика", "patient_id": reg["id"]},
+        headers=ch,
+    )
+    assert resp.status_code == 403
+    assert resp.json()["code"] == "CONSENT_REQUIRED"
+
+
+def test_assistant_patient_context_audited(client, kb_collection):
+    """Загрузка контекста пациента аудируется ASK_ASSISTANT_WITH_PATIENT (спецкатегория)."""
+    ph, pid = patient_ctx(client, "pap3@test.ru")
+    ch, cid = clinician_ctx(client, "cap3@test.ru")
+    ah, _ = admin_ctx(client, "aap3@test.ru")
+    _grant(client, ah, pid, cid)
+    finish_screening(client, ph, GREEN_ANSWERS)
+
+    client.post(
+        "/api/v1/assistant/ask",
+        json={"query": "контекст пациента", "patient_id": pid},
+        headers=ch,
+    )
+    resp = client.get("/api/v1/admin/audit", headers=ah)
+    assert resp.status_code == 200
+    actions = [e["action"] for e in resp.json()["items"]]
+    assert "ASK_ASSISTANT_WITH_PATIENT" in actions

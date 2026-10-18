@@ -53,31 +53,43 @@ class AgentState(TypedDict, total=False):
     topic: str | None
     limit: int
     chunks: list[RAGChunk]
+    patient_context: dict | None
     answer: dict
 
 
 class AgentFactory:
     def __init__(self, client) -> None:
         self._client = client
+        self._graph = None  # компиляция графа один раз, не на каждый запрос
 
-    def _retrieve(self, state: AgentState) -> AgentState:
-        if detect_redline(state["query"]) is not None:
-            return {"chunks": []}  # отказ формируется в answer, поиск не нужен
+    def search_kb(self, query: str, *, topic: str | None = None, limit: int = 5) -> list[RAGChunk]:
+        """Инструмент doctor-search: гибридный поиск по Qdrant (docs/07 §7).
+
+        Отдельный переиспользуемый tool — ядро RAG-модуля. Redline-запрос
+        (диагноз/терапия) поиска не делает; отказ формируется в _answer.
+        """
+        if detect_redline(query) is not None:
+            return []
         hits = kb_store.hybrid_search(
             self._client,
             _embedder,
-            state["query"],
-            topic=state.get("topic"),
-            limit=state.get("limit", 5),
+            query,
+            topic=topic,
+            limit=limit,
         )
-        hits = _relevance_gate(state["query"], hits, state.get("limit", 5))
-        chunks = [RAGChunk(text=h["text"], source_title=h["source_title"], guideline_id=h["guideline_id"], topic=h["topic"], score=h["score"]) for h in hits]
-        return {"chunks": chunks}
+        hits = _relevance_gate(query, hits, limit)
+        return [
+            RAGChunk(text=h["text"], source_title=h["source_title"], guideline_id=h["guideline_id"], topic=h["topic"], score=h["score"])
+            for h in hits
+        ]
+
+    def _retrieve(self, state: AgentState) -> AgentState:
+        return {"chunks": self.search_kb(state["query"], topic=state.get("topic"), limit=state.get("limit", 5))}
 
     def _answer(self, state: AgentState) -> AgentState:
-        q = state["query"]
-        chunks = state.get("chunks", [])
-        result = build_rag_answer(q, chunks)
+        result = build_rag_answer(
+            state["query"], state.get("chunks", []), patient_context=state.get("patient_context")
+        )
         return {
             "answer": {
                 "answer": result.answer,
@@ -92,16 +104,20 @@ class AgentFactory:
         }
 
     def build(self):
-        graph = StateGraph(AgentState)
-        graph.add_node("retrieve", self._retrieve)
-        graph.add_node("answer", self._answer)
-        graph.add_edge(START, "retrieve")
-        graph.add_edge("retrieve", "answer")
-        graph.add_edge("answer", END)
-        return graph.compile()
+        if self._graph is None:
+            graph = StateGraph(AgentState)
+            graph.add_node("retrieve", self._retrieve)
+            graph.add_node("answer", self._answer)
+            graph.add_edge(START, "retrieve")
+            graph.add_edge("retrieve", "answer")
+            graph.add_edge("answer", END)
+            self._graph = graph.compile()
+        return self._graph
 
-    def invoke(self, query: str, *, topic: str | None = None, limit: int = 5) -> dict:
-        return self.build().invoke({"query": query, "topic": topic, "limit": limit})["answer"]
+    def invoke(self, query: str, *, topic: str | None = None, limit: int = 5, patient_context: dict | None = None) -> dict:
+        return self.build().invoke(
+            {"query": query, "topic": topic, "limit": limit, "patient_context": patient_context}
+        )["answer"]
 
 
 __all__ = ["AgentFactory", "AgentState"]

@@ -12,7 +12,7 @@ from compass.scales import ALL_SCALES
 from compass.trend import trends
 
 from app.errors import Problem
-from app.models import Assessment, ClinicianRoster, DiaryEntry, Escalation, User
+from app.models import Assessment, ClinicianRoster, Consent, DiaryEntry, Escalation, User
 
 from .audit import record as audit_record
 
@@ -102,8 +102,11 @@ def patient_timeline(db: Session, patient_id, days: int) -> dict:
     }
 
 
-def report(db: Session, clinician_id, patient_id) -> dict:
-    _require_roster(db, clinician_id, patient_id)
+def _patient_card(db: Session, patient_id) -> dict:
+    """Сборка карты пациента (только данные; roster/consent/audit — у вызывающих).
+
+    Повторно используется report() и patient_context() ассистента (docs/07 §7).
+    """
     patient = db.get(User, patient_id)
     if patient is None or patient.role != "PATIENT":
         raise Problem(404, "NOT_FOUND", "Пациент не найден")
@@ -126,9 +129,6 @@ def report(db: Session, clinician_id, patient_id) -> dict:
         .order_by(Escalation.notified_clinician_at.desc().nulls_last())
     ).all()
     timeline = patient_timeline(db, patient_id, 90)
-
-    audit_record(db, clinician_id, "READ_REPORT", "patient", str(patient_id))
-    db.commit()
 
     return {
         "patient_id": str(patient_id),
@@ -162,4 +162,39 @@ def report(db: Session, clinician_id, patient_id) -> dict:
             {"id": str(e.id), "kind": e.kind, "notified_at": e.notified_clinician_at.isoformat() if e.notified_clinician_at else None}
             for e in escalations
         ],
+    }
+
+
+def report(db: Session, clinician_id, patient_id) -> dict:
+    """Полная карта пациента для панели врача (FR-8). Roster + READ_REPORT audit."""
+    _require_roster(db, clinician_id, patient_id)
+    card = _patient_card(db, patient_id)
+    audit_record(db, clinician_id, "READ_REPORT", "patient", str(patient_id))
+    db.commit()
+    return card
+
+
+def patient_context(db: Session, clinician_id, patient_id) -> dict:
+    """Компактный контекст пациента для ИИ-ассистента врача (docs/07 §7).
+
+    Спецкатегория ПДн (152-ФЗ): roster-gate + активное согласие пациента +
+    append-only audit ASK_ASSISTANT_WITH_PATIENT. Транзакцию коммитит вызывающий
+    роутер /assistant/ask. В Qdrant НЕ попадает — только grounding ответа.
+    """
+    _require_roster(db, clinician_id, patient_id)
+    active = db.scalar(
+        select(Consent).where(Consent.user_id == patient_id, Consent.revoked_at.is_(None))
+    )
+    if active is None:
+        raise Problem(403, "CONSENT_REQUIRED", "Нет активного согласия пациента — карта недоступна (152-ФЗ)")
+    card = _patient_card(db, patient_id)
+    audit_record(db, clinician_id, "ASK_ASSISTANT_WITH_PATIENT", "patient", str(patient_id))
+    return {
+        "patient_id": card["patient_id"],
+        "fio": card["fio"],
+        "prescribed_scale": card["prescribed_scale"],
+        "last_assessment": card["last_assessment"],
+        "trend": card["trend"],
+        "open_escalations": card["open_escalations"],
+        "recent_diary": card["diary"][:3],
     }
