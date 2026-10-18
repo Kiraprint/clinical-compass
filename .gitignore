@@ -52,5 +52,8 @@ tools/fxtun-docker/fxtunnel
 # Android (item 4): Firebase-конфиг приложения приходит из CI-секрета
 mobile/android/app/google-services.json
 mobile/android/.gradle
+mobile/android/app/release.keystore
+mobile/android/keystore.properties
+*.apk
 /test-results/
 e2e/test-results/
