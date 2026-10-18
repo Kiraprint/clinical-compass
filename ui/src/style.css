@@ -23,6 +23,7 @@ button.ghost { background: transparent; color: #2f6fed; border: 1px solid #2f6fe
 button.danger { background: #d64545; }
 button:disabled { opacity: 0.5; cursor: default; }
 input, select, textarea { padding: 8px 10px; border: 1px solid #cfd6e2; border-radius: 8px; font-size: 14px; width: 100%; box-sizing: border-box; }
+input[type="checkbox"] { width: auto; height: auto; padding: 0; border: none; margin: 0; cursor: pointer; }
 label { font-size: 13px; color: #5a6478; display: block; margin: 6px 0 2px; }
 .badge { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
 .badge.GREEN { background: #e2f5e8; color: #1f7a3d; }
@@ -36,6 +37,8 @@ label { font-size: 13px; color: #5a6478; display: block; margin: 6px 0 2px; }
 .tabs button.active { background: #2f6fed; color: #fff; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eef1f6; white-space: nowrap; }
+.scale-table { width: 100%; margin: 0; border-collapse: collapse; }
+.scale-table td { padding: 4px 0; border-bottom: none; white-space: normal; }
 .qa { margin-bottom: 12px; }
 .qa p { margin: 0 0 4px; font-size: 14px; }
 .qa .row { gap: 6px; }

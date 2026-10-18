@@ -148,14 +148,14 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <label style={{ margin: 0 }}>Шкалы скрининга</label>
-        <table style={{ width: "100%", fontSize: 14, borderCollapse: "collapse" }}>
+        <table className="scale-table" style={{ fontSize: 14 }}>
           <tbody>
             {report.available_scales.map((s) => (
               <tr key={s.code}>
-                <td style={{ padding: "4px 0", textAlign: "left" }}>
+                <td style={{ textAlign: "left" }}>
                   <label htmlFor={s.code}>{s.title}</label>
                 </td>
-                <td style={{ padding: "4px 0", textAlign: "right", width: 44, whiteSpace: "nowrap" }}>
+                <td style={{ textAlign: "right", width: 44, whiteSpace: "nowrap" }}>
                   <input
                     id={s.code}
                     type="checkbox"
