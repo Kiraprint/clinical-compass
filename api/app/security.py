@@ -39,7 +39,12 @@ def totp_provisioning_uri(secret: str, email: str) -> str:
 
 
 def verify_totp(secret: str, otp: str) -> bool:
-    return pyotp.TOTP(secret).verify(otp)
+    # valid_window=1 — допуск ±1 30-секундного окна (RFC 6238 §5.2): код, вычисленный
+    # в конце окна, остаётся валидным в начале следующего. Устраняет 401-флейк при
+    # входе через UI/e2e, когда TOTP считается перед заполнением, а валидируется
+    # после клика «Войти» (страдает граница окна). Безопасность: 3 валидных кода из
+    # 10^6, компенсируется rate-limiter'ом 5/60с на (IP, email).
+    return pyotp.TOTP(secret).verify(otp, valid_window=1)
 
 
 def create_access_token(user_id: uuid.UUID, role: str) -> str:

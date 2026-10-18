@@ -1,4 +1,7 @@
 # Контракт: docs/04 §3.1; docs/06 §3 (auth_2fa_required и др.)
+import datetime as _dt
+import time
+
 import pyotp
 
 from .conftest import auth_header, login, register
@@ -41,6 +44,27 @@ def test_login_clinician_requires_otp(client):
     data = login(client, "doc2@test.ru", otp=otp)
     assert data["access_token"]
 
+def test_login_accepts_adjacent_totp_window(client):
+    # valid_window=1: код из соседнего 30-секундного окна валиден — устраняет
+    # 401-флейк на границе окна (TOTP считается перед заполнением формы,
+    # валидируется после клика «Войти»). Код из окна −2 отклоняется.
+    data = register(client, "win@test.ru", role="CLINICIAN")
+    secret = data["totp_secret"]
+    now_epoch = int(time.time())
+    win_start = now_epoch - (now_epoch % 30)
+    prev_code = pyotp.TOTP(secret).at(_dt.datetime.fromtimestamp(win_start - 15))
+    stale_code = pyotp.TOTP(secret).at(_dt.datetime.fromtimestamp(win_start - 45))
+    resp = client.post(
+        "/api/v1/auth/login",
+        json={"email": "win@test.ru", "password": "Str0ng-Pass!", "otp": prev_code},
+    )
+    assert resp.status_code == 200, resp.text
+    resp = client.post(
+        "/api/v1/auth/login",
+        json={"email": "win@test.ru", "password": "Str0ng-Pass!", "otp": stale_code},
+    )
+    assert resp.status_code == 401
+
 
 def test_login_wrong_password(client):
     register(client, "wp@test.ru")
@@ -48,7 +72,7 @@ def test_login_wrong_password(client):
     assert resp.status_code == 401
 
 def test_login_rate_limited_429(client):
-    # Перебор пароля/2FA: > rate_max попыток на (IP, email) → 429 TOO_MANY_REQUESTS
+    # Перебор пароля/2FA: > rate_max неудачных попыток на (IP, email) → 429 TOO_MANY_REQUESTS
     register(client, "rl@test.ru")
     for _ in range(5):
         resp = client.post("/api/v1/auth/login", json={"email": "rl@test.ru", "password": "WrongPass-1"})
@@ -56,6 +80,14 @@ def test_login_rate_limited_429(client):
     resp = client.post("/api/v1/auth/login", json={"email": "rl@test.ru", "password": "WrongPass-1"})
     assert resp.status_code == 429
     assert resp.json()["code"] == "TOO_MANY_REQUESTS"
+
+def test_login_successes_not_rate_limited(client):
+    # Успешные входы не расходуют бюджет rate-limiter'а (считает только неудачи):
+    # 6 успешных логинов подряд не дают 429.
+    register(client, "ok@test.ru")
+    for _ in range(6):
+        data = login(client, "ok@test.ru")
+        assert data["access_token"]
 
 
 def test_refresh_returns_new_access(client):

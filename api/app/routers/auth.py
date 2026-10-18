@@ -12,7 +12,7 @@ from app import security
 from app.db import get_db
 from app.errors import Problem
 from app.models import User
-from app.ratelimit import check_rate
+from app.ratelimit import check_rate, record_rate_hit
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -64,9 +64,11 @@ def login(body: LoginBody, request: Request, db: Session = Depends(get_db)):
                       f"Слишком много попыток входа, повторите через {retry_after} с")
     user = db.scalar(select(User).where(User.email == email))
     if user is None or not security.verify_password(body.password, user.password_hash):
+        record_rate_hit((client, email))
         raise Problem(401, "UNAUTHORIZED", "Неверный email или пароль")
     if user.role != "PATIENT":
         if not user.totp_secret or not body.otp or not security.verify_totp(user.totp_secret, body.otp):
+            record_rate_hit((client, email))
             raise Problem(401, "UNAUTHORIZED", "Требуется корректный код 2FA")
     return {
         "access_token": security.create_access_token(user.id, user.role),
