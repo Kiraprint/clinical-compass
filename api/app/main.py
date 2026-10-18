@@ -23,10 +23,11 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Clinical Compass API", version="0.1.0", lifespan=lifespan)
     register_handlers(app)
 
-    from .routers import admin, assistant, auth, chat, checkins, clinician, consent, diary, notifications, push, screenings
+    from .routers import admin, assistant, auth, chat, checkins, clinician, consent, diary, drugs, notifications, push, screenings
 
     app.include_router(auth.router, prefix="/api/v1")
     app.include_router(assistant.router, prefix="/api/v1")
+    app.include_router(drugs.router, prefix="/api/v1")
     app.include_router(consent.router, prefix="/api/v1")
     app.include_router(admin.router, prefix="/api/v1")
     app.include_router(screenings.router, prefix="/api/v1")

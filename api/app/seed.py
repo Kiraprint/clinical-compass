@@ -8,15 +8,17 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import random
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-from sqlalchemy import text
+from sqlalchemy import delete, text
 
 from app import db, security
-from app.models import Answer, Assessment, Consent, DiaryEntry, Prescription, Run, User
+from app.models import Answer, Assessment, Consent, DiaryEntry, Drug, Prescription, Run, User
 from app.services import screening as screening_service
 
 MOSCOW_TZ = timezone(timedelta(hours=3))
@@ -61,6 +63,33 @@ def _answers_for(profile, rng: random.Random, total: int, day: int, max_value: i
     return answers
 
 
+def _seed_drugs(s) -> None:
+    """Загружает api/app/data/drugs.json в таблицу drugs (источник — ГРЛС).
+
+    Idempotent: удаляет старые строки и вставляет заново (на drugs нет FK, ссылающихся
+    INTO таблицу — AdverseEvent.suspected_drug свободный текст). Таблица — источник
+    правды для чанков ИИ-агента (kb_seed._drug_docs) и для API /drugs.
+    """
+    p = Path(__file__).parent / "data" / "drugs.json"
+    if not p.exists():
+        print("[seed] drugs.json не найден, пропуск справочника препаратов")
+        return
+    data = json.loads(p.read_text(encoding="utf-8"))
+    s.execute(delete(Drug))
+    for d in data.get("drugs", []):
+        s.add(Drug(
+            drug_id=d["drug_id"], trade_name=d["trade_name"], inn=d["inn"],
+            inn_en=d.get("inn_en"), form=d["form"], reg_certificate=d["reg_certificate"],
+            reg_date=datetime.strptime(d["reg_date"], "%Y-%m-%d").date(),
+            revision_date=datetime.strptime(d["revision_date"], "%Y-%m-%d").date() if d.get("revision_date") else None,
+            pharmacology=d["pharmacology"], indications=d["indications"], dosage=d["dosage"],
+            contraindications=d["contraindications"], adverse_events=d["adverse_events"],
+            special_notes=d["special_notes"],
+        ))
+    s.flush()
+    print(f"[seed] drugs: {len(data.get('drugs', []))} в таблице (источник для KB-чанков и /drugs)")
+
+
 def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: bool = False, seed_value: int = 42) -> None:
     db.setup(database_url)
     db.init_db()
@@ -86,6 +115,8 @@ def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: bool = 
         doc_id = doc.id
         s.commit()
         print(f"[seed] admin={admin.email} clinician={doc.email} (TOTP: {doc.totp_secret})")
+
+        _seed_drugs(s)
 
         profiles = (PATIENT_PROFILES * ((n_patients // len(PATIENT_PROFILES)) + 1))[:n_patients]
         for idx, profile in enumerate(profiles, start=1):

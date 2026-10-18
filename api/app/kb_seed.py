@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 from qdrant_client import QdrantClient
+from sqlalchemy import select
 
 from app.config import settings
 from app.services import kb
@@ -96,7 +97,6 @@ def _redlines_docs() -> list[dict]:
         },
     ]
 
-_DRUGS_FILE = Path(__file__).parent / "data" / "drugs.json"
 _GUIDELINES_FILE = Path(__file__).parent / "data" / "guidelines.json"
 _GUIDELINES_CACHE = Path(__file__).parent / "data" / "guidelines_cache"
 
@@ -146,42 +146,47 @@ def _guideline_docs(with_full_text: bool = False) -> list[dict]:
 
 
 def _drug_docs() -> list[dict]:
-    """Чанки по препаратам из api/app/data/drugs.json (источник — ГРЛС, усл.7 кейса).
+    """Чанки по препаратам из таблицы drugs (источник — ГРЛС, усл.7 кейса).
 
-    На препарат — основной чанк (показания/дозировка/механизм) + отдельный чанк
-    нежелательных явлений и противопоказаний, чтобы retrieval по «побочные эффекты
-    <препарат>» попадал точно. Тема ЛЕКАРСТВА.
+    Таблица — единственный источник правды: seed.py грузит api/app/data/drugs.json
+    в drugs, отсюда же строятся чанки для Qdrant. На препарат — основной чанк
+    (показания/дозировка/механизм) + отдельный чанк НЯ/противопоказаний, чтобы
+    retrieval по «побочные эффекты <препарат>» попадал точно. Тема ЛЕКАРСТВА.
     """
-    if not _DRUGS_FILE.exists():
-        return []
-    data = json.loads(_DRUGS_FILE.read_text(encoding="utf-8"))
+    from app.db import SessionLocal
+    from app.models import Drug
+
     docs: list[dict] = []
-    for d in data.get("drugs", []):
-        title = f"{d['trade_name']} ({d['inn']})"
-        ru = f"РУ {d['reg_certificate']} от {d['reg_date']}"
+    with SessionLocal() as s:
+        rows = s.execute(
+            select(Drug).order_by(Drug.drug_id)
+        ).scalars().all()
+    for d in rows:
+        title = f"{d.trade_name} ({d.inn})"
+        ru = f"РУ {d.reg_certificate} от {d.reg_date}"
         docs.append(
             {
-                "guideline_id": f"drug-{d['drug_id']}",
+                "guideline_id": f"drug-{d.drug_id}",
                 "source_title": f"{title} — инструкция",
                 "topic": "ЛЕКАРСТВА",
                 "text": (
-                    f"Препарат {title}. Лекарственная форма: {d['form']}. "
-                    f"{ru}. Механизм действия: {d['pharmacology']} "
-                    f"Показания к применению: {d['indications']} "
-                    f"Режим дозирования: {d['dosage']} "
-                    f"{d['special_notes']}"
+                    f"Препарат {title}. Лекарственная форма: {d.form}. "
+                    f"{ru}. Механизм действия: {d.pharmacology} "
+                    f"Показания к применению: {d.indications} "
+                    f"Режим дозирования: {d.dosage} "
+                    f"{d.special_notes}"
                 ),
             }
         )
         docs.append(
             {
-                "guideline_id": f"drug-{d['drug_id']}-safety",
+                "guideline_id": f"drug-{d.drug_id}-safety",
                 "source_title": f"{title} — нежелательные явления и противопоказания",
                 "topic": "ЛЕКАРСТВА",
                 "text": (
-                    f"Препарат {title}. Противопоказания: {d['contraindications']} "
-                    f"Нежелательные явления: {d['adverse_events']} "
-                    f"{d['special_notes']}"
+                    f"Препарат {title}. Противопоказания: {d.contraindications} "
+                    f"Нежелательные явления: {d.adverse_events} "
+                    f"{d.special_notes}"
                 ),
             }
         )
@@ -218,6 +223,11 @@ def main() -> None:
 
     if args.reset and client.collection_exists(kb.COLLECTION):
         client.delete_collection(kb.COLLECTION)
+
+    # build_corpus()._drug_docs читает препараты из таблицы drugs — нужен engine.
+    from app import db as _db
+    if _db.engine is None:
+        _db.setup(settings.database_url)
 
     docs = build_corpus(with_guidelines=args.with_guidelines)
     n = kb.upsert_documents(client, build_embedder(), docs)

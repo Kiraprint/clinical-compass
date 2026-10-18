@@ -57,9 +57,12 @@ services:
     command: ["python", "-m", "app.kb_seed", "--reset"]
     environment:
       CC_QDRANT_URL: http://qdrant:6333
+      CC_DATABASE_URL: postgresql+psycopg://compass:compass@postgres:5432/compass
     depends_on:
       qdrant:
         condition: service_healthy
+      seed:
+        condition: service_completed_successfully
     restart: "no"
 
   ui:

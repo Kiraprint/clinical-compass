@@ -49,6 +49,12 @@ def client(engine):
 
 @pytest.fixture(autouse=True)
 def clean(engine):
+    # Справочник препаратов нужен build_corpus()/KB-тестам (kb_seed._drug_docs
+    # читает из таблицы drugs). Сеем перед каждым тестом, т.к. teardown тронкает.
+    from app.seed import _seed_drugs
+    with db.SessionLocal() as s:
+        _seed_drugs(s)
+        s.commit()
     yield
     from app.ratelimit import reset_rate_limits
     reset_rate_limits()

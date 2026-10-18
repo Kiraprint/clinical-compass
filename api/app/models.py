@@ -274,3 +274,28 @@ class AdherenceRecord(Base):
     __table_args__ = (
         CheckConstraint("status in ('taken','partial','missed')", name="adherence_records_status"),
     )
+
+
+class Drug(Base):
+    """Препараты (источник — ГРЛС, grls.rosminzdrav.ru). Справочник для ИИ-агента
+    (чанки в Qdrant строятся из этой таблицы — api/app/kb_seed._drug_docs) и для
+    API врач/админ. Не ПДн: публичные факты регистрационного удостоверения."""
+
+    __tablename__ = "drugs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    drug_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # slug «aviandr»
+    trade_name: Mapped[str] = mapped_column(String(128))
+    inn: Mapped[str] = mapped_column(String(128))
+    inn_en: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    form: Mapped[str] = mapped_column(String(255))
+    reg_certificate: Mapped[str] = mapped_column(String(128))
+    reg_date: Mapped[datetime] = mapped_column(Date)
+    revision_date: Mapped[datetime | None] = mapped_column(Date, nullable=True)
+    pharmacology: Mapped[str] = mapped_column(Text)
+    indications: Mapped[str] = mapped_column(Text)
+    dosage: Mapped[str] = mapped_column(Text)
+    contraindications: Mapped[str] = mapped_column(Text)
+    adverse_events: Mapped[str] = mapped_column(Text)
+    special_notes: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
