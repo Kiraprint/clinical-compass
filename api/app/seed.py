@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 
 from app import db, security
-from app.models import Answer, Assessment, Consent, DiaryEntry, Run, User
+from app.models import Answer, Assessment, Consent, DiaryEntry, Prescription, Run, User
 from app.services import screening as screening_service
 
 MOSCOW_TZ = timezone(timedelta(hours=3))
@@ -93,16 +93,18 @@ def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: bool = 
             email = f"p{idx}@compass.demo"
             patient = User(
                 email=email, fio=fio, password_hash=security.hash_password("Demo-Pass-1"),
-                role="PATIENT", prescribed_scale=code,
+                role="PATIENT",
             )
             s.add(patient)
             s.flush()
             pid = patient.id
             s.add(Consent(user_id=pid, version=1, text_hash="consent-v1",
                          signed_at=datetime.now(timezone.utc) - timedelta(days=days)))
+            s.add(Prescription(patient_id=pid, scale_code=code))
             s.execute(
                 text(f"INSERT INTO clinician_roster(clinician_id, patient_id) VALUES ('{doc_id}', '{pid}') ON CONFLICT DO NOTHING")
             )
+            s.flush()  # чтобы prescribed_scales() видел назначение в цикле скринингов ниже
 
             totals: list[int] = []
             for day in range(1, days + 1):

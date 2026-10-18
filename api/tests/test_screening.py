@@ -1,5 +1,5 @@
 # Контракт: docs/04 §3.1; docs/06 §3 (consent_gating, screening_closes_run, screening_one_open_only)
-from .conftest import auth_header, login, patient_ctx, register
+from .conftest import admin_ctx, auth_header, clinician_ctx, login, patient_ctx, register
 
 PHQ_ALL = {f"q{i}": 0 for i in range(1, 10)}
 
@@ -94,15 +94,47 @@ def test_finish_out_of_range_422(client):
     assert resp.json()["code"] == "VALIDATION"
 
 def test_patient_cannot_choose_scale(client):
-    """item 1: шкала назначается врачом — клиентский questionnaire_code игнорируется (дефолт PHQ-9)."""
-    h, _ = patient_ctx(client, "nochoice@test.ru")
-    # даже если клиент шлёт произвольный код — сервер использует дефолт/предписание
+    """item 1: шкала вне назначенного множества → 403 SCALE_NOT_PRESCRIBED; без кода — первичная (дефолт PHQ-9)."""
+    h, _ = patient_ctx(client, "cc@test.ru")
+    # пациент без назначения имеет дефолт [PHQ-9]; GAD-7 не в множестве → 403
     resp = client.post("/api/v1/screenings", json={"questionnaire_code": "GAD-7"}, headers=h)
+    assert resp.status_code == 403
+    assert resp.json()["code"] == "SCALE_NOT_PRESCRIBED"
+    # без кода — первичная назначенная (PHQ-9)
+    resp = client.post("/api/v1/screenings", json={}, headers=h)
     assert resp.status_code == 201
     assert resp.json()["questionnaire_code"] == "PHQ-9"
 
 def test_prescribed_scale_defaults_to_phq9(client):
     h, _ = patient_ctx(client, "def@test.ru")
-    resp = client.get("/api/v1/me/prescribed-scale", headers=h)
+    resp = client.get("/api/v1/me/prescribed-scales", headers=h)
     assert resp.status_code == 200
-    assert resp.json()["questionnaire_code"] == "PHQ-9"
+    assert [s["code"] for s in resp.json()["scales"]] == ["PHQ-9"]
+
+def test_patient_can_start_any_prescribed_scale(client):
+    """multi-scale: врач назначает [PHQ-9, GAD-7]; пациент стартует GAD-7, HADS-A — 403, без кода — PHQ-9."""
+    h, pid = patient_ctx(client, "ms@test.ru")
+    c, cid = clinician_ctx(client, "msc@test.ru")
+    a, _ = admin_ctx(client, "msa@test.ru")
+    # roster-грант от админа
+    g = client.post("/api/v1/admin/roster", json={"patient_id": pid, "clinician_id": cid}, headers=a)
+    assert g.status_code == 201, g.text
+    resp = client.put(
+        f"/api/v1/clinician/patients/{pid}/prescribed-scales",
+        json={"scales": ["PHQ-9", "GAD-7"]}, headers=c,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["scales"] == ["PHQ-9", "GAD-7"]
+    # пациент видит обе назначенные
+    scales = client.get("/api/v1/me/prescribed-scales", headers=h).json()["scales"]
+    assert [s["code"] for s in scales] == ["PHQ-9", "GAD-7"]
+    # GAD-7 разрешён (в множестве)
+    r = client.post("/api/v1/screenings", json={"questionnaire_code": "GAD-7"}, headers=h)
+    assert r.status_code == 201 and r.json()["questionnaire_code"] == "GAD-7"
+    client.post("/api/v1/screenings/abandon", headers=h)
+    # HADS-A не назначена → 403
+    r = client.post("/api/v1/screenings", json={"questionnaire_code": "HADS-A"}, headers=h)
+    assert r.status_code == 403 and r.json()["code"] == "SCALE_NOT_PRESCRIBED"
+    # без кода — первичная (PHQ-9, первая назначенная)
+    r = client.post("/api/v1/screenings", json={}, headers=h)
+    assert r.status_code == 201 and r.json()["questionnaire_code"] == "PHQ-9"

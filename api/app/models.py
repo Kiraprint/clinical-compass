@@ -25,9 +25,8 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String)
     role: Mapped[str] = mapped_column(String)  # PATIENT | CLINICIAN | ADMIN
     totp_secret: Mapped[str | None] = mapped_column(String, nullable=True)
-    # Шкала скрининга назначается врачом (roster), не выбирается пациентом.
-    # None → серверный дефолт (первая линия — PHQ-9, см. services/screening.py DEFAULT_SCALE).
-    prescribed_scale: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Шкалы скрининга назначаются врачом (roster) через таблицу prescriptions —
+    # пациент выбирает только из назначенного множества (см. services/screening.py).
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
 
 
@@ -158,6 +157,15 @@ class ClinicianRoster(Base):
     clinician_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
     patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
     granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
+class Prescription(Base):
+    """Назначенные пациенту шкалы скрининга (множество). PK (patient_id, scale_code).
+    Кто назначил — в audit_log (PRESCRIBE_SCALE); строка хранит только сам набор."""
+    __tablename__ = "prescriptions"
+
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    scale_code: Mapped[str] = mapped_column(String, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
 
 class PushSubscription(Base):
     __tablename__ = "push_subscriptions"

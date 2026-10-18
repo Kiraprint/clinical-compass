@@ -86,10 +86,10 @@ def test_diary_in_report(client):
     report = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=c).json()
     assert report["diary"][0]["content"] == "Сегодня получше"
 def test_prescribe_scale_roster_gated(client):
-    """item 1: врач назначает шкалу; без roster — 403 NO_ROSTER."""
+    """item 1: врач назначает шкалы; без roster — 403 NO_ROSTER."""
     _, pid = _with_patient(client, "ps@test.ru")
     c, _ = clinician_ctx(client, "pc@test.ru")
-    resp = client.put(f"/api/v1/clinician/patients/{pid}/prescribed-scale", json={"scale": "PHQ-9"}, headers=c)
+    resp = client.put(f"/api/v1/clinician/patients/{pid}/prescribed-scales", json={"scales": ["PHQ-9"]}, headers=c)
     assert resp.status_code == 403
     assert resp.json()["code"] == "NO_ROSTER"
 
@@ -100,9 +100,9 @@ def test_prescribe_scale_applies_to_patient(client):
     a, _ = admin_ctx(client, "pa2@test.ru")
     _grant(client, a, pid, cid)
 
-    resp = client.put(f"/api/v1/clinician/patients/{pid}/prescribed-scale", json={"scale": "GAD-7"}, headers=c)
+    resp = client.put(f"/api/v1/clinician/patients/{pid}/prescribed-scales", json={"scales": ["GAD-7"]}, headers=c)
     assert resp.status_code == 200
-    assert resp.json()["questionnaire_code"] == "GAD-7"
+    assert resp.json()["scales"] == ["GAD-7"]
 
     # Пациент теперь видит назначенную шкалу
     h = client.post(
@@ -110,10 +110,10 @@ def test_prescribe_scale_applies_to_patient(client):
     ).json()
     # ps2 зарегистрирован через patient_ctx с дефолтным паролем Str0ng-Pass!
     hdr = auth_header(h["access_token"])
-    ps = client.get("/api/v1/me/prescribed-scale", headers=hdr)
+    ps = client.get("/api/v1/me/prescribed-scales", headers=hdr)
     assert ps.status_code == 200
-    assert ps.json()["questionnaire_code"] == "GAD-7"
+    assert [s["code"] for s in ps.json()["scales"]] == ["GAD-7"]
 
     # Отчёт врача отражает назначение
     report = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=c)
-    assert report.json()["prescribed_scale"] == "GAD-7"
+    assert report.json()["prescribed_scales"] == ["GAD-7"]

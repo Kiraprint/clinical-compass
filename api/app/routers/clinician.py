@@ -15,15 +15,15 @@ from app.models import User
 router = APIRouter(tags=["clinician"])
 
 class PrescribeBody(BaseModel):
-    scale: str = Field(min_length=1)
+    scales: list[str] = Field(min_length=1)
 
-@router.put("/clinician/patients/{patient_id}/prescribed-scale")
+@router.put("/clinician/patients/{patient_id}/prescribed-scales")
 def prescribe(
     patient_id: uuid.UUID, body: PrescribeBody,
     user: User = Depends(require_clinician), db: Session = Depends(get_db),
 ):
-    """Врач назначает пациенту шкалу скрининга (item 1). Рост-гейт 403 NO_ROSTER."""
-    return services.clinician.prescribe_scale(db, user.id, patient_id, body.scale)
+    """Врач назначает пациенту множество шкал скрининга (item 1, multi-scale). Рост-гейт 403 NO_ROSTER."""
+    return services.clinician.prescribe_scales(db, user.id, patient_id, body.scales)
 
 
 @router.get("/clinician/patients")

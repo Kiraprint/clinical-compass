@@ -20,7 +20,7 @@ from compass.scoring import score, risk_flags
 from compass.triage import triage
 
 from app.errors import Problem
-from app.models import Answer, Assessment, Escalation, Run, User
+from app.models import Answer, Assessment, Escalation, Prescription, Run, User
 
 from .audit import record as audit_record
 from . import push as push_service
@@ -57,18 +57,33 @@ def _own_run(db: Session, run_id, patient_id) -> Run:
 # Шкала первой линии при отсутствии предписания врача (item 1: пациент не выбирает шкалу).
 DEFAULT_SCALE = PHQ9.code
 
-def prescribed_scale(db: Session, patient_id) -> str:
-    """Шкала назначается врачом (User.prescribed_scale), иначе — дефолт первой линии."""
-    user = db.get(User, patient_id)
-    if user is None:
-        raise Problem(404, "NOT_FOUND", "Пациент не найден")
-    code = user.prescribed_scale or DEFAULT_SCALE
-    _scale(code)  # валидация кода (404, если такой шкалы нет)
-    return code
+def prescribed_scales(db: Session, patient_id) -> list[str]:
+    """Шкалы, назначенные пациенту врачом (упорядочены по времени назначения).
+    Пусто → дефолт первой линии [PHQ-9] (пациент без назначения всё равно может скриниться)."""
+    rows = db.scalars(
+        select(Prescription).where(Prescription.patient_id == patient_id).order_by(Prescription.created_at)
+    ).all()
+    codes = [r.scale_code for r in rows]
+    if not codes:
+        return [DEFAULT_SCALE]
+    return codes
 
-def start_screening(db: Session, patient_id) -> Run:
-    questionnaire_code = prescribed_scale(db, patient_id)
-    scale = _scale(questionnaire_code)
+def prescribed_scale(db: Session, patient_id) -> str:
+    """Первичная (первая назначенная) шкала — для чек-инов и дефолта старта. Без назначения — PHQ-9."""
+    return prescribed_scales(db, patient_id)[0]
+
+def start_screening(db: Session, patient_id, questionnaire_code: str | None = None) -> Run:
+    """Старт скрининга. Шкала: явно указанная пациентом (если она в назначенном множестве),
+    иначе первичная. Пациент не может выбрать произвольную шкалу — 403 SCALE_NOT_PRESCRIBED."""
+    assigned = prescribed_scales(db, patient_id)
+    if questionnaire_code is None:
+        code = assigned[0]
+    elif questionnaire_code in assigned:
+        code = questionnaire_code
+    else:
+        raise Problem(403, "SCALE_NOT_PRESCRIBED",
+                      f"Шкала {questionnaire_code} не назначена врачом")
+    scale = _scale(code)
     open_run = db.scalar(
         select(Run).where(Run.patient_id == patient_id, Run.mode == "SCREENING", Run.finished_at.is_(None))
     )
@@ -210,7 +225,7 @@ def _last_scale_result(db: Session, patient_id) -> tuple:
 
 
 def today_checkin(db: Session, patient_id) -> dict:
-    scale = _scale(_last_scale_result(db, patient_id)[1] or PHQ9.code)
+    scale = _scale(_last_scale_result(db, patient_id)[1] or prescribed_scale(db, patient_id))
     last_result, _ = _last_scale_result(db, patient_id)
     checkin = generate_checkin(scale, last_result)
     items = checkin.items
@@ -235,7 +250,7 @@ def complete_checkin(db: Session, patient_id, answers: Mapping[str, int]) -> dic
     )
     if existing is not None:
         raise Problem(409, "RUN_ALREADY_TODAY", "Чек-ин за сегодня уже выполнен")
-    scale = _scale(_last_scale_result(db, patient_id)[1] or PHQ9.code)
+    scale = _scale(_last_scale_result(db, patient_id)[1] or prescribed_scale(db, patient_id))
     last_result, _ = _last_scale_result(db, patient_id)
     checkin = generate_checkin(scale, last_result)
     items = checkin.items

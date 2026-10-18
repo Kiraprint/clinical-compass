@@ -16,7 +16,9 @@ router = APIRouter(tags=["screenings"])
 
 
 class ScreeningBody(BaseModel):
-    """Тело пустое: шкала назначается врачом (item 1), пациент её не передаёт."""
+    """Шкала — опциональна: пациент выбирает из назначенных врачом (item 1, multi-scale).
+    Без questionnaire_code — первичная назначенная. Произвольная шкала → 403 SCALE_NOT_PRESCRIBED."""
+    questionnaire_code: str | None = None
 
 
 class AnswersBody(BaseModel):
@@ -38,15 +40,17 @@ def list_questionnaires(user: User = Depends(require_consent), db: Session = Dep
     ]
 
 
-@router.get("/me/prescribed-scale")
-def my_prescribed_scale(user: User = Depends(require_consent), db: Session = Depends(get_db)):
-    """Шкала, назначенная пациенту врачом (item 1). Без предписания — дефолт первой линии."""
-    code = services.screening.prescribed_scale(db, user.id)
-    return {"questionnaire_code": code}
+@router.get("/me/prescribed-scales")
+def my_prescribed_scales(user: User = Depends(require_consent), db: Session = Depends(get_db)):
+    """Шкалы, назначенные пациенту врачом (item 1, multi-scale). Без назначения — дефолт [PHQ-9]."""
+    from compass.scales import ALL_SCALES
+
+    codes = services.screening.prescribed_scales(db, user.id)
+    return {"scales": [{"code": c, "title": ALL_SCALES[c].title} for c in codes]}
 
 @router.post("/screenings", status_code=201)
 def create_screening(body: ScreeningBody, user: User = Depends(require_consent), db: Session = Depends(get_db)):
-    run = services.screening.start_screening(db, user.id)
+    run = services.screening.start_screening(db, user.id, body.questionnaire_code)
     return {
         "run_id": str(run.id),
         "questionnaire_code": run.questionnaire_code,

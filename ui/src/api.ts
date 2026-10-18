@@ -113,7 +113,11 @@ export const api = {
   postConsent: verb<Consent>("POST")("/api/v1/consent"),
   revokeConsent: () => req<void>("/api/v1/consent/revoke", { method: "POST" }),
   getQuestionnaires: () => req<Questionnaire[]>("/api/v1/questionnaires"),
-  startScreening: () => req<ScreeningRun>("/api/v1/screenings", { method: "POST", body: "{}" }),
+  startScreening: (questionnaireCode?: string) =>
+    req<ScreeningRun>("/api/v1/screenings", {
+      method: "POST",
+      body: JSON.stringify(questionnaireCode ? { questionnaire_code: questionnaireCode } : {}),
+    }),
   submitAnswers: (runId: string, answers: Record<string, number>) =>
     req<void>(`/api/v1/runs/${runId}/answers`, {
       method: "POST",
@@ -143,11 +147,11 @@ export const api = {
     }),
   assistantStatus: () => req<{ collection: string; points: number }>("/api/v1/assistant/status"),
   adminAudit: () => req<{ items: AuditEvent[] }>("/api/v1/admin/audit"),
-  prescribedScale: () => req<{ questionnaire_code: string }>("/api/v1/me/prescribed-scale"),
-  setPrescribedScale: (patientId: string, scale: string) =>
-    req<{ patient_id: string; questionnaire_code: string }>(`/api/v1/clinician/patients/${patientId}/prescribed-scale`, {
+  prescribedScales: () => req<{ scales: { code: string; title: string }[] }>("/api/v1/me/prescribed-scales"),
+  setPrescribedScales: (patientId: string, scales: string[]) =>
+    req<{ patient_id: string; scales: string[] }>(`/api/v1/clinician/patients/${patientId}/prescribed-scales`, {
       method: "PUT",
-      body: JSON.stringify({ scale }),
+      body: JSON.stringify({ scales }),
     }),
   vapidPublicKey: () => req<{ public_key: string }>("/api/v1/push/vapid-public-key"),
   subscribePush: (endpoint: string, keys: { p256dh: string; auth: string }) =>
@@ -242,7 +246,7 @@ export interface Report {
   patient_id: string;
   email: string;
   fio: string | null;
-  prescribed_scale: string | null;
+  prescribed_scales: string[];
   last_assessment: {
     assessment_id: string;
     total_score: number;

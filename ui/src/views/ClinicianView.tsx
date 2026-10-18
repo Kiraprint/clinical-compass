@@ -107,20 +107,20 @@ export default function ClinicianView() {
 }
 
 function ReportView({ report, error, onBack }: { report: Report | null; error: string; onBack: () => void }) {
-  const [scale, setScale] = useState("");
+  const [picked, setPicked] = useState<string[]>([]);
   const [scaleSaved, setScaleSaved] = useState<number | null>(null);
   const [scaleError, setScaleError] = useState("");
   useEffect(() => {
-    if (report) setScale(report.prescribed_scale ?? "");
+    if (report) setPicked(report.prescribed_scales ?? []);
   }, [report]);
 
   const saveScale = async () => {
-    if (!report || !scale) return;
+    if (!report || picked.length === 0) return;
     setScaleError("");
     try {
-      const res = await api.setPrescribedScale(report.patient_id, scale);
+      const res = await api.setPrescribedScales(report.patient_id, picked);
       setScaleSaved(Date.now());
-      setScale(res.questionnaire_code);
+      setPicked(res.scales);
     } catch (e: unknown) {
       setScaleError(e instanceof Error ? e.message : String(e));
     }
@@ -146,17 +146,25 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
       <h2>{report.fio ?? report.email}</h2>
       <p style={{ color: "#5a6478" }}>{report.email}</p>
 
-      <div className="row" style={{ alignItems: "center" }}>
-        <label style={{ margin: 0 }}>Шкала скрининга</label>
-        <select value={scale} onChange={(e) => setScale(e.target.value)}>
-          <option value="">— не задана (дефолт PHQ-9) —</option>
+      <div className="row" style={{ alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+        <label style={{ margin: 0 }}>Шкалы скрининга</label>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           {report.available_scales.map((s) => (
-            <option key={s.code} value={s.code}>
+            <label key={s.code} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
+              <input
+                type="checkbox"
+                checked={picked.includes(s.code)}
+                onChange={() =>
+                  setPicked((cur) =>
+                    cur.includes(s.code) ? cur.filter((c) => c !== s.code) : [...cur, s.code],
+                  )
+                }
+              />
               {s.title}
-            </option>
+            </label>
           ))}
-        </select>
-        <button onClick={saveScale}>Назначить</button>
+        </div>
+        <button onClick={saveScale} disabled={picked.length === 0}>Назначить</button>
         {scaleSaved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
       </div>
       {scaleError && <p className="error">{scaleError}</p>}

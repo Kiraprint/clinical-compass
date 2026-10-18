@@ -92,8 +92,9 @@ export default function PatientView() {
 }
 
 function ScreeningTab() {
-  const [scales, setScales] = useState<Questionnaire[]>([]);
-  const [assignedTitle, setAssignedTitle] = useState("");
+  const [catalog, setCatalog] = useState<Questionnaire[]>([]);
+  const [assigned, setAssigned] = useState<{ code: string; title: string }[]>([]);
+  const [chosenCode, setChosenCode] = useState<string | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const [questions, setQuestions] = useState<{ key: string; text: string; max: number }[]>([]);
   const [answers, setAnswers] = useState<Record<string, number>>({});
@@ -101,15 +102,12 @@ function ScreeningTab() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    api
-      .prescribedScale()
-      .then((p) => {
-        const catalog = api.getQuestionnaires();
-        return catalog.then((q) => {
-          setScales(q);
-          const s = q.find((x) => x.code === p.questionnaire_code);
-          setAssignedTitle(s ? s.title : p.questionnaire_code);
-        });
+    Promise.all([api.getQuestionnaires(), api.prescribedScales()])
+      .then(([q, p]) => {
+        setCatalog(q);
+        setAssigned(p.scales);
+        // Одна назначенная — выбираем её автоматически; несколько — пациент выберет.
+        setChosenCode(p.scales.length === 1 ? p.scales[0].code : null);
       })
       .catch((e) => setError(e instanceof ApiError ? e.detail : String(e)));
   }, []);
@@ -117,8 +115,8 @@ function ScreeningTab() {
   const start = async () => {
     setError("");
     try {
-      const run = await api.startScreening();
-      const scale = scales.find((s) => s.code === run.questionnaire_code);
+      const run = await api.startScreening(chosenCode ?? undefined);
+      const scale = catalog.find((s) => s.code === run.questionnaire_code);
       setRunId(run.run_id);
       setQuestions((scale?.items ?? []).map((i) => ({ key: i.key, text: i.text, max: i.max_value })));
       setAnswers({});
@@ -179,10 +177,28 @@ function ScreeningTab() {
       {!runId ? (
         <>
           <p style={{ color: "#5a6478", fontSize: 14 }}>
-            Шкала назначена вашим врачом: <b>{assignedTitle || "…"}</b>
+            {assigned.length > 1
+              ? "Шкалы назначены вашим врачом — выберите одну:"
+              : "Шкала назначена вашим врачом:"}
           </p>
-          <div style={{ marginTop: 12 }}>
-            <button onClick={start} disabled={!assignedTitle}>
+          {assigned.length > 1 && (
+            <div className="row" style={{ gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+              {assigned.map((s) => (
+                <button
+                  key={s.code}
+                  className={chosenCode === s.code ? "on" : ""}
+                  onClick={() => setChosenCode(s.code)}
+                >
+                  {s.title}
+                </button>
+              ))}
+            </div>
+          )}
+          {assigned.length === 1 && (
+            <b style={{ display: "block", marginBottom: 12 }}>{assigned[0]?.title || "…"}</b>
+          )}
+          <div style={{ marginTop: 4 }}>
+            <button onClick={start} disabled={!chosenCode}>
               Начать скрининг
             </button>
           </div>

@@ -12,7 +12,7 @@ from compass.scales import ALL_SCALES
 from compass.trend import trends
 
 from app.errors import Problem
-from app.models import Assessment, ClinicianRoster, Consent, DiaryEntry, Escalation, User
+from app.models import Assessment, ClinicianRoster, Consent, DiaryEntry, Escalation, Prescription, User
 
 from .audit import record as audit_record
 
@@ -22,17 +22,44 @@ def _require_roster(db: Session, clinician_id, patient_id) -> None:
     if row is None:
         raise Problem(403, "NO_ROSTER", "Пациент не закреплён за этим врачом")
 
-def prescribe_scale(db: Session, clinician_id, patient_id, scale_code: str) -> dict:
-    """Врач назначает пациенту шкалу скрининга (item 1). Validity через _scale (404)."""
+def _prescribed_scales_of(db: Session, patient_id) -> list[str]:
+    """Коды назначенных пациенту шкал (упорядочены по времени назначения)."""
+    rows = db.scalars(
+        select(Prescription).where(Prescription.patient_id == patient_id).order_by(Prescription.created_at)
+    ).all()
+    return [r.scale_code for r in rows]
+
+def prescribe_scales(db: Session, clinician_id, patient_id, scale_codes: list[str]) -> dict:
+    """Врач назначает пациенту множество шкал скрининга (item 1, multi-scale).
+
+    Заменяет весь набор: отсутствующие в scale_codes удаляются, новые добавляются,
+    уже назначенные сохраняют created_at (стабильный порядок). Roster-gate 403.
+    Validity кодов — через _scale (404). Минимум одна шкала.
+    """
     from app.services.screening import _scale
 
-    _scale(scale_code)  # 404, если неизвестная шкала
+    # уникальные, непустые, валидные коды
+    uniq: list[str] = []
+    for code in scale_codes:
+        c = code.strip()
+        if c and c not in uniq:
+            _scale(c)
+            uniq.append(c)
+    if not uniq:
+        raise Problem(422, "VALIDATION", "Нужна хотя бы одна шкала")
     _require_roster(db, clinician_id, patient_id)
-    patient = db.get(User, patient_id)
-    patient.prescribed_scale = scale_code
+    existing = {r.scale_code: r for r in db.scalars(
+        select(Prescription).where(Prescription.patient_id == patient_id)
+    ).all()}
+    for code in list(existing):
+        if code not in uniq:
+            db.delete(existing[code])
+    for code in uniq:
+        if code not in existing:
+            db.add(Prescription(patient_id=patient_id, scale_code=code))
     audit_record(db, clinician_id, "PRESCRIBE_SCALE", "user", str(patient_id))
     db.commit()
-    return {"patient_id": str(patient_id), "questionnaire_code": scale_code}
+    return {"patient_id": str(patient_id), "scales": uniq}
 
 
 def list_patients(db: Session, clinician_id, triage: str | None = None) -> list[dict]:
@@ -134,7 +161,7 @@ def _patient_card(db: Session, patient_id) -> dict:
         "patient_id": str(patient_id),
         "email": patient.email,
         "fio": patient.fio,
-        "prescribed_scale": patient.prescribed_scale,
+        "prescribed_scales": _prescribed_scales_of(db, patient_id),
         "last_assessment": (
             {
                 "assessment_id": str(last.id),
@@ -192,7 +219,7 @@ def patient_context(db: Session, clinician_id, patient_id) -> dict:
     return {
         "patient_id": card["patient_id"],
         "fio": card["fio"],
-        "prescribed_scale": card["prescribed_scale"],
+        "prescribed_scales": card["prescribed_scales"],
         "last_assessment": card["last_assessment"],
         "trend": card["trend"],
         "open_escalations": card["open_escalations"],
