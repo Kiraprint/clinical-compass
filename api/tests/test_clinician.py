@@ -218,3 +218,55 @@ def test_clinician_chat_roster_gated(client):
     r = client.post(f"/api/v1/clinician/patients/{pid}/chat", json={"content": "x"}, headers=c)
     assert r.status_code == 403
     assert r.json()["code"] == "NO_ROSTER"
+
+
+TEMPLATE_A = """Жалобы: постоянная тревога, нарушение сна, снижение настроения
+Анамнез: симптомы около 6 месяцев, ранее не обращался
+Диагноз: F41.1 Генерализованное тревожное расстройство
+Лечение: Авиандр 20 мг 2 раза в сутки
+PHQ-9: 12, GAD-7 = 14"""
+
+# Тот же клинический смысл, другой порядок разделов и стиль фиксации.
+TEMPLATE_B = """Диагноз — F41.1
+Назначено: Авиандр 20 мг
+Жалобы: тревога, бессонница
+GAD-7: 14
+Анамнез заболевания: 6 месяцев"""
+
+
+def test_import_history_parses_different_templates(client):
+    """метрика кейса 2: извлечение из историй разных шаблонов (порядок/стиль/формат)."""
+    _, pid = _with_patient(client, "hi@test.ru")
+    c, cid = clinician_ctx(client, "hic@test.ru")
+    a, _ = admin_ctx(client, "hia@test.ru")
+    _grant(client, a, pid, cid)
+
+    ra = client.post(f"/api/v1/clinician/patients/{pid}/import-history",
+                     json={"text": TEMPLATE_A, "template_name": "A"}, headers=c)
+    assert ra.status_code == 200, ra.text
+    a_body = ra.json()
+    assert "F41.1" in a_body["diagnosis_codes"]
+    assert any("Авиандр" in t for t in a_body["therapy"])
+    assert a_body["complaints"] and "тревога" in a_body["complaints"]
+    assert a_body["requires_confirmation"] is True
+
+    rb = client.post(f"/api/v1/clinician/patients/{pid}/import-history",
+                     json={"text": TEMPLATE_B, "template_name": "B"}, headers=c)
+    assert rb.status_code == 200, rb.text
+    b_body = rb.json()
+    # Тот же диагноз и препарат извлечены несмотря на другой порядок/стиль.
+    assert "F41.1" in b_body["diagnosis_codes"]
+    assert any("Авиандр" in t for t in b_body["therapy"])
+    assert any("GAD-7" in s for s in b_body["scale_scores"])
+
+    audit = client.get("/api/v1/admin/audit", headers=a).json()["items"]
+    assert sum(1 for e in audit if e["action"] == "IMPORT_HISTORY") == 2
+
+
+def test_import_history_roster_gated(client):
+    _, pid = _with_patient(client, "hi2@test.ru")
+    c, _ = clinician_ctx(client, "hic2@test.ru")
+    r = client.post(f"/api/v1/clinician/patients/{pid}/import-history",
+                    json={"text": TEMPLATE_A}, headers=c)
+    assert r.status_code == 403
+    assert r.json()["code"] == "NO_ROSTER"

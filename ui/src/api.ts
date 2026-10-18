@@ -175,6 +175,11 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ content }),
       }),
+  importHistory: (patientId: string, text: string, templateName?: string) =>
+    req<ImportHistoryResult>(`/api/v1/clinician/patients/${patientId}/import-history`, {
+      method: "POST",
+      body: JSON.stringify({ text, template_name: templateName }),
+    }),
   vapidPublicKey: () => req<{ public_key: string }>("/api/v1/push/vapid-public-key"),
   subscribePush: (endpoint: string, keys: { p256dh: string; auth: string }) =>
     req<{ subscribed: boolean }>("/api/v1/push/subscribe", {
@@ -264,6 +269,17 @@ export interface PatientCard {
   last_assessment_at: string | null;
   open_escalations: number;
 }
+export interface ImportHistoryResult {
+  template: string;
+  fields_found: number;
+  complaints: string | null;
+  anamnesis: string | null;
+  diagnosis_codes: string[];
+  therapy: string[];
+  scale_scores: string[];
+  requires_confirmation: boolean;
+}
+
 export interface Report {
   patient_id: string;
   email: string;

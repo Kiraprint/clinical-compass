@@ -16,6 +16,7 @@ from app.errors import Problem
 from app.models import AdherenceRecord, AdverseEvent, Assessment, ChatMessage, ClinicianRoster, Consent, DiaryEntry, Escalation, Prescription, User
 
 from .audit import record as audit_record
+from .history_extract import extract_history
 
 
 def _require_roster(db: Session, clinician_id, patient_id) -> None:
@@ -392,3 +393,25 @@ def clinician_list_chat(db: Session, clinician_id, patient_id) -> list[dict]:
     ).all()
     # вернуть в хронологическом порядке (последние 50)
     return [_chat_dict(m) for m in reversed(rows)]
+
+
+def import_history(db: Session, clinician_id, patient_id, text: str, template_name: str | None) -> dict:
+    """Разбор клинической истории (метрика кейса 2). Roster + аудит IMPORT_HISTORY.
+
+    Возвращает ЧЕРНОВИК извлечённых полей — врач подтверждает вручную. В клиническую
+    модель не пишется (структурирование, не клиническое действие).
+    """
+    _require_roster(db, clinician_id, patient_id)
+    ext = extract_history(text, template_name)
+    audit_record(db, clinician_id, "IMPORT_HISTORY", "patient", str(patient_id))
+    db.commit()
+    return {
+        "template": ext.template,
+        "fields_found": ext.fields_found,
+        "complaints": ext.complaints,
+        "anamnesis": ext.anamnesis,
+        "diagnosis_codes": list(ext.diagnosis_codes),
+        "therapy": list(ext.therapy),
+        "scale_scores": list(ext.scale_scores),
+        "requires_confirmation": True,
+    }

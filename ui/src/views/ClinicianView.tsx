@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, PatientCard, Report } from "../api";
+import { api, ImportHistoryResult, PatientCard, Report } from "../api";
 import TrendChart from "../TrendChart";
 import AssistantTab from "./AssistantTab";
 
@@ -158,6 +158,9 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
   const [chatMsgs, setChatMsgs] = useState<{ id: string; sender: string; content: string; created_at: string }[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [chatErr, setChatErr] = useState("");
+  const [histText, setHistText] = useState("");
+  const [histResult, setHistResult] = useState<ImportHistoryResult | null>(null);
+  const [histErr, setHistErr] = useState("");
   useEffect(() => {
     if (report) { setPicked(report.prescribed_scales ?? []); setAeList(report.adverse_events ?? []); }
   }, [report]);
@@ -206,6 +209,17 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
       setChatInput("");
     } catch (e: unknown) {
       setChatErr(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const runImport = async () => {
+    if (!report || !histText.trim()) return;
+    setHistErr("");
+    setHistResult(null);
+    try {
+      setHistResult(await api.importHistory(report.patient_id, histText.trim()));
+    } catch (e: unknown) {
+      setHistErr(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -388,6 +402,28 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
         <button onClick={sendChat} disabled={!chatInput.trim()}>Отправить</button>
       </div>
       {chatErr && <p className="error">{chatErr}</p>}
+
+      <h3>Импорт истории болезни (метрика кейса 2)</h3>
+      <p style={{ color: "#5a6478", fontSize: 13 }}>
+        Вставьте текст истории болезни (любой шаблон) — система извлечёт ключевые поля
+        в черновик. Подтвердите перед использованием в клинической модели.
+      </p>
+      <textarea rows={5} placeholder="Жалобы: …\nАнамнез: …\nДиагноз: F41.1\nЛечение: Авиандр 20 мг"
+        value={histText} onChange={(e) => setHistText(e.target.value)} />
+      <div style={{ marginTop: 8 }}>
+        <button onClick={runImport} disabled={!histText.trim()}>Разобрать</button>
+      </div>
+      {histErr && <p className="error">{histErr}</p>}
+      {histResult && (
+        <div className="alert-info" style={{ marginTop: 10 }}>
+          <b>Черновик (требует подтверждения)</b> · шаблон: {histResult.template}, полей: {histResult.fields_found}
+          {histResult.complaints && <div><b>Жалобы:</b> {histResult.complaints}</div>}
+          {histResult.anamnesis && <div><b>Анамнез:</b> {histResult.anamnesis}</div>}
+          {histResult.diagnosis_codes.length > 0 && <div><b>Коды МКБ-10:</b> {histResult.diagnosis_codes.join(", ")}</div>}
+          {histResult.therapy.length > 0 && <div><b>Терапия:</b> {histResult.therapy.join("; ")}</div>}
+          {histResult.scale_scores.length > 0 && <div><b>Баллы шкал:</b> {histResult.scale_scores.join("; ")}</div>}
+        </div>
+      )}
 
       <h3>Динамика (90 дней)</h3>
       <TrendChart timeline={{ runs: report.history, trend: report.trend }} />

@@ -1,0 +1,35 @@
+{
+  "note": "Синтетические клинические истории (собственные, без текстов третьих лиц) для метрики кейса 2 — точность извлечения при разных шаблонах.",
+  "cases": [
+    {
+      "id": "full-colon",
+      "text": "Жалобы: постоянная тревога, нарушение сна\nАнамнез: симптомы 6 месяцев\nДиагноз: F41.1 Генерализованное тревожное расстройство\nЛечение: Авиандр 20 мг 2 раза в сутки\nPHQ-9: 12",
+      "gold": {"diagnosis_codes": ["F41.1"], "drugs": ["Авиандр"], "has_complaints": true, "has_anamnesis": true, "has_scales": true}
+    },
+    {
+      "id": "reordered-dash",
+      "text": "Диагноз — F41.1\nНазначено: Авиандр 20 мг\nЖалобы: тревога, бессонница\nGAD-7: 14\nАнамнез заболевания: 6 месяцев",
+      "gold": {"diagnosis_codes": ["F41.1"], "drugs": ["Авиандр"], "has_complaints": true, "has_anamnesis": true, "has_scales": true}
+    },
+    {
+      "id": "english",
+      "text": "Complaints: anxiety, insomnia\nAnamnesis: 6 months\nDiagnosis: F32.1\nTherapy: Авиандр 20 мг\nHADS: 11",
+      "gold": {"diagnosis_codes": ["F32.1"], "drugs": ["Авиандр"], "has_complaints": true, "has_anamnesis": true, "has_scales": true}
+    },
+    {
+      "id": "brief",
+      "text": "Клинический диагноз: F43.2\nТерапия: Авиандр 20 мг",
+      "gold": {"diagnosis_codes": ["F43.2"], "drugs": ["Авиандр"], "has_complaints": false, "has_anamnesis": false, "has_scales": false}
+    },
+    {
+      "id": "multi-code",
+      "text": "Диагноз: F41.1, F43.2\nЛечение: Авиандр 20 мг, гидроксизин 25 мг\nЖалобы: тревога",
+      "gold": {"diagnosis_codes": ["F41.1", "F43.2"], "drugs": ["Авиандр", "гидроксизин"], "has_complaints": true, "has_anamnesis": false, "has_scales": false}
+    },
+    {
+      "id": "stylized",
+      "text": "ИСТОРИЯ БОЛЕЗНИ\n\nЖалобы при поступлении: выраженная тревога\nАнамнез жизни: без особенностей\nДиагноз: F41.1\nПринимает: Авиандр 20 мг\nГоспитальная шкала: HADS 10",
+      "gold": {"diagnosis_codes": ["F41.1"], "drugs": ["Авиандр"], "has_complaints": true, "has_anamnesis": true, "has_scales": true}
+    }
+  ]
+}

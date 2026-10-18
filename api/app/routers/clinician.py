@@ -92,6 +92,18 @@ def clinician_chat_list(
     """История переписки врача с пациентом (задача кейса 6). Roster-гейт."""
     return {"items": services.clinician.clinician_list_chat(db, user.id, patient_id)}
 
+class HistoryBody(BaseModel):
+    text: str = Field(min_length=1)
+    template_name: str | None = None
+
+@router.post("/clinician/patients/{patient_id}/import-history")
+def import_history(
+    patient_id: uuid.UUID, body: HistoryBody,
+    user: User = Depends(require_clinician), db: Session = Depends(get_db),
+):
+    """Разбор клинической истории в черновик полей (метрика кейса 2). Roster + аудит."""
+    return services.clinician.import_history(db, user.id, patient_id, body.text, body.template_name)
+
 
 me_router = APIRouter(tags=["me"])
 
