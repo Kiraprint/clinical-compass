@@ -46,8 +46,10 @@ async function refreshAccessToken(): Promise<boolean> {
       body: JSON.stringify({ refresh_token: refreshToken }),
     });
     if (!resp.ok) return false;
-    const body = (await resp.json()) as { access_token: string };
+    // F4: сервер ротирует refresh — сохраняем новый, иначе следующий refresh 401.
+    const body = (await resp.json()) as { access_token: string; refresh_token: string };
     setToken(body.access_token);
+    setRefreshToken(body.refresh_token);
     return true;
   } catch {
     return false;
@@ -109,6 +111,16 @@ export interface ScreeningRun {
 export const api = {
   register: verb<RegisterResp>("POST")("/api/v1/auth/register"),
   login: verb<LoginResp>("POST")("/api/v1/auth/login"),
+  // F4: отзыв refresh-токена на сервере (best-effort, не блокирует UI).
+  logout: () => {
+    const rt = getRefreshToken();
+    if (rt) fetch(`${BASE}/api/v1/auth/logout`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: rt }),
+      keepalive: true,
+    }).catch(() => {});
+  },
   getConsent: () => req<Consent>("/api/v1/consent"),
   postConsent: verb<Consent>("POST")("/api/v1/consent"),
   revokeConsent: () => req<void>("/api/v1/consent/revoke", { method: "POST" }),

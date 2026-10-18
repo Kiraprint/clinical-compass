@@ -53,4 +53,46 @@ def revoke(user: User = Depends(require_patient), db: Session = Depends(get_db))
     if consent is None:
         raise Problem(409, "CONFLICT", "Нет активного согласия для отзыва")
     consent.revoked_at = datetime.now(timezone.utc)
+    _destroy_patient_pdn(db, user.id)
     db.commit()
+
+
+def _destroy_patient_pdn(db: Session, patient_id) -> None:
+    """F2 (152-ФЗ ст.9 ч.2-3): уничтожение спецкатегории ПДн при отзыве согласия.
+
+    DELETE строк пациента в FK-безопасном порядке (дети раньше родителей):
+    notification → escalation → answer → assessment → run, и независимые
+    diary/chat/adverse/adherence. Свободный текст был зашифрован pgcrypto — удаление
+    строк уничтожает зашифрованные blob'ы. Consent + audit_log остаются (реквизиты
+    ст. 9 ч.4 и WORM-аудит доступа — основание обработки, не уничтожаются).
+    Prescription/ClinicianRoster/PushSubscription/DeviceToken — операционные связи,
+    не спецкатегория ПДн. Реальная деструкция 30 дней (152-ФЗ ст.9 ч.2-3) выполняется
+    шедулером в проде; в MVP — немедленное удаление при отзыве.
+    """
+    from sqlalchemy import delete as sa_delete, select as sa_select
+
+    from app.models import (
+        AdherenceRecord,
+        AdverseEvent,
+        Answer,
+        Assessment,
+        ChatMessage,
+        DiaryEntry,
+        Escalation,
+        Notification,
+        Run,
+    )
+
+    # дети → родители. Answer не имеет patient_id — удаляем через подзапрос по runs.
+    db.execute(sa_delete(Notification).where(Notification.patient_id == patient_id))
+    db.execute(sa_delete(Escalation).where(Escalation.patient_id == patient_id))
+    run_ids = sa_select(Run.id).where(Run.patient_id == patient_id)
+    db.execute(sa_delete(Answer).where(Answer.run_id.in_(run_ids)))
+    db.execute(sa_delete(Assessment).where(Assessment.patient_id == patient_id))
+    db.execute(sa_delete(Run).where(Run.patient_id == patient_id))
+    # независимые
+    db.execute(sa_delete(DiaryEntry).where(DiaryEntry.patient_id == patient_id))
+    db.execute(sa_delete(ChatMessage).where(ChatMessage.patient_id == patient_id))
+    db.execute(sa_delete(AdverseEvent).where(AdverseEvent.patient_id == patient_id))
+    db.execute(sa_delete(AdherenceRecord).where(AdherenceRecord.patient_id == patient_id))
+    db.flush()

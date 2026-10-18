@@ -10,6 +10,7 @@ import os
 os.environ.setdefault("CC_FAST_ARGON2", "1")
 os.environ.setdefault("CC_PUSH_ENABLED", "0")  # тесты без сетевого Web Push (уведомления в БД остаются)
 os.environ.setdefault("CC_QDRANT_COLLECTION", "kb_test")  # не затираем демо-коллекцию kb
+os.environ.setdefault("CC_DATA_KEY", "test-data-key-0123456789abcdef0123456789abcdef")  # F1: pgcrypto ключ для тестов
 
 import pyotp
 import pytest
@@ -45,6 +46,13 @@ def client(engine):
     app = create_app()
     with TestClient(app) as c:
         yield c
+
+@pytest.fixture()
+def db_session(engine):
+    """Сессия БД для прямых запросов в обход ORM (проверки шифрования в покое)."""
+    with db.SessionLocal() as s:
+        yield s
+        s.rollback()
 
 
 @pytest.fixture(autouse=True)

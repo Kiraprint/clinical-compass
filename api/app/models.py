@@ -9,6 +9,7 @@ from sqlalchemy import BigInteger, CheckConstraint, Date, DateTime, ForeignKey, 
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
+from .crypto import EncryptedText
 from .db import Base
 
 
@@ -128,7 +129,7 @@ class DiaryEntry(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
-    content: Mapped[str] = mapped_column(String)
+    content: Mapped[str] = mapped_column(EncryptedText())
     mood: Mapped[int | None] = mapped_column(nullable=True)  # 1..10
     sleep_h: Mapped[float | None] = mapped_column(nullable=True)
     tags: Mapped[list] = mapped_column(JSONB, default=list)
@@ -147,7 +148,7 @@ class ChatMessage(Base):
     patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
     sender: Mapped[str] = mapped_column(String)  # PATIENT | SYSTEM
     kind: Mapped[str] = mapped_column(String)  # TEXT | FAQ | HOTLINE
-    content: Mapped[str] = mapped_column(String)
+    content: Mapped[str] = mapped_column(EncryptedText())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)
 
 
@@ -238,7 +239,7 @@ class AdverseEvent(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
     clinician_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
-    event_text: Mapped[str] = mapped_column(Text)
+    event_text: Mapped[str] = mapped_column(EncryptedText())
     severity: Mapped[str] = mapped_column(String(16))   # mild | moderate | severe
     onset_date: Mapped[datetime] = mapped_column(Date)
     suspected_drug: Mapped[str | None] = mapped_column(String(128))
@@ -268,7 +269,7 @@ class AdherenceRecord(Base):
     patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
     medication: Mapped[str | None] = mapped_column(String(128))
     status: Mapped[str] = mapped_column(String(16))   # taken | partial | missed
-    note: Mapped[str | None] = mapped_column(Text)
+    note: Mapped[str | None] = mapped_column(EncryptedText())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)
 
     __table_args__ = (
@@ -299,3 +300,21 @@ class Drug(Base):
     adverse_events: Mapped[str] = mapped_column(Text)
     special_notes: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
+
+class RefreshToken(Base):
+    """F4 (security-audit): server-side rotating refresh tokens с jti-стором.
+
+    Заменяет stateless JWT refresh — каждый логин/ротация создаёт строку, /refresh
+    проверяет jti + revoked + expires, ротирует (revoke old → issue new), /auth/logout
+    отзывает. Украденный refresh живёт до первого использования легитимным клиентом.
+    """
+    __tablename__ = "refresh_tokens"
+    __table_args__ = (Index("refresh_tokens_user", "user_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    jti: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -36,9 +36,15 @@ async def problem_handler(request: Request, exc: Problem) -> JSONResponse:
 
 
 async def validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    # F5 (ГОСТ 56939/152-ФЗ): pydantic echo'ит поле input — там могут быть пароль
+    # или PHI (текст дневника/чата). Вырезаем input и ctx перед сериализацией.
+    safe = []
+    for e in exc.errors()[:3]:
+        e = {k: v for k, v in e.items() if k not in ("input", "ctx")}
+        safe.append(e)
     return JSONResponse(
         status_code=422,
-        content=_problem(422, "VALIDATION", str(exc.errors()[:3]), str(request.url.path)),
+        content=_problem(422, "VALIDATION", str(safe), str(request.url.path)),
     )
 
 

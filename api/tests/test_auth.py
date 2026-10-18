@@ -106,3 +106,42 @@ def test_patient_token_cannot_access_admin(client):
     resp = client.get("/api/v1/admin/audit", headers=auth_header(data["access_token"]))
     assert resp.status_code == 403
     assert resp.json()["code"] == "ROLE_MISMATCH"
+
+
+def test_refresh_rotates_and_invalidates_old(client, db_session):
+    """F4: /refresh выдаёт новый refresh, старый отозван."""
+    from app.models import RefreshToken
+
+    register(client, "rot@test.ru")
+    data = login(client, "rot@test.ru")
+    old_rt = data["refresh_token"]
+    # первый refresh — успех + новый refresh_token
+    resp = client.post("/api/v1/auth/refresh", json={"refresh_token": old_rt})
+    assert resp.status_code == 200
+    new_rt = resp.json()["refresh_token"]
+    assert new_rt != old_rt
+    # повторное использование старого → 401 (отозван)
+    resp2 = client.post("/api/v1/auth/refresh", json={"refresh_token": old_rt})
+    assert resp2.status_code == 401
+    # новый refresh ещё работает
+    resp3 = client.post("/api/v1/auth/refresh", json={"refresh_token": new_rt})
+    assert resp3.status_code == 200
+    # в сторе ровно одна активная (не отозванная) строка
+    active = db_session.execute(
+        RefreshToken.__table__.select().where(RefreshToken.__table__.c.revoked_at.is_(None))
+    ).all()
+    assert len(active) == 1
+
+
+def test_logout_revokes_refresh(client):
+    """F4: /auth/logout отзывает refresh-токен."""
+    register(client, "lo@test.ru")
+    data = login(client, "lo@test.ru")
+    resp = client.post("/api/v1/auth/logout", json={"refresh_token": data["refresh_token"]})
+    assert resp.status_code == 204
+    # после logout refresh не работает
+    resp2 = client.post("/api/v1/auth/refresh", json={"refresh_token": data["refresh_token"]})
+    assert resp2.status_code == 401
+    # logout idempotent — повторный вызов тоже 204
+    resp3 = client.post("/api/v1/auth/logout", json={"refresh_token": data["refresh_token"]})
+    assert resp3.status_code == 204

@@ -25,6 +25,7 @@ export default function App() {
   if (session && !getToken()) return null; // защита от неконсистентного состояния
 
   const logout = () => {
+    api.logout(); // F4: отзыв refresh-токена на сервере (best-effort)
     setToken(null);
     setRefreshToken(null);
     localStorage.removeItem("cc_role");
