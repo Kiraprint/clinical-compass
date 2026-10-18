@@ -143,8 +143,12 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
       <button className="ghost" onClick={onBack}>
         ← Назад к списку
       </button>
-      <h2>{report.fio ?? report.email}</h2>
-      <p style={{ color: "#5a6478" }}>{report.email}</p>
+      <h2 style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+        {report.fio ?? report.email}
+        {report.fio && report.email && (
+          <span style={{ color: "#5a6478", fontSize: 14, fontWeight: 400 }}>{report.email}</span>
+        )}
+      </h2>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <h3 style={{ margin: 0 }}>Шкалы скрининга</h3>
