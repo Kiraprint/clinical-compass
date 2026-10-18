@@ -396,7 +396,7 @@ function ChatTab() {
       <div style={{ maxHeight: 320, overflowY: "auto", marginBottom: 10 }}>
         {messages.map((m) => (
           <div key={m.id} className={`msg ${m.sender === "SYSTEM" ? "system" : ""}`}>
-            <b>{m.sender === "SYSTEM" ? "Помощник: " : "Вы: "}</b>
+            <b>{m.sender === "SYSTEM" ? "Помощник: " : m.sender === "CLINICIAN" ? "Врач: " : "Вы: "}</b>
             {m.content}
           </div>
         ))}

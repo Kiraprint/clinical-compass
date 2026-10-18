@@ -13,7 +13,7 @@ from compass.scales import ALL_SCALES
 from compass.trend import trends
 
 from app.errors import Problem
-from app.models import AdherenceRecord, AdverseEvent, Assessment, ClinicianRoster, Consent, DiaryEntry, Escalation, Prescription, User
+from app.models import AdherenceRecord, AdverseEvent, Assessment, ChatMessage, ClinicianRoster, Consent, DiaryEntry, Escalation, Prescription, User
 
 from .audit import record as audit_record
 
@@ -358,3 +358,37 @@ def adherence_summary(db: Session, clinician_id, patient_id, days: int = 14) -> 
         "pct": pct,
         "records": [_adherence_dict(r) for r in rows[:20]],
     }
+
+
+def _chat_dict(m: ChatMessage) -> dict:
+    return {
+        "id": str(m.id),
+        "sender": m.sender,
+        "kind": m.kind,
+        "content": m.content,
+        "created_at": m.created_at.isoformat(),
+    }
+
+
+def clinician_post_chat(db: Session, clinician_id, patient_id, content: str) -> dict:
+    """Врач пишет пациенту в канал коммуникации (задача кейса 6). Roster + аудит CLINICIAN_CHAT."""
+    _require_roster(db, clinician_id, patient_id)
+    msg = ChatMessage(patient_id=patient_id, sender="CLINICIAN", kind="TEXT", content=content)
+    db.add(msg)
+    db.flush()
+    audit_record(db, clinician_id, "CLINICIAN_CHAT", "patient", str(patient_id))
+    db.commit()
+    return _chat_dict(msg)
+
+
+def clinician_list_chat(db: Session, clinician_id, patient_id) -> list[dict]:
+    """История переписки с пациентом (задача кейса 6). Roster-гейт."""
+    _require_roster(db, clinician_id, patient_id)
+    rows = db.scalars(
+        select(ChatMessage)
+        .where(ChatMessage.patient_id == patient_id)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(50)
+    ).all()
+    # вернуть в хронологическом порядке (последние 50)
+    return [_chat_dict(m) for m in reversed(rows)]

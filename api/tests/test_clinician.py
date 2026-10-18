@@ -189,3 +189,32 @@ def test_adherence_patient_records_and_doctor_aggregate(client):
     report = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=c).json()
     assert report["adherence"]["pct"] == 66.7
     assert report["adherence"]["records"][0]["medication"] == "Авиандр"
+
+
+def test_clinician_chat_patient_sees_message(client):
+    """задача кейса 6: врач пишет пациенту, пациент видит сообщение в своём чате."""
+    h, pid = _with_patient(client, "ch@test.ru")
+    c, cid = clinician_ctx(client, "chc@test.ru")
+    a, _ = admin_ctx(client, "cha@test.ru")
+    _grant(client, a, pid, cid)
+
+    r = client.post(f"/api/v1/clinician/patients/{pid}/chat",
+                    json={"content": "Как вы себя чувствуете после начала терапии?"}, headers=c)
+    assert r.status_code == 201, r.text
+    assert r.json()["sender"] == "CLINICIAN"
+
+    # Пациент видит сообщение врача в своём чате
+    thread = client.get("/api/v1/chat/thread", headers=h).json()["items"]
+    assert any(m["sender"] == "CLINICIAN" and "после начала терапии" in m["content"] for m in thread)
+
+    # Аудит
+    audit = client.get("/api/v1/admin/audit", headers=a).json()["items"]
+    assert any(e["action"] == "CLINICIAN_CHAT" and e["object_id"] == str(pid) for e in audit)
+
+
+def test_clinician_chat_roster_gated(client):
+    _, pid = _with_patient(client, "ch2@test.ru")
+    c, _ = clinician_ctx(client, "chc2@test.ru")
+    r = client.post(f"/api/v1/clinician/patients/{pid}/chat", json={"content": "x"}, headers=c)
+    assert r.status_code == 403
+    assert r.json()["code"] == "NO_ROSTER"

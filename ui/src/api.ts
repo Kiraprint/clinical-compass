@@ -166,6 +166,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  clinicianChatList: (patientId: string) =>
+    req<{ items: { id: string; sender: string; kind: string; content: string; created_at: string }[] }>(
+      `/api/v1/clinician/patients/${patientId}/chat`),
+  clinicianChatPost: (patientId: string, content: string) =>
+    req<{ id: string; sender: string; kind: string; content: string; created_at: string }>(
+      `/api/v1/clinician/patients/${patientId}/chat`, {
+        method: "POST",
+        body: JSON.stringify({ content }),
+      }),
   vapidPublicKey: () => req<{ public_key: string }>("/api/v1/push/vapid-public-key"),
   subscribePush: (endpoint: string, keys: { p256dh: string; auth: string }) =>
     req<{ subscribed: boolean }>("/api/v1/push/subscribe", {

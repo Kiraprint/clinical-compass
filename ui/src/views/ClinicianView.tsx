@@ -155,8 +155,19 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
   const [aeSaved, setAeSaved] = useState<number | null>(null);
   const [aeError, setAeError] = useState("");
   const [aeList, setAeList] = useState<Report["adverse_events"]>([]);
+  const [chatMsgs, setChatMsgs] = useState<{ id: string; sender: string; content: string; created_at: string }[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatErr, setChatErr] = useState("");
   useEffect(() => {
     if (report) { setPicked(report.prescribed_scales ?? []); setAeList(report.adverse_events ?? []); }
+  }, [report]);
+  useEffect(() => {
+    if (!report) return;
+    let cancelled = false;
+    api.clinicianChatList(report.patient_id)
+      .then((r) => { if (!cancelled) setChatMsgs(r.items); })
+      .catch(() => { if (!cancelled) setChatMsgs([]); });
+    return () => { cancelled = true; };
   }, [report]);
 
   const saveScale = async () => {
@@ -183,6 +194,18 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
       setAeText(""); setAeDrug(""); setAeSaved(Date.now());
     } catch (e: unknown) {
       setAeError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const sendChat = async () => {
+    if (!report || !chatInput.trim()) return;
+    setChatErr("");
+    try {
+      const m = await api.clinicianChatPost(report.patient_id, chatInput.trim());
+      setChatMsgs([...chatMsgs, m]);
+      setChatInput("");
+    } catch (e: unknown) {
+      setChatErr(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -348,6 +371,23 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
         </div>
       </div>
       {aeError && <p className="error">{aeError}</p>}
+
+      <h3>Переписка с пациентом (задача кейса 6)</h3>
+      <div style={{ maxHeight: 280, overflowY: "auto", marginBottom: 8 }}>
+        {chatMsgs.length > 0 ? chatMsgs.map((m) => (
+          <div key={m.id} className={`msg ${m.sender === "SYSTEM" ? "system" : ""}`}>
+            <b>{m.sender === "CLINICIAN" ? "Врач: " : m.sender === "SYSTEM" ? "Помощник: " : "Пациент: "}</b>
+            {m.content}
+          </div>
+        )) : <p style={{ color: "#5a6478", fontSize: 13 }}>Переписки пока нет.</p>}
+      </div>
+      <div className="row">
+        <input placeholder="Сообщение пациенту" value={chatInput}
+          onChange={(e) => setChatInput(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && sendChat()} />
+        <button onClick={sendChat} disabled={!chatInput.trim()}>Отправить</button>
+      </div>
+      {chatErr && <p className="error">{chatErr}</p>}
 
       <h3>Динамика (90 дней)</h3>
       <TrendChart timeline={{ runs: report.history, trend: report.trend }} />

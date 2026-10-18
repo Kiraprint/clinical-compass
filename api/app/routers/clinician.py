@@ -73,6 +73,25 @@ def adherence_summary(
     """Агрегат приверженности лечению (задача кейса 7). Roster-гейт."""
     return services.clinician.adherence_summary(db, user.id, patient_id, days)
 
+class ClinicianChatBody(BaseModel):
+    content: str = Field(min_length=1)
+
+@router.post("/clinician/patients/{patient_id}/chat", status_code=201)
+def clinician_chat_post(
+    patient_id: uuid.UUID, body: ClinicianChatBody,
+    user: User = Depends(require_clinician), db: Session = Depends(get_db),
+):
+    """Врач пишет пациенту (задача кейса 6 — канал коммуникации). Roster + аудит."""
+    return services.clinician.clinician_post_chat(db, user.id, patient_id, body.content)
+
+@router.get("/clinician/patients/{patient_id}/chat")
+def clinician_chat_list(
+    patient_id: uuid.UUID,
+    user: User = Depends(require_clinician), db: Session = Depends(get_db),
+):
+    """История переписки врача с пациентом (задача кейса 6). Roster-гейт."""
+    return {"items": services.clinician.clinician_list_chat(db, user.id, patient_id)}
+
 
 me_router = APIRouter(tags=["me"])
 
