@@ -252,3 +252,25 @@ class AdverseEvent(Base):
             name="adverse_events_action",
         ),
     )
+
+
+class AdherenceRecord(Base):
+    """Приверженность лечению (задача кейса 7). Спецкатегория ПДн (152-ФЗ).
+
+    Пациент ежедневно отмечает приём назначенного препарата: taken/partial/missed.
+    Врач видит агрегат (% приверженности за окно) в карточке. medication — свободная
+    строка (напр. «Авиандр»), без FK на модель назначения (YAGNI для демо).
+    """
+
+    __tablename__ = "adherence_records"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    medication: Mapped[str | None] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(16))   # taken | partial | missed
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)
+
+    __table_args__ = (
+        CheckConstraint("status in ('taken','partial','missed')", name="adherence_records_status"),
+    )

@@ -12,12 +12,13 @@ import {
 } from "../api";
 import TrendChart from "../TrendChart";
 
-type Tab = "screening" | "checkin" | "diary" | "chat" | "trend";
+type Tab = "screening" | "checkin" | "diary" | "chat" | "trend" | "adherence";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "screening", label: "Скрининг" },
   { id: "checkin", label: "Ежедневный чек-ин" },
   { id: "diary", label: "Дневник" },
+  { id: "adherence", label: "Приверженность" },
   { id: "chat", label: "Чат поддержки" },
   { id: "trend", label: "Мой тренд" },
 ];
@@ -85,6 +86,7 @@ export default function PatientView() {
       {tab === "screening" && <ScreeningTab />}
       {tab === "checkin" && <CheckinTab />}
       {tab === "diary" && <DiaryTab />}
+      {tab === "adherence" && <AdherenceTab />}
       {tab === "chat" && <ChatTab />}
       {tab === "trend" && <TrendTab />}
     </>
@@ -321,6 +323,49 @@ function DiaryTab() {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function AdherenceTab() {
+  const [medication, setMedication] = useState("");
+  const [status, setStatus] = useState<"taken" | "partial" | "missed">("taken");
+  const [note, setNote] = useState("");
+  const [saved, setSaved] = useState<number | null>(null);
+  const [err, setErr] = useState("");
+
+  const submit = async () => {
+    setErr("");
+    try {
+      await api.recordAdherence({ medication: medication.trim() || undefined, status, note: note.trim() || undefined });
+      setSaved(Date.now()); setNote("");
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <div className="card">
+      <h2>Приверженность лечению</h2>
+      <p style={{ color: "#5a6478", fontSize: 14 }}>
+        Отметьте, как вы следовали назначенному лечению сегодня. Это поможет врачу оценить динамику и
+        корректировать терапию (задача кейса 7).
+      </p>
+      <input placeholder="Препарат (напр. Авиандр) — необязательно" value={medication} onChange={(e) => setMedication(e.target.value)} />
+      <div style={{ display: "flex", gap: 8, margin: "8px 0" }}>
+        {(["taken", "partial", "missed"] as const).map((s) => (
+          <button key={s} className={status === s ? "active" : "ghost"}
+            onClick={() => setStatus(s)}>
+            {s === "taken" ? "Принял" : s === "partial" ? "Частично" : "Пропустил"}
+          </button>
+        ))}
+      </div>
+      <input placeholder="Заметка (необязательно)" value={note} onChange={(e) => setNote(e.target.value)} />
+      <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center" }}>
+        <button onClick={submit}>Записать</button>
+        {saved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
+      </div>
+      {err && <p className="error">{err}</p>}
     </div>
   );
 }

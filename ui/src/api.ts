@@ -161,6 +161,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  recordAdherence: (body: { medication?: string; status: "taken" | "partial" | "missed"; note?: string }) =>
+    req<Report["adherence"]["records"][number]>("/api/v1/me/adherence", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   vapidPublicKey: () => req<{ public_key: string }>("/api/v1/push/vapid-public-key"),
   subscribePush: (endpoint: string, keys: { p256dh: string; auth: string }) =>
     req<{ subscribed: boolean }>("/api/v1/push/subscribe", {
@@ -270,6 +275,10 @@ export interface Report {
     target: string;
     reason: string;
   } | null;
+  adherence: {
+    pct: number | null; total: number; taken: number; partial: number; missed: number;
+    records: { id: string; medication: string | null; status: string; note: string | null; created_at: string }[];
+  };
   adverse_events: {
     id: string; event_text: string; severity: string; onset_date: string;
     suspected_drug: string | null; action_taken: string | null; created_at: string;

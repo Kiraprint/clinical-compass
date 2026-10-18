@@ -65,6 +65,14 @@ def list_adverse_events(
 ):
     return {"items": services.clinician.list_adverse_events(db, user.id, patient_id)}
 
+@router.get("/clinician/patients/{patient_id}/adherence")
+def adherence_summary(
+    patient_id: uuid.UUID, days: int = Query(default=14, ge=1, le=90),
+    user: User = Depends(require_clinician), db: Session = Depends(get_db),
+):
+    """Агрегат приверженности лечению (задача кейса 7). Roster-гейт."""
+    return services.clinician.adherence_summary(db, user.id, patient_id, days)
+
 
 me_router = APIRouter(tags=["me"])
 
@@ -72,3 +80,16 @@ me_router = APIRouter(tags=["me"])
 @me_router.get("/me/timeline")
 def timeline(days: int = Query(default=90, ge=1, le=365), user: User = Depends(require_consent), db: Session = Depends(get_db)):
     return services.clinician.patient_timeline(db, user.id, days)
+
+class AdherenceBody(BaseModel):
+    medication: str | None = None
+    status: str = Field(pattern="^(taken|partial|missed)$")
+    note: str | None = None
+
+@me_router.post("/me/adherence", status_code=201)
+def record_adherence(
+    body: AdherenceBody,
+    user: User = Depends(require_consent), db: Session = Depends(get_db),
+):
+    """Пациент отмечает приверженность лечению (задача кейса 7). consent-гейт."""
+    return services.clinician.create_adherence(db, user.id, body.medication, body.status, body.note)

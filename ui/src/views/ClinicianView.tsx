@@ -270,6 +270,41 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
         </div>
       )}
 
+      <h3>Приверженность лечению (задача кейса 7, 14 дней)</h3>
+      {report.adherence.pct !== null ? (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+            <div style={{ flex: 1, maxWidth: 320, height: 18, background: "#eef0f4", borderRadius: 9, overflow: "hidden" }}>
+              <div style={{ width: `${Math.round(report.adherence.pct)}%`, height: "100%",
+                background: report.adherence.pct >= 80 ? "#2e7d32" : report.adherence.pct >= 50 ? "#c9a227" : "#b3261e" }} />
+            </div>
+            <b>{report.adherence.pct}%</b>
+            <span style={{ color: "#5a6478", fontSize: 13 }}>
+              принят {report.adherence.taken} · частично {report.adherence.partial} · пропущен {report.adherence.missed}
+            </span>
+          </div>
+          {report.adherence.records.length > 0 && (
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Дата</th><th>Препарат</th><th>Статус</th><th>Заметка</th></tr></thead>
+                <tbody>
+                  {report.adherence.records.map((r) => (
+                    <tr key={r.id}>
+                      <td>{r.created_at.slice(0, 10)}</td>
+                      <td>{r.medication ?? "—"}</td>
+                      <td>{r.status}</td>
+                      <td>{r.note ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      ) : (
+        <p style={{ color: "#5a6478", fontSize: 13 }}>Записей о приверженности за 14 дней нет.</p>
+      )}
+
       <h3>Нежелательные явления (задача кейса 3)</h3>
       {aeList.length > 0 ? (
         <div className="table-wrap">

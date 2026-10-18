@@ -167,3 +167,25 @@ def test_adverse_event_roster_gated(client):
     resp = client.post(f"/api/v1/clinician/patients/{pid}/adverse-events", json=body, headers=c)
     assert resp.status_code == 403
     assert resp.json()["code"] == "NO_ROSTER"
+
+
+def test_adherence_patient_records_and_doctor_aggregate(client):
+    """задача кейса 7: пациент отмечает приверженность, врач видит агрегат % в карточке."""
+    h, pid = _with_patient(client, "ad@test.ru")
+    # Пациент отмечает 3 записи: 2 taken + 1 missed → pct = (2 + 0)/3*100 ≈ 66.7
+    for st in ("taken", "taken", "missed"):
+        r = client.post("/api/v1/me/adherence", json={"medication": "Авиандр", "status": st}, headers=h)
+        assert r.status_code == 201, r.text
+
+    c, cid = clinician_ctx(client, "adc@test.ru")
+    a, _ = admin_ctx(client, "ada@test.ru")
+    _grant(client, a, pid, cid)
+
+    summ = client.get(f"/api/v1/clinician/patients/{pid}/adherence", headers=c).json()
+    assert summ["total"] == 3 and summ["taken"] == 2 and summ["missed"] == 1
+    assert summ["pct"] == 66.7
+
+    # Агрегат есть и в отчёте
+    report = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=c).json()
+    assert report["adherence"]["pct"] == 66.7
+    assert report["adherence"]["records"][0]["medication"] == "Авиандр"
