@@ -9,6 +9,7 @@ diary_entries.content, chat_messages.content, adverse_events.event_text,
 adherence_records.note — хранится как bytea (pgp_sym_encrypt), читается через
 pgp_sym_decrypt (см. api/app/crypto.EncryptedText). Ключ — CC_DATA_KEY (прод — KMS),
 параметризованный bind (не в тексте SQL). Существующие строки шифруются в USING.
+escalations.resolution шифруется отдельной миграцией e7a8b9c0d1e2 (re-audit F1).
 """
 from __future__ import annotations
 

@@ -85,3 +85,32 @@ def test_consent_revoke_destroys_patient_pdn(client, db_session):
     # consent остаётся (реквизиты ст. 9 ч.4 — основание обработки), revoked_at проставлен
     consent = db_session.execute(select(Consent).where(Consent.user_id == pid)).scalar_one()
     assert consent.revoked_at is not None
+
+
+def test_consent_revoke_destroys_push_tokens(client, db_session):
+    """F2 re-audit: PushSubscription/DeviceToken уничтожаются при отзыве согласия
+    (канал доставки — иначе отозванный пациент продолжает получать push)."""
+    from sqlalchemy import func, select
+
+    from app.models import DeviceToken, PushSubscription
+
+    h, pid = patient_ctx(client, "f2push@test.ru")
+    # наполняем каналами доставки push
+    db_session.add(PushSubscription(
+        user_id=pid, endpoint="https://push.example.com/sub/abc",
+        p256dh="key-p256dh", auth="key-auth",
+    ))
+    db_session.add(DeviceToken(user_id=pid, token="fcm-token-xyz", platform="android"))
+    db_session.commit()
+
+    def _count(model):
+        return db_session.execute(select(func.count()).select_from(model).where(model.user_id == pid)).scalar_one()
+
+    assert _count(PushSubscription) == 1
+    assert _count(DeviceToken) == 1
+
+    # отзыв согласия → уничтожение каналов доставки
+    assert client.post("/api/v1/consent/revoke", headers=h).status_code == 204
+
+    assert _count(PushSubscription) == 0
+    assert _count(DeviceToken) == 0

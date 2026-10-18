@@ -65,9 +65,12 @@ def _destroy_patient_pdn(db: Session, patient_id) -> None:
     diary/chat/adverse/adherence. Свободный текст был зашифрован pgcrypto — удаление
     строк уничтожает зашифрованные blob'ы. Consent + audit_log остаются (реквизиты
     ст. 9 ч.4 и WORM-аудит доступа — основание обработки, не уничтожаются).
-    Prescription/ClinicianRoster/PushSubscription/DeviceToken — операционные связи,
-    не спецкатегория ПДн. Реальная деструкция 30 дней (152-ФЗ ст.9 ч.2-3) выполняется
-    шедулером в проде; в MVP — немедленное удаление при отзыве.
+    PushSubscription/DeviceToken — аутентификационно-связанные каналы доставки
+    (endpoint/keys/FCM-токен), привязанные к user_id; при отзыве согласия
+    уничтожаются тоже, иначе отозванный пациент продолжает получать push
+    (утечка канала доставки 152-ФЗ ст.9 ч.2-3). Prescription/ClinicianRoster —
+    операционные связи, остаются (врач может повторно назначить при ре-консенте).
+    Реальная деструкция 30 дней выполняется шедулером в проде; в MVP — немедленно.
     """
     from sqlalchemy import delete as sa_delete, select as sa_select
 
@@ -77,9 +80,11 @@ def _destroy_patient_pdn(db: Session, patient_id) -> None:
         Answer,
         Assessment,
         ChatMessage,
+        DeviceToken,
         DiaryEntry,
         Escalation,
         Notification,
+        PushSubscription,
         Run,
     )
 
@@ -95,4 +100,8 @@ def _destroy_patient_pdn(db: Session, patient_id) -> None:
     db.execute(sa_delete(ChatMessage).where(ChatMessage.patient_id == patient_id))
     db.execute(sa_delete(AdverseEvent).where(AdverseEvent.patient_id == patient_id))
     db.execute(sa_delete(AdherenceRecord).where(AdherenceRecord.patient_id == patient_id))
+    # F2 (re-audit): каналы доставки push — уничтожаем, иначе отозванный пациент
+    # продолжает получать уведомления (утечка канала, 152-ФЗ ст.9 ч.2-3).
+    db.execute(sa_delete(PushSubscription).where(PushSubscription.user_id == patient_id))
+    db.execute(sa_delete(DeviceToken).where(DeviceToken.user_id == patient_id))
     db.flush()

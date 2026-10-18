@@ -107,7 +107,11 @@ def refresh(body: RefreshBody, db: Session = Depends(get_db)):
     jti = payload.get("jti")
     if not jti:
         raise Problem(401, "UNAUTHORIZED", "Refresh-токен без jti")
-    rt = db.scalar(select(RefreshToken).where(RefreshToken.jti == jti))
+    # F4: with_for_update сериализует конкурентные /refresh с одинаковым jti —
+    # вторая транзакция ждёт, видит revoked_at и получает 401 (no double-issue).
+    rt = db.scalar(
+        select(RefreshToken).where(RefreshToken.jti == jti).with_for_update()
+    )
     if rt is None:
         raise Problem(401, "TOKEN_EXPIRED", "Refresh-токен не найден в сторе")
     if rt.revoked_at is not None:

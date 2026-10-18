@@ -202,11 +202,13 @@ Reachability check: `doc_id`/`pid` are **internally-generated UUIDs** (`patient.
 
 | Finding | Status | Evidence (file:line) | Residual risk |
 |---------|--------|----------------------|---------------|
-| F1 encryption | ✅ FIXED | `crypto.py:31`, `models.py:132,151,242,272`, mig `e6f7a8b9c0d1` | Numeric scores/flags plaintext (not free-text) |
-| F2 consent destroy | ✅ FIXED | `consent.py:60-97` (FK-safe DELETE) | DeviceToken/PushSubscription left (not PDn) |
-| F3 fail-fast secrets | ✅ FIXED | `config.py:40-51`, compose `CC_DATA_KEY` | Demo secrets intentional in compose |
-| F4 refresh rotation | ✅ FIXED | `auth.py:82-140`, `models.py:306-324`, mig `f7a8b9c0d1e2` | Concurrent-refresh race (rate-limited) |
-| F5 422 strip | ✅ FIXED | `errors.py:48` | — |
+| F1 free-text encryption | ✅ FIXED | `crypto.py:31`, `models.py:124,132,151,242,272`, mig `e6f7a8b9c0d1`+`e7a8b9c0d1e2` | Numeric scores/flags plaintext (structured, not free-text) |
+| F1 Escalation.resolution | ✅ FIXED | `models.py:124` EncryptedText, mig `e7a8b9c0d1e2` | — |
+| F2 consent destroy | ✅ FIXED | `consent.py:60-107` (FK-safe DELETE + push tokens) | — |
+| F2 push tokens | ✅ FIXED | `consent.py:103-106` deletes PushSubscription+DeviceToken | — |
+| F3 fail-fast secrets | ✅ FIXED | `config.py:31-53` inverted: always reject demo secrets unless `CC_ALLOW_DEMO_SECRETS=true` | prod deploy without flag → fail-fast at import |
+| F4 refresh rotation | ✅ FIXED | `auth.py:110-114` `with_for_update()` serializes concurrent refresh | family/chain revocation not implemented (accepted MVP) |
+| F5 422 strip | ✅ FIXED | `errors.py:36-40` | — |
 | F6 audit IP | ⚠️ PARTIAL | nginx no X-Real-IP; patient self-reads not audited | Prod: ProxyHeaders middleware |
 | F7 backup | ⏳ OPEN | — | CI cron pg_dump + restore test |
 | F8 lockfile | ✅ FIXED | `uv.lock` + `Dockerfile` (uv sync layered) | — |
@@ -214,9 +216,10 @@ Reachability check: `doc_id`/`pid` are **internally-generated UUIDs** (`patient.
 | F10 seed SQL | ⚠️ PARTIAL | `seed.py:99-101` (internal UUIDs) | Parameterize seed roster insert |
 | F11 threat model | ⏳ OPEN | — | STRIDE + 14971 risk register artifact |
 | F12 nginx/api port | ⚠️ PARTIAL | compose `:8000` host bind | nginx TLS-only, remove api port expose |
+| NEW-3 migration key literal | ⏳ OPEN (LOW) | `e6f7a8b9c0d1:29-33` + `e7a8b9c0d1e2` | One-time exposure, maintenance window |
 
-**Closed:** F1, F2, F3, F4, F5, F8 (6/12). **Partial:** F6, F10, F12. **Open:** F7, F9, F11 (demo-accepted, prod roadmap).
+**Closed:** F1 (incl. Escalation.resolution), F2 (incl. push tokens), F3 (inverted fail-fast), F4 (with_for_update), F5, F8 — **8/12**. **Partial:** F6, F10, F12. **Open:** F7, F9, F11, NEW-3 (demo-accepted, prod roadmap).
 
-**Regression after remediation:** 157 pytest (core 62 + API 95) + 14 e2e = **171 green**. Live-verified: F1 raw=PGP-bytea, F2 diary→0 after revoke, F4 old-token→401, F3 login works (demo mode).
+**Regression after re-audit fixes:** 159 pytest (core 62 + API 97: +F2 push-token test, +F3 fail-fast test, +F4 concurrency test) + 14 e2e = **173 green**. Live-verified: F1 raw=PGP-bytea, F2 diary+tokens→0 after revoke, F4 old-token→401, F3 prod-without-flag→fail-fast.
 
 **IDOR/cross-clinician isolation:** confirmed clean — every patient-scoped clinician function calls `_require_roster` (`clinician.py:22`); patient endpoints derive `patient_id` from JWT not path param; test `test_clinician_cannot_see_unrostered` proves 403 NO_ROSTER.

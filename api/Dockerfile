@@ -6,10 +6,13 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.19 /uv /usr/local/bin/uv
 COPY pyproject.toml uv.lock ./
 COPY core/pyproject.toml /app/core/pyproject.toml
 COPY api/pyproject.toml /app/api/pyproject.toml
-RUN uv sync --frozen --no-dev --no-install-project
+# F8 layer caching: первый sync — только сторонние зависимости всех workspace-членов
+# (--all-packages нужен т.к. рут-проект не имеет deps, deps в членах core/api),
+# без установки самих пакетов (--no-install-workspace) → кеш при change кода.
+RUN uv sync --frozen --no-dev --all-packages --no-install-workspace
 COPY core/ /app/core/
 COPY api/ /app/api/
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --all-packages
 WORKDIR /app/api
 EXPOSE 8000
 # venv-бинарь напрямую (uv run ре-синкает на каждом старте — лишние ~10с и сеть).

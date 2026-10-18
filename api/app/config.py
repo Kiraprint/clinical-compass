@@ -3,8 +3,13 @@
 from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
-# Демо-секреты, запрещённые в prod-режиме (CC_PROD_MODE=true).
+# Демо-секреты, запрещённые по умолчанию (F3). Чтобы стартовать с ними,
+# нужно явно поставить CC_ALLOW_DEMO_SECRETS=true (демо/тест). prod-деплой as-is → fail.
 _DEMO_SECRETS = {"dev-secret-change-me-0123456789abcdef", "demo-jwt-secret-0123456789abcdefghij"}
+_DEMO_KEYS = {
+    "compass-demo-data-key-do-not-use-in-prod-0123456789",
+    "test-data-key-0123456789abcdef0123456789abcdef",
+}
 
 
 class Settings(BaseSettings):
@@ -21,7 +26,11 @@ class Settings(BaseSettings):
     qdrant_collection: str = "kb"  # документы: открытый не-ПДн корпус (docs/08)
     embedder: str = "hash"  # hash | bge-m3 (docs/08 §4; по умолчанию офлайн-демо)
     data_key: str = ""  # CC_DATA_KEY: симметричный ключ pgcrypto для free-text ПДн (прод — KMS)
-    prod_mode: bool = False  # CC_PROD_MODE: fail-fast на демо-секретах/пустом data_key
+    # F3: инверсия fail-fast. По умолчанию демо-секреты запрещены; демо/тест
+    # окружение явно ставит CC_ALLOW_DEMO_SECRETS=true. prod-деплой compose as-is
+    # (с demo-jwt-secret) → Settings() падает при импорте → сервер не стартует.
+    allow_demo_secrets: bool = False
+    prod_mode: bool = False  # CC_PROD_MODE: дополнительные строгие проверки (KMS-класс data_key и т.д.)
     model_config = {"env_prefix": "CC_"}
 
     @model_validator(mode="after")
@@ -29,11 +38,23 @@ class Settings(BaseSettings):
         # F3 (ФСТЭК №21 ИАФ, ГОСТ 56939): секреты аутентификации — вне git, достаточно энтропии.
         if len(self.jwt_secret) < 32:
             raise ValueError("CC_JWT_SECRET должен быть >= 32 байт (RFC 7518)")
+        # Всегда (включая демо) — reject known demo secrets unless explicitly allowed.
+        if self.jwt_secret in _DEMO_SECRETS and not self.allow_demo_secrets:
+            raise ValueError(
+                "CC_JWT_SECRET — демо-значение из git; для демо/теста поставьте "
+                "CC_ALLOW_DEMO_SECRETS=true, для prod — сгенерируйте >=32 байт энтропии"
+            )
+        if len(self.data_key) < 32 and not self.allow_demo_secrets:
+            raise ValueError(
+                "CC_DATA_KEY (>=32 байт) обязателен для шифрования ПДн; "
+                "для демо/теста поставьте CC_ALLOW_DEMO_SECRETS=true"
+            )
         if self.prod_mode:
-            if self.jwt_secret in _DEMO_SECRETS:
-                raise ValueError("CC_PROD_MODE: CC_JWT_SECRET не должен быть демо-значением из git")
-            if len(self.data_key) < 32:
-                raise ValueError("CC_PROD_MODE: CC_DATA_KEY (>=32 байт) обязателен для шифрования ПДн")
+            # Дополнительные prod-проверки (KMS-класс, не-демо data_key).
+            if self.data_key in _DEMO_KEYS:
+                raise ValueError("CC_PROD_MODE: CC_DATA_KEY не должен быть демо-значением")
+            if self.allow_demo_secrets:
+                raise ValueError("CC_PROD_MODE несовместим с CC_ALLOW_DEMO_SECRETS")
         return self
 
 

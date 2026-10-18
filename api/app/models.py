@@ -121,7 +121,7 @@ class Escalation(Base):
     kind: Mapped[str] = mapped_column(String)  # SUICIDAL | SEVERE
     notified_clinician_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    resolution: Mapped[str | None] = mapped_column(String, nullable=True)
+    resolution: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
 
 
 class DiaryEntry(Base):

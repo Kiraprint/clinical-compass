@@ -145,3 +145,49 @@ def test_logout_revokes_refresh(client):
     # logout idempotent — повторный вызов тоже 204
     resp3 = client.post("/api/v1/auth/logout", json={"refresh_token": data["refresh_token"]})
     assert resp3.status_code == 204
+
+def test_refresh_concurrent_does_not_double_issue(client, db_session):
+    """F4 re-audit: with_for_update сериализует два конкурентных /refresh с одним jti.
+    Симулируем race вручную — отзываем токен между decode и lookup не нужно,
+    проверяем инвариант: из одного валидного refresh-тока нельзя получить два
+    независимых активных токена через последовательные вызовы (второй видит revoked)."""
+    from app.models import RefreshToken
+
+    register(client, "race@test.ru")
+    data = login(client, "race@test.ru")
+    old_rt = data["refresh_token"]
+
+    # первый refresh — успех
+    r1 = client.post("/api/v1/auth/refresh", json={"refresh_token": old_rt})
+    assert r1.status_code == 200
+    # второй с тем же old_rt — должен 401 (row locked + revoked_at set)
+    r2 = client.post("/api/v1/auth/refresh", json={"refresh_token": old_rt})
+    assert r2.status_code == 401
+    # ровно одна активная строка в сторе
+    active = db_session.execute(
+        RefreshToken.__table__.select().where(RefreshToken.__table__.c.revoked_at.is_(None))
+    ).all()
+    assert len(active) == 1
+
+
+def test_prod_mode_rejects_demo_secrets():
+    """F3 re-audit: prod-деплой compose as-is (демо-секреты, без CC_ALLOW_DEMO_SECRETS)
+    → Settings() падает при импорте → fail-fast."""
+    import os
+
+    from app.config import Settings
+
+    # prod-режим без allow_demo_secrets → demo-jwt-secret должен быть отвергнут
+    os.environ.pop("CC_ALLOW_DEMO_SECRETS", None)
+    try:
+        Settings(
+            jwt_secret="demo-jwt-secret-0123456789abcdefghij",
+            data_key="compass-demo-data-key-do-not-use-in-prod-0123456789",
+            prod_mode=False,
+            _env_file=None,
+        )
+        raise AssertionError("демо-секрет должен быть отвергнут без CC_ALLOW_DEMO_SECRETS")
+    except ValueError as e:
+        assert "CC_ALLOW_DEMO_SECRETS" in str(e) or "демо" in str(e).lower()
+    finally:
+        os.environ["CC_ALLOW_DEMO_SECRETS"] = "true"

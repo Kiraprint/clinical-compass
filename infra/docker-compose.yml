@@ -36,6 +36,7 @@ services:
       CC_DATABASE_URL: postgresql+psycopg://compass:compass@postgres:5432/compass
       CC_JWT_SECRET: demo-jwt-secret-0123456789abcdefghij
       CC_DATA_KEY: compass-demo-data-key-do-not-use-in-prod-0123456789
+      CC_ALLOW_DEMO_SECRETS: "true"  # F3: демо-стек; prod-деплой НЕ ставит этот флаг → fail-fast
       CC_VAPID_PRIVATE_KEY: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JR0hBZ0VBTUJNR0J5cUdTTTQ5QWdFR0NDcUdTTTQ5QXdFSEJHMHdhd0lCQVFRZ3dVN2MwMkZiYXBVVndxVmUKWkJFcUMrRTJGZ2NScm9SeDNiZkFmSlVEOHN5aFJBTkNBQVJUaTg4TlpBK3hxaUxVM1c4RGxwNUxrL25WejBSNwptZDZEZnp6aUc2YWZ2a3ZsankwQVlSWFRzVmp3Y2l4SzdSQTAzWlBNbjA5UEg1Smkrbi9SeStkLwotLS0tLUVORCBQUklWQVRFIEtFWS0tLS0tCg==
       CC_QDRANT_URL: http://qdrant:6333
     depends_on:

@@ -11,6 +11,7 @@ os.environ.setdefault("CC_FAST_ARGON2", "1")
 os.environ.setdefault("CC_PUSH_ENABLED", "0")  # тесты без сетевого Web Push (уведомления в БД остаются)
 os.environ.setdefault("CC_QDRANT_COLLECTION", "kb_test")  # не затираем демо-коллекцию kb
 os.environ.setdefault("CC_DATA_KEY", "test-data-key-0123456789abcdef0123456789abcdef")  # F1: pgcrypto ключ для тестов
+os.environ.setdefault("CC_ALLOW_DEMO_SECRETS", "true")  # F3: тесты используют демо-секреты
 
 import pyotp
 import pytest
