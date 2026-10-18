@@ -146,11 +146,11 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
       <h2>{report.fio ?? report.email}</h2>
       <p style={{ color: "#5a6478" }}>{report.email}</p>
 
-      <div className="row" style={{ alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <label style={{ margin: 0 }}>Шкалы скрининга</label>
-        <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 280 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, alignSelf: "flex-end", minWidth: 320 }}>
           {report.available_scales.map((s) => (
-            <label key={s.code} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 14 }}>
+            <label key={s.code} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 14, gap: 12 }}>
               <span>{s.title}</span>
               <input
                 type="checkbox"
@@ -164,8 +164,10 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
             </label>
           ))}
         </div>
-        <button onClick={saveScale} disabled={picked.length === 0}>Назначить</button>
-        {scaleSaved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, alignItems: "center" }}>
+          <button onClick={saveScale} disabled={picked.length === 0}>Назначить</button>
+          {scaleSaved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
+        </div>
       </div>
       {scaleError && <p className="error">{scaleError}</p>}
 
