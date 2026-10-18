@@ -145,6 +145,7 @@ cd android && ./gradlew assembleDebug           # APK: app/build/outputs/apk/deb
 - **Пуши**: нативно приложение использует не Web Push, а FCM. Регистрация токена устройства: `POST /api/v1/push/device-token`, одноразовый апгрейд `POST /api/v1/push/fcm/upgrade` (cooldown 60 мин → `429 FCM_COOLDOWN`, статус в колоколе уведомлений).
 - **Firebase**: для реальной доставки пушей нужен Firebase-проект (`google-services.json` в `mobile/android/app/`, в CI — из `secrets.FCM_GOOGLE_SERVICES_JSON`); без файла APK собирается, но пуши не работают. Серверная отправка — FCM HTTP v1 по `CC_FCM_SERVICE_ACCOUNT_B64` (base64 service-account JSON); без неё сервер шлёт только Web Push.
 - **Подпись**: debug-APK подписывается автоматически; release — из `ANDROID_KEYSTORE_B64` + паролей (см. workflow).
+- **Локальная сборка release-APK через CLI** (без локальных Java/SDK): `tools/build-apk.sh` собирает образ `compass-android-builder` (JDK 21 + Android SDK 36), генерирует персистентный demo-keystore, запускает `gradlew assembleRelease` и кладёт подписанный APK в `dist/compass-release.apk`. Перед запуском пересобери веб-часть с `VITE_API_BASE` и `npx cap sync android` (см. блок выше).
 
 ## Дорожная карта
 
