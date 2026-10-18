@@ -194,3 +194,29 @@ Reachability check: `doc_id`/`pid` are **internally-generated UUIDs** (`patient.
 **Top remediation order:** F1 (encrypt special-category PDn at rest via real KMS) → F3 (remove committed secrets, fail-fast) → F2 (implement consent-revocation destruction) → F4 (server-side rotating refresh tokens + logout) → F5/F6/F9 (response/audit/session hardening) → F7/F8 (backup + pinned deps) → F10-F12 (process & config hygiene).
 
 *Inference notes:* all findings are grounded in cited file:line evidence. The only inferred elements are pydantic v2's default `input` inclusion in `errors()` (well-documented library behavior confirmed by the handler code) and the nginx default-access-log behavior (standard).
+
+
+---
+
+## Remediation Status (commit 73af354 + uv F8)
+
+| Finding | Status | Evidence (file:line) | Residual risk |
+|---------|--------|----------------------|---------------|
+| F1 encryption | ✅ FIXED | `crypto.py:31`, `models.py:132,151,242,272`, mig `e6f7a8b9c0d1` | Numeric scores/flags plaintext (not free-text) |
+| F2 consent destroy | ✅ FIXED | `consent.py:60-97` (FK-safe DELETE) | DeviceToken/PushSubscription left (not PDn) |
+| F3 fail-fast secrets | ✅ FIXED | `config.py:40-51`, compose `CC_DATA_KEY` | Demo secrets intentional in compose |
+| F4 refresh rotation | ✅ FIXED | `auth.py:82-140`, `models.py:306-324`, mig `f7a8b9c0d1e2` | Concurrent-refresh race (rate-limited) |
+| F5 422 strip | ✅ FIXED | `errors.py:48` | — |
+| F6 audit IP | ⚠️ PARTIAL | nginx no X-Real-IP; patient self-reads not audited | Prod: ProxyHeaders middleware |
+| F7 backup | ⏳ OPEN | — | CI cron pg_dump + restore test |
+| F8 lockfile | ✅ FIXED | `uv.lock` + `Dockerfile` (uv sync layered) | — |
+| F9 localStorage | ⏳ OPEN | `api.ts:24-27` | httpOnly cookie + CSRF |
+| F10 seed SQL | ⚠️ PARTIAL | `seed.py:99-101` (internal UUIDs) | Parameterize seed roster insert |
+| F11 threat model | ⏳ OPEN | — | STRIDE + 14971 risk register artifact |
+| F12 nginx/api port | ⚠️ PARTIAL | compose `:8000` host bind | nginx TLS-only, remove api port expose |
+
+**Closed:** F1, F2, F3, F4, F5, F8 (6/12). **Partial:** F6, F10, F12. **Open:** F7, F9, F11 (demo-accepted, prod roadmap).
+
+**Regression after remediation:** 157 pytest (core 62 + API 95) + 14 e2e = **171 green**. Live-verified: F1 raw=PGP-bytea, F2 diary→0 after revoke, F4 old-token→401, F3 login works (demo mode).
+
+**IDOR/cross-clinician isolation:** confirmed clean — every patient-scoped clinician function calls `_require_roster` (`clinician.py:22`); patient endpoints derive `patient_id` from JWT not path param; test `test_clinician_cannot_see_unrostered` proves 403 NO_ROSTER.

@@ -1,0 +1,11 @@
+[project]
+name = "clinical-compass"
+version = "0.1.0"
+description = "Клинический компас — цифровой ассистент врача (скрининг тревоги/депрессии)."
+requires-python = ">=3.12"
+
+[tool.uv.workspace]
+members = ["core", "api"]
+
+[tool.uv.sources]
+clinical-compass-core = { workspace = true }
