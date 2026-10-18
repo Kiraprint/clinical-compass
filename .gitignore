@@ -33,6 +33,8 @@ bench/__pycache__/
 # (имя файла в NFD с combining-символами, паттерн «Кейс_*.pdf» не совпадал).
 /*.pdf
 /*.docx
+# Полные тексты клинических рекомендаций (копирайт) — в кеш, не в git (docs/08 §2).
+api/app/data/guidelines_cache/
 
 # Demo tunnel (Cloudflare quick tunnel + ngrok стабильный)
 tools/bin/

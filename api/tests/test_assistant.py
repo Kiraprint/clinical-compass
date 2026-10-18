@@ -7,6 +7,7 @@ import os
 import pytest
 
 from app.config import settings
+from app.kb_seed import build_corpus
 
 from .conftest import admin_ctx, auth_header, clinician_ctx, finish_screening, login, patient_ctx, register
 
@@ -48,6 +49,19 @@ def test_assistant_requires_clinician(client):
     resp = client.post("/api/v1/assistant/ask", json={"query": "порог PHQ-9"}, headers=h)
     assert resp.status_code == 403
     assert resp.json()["code"] == "ROLE_MISMATCH"
+
+
+def test_kb_corpus_includes_drugs_and_guidelines():
+    """Корпус KB: шкалы + триаж + красные линии + препараты (Авиандр) + КР Минздрава."""
+    docs = build_corpus()
+    gids = {d["guideline_id"] for d in docs}
+    topics = {d["topic"] for d in docs}
+    assert "drug-aviandr" in gids and "drug-aviandr-safety" in gids
+    assert "kr-gtr-f41-1" in gids
+    assert "ЛЕКАРСТВА" in topics
+    # Чанк Авиандра цитирует регистрационное удостоверение (усл.7 кейса — ГРЛС).
+    aviandr = next(d for d in docs if d["guideline_id"] == "drug-aviandr")
+    assert "РУ" in aviandr["text"] and "ЛП-" in aviandr["text"]
 
 
 def test_assistant_grounded_answer_with_citations(client, kb_collection):

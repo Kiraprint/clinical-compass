@@ -97,6 +97,52 @@ def _redlines_docs() -> list[dict]:
     ]
 
 _DRUGS_FILE = Path(__file__).parent / "data" / "drugs.json"
+_GUIDELINES_FILE = Path(__file__).parent / "data" / "guidelines.json"
+_GUIDELINES_CACHE = Path(__file__).parent / "data" / "guidelines_cache"
+
+
+def _guideline_docs(with_full_text: bool = False) -> list[dict]:
+    """Чанки клинических рекомендаций Минздрава (критерий кейса 1 — указать источник).
+
+    Метаданный чанк (guideline_id, код, разработчик, URL, краткая справка) строится
+    всегда — он цитируем в RAG-ответах без сети. Полный текст КР защищён авторским
+    правом (docs/08 §2): индексируется из кеша data/guidelines_cache/<id>.txt только
+    при with_full_text=True и наличии файла.
+    """
+    if not _GUIDELINES_FILE.exists():
+        return []
+    data = json.loads(_GUIDELINES_FILE.read_text(encoding="utf-8"))
+    docs: list[dict] = []
+    for g in data.get("guidelines", []):
+        code = g["code"]
+        docs.append(
+            {
+                "guideline_id": f"kr-{g['id']}",
+                "source_title": g["title"],
+                "topic": "РЕКОМЕНДАЦИИ",
+                "text": (
+                    f"{g['title']}. Код рубрикатора КР Минздрава: {code}, ред. {g['revision']}. "
+                    f"Разработчик: {g['developer']}. {g['summary']} "
+                    f"Источник: рубрикатор КР Минздрава {g['rubricator_url']}."
+                ),
+            }
+        )
+        if with_full_text:
+            cache = _GUIDELINES_CACHE / f"{g['id']}.txt"
+            if cache.exists():
+                full = cache.read_text(encoding="utf-8")
+                for i in range(0, len(full), 1800):
+                    chunk = full[i : i + 1800].strip()
+                    if chunk:
+                        docs.append(
+                            {
+                                "guideline_id": f"kr-{g['id']}-t{i // 1800}",
+                                "source_title": g["title"],
+                                "topic": "РЕКОМЕНДАЦИИ",
+                                "text": chunk,
+                            }
+                        )
+    return docs
 
 
 def _drug_docs() -> list[dict]:
@@ -142,14 +188,19 @@ def _drug_docs() -> list[dict]:
     return docs
 
 
-def build_corpus() -> list[dict]:
-    return _scale_docs() + _triage_docs() + _redlines_docs() + _drug_docs()
+def build_corpus(with_guidelines: bool = False) -> list[dict]:
+    return (
+        _scale_docs() + _triage_docs() + _redlines_docs()
+        + _drug_docs() + _guideline_docs(with_full_text=with_guidelines)
+    )
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--url", default=settings.qdrant_url)
     p.add_argument("--reset", action="store_true", help="drop и пересоздать коллекцию")
+    p.add_argument("--with-guidelines", action="store_true",
+                   help="индексировать полный текст КР из data/guidelines_cache (метаданные всегда)")
     args = p.parse_args()
 
     client = QdrantClient(url=args.url, timeout=10)
@@ -168,7 +219,7 @@ def main() -> None:
     if args.reset and client.collection_exists(kb.COLLECTION):
         client.delete_collection(kb.COLLECTION)
 
-    docs = build_corpus()
+    docs = build_corpus(with_guidelines=args.with_guidelines)
     n = kb.upsert_documents(client, build_embedder(), docs)
     total = kb.count_points(client)
     print(f"Индексировано {n} чанков; всего в коллекции {kb.COLLECTION}: {total}")
