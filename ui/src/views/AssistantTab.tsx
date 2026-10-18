@@ -32,7 +32,7 @@ export default function AssistantTab() {
   const mentionMatches = useMemo(() => {
     if (!mentionOpen) return [];
     const q = mentionQ.toLowerCase();
-    return patients.filter((p) => (p.fio ?? p.email).toLowerCase().includes(q)).slice(0, 8);
+    return patients.filter((p) => (p.fio || p.email).toLowerCase().includes(q)).slice(0, 8);
   }, [mentionOpen, mentionQ, patients]);
 
   const handleChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
@@ -44,6 +44,11 @@ export default function AssistantTab() {
       setMentionQ(m[1]);
     } else {
       setMentionOpen(false);
+    }
+    // Если тег выбранного пациента удалили из текста — открепляем контекст.
+    if (patientLabel && !v.includes(`@${patientLabel}`)) {
+      setPatientId(null);
+      setPatientLabel("");
     }
   };
 
@@ -157,12 +162,13 @@ export default function AssistantTab() {
                   textAlign: "left",
                   border: "none",
                   background: "transparent",
+                  color: "#2a3350",
                   padding: "6px 10px",
                   cursor: "pointer",
                   fontSize: 13,
                 }}
               >
-                {p.fio ?? p.email}
+                {p.fio || p.email}
                 {p.last_triage && <span style={{ color: "#5a6478", marginLeft: 8 }}>· {p.last_triage}</span>}
               </button>
             ))}

@@ -148,9 +148,10 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
 
       <div className="row" style={{ alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
         <label style={{ margin: 0 }}>Шкалы скрининга</label>
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 280 }}>
           {report.available_scales.map((s) => (
-            <label key={s.code} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
+            <label key={s.code} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 14 }}>
+              <span>{s.title}</span>
               <input
                 type="checkbox"
                 checked={picked.includes(s.code)}
@@ -160,7 +161,6 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
                   )
                 }
               />
-              {s.title}
             </label>
           ))}
         </div>
