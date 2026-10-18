@@ -22,6 +22,44 @@ export default function ClinicianView() {
     load(filter);
   }, [filter]);
 
+  // Карточка пациента — отдельная ссылка (#patient=<id>): синхронизируем с hash,
+  // чтобы клик по уведомлению об эскалации открывал нужного пациента.
+  useEffect(() => {
+    const applyHash = () => {
+      const m = window.location.hash.match(/patient=([0-9a-fA-F-]+)/);
+      const pid = m ? m[1] : null;
+      if (pid) setSection("patients");
+      setSelected((cur) => (cur === pid ? cur : pid));
+    };
+    applyHash();
+    window.addEventListener("hashchange", applyHash);
+    return () => window.removeEventListener("hashchange", applyHash);
+  }, []);
+
+  // Загрузка карточки при смене выбранного пациента.
+  useEffect(() => {
+    if (!selected) {
+      setReport(null);
+      return;
+    }
+    let cancelled = false;
+    setReportError("");
+    api
+      .clinicianReport(selected)
+      .then((r) => {
+        if (!cancelled) setReport(r);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setReport(null);
+          setReportError(e instanceof Error ? e.message : String(e));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected]);
+
   if (section === "assistant") {
     return (
       <>
@@ -35,17 +73,6 @@ export default function ClinicianView() {
       </>
     );
   }
-
-  const open = async (patientId: string) => {
-    setSelected(patientId);
-    setReportError("");
-    try {
-      setReport(await api.clinicianReport(patientId));
-    } catch (e: unknown) {
-      setReport(null);
-      setReportError(e instanceof Error ? e.message : String(e));
-    }
-  };
 
   return (
     <>
@@ -81,7 +108,12 @@ export default function ClinicianView() {
                 {cards.map((c) => (
                   <tr key={c.patient_id}>
                     <td>
-                      {c.fio ?? c.email}
+                      <a
+                        href={"#patient=" + c.patient_id}
+                        style={{ color: "#2f6fed", textDecoration: "none", fontWeight: 600 }}
+                      >
+                        {c.fio ?? c.email}
+                      </a>
                       <br />
                       <small>{c.email}</small>
                     </td>
@@ -89,7 +121,12 @@ export default function ClinicianView() {
                     <td>{c.last_score ?? "—"}</td>
                     <td>{c.open_escalations}</td>
                     <td>
-                      <button className="ghost" onClick={() => open(c.patient_id)}>
+                      <button
+                        className="ghost"
+                        onClick={() => {
+                          window.location.hash = "patient=" + c.patient_id;
+                        }}
+                      >
                         Открыть
                       </button>
                     </td>
@@ -100,7 +137,7 @@ export default function ClinicianView() {
           </div>
         </div>
       ) : (
-        <ReportView report={report} error={reportError} onBack={() => setSelected(null)} />
+        <ReportView report={report} error={reportError} onBack={() => { window.location.hash = ""; }} />
       )}
     </>
   );

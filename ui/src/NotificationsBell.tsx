@@ -86,7 +86,14 @@ export default function NotificationsBell() {
             <div
               key={n.id}
               className={`bell-item ${n.read ? "" : "unread"}`}
-              onClick={() => !n.read && markOne(n.id)}
+              title={n.patient_id ? "Открыть карточку пациента" : undefined}
+              onClick={() => {
+                if (n.patient_id) {
+                  window.location.hash = "patient=" + n.patient_id;
+                  setOpen(false);
+                }
+                if (!n.read) markOne(n.id);
+              }}
             >
               <div className="bell-title">
                 {n.title}

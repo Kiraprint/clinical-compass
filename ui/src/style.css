@@ -62,7 +62,7 @@ small { color: #8a94a8; }
 .bell-btn { background: transparent; color: #fff; border: 1px solid #4a5b8c; border-radius: 8px; padding: 6px 10px; font-size: 16px; }
 .bell-btn:hover { border-color: #7f93c9; }
 .badge-badge { position: absolute; top: -4px; right: -6px; background: #d64545; color: #fff; border-radius: 10px; font-size: 11px; padding: 1px 5px; line-height: 1; }
-.bell-panel { position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; background: #fff; border: 1px solid #e2e6ee; border-radius: 10px; box-shadow: 0 6px 18px rgba(0,0,0,.12); width: 320px; max-height: 420px; overflow-y: auto; }
+.bell-panel { position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; background: #fff; color: #1c2333; border: 1px solid #e2e6ee; border-radius: 10px; box-shadow: 0 6px 18px rgba(0,0,0,.12); width: 320px; max-height: 420px; overflow-y: auto; }
 .bell-head { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-bottom: 1px solid #eef1f6; font-size: 14px; }
 .bell-head button { padding: 4px 8px; font-size: 12px; }
 .bell-item { padding: 8px 12px; border-bottom: 1px solid #f2f4f8; cursor: pointer; }
