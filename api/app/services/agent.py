@@ -15,6 +15,9 @@ from langgraph.graph import END, START, StateGraph
 from compass.agent import RAGChunk, build_rag_answer, detect_redline
 from compass.depersonalize import depersonalize
 
+from app.config import settings
+from app.services.depersonalize import build_name_extractor
+
 from app.services import kb as kb_store
 from app.services.embeddings import build_embedder
 
@@ -170,12 +173,36 @@ def scrub_for_llm(
     Маскируются: запрос врача целиком (он может содержать ФИО/телефон/адрес) и
     свободный текст карты (ФИО, дневниковые записи). Числовые поля (баллы,
     триаж, тренд) — не ПДн и остаются как есть.
+
+    При CC_DEPERSONALIZE_NER=true (и установленном natasha) к deny-list
+    добавляются имена из NER-детекции — для ФИО, неизвестных системе
+    (docs/12 §NER).
     """
     counts: dict[str, int] = {}
 
     def _add(found) -> None:
         for f in found:
             counts[f.kind] = counts.get(f.kind, 0) + 1
+
+    # NER-расширение: имена из запроса и карты → в deny-list (если включён флаг).
+    extra_names: list[str] = []
+    if settings.depersonalize_ner:
+        extractor = build_name_extractor()
+        texts = [query]
+        if patient_context is not None:
+            if patient_context.get("fio"):
+                texts.append(str(patient_context["fio"]))
+            texts.extend(
+                str(e.get("content"))
+                for e in (patient_context.get("recent_diary") or [])
+                if e.get("content")
+            )
+        for t in texts:
+            for name in extractor.extract(t):
+                if name not in extra_names:
+                    extra_names.append(name)
+    if extra_names:
+        names = list(names or []) + extra_names
 
     masked_query = depersonalize(query, names=names)
     _add(masked_query.findings)

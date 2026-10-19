@@ -114,7 +114,7 @@ python3 -m venv .venv && .venv/bin/pip install -e "core" -e "api[dev]"
 # тестовая БД (dev-override публикует порт на 127.0.0.1; базовый compose — нет)
 docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up -d postgres qdrant
 cd api && alembic upgrade head                                # схема из миграций (не create_all)
-.venv/bin/pytest core api                                     # 80 + 106 тестов
+.venv/bin/pytest core api                                     # 80 + 111 тестов
 cd ui && npm install && npm run dev                           # UI на :5173 (proxy → :8000)
 cd e2e && npx playwright install chromium && npx playwright test
 ```
@@ -161,12 +161,12 @@ cd android && ./gradlew assembleDebug           # APK: app/build/outputs/apk/deb
 - [x] SDD
 - [x] TDD
 - [x] E1–E2: клинический движок (80 юнит-тестов)
-- [x] E3–E5: API (106 интеграционных теста)
+- [x] E3–E5: API (111 интеграционных тестов)
 - [x] E6: UI, симулятор, docker compose, e2e (14 Playwright)
 - [x] Кейс-дефициты P1–P9: Авиандр в KB, маршрутизация, НЯ, приверженность, парсинг историй, врач↔пациент чат, КР Минздрава
 - [x] Security audit F1–F12 + NEW-1..5: pgcrypto на всех free-text ПДн, уничтожение при отзыве, ротация refresh, httpOnly cookies, fail-fast секреты, AES-256 backup, threat model (ГОСТ 14971), gate привилегированной регистрации
 
-**Регрессия:** 80 core + 106 API + 14 e2e = 200 тестов.
+**Регрессия:** 80 core + 111 API + 14 e2e = 205 тестов.
 
 **Первый администратор (прод):** публичная регистрация CLINICIAN/ADMIN запрещена вне демо-режима (NEW-1):
 `docker compose -f infra/docker-compose.yml run --rm --entrypoint /app/.venv/bin/python api -m app.bootstrap_user --email admin@clinic.ru --role ADMIN`
