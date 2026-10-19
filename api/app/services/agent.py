@@ -16,7 +16,7 @@ from compass.agent import RAGChunk, build_rag_answer, detect_redline
 from compass.depersonalize import depersonalize
 
 from app.config import settings
-from app.services.depersonalize import build_name_extractor
+from app.services.depersonalize import build_name_extractor, ner_backend
 
 from app.services import kb as kb_store
 from app.services.embeddings import build_embedder
@@ -186,7 +186,7 @@ def scrub_for_llm(
 
     # NER-расширение: имена из запроса и карты → в deny-list (если включён флаг).
     extra_names: list[str] = []
-    if settings.depersonalize_ner:
+    if ner_backend() != "off":
         extractor = build_name_extractor()
         texts = [query]
         if patient_context is not None:

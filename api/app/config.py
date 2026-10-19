@@ -26,7 +26,11 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://127.0.0.1:6333"  # векторная БД ИИ-агента (docs/07)
     qdrant_collection: str = "kb"  # документы: открытый не-ПДн корпус (docs/08)
     embedder: str = "hash"  # hash | bge-m3 (docs/08 §4; по умолчанию офлайн-демо)
-    depersonalize_ner: bool = False  # CC_DEPERSONALIZE_NER: NER-расширение ФИО-детекции (natasha, опционально, docs/12)
+    # CC_DEPERSONALIZE_NER: off | natasha | rubert (docs/12). true/1 = natasha
+    # (обратная совместимость). rubert — redmadrobot-rnd/rubert-base-pii-ner:
+    # Apache-2.0, FIO F1 0.933 на redmadrobot-rnd/pii_benchmark (bench/ner).
+    depersonalize_ner: str = "off"
+    ner_model: str = "redmadrobot-rnd/rubert-base-pii-ner"  # CC_NER_MODEL
     data_key: str = ""  # CC_DATA_KEY: симметричный ключ pgcrypto для free-text ПДн (прод — KMS)
     # F3: инверсия fail-fast. По умолчанию демо-секреты запрещены; демо/тест
     # окружение явно ставит CC_ALLOW_DEMO_SECRETS=true. prod-деплой compose as-is

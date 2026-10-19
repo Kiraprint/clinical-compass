@@ -51,9 +51,11 @@ def test_fake_natasha_module_extracts_per(monkeypatch):
     import types
 
     class _Span:
-        def __init__(self, text, kind):
+        def __init__(self, text, kind, start=0):
             self.text = text
             self.type = kind
+            self.start = start
+            self.stop = start + len(text)
 
         def normalize(self, morph):
             pass
@@ -62,9 +64,8 @@ def test_fake_natasha_module_extracts_per(monkeypatch):
         def __init__(self, text):
             self.text = text
             self.spans = [
-                _Span("Иванов Иван", "PER"),
-                _Span("Москва", "LOC"),
-                _Span("Иванов Иван", "PER"),  # дубль отфильтруется
+                _Span("Иванов Иван", "PER", 0),
+                _Span("Москва", "LOC", 13),
             ]
 
         def segment(self, seg):
@@ -176,3 +177,80 @@ def test_no_network_egress_on_scrub_path(monkeypatch):
         _ = ex.extract("Проверка оффлайн NER")  # не должно упасть с NETWORK EGRESS
         settings.depersonalize_ner = False
     assert not attempts, f"сетевые попытки: {attempts}"
+
+
+# ---------- rubert backend (redmadrobot-rnd/rubert-base-pii-ner) ----------
+
+def test_ner_backend_selector():
+    """CC_DEPERSONALIZE_NER: off|true|natasha|rubert (+bool обратная совместимость)."""
+    from app.services.depersonalize import ner_backend
+
+    for value, expected in [
+        ("off", "off"), ("false", "off"), ("", "off"),
+        ("true", "natasha"), ("1", "natasha"), ("natasha", "natasha"),
+        (True, "natasha"), (False, "off"),
+        ("rubert", "rubert"), ("RUBERT", "rubert"),
+        ("garbage", "off"),
+    ]:
+        settings.depersonalize_ner = value
+        assert ner_backend() == expected, value
+    settings.depersonalize_ner = "off"
+
+
+def test_rubert_backend_extracts_fio_and_spans(monkeypatch):
+    """Фейковый pipeline rubert: PER-категории → FIO, адрес → ADDRESS."""
+    from app.services.depersonalize import RubertPiiNameExtractor
+
+    text = "Иванов Иван, г. Москва"
+    calls = []
+
+    def fake_pipe(t):
+        calls.append(t)
+        return [
+            {"entity_group": "LAST_NAME", "start": 0, "end": 6},
+            {"entity_group": "FIRST_NAME", "start": 7, "end": 11},
+            {"entity_group": "CITY", "start": 16, "end": 22},
+            {"entity_group": "UNKNOWN_LABEL", "start": 0, "end": 1},  # игнор
+        ]
+
+    ex = RubertPiiNameExtractor()
+    ex._pipe = fake_pipe  # уже «загружен»
+    assert ex.extract(text) == ["Иванов", "Иван"]
+    spans = ex.extract_spans(text)
+    assert ("FIO", 0, 6) in spans and ("ADDRESS", 16, 22) in spans
+    assert all(k != "UNKNOWN_LABEL" for k, _, _ in spans)
+
+
+def test_rubert_backend_degrades_without_deps(monkeypatch):
+    """Нет torch/transformers → пустой результат и деградация, без падения."""
+    import builtins
+    from app.services.depersonalize import RubertPiiNameExtractor
+
+    real_import = builtins.__import__
+
+    def blocked(name, *a, **k):
+        if name in ("torch", "transformers"):
+            raise ImportError(f"no {name}")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    ex = RubertPiiNameExtractor()
+    assert ex.extract("Иванов Иван") == []
+    assert ex.extract("ещё текст") == []  # деградация одноразовая
+
+
+def test_build_name_extractor_picks_backend(monkeypatch):
+    """build_name_extractor выбирает класс по CC_DEPERSONALIZE_NER."""
+    import app.services.depersonalize as d
+
+    monkeypatch.setattr(d, "_extractor", None)
+    settings.depersonalize_ner = "rubert"
+    assert isinstance(d.build_name_extractor(), d.RubertPiiNameExtractor)
+
+    monkeypatch.setattr(d, "_extractor", None)
+    settings.depersonalize_ner = "natasha"
+    assert isinstance(d.build_name_extractor(), d.NatashaNameExtractor)
+
+    monkeypatch.setattr(d, "_extractor", None)
+    settings.depersonalize_ner = "off"
+    assert isinstance(d.build_name_extractor(), d.NullNameExtractor)

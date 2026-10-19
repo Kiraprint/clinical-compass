@@ -34,6 +34,9 @@ dev = ["pytest>=8", "httpx>=0.27"]
 # наш адаптер никогда не конструирует MorphVocab (try/except, деградация),
 # инференс полностью оффлайн (модели в wheel), см. тест no_network_egress.
 ner = ["natasha>=1.1"]
+# rubert-base-pii-ner (Apache-2.0): FIO F1 0.933 на redmadrobot-rnd/pii_benchmark
+# (bench/ner), в 5.5x точнее natasha; тяжёлые ML-зависимости — только этот extra.
+ner-rubert = ["torch>=2.2", "transformers>=4.40"]
 
 [tool.setuptools.packages.find]
 where = ["."]

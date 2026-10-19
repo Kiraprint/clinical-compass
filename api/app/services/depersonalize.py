@@ -23,11 +23,22 @@ class NameExtractor(Protocol):
         """Имена (в исходном написании) для маскирования в text."""
         ...
 
+    def extract_spans(self, text: str) -> list[tuple[str, int, int]]:
+        """(вид, start, end) найденных сущностей: FIO/ADDRESS/DOC/PHONE/EMAIL.
+
+        Нужен бенчмарку (bench/ner) для честного сравнения кандидатов и
+        будущему прямому маскированию по спанам.
+        """
+        ...
+
 
 class NullNameExtractor:
     """NER выключен: только deny-list + regex (детерминированное демо)."""
 
     def extract(self, text: str) -> list[str]:
+        return []
+
+    def extract_spans(self, text: str) -> list[tuple[str, int, int]]:
         return []
 
 
@@ -62,6 +73,9 @@ class NatashaNameExtractor:
         return seg, morph, ner
 
     def extract(self, text: str) -> list[str]:
+        return [text[s:e] for kind, s, e in self.extract_spans(text) if kind == "FIO"]
+
+    def extract_spans(self, text: str) -> list[tuple[str, int, int]]:
         if self._pipeline is None:
             try:
                 self._pipeline = self._build()
@@ -85,27 +99,117 @@ class NatashaNameExtractor:
         except Exception as exc:
             logger.warning("natasha NER сбой на фрагменте: %s", exc)
             return []
-        names = []
+        out: list[tuple[str, int, int]] = []
         for span in doc.spans:
-            if getattr(span, "type", None) != "PER":
+            kind = _NATASHA_KIND.get(getattr(span, "type", ""))
+            if kind is None:
                 continue
-            if morph is not None:
-                try:
-                    span.normalize(morph)
-                except Exception:
-                    pass  # нормализация опциональна; маскируем исходное написание
-            name = span.text.strip()
-            if name and name not in names:
-                names.append(name)
-        return names
+            start, stop = span.start, span.stop
+            if stop > start:
+                out.append((kind, start, stop))
+        return out
+
+
+# natasha-типы: PER -> ФИО, LOC -> адрес (грубо; бенчмарк bench/ner это измеряет).
+_NATASHA_KIND = {"PER": "FIO", "LOC": "ADDRESS"}
+
+class RubertPiiNameExtractor:
+    """redmadrobot-rnd/rubert-base-pii-ner: RU-PII token-classification.
+
+    Apache-2.0, обучен на русских ПДн (ФИО/адреса/документы/контакты).
+    На redmadrobot-rnd/pii_benchmark FIO F1 0.933 exact / 0.947 overlap —
+    в 5.5x точнее natasha (0.168/0.456), см. bench/ner/README.md.
+
+    Зависимости опциональны (extra "ner-rubert"): torch + transformers.
+    При их отсутствии/сбое модели — лог + деградация до regex-пути.
+    """
+
+    def __init__(self) -> None:
+        self._pipe = None
+
+    def _build(self):
+        import torch
+        from transformers import pipeline
+
+        device = 0 if torch.cuda.is_available() else -1
+        return pipeline(
+            "token-classification",
+            model=settings.ner_model,
+            device=device,
+            aggregation_strategy="first",
+        )
+
+    def extract_spans(self, text: str) -> list[tuple[str, int, int]]:
+        if self._pipe is None:
+            try:
+                self._pipe = self._build()
+            except Exception as exc:  # ImportError/OSError/любой сбой инициализации
+                logger.warning(
+                    "depersonalize_ner=rubert, но модель недоступна (%s: %s) — "
+                    "деградация до regex/deny-list",
+                    type(exc).__name__, exc,
+                )
+                self._pipe = False
+        if self._pipe is False or not text:
+            return []
+        try:
+            ents = self._pipe(text)
+        except Exception as exc:
+            logger.warning("rubert NER сбой на фрагменте: %s", exc)
+            return []
+        out: list[tuple[str, int, int]] = []
+        for e in ents:
+            label = e.get("entity_group") or e.get("entity")
+            kind = _RUBERT_KIND.get(label)
+            if kind and int(e["end"]) > int(e["start"]):
+                out.append((kind, int(e["start"]), int(e["end"])))
+        return out
+
+    def extract(self, text: str) -> list[str]:
+        return [text[s:e] for kind, s, e in self.extract_spans(text) if kind == "FIO"]
+
+
+# Категории rubert-base-pii-ner -> виды нашего гварда.
+_RUBERT_KIND = {
+    "FIRST_NAME": "FIO", "LAST_NAME": "FIO", "MIDDLE_NAME": "FIO", "NAME": "FIO",
+    "CITY": "ADDRESS", "STREET": "ADDRESS", "HOUSE": "ADDRESS",
+    "REGION": "ADDRESS", "DISTRICT": "ADDRESS", "COUNTRY": "ADDRESS",
+    "PASSPORT": "DOC", "SNILS": "DOC", "INN": "DOC", "OMS": "DOC",
+    "DRIVER_LICENSE": "DOC", "MILITARY_ID": "DOC", "BIRTH_CERTIFICATE": "DOC",
+    "CREDIT_CARD": "DOC", "PHONE": "PHONE", "EMAIL": "EMAIL",
+}
+
+_NER_OFF = {"", "off", "false", "0", "none", "no"}
+
+
+def ner_backend() -> str:
+    """Нормализованное имя backend'а: off | natasha | rubert."""
+    raw = settings.depersonalize_ner
+    if isinstance(raw, bool):  # обратная совместимость (тесты/старые конфиги)
+        return "natasha" if raw else "off"
+    value = str(raw).strip().lower()
+    if value in _NER_OFF:
+        return "off"
+    if value in ("true", "1", "yes", "on", "natasha"):
+        return "natasha"
+    if value == "rubert":
+        return "rubert"
+    logger.warning("неизвестный CC_DEPERSONALIZE_NER=%r — NER выключен", raw)
+    return "off"
 
 
 _extractor = None
 
 
 def build_name_extractor() -> NameExtractor:
-    """Один экземпляр на процесс (сегментер/модели грузятся один раз)."""
+    """Один экземпляр на процесс (модели грузятся один раз)."""
     global _extractor
     if _extractor is None:
-        _extractor = NatashaNameExtractor() if settings.depersonalize_ner else NullNameExtractor()
+        backend = ner_backend()
+        if backend == "rubert":
+            _extractor = RubertPiiNameExtractor()
+        elif backend == "natasha":
+            _extractor = NatashaNameExtractor()
+        else:
+            _extractor = NullNameExtractor()
     return _extractor

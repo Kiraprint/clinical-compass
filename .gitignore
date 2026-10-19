@@ -19,6 +19,7 @@ e2e/test-results/
 bench/.venv/
 bench/data/
 bench/sources/
+bench/ner/data/
 bench/__pycache__/
 
 # Env / secrets
