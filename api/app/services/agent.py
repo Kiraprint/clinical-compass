@@ -121,9 +121,6 @@ class AgentFactory:
                 guideline_id=h["guideline_id"],
                 topic=h["topic"],
                 score=h["score"],
-                year=h.get("year"),
-                design=h.get("design", ""),
-                source_url=h.get("source_url", ""),
             )
             for h in hits
         ]
@@ -147,8 +144,6 @@ class AgentFactory:
                         "guideline_id": c.guideline_id,
                         "topic": c.topic,
                         "score": c.score,
-                        "source_url": c.source_url,
-                        "design": c.design,
                     }
                     for c in result.citations
                 ],
