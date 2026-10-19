@@ -162,11 +162,11 @@ cd android && ./gradlew assembleDebug           # APK: app/build/outputs/apk/deb
 - [x] TDD
 - [x] E1–E2: клинический движок (80 юнит-тестов)
 - [x] E3–E5: API (111 интеграционных тестов)
-- [x] E6: UI, симулятор, docker compose, e2e (14 Playwright)
+- [x] E6: UI, симулятор, docker compose, e2e (26 Playwright)
 - [x] Кейс-дефициты P1–P9: Авиандр в KB, маршрутизация, НЯ, приверженность, парсинг историй, врач↔пациент чат, КР Минздрава
 - [x] Security audit F1–F12 + NEW-1..5: pgcrypto на всех free-text ПДн, уничтожение при отзыве, ротация refresh, httpOnly cookies, fail-fast секреты, AES-256 backup, threat model (ГОСТ 14971), gate привилегированной регистрации
 
-**Регрессия:** 80 core + 111 API + 14 e2e = 205 тестов.
+**Регрессия:** 80 core + 112 API + 26 e2e = 218 тестов.
 
 **Первый администратор (прод):** публичная регистрация CLINICIAN/ADMIN запрещена вне демо-режима (NEW-1):
 `docker compose -f infra/docker-compose.yml run --rm --entrypoint /app/.venv/bin/python api -m app.bootstrap_user --email admin@clinic.ru --role ADMIN`
