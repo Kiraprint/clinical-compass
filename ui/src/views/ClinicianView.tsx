@@ -2,11 +2,12 @@ import { useEffect, useState } from "react";
 import { api, ImportHistoryResult, PatientCard, Report } from "../api";
 import TrendChart from "../TrendChart";
 import AssistantTab from "./AssistantTab";
+import DrugLibraryTab from "./DrugLibraryTab";
 
 const TRIAGE_FILTERS = ["", "GREEN", "YELLOW", "RED"] as const;
 
 export default function ClinicianView() {
-  const [section, setSection] = useState<"patients" | "assistant">("patients");
+  const [section, setSection] = useState<"patients" | "assistant" | "library">("patients");
   const [filter, setFilter] = useState<(typeof TRIAGE_FILTERS)[number]>("");
   const [cards, setCards] = useState<PatientCard[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -68,8 +69,24 @@ export default function ClinicianView() {
           <button className="active" onClick={() => setSection("assistant")}>
             Ассистент
           </button>
+          <button onClick={() => setSection("library")}>Библиотека</button>
         </div>
         <AssistantTab />
+      </>
+    );
+  }
+
+  if (section === "library") {
+    return (
+      <>
+        <div className="tabs">
+          <button onClick={() => setSection("patients")}>Пациенты</button>
+          <button onClick={() => setSection("assistant")}>Ассистент</button>
+          <button className="active" onClick={() => setSection("library")}>
+            Библиотека
+          </button>
+        </div>
+        <DrugLibraryTab />
       </>
     );
   }
@@ -81,6 +98,7 @@ export default function ClinicianView() {
           Пациенты
         </button>
         <button onClick={() => setSection("assistant")}>Ассистент</button>
+        <button onClick={() => setSection("library")}>Библиотека</button>
       </div>
       <div className="tabs">
         {TRIAGE_FILTERS.map((f) => (

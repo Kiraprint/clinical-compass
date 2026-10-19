@@ -184,6 +184,9 @@ export const api = {
     }),
   assistantStatus: () => req<{ collection: string; points: number }>("/api/v1/assistant/status"),
   adminAudit: () => req<{ items: AuditEvent[] }>("/api/v1/admin/audit"),
+  drugs: (q?: string) =>
+    req<{ items: Drug[] }>(`/api/v1/drugs${q ? `?q=${encodeURIComponent(q)}` : ""}`),
+  drug: (drugId: string) => req<Drug>(`/api/v1/drugs/${encodeURIComponent(drugId)}`),
   prescribedScales: () => req<{ scales: { code: string; title: string }[] }>("/api/v1/me/prescribed-scales"),
   setPrescribedScales: (patientId: string, scales: string[]) =>
     req<{ patient_id: string; scales: string[] }>(`/api/v1/clinician/patients/${patientId}/prescribed-scales`, {
@@ -381,4 +384,21 @@ export interface AssistantAnswer {
   refused: boolean;
   refusal_code: string | null;
   citations: AssistantCitation[];
+}
+/** Справочник препаратов (ГРЛС). Не ПДн: публичные факты рег. удостоверения. */
+export interface Drug {
+  drug_id: string;
+  trade_name: string;
+  inn: string;
+  inn_en: string | null;
+  form: string;
+  reg_certificate: string;
+  reg_date: string | null;
+  revision_date: string | null;
+  pharmacology: string;
+  indications: string;
+  dosage: string;
+  contraindications: string;
+  adverse_events: string;
+  special_notes: string;
 }
