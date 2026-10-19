@@ -223,3 +223,51 @@ def test_privileged_registration_requires_admin_or_demo(client, monkeypatch):
                     json={"email": "new-doc@t.ru", "password": "Str0ng-Pass!", "role": "CLINICIAN"},
                     headers=ha)
     assert r.status_code == 201
+
+
+def test_login_without_otp_when_requirement_off(client, monkeypatch):
+    """CC_REQUIRE_OTP=false отключает проверку 2FA, но totp_secret хранится в БД."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "require_otp", True)
+    r = client.post("/api/v1/auth/register",
+                    json={"email": "off-doc@t.ru", "password": "Str0ng-Pass!", "role": "CLINICIAN"})
+    assert r.status_code == 201 and "totp_secret" in r.json()  # секрет по-прежнему выдаётся
+    email = "off-doc@t.ru"
+
+    # флаг выключен: вход без кода успешен (и неверный код игнорируется)
+    monkeypatch.setattr(settings, "require_otp", False)
+    for otp in (None, "000000"):
+        r = client.post("/api/v1/auth/login",
+                        json={"email": email, "password": "Str0ng-Pass!", "otp": otp})
+        assert r.status_code == 200 and r.json()["role"] == "CLINICIAN"
+
+    # флаг включён обратно: без кода — 401, с верным кодом — успех
+    monkeypatch.setattr(settings, "require_otp", True)
+    r = client.post("/api/v1/auth/login",
+                    json={"email": email, "password": "Str0ng-Pass!", "otp": "000000"})
+    assert r.status_code == 401
+    # достаём сохранённый totp_secret из БД и входим с верным кодом
+    from sqlalchemy import select
+    from app.models import User
+    from app.db import SessionLocal
+    with SessionLocal() as db:
+        secret = db.scalar(select(User.totp_secret).where(User.email == email))
+    assert secret  # секрет не был стёрт при отключённом флаге
+    r = client.post("/api/v1/auth/login",
+                    json={"email": email, "password": "Str0ng-Pass!", "otp": pyotp.TOTP(secret).now()})
+    assert r.status_code == 200
+
+
+def test_prod_mode_requires_otp():
+    """CC_PROD_MODE=true + CC_REQUIRE_OTP=false — несовместимо (fail-fast)."""
+    from pydantic import ValidationError
+    from app.config import Settings
+
+    try:
+        Settings(_env_file=None, allow_demo_secrets=False, prod_mode=True,
+                 require_otp=False,
+                 jwt_secret="x" * 40, data_key="y" * 40)
+        raise AssertionError("ожидали ValidationError")
+    except ValidationError as exc:
+        assert "CC_REQUIRE_OTP" in str(exc)

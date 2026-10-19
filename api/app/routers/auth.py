@@ -107,7 +107,7 @@ def login(body: LoginBody, request: Request, response: Response, db: Session = D
     if user is None or not security.verify_password(body.password, user.password_hash):
         record_rate_hit((client, email))
         raise Problem(401, "UNAUTHORIZED", "Неверный email или пароль")
-    if user.role != "PATIENT":
+    if user.role != "PATIENT" and settings.require_otp:
         if not user.totp_secret or not body.otp or not security.verify_totp(user.totp_secret, body.otp):
             record_rate_hit((client, email))
             raise Problem(401, "UNAUTHORIZED", "Требуется корректный код 2FA")

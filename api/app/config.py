@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     allow_demo_secrets: bool = False
     prod_mode: bool = False  # CC_PROD_MODE: дополнительные строгие проверки (KMS-класс data_key и т.д.)
     cookie_secure: bool = True  # CC_COOKIE_SECURE: Secure flag на httpOnly cookies (False для HTTP-демо)
+    # CC_REQUIRE_OTP: требовать 2FA-код при входе CLINICIAN/ADMIN. false — отключить
+    # проверку (демо/локально), totp_secret всё равно хранится в БД — развернуть
+    # версию с OTP можно одним флагом. prod_mode требует require_otp=true.
+    require_otp: bool = True
     model_config = {"env_prefix": "CC_"}
 
     @model_validator(mode="after")
@@ -67,6 +71,8 @@ class Settings(BaseSettings):
         if self.prod_mode:
             if self.allow_demo_secrets:
                 raise ValueError("CC_PROD_MODE несовместим с CC_ALLOW_DEMO_SECRETS")
+            if not self.require_otp:
+                raise ValueError("CC_PROD_MODE требует CC_REQUIRE_OTP=true (2FA обязателен в проде)")
         return self
 
 

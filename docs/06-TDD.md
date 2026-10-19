@@ -68,6 +68,7 @@
 | Тест | Сценарий | Ожидание |
 |---|---|---|
 | auth_2fa_required | регистрация CLINICIAN → login без otp | 401; с корректным TOTP → 200 |
+| auth_otp_optional_flag | CC_REQUIRE_OTP=false → login CLINICIAN без otp → 200; секрет остаётся в БД; prod_mode+false → fail-fast |
 | consent_gating | PATIENT без согласия → POST /screenings | 403 CONSENT_REQUIRED; после /consent → 201 |
 | screening_closes_run | finish → повторные answers | 409 RUN_CLOSED |
 | screening_one_open_only | 2-й screenings при открытом | 409 CONFLICT |
