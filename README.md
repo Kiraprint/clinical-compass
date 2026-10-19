@@ -110,7 +110,7 @@ export NGROK_URL=<ваш>.ngrok-free.app           # dev-домен из dashboa
 python3 -m venv .venv && .venv/bin/pip install -e "core" -e "api[dev]"
 docker compose -f infra/docker-compose.yml up -d postgres   # тестовая БД
 cd api && alembic upgrade head                                # схема из миграций (не create_all)
-.venv/bin/pytest core api                                     # 62 + 86 тестов
+.venv/bin/pytest core api                                     # 62 + 97 тестов
 cd ui && npm install && npm run dev                           # UI на :5173 (proxy → :8000)
 cd e2e && npx playwright install chromium && npx playwright test
 ```
@@ -156,9 +156,13 @@ cd android && ./gradlew assembleDebug           # APK: app/build/outputs/apk/deb
 - [x] Спецификация
 - [x] SDD
 - [x] TDD
-- [x] E1–E2: клинический движок (33 юнит-теста)
-- [x] E3–E5: API (36 интеграционных тестов)
-- [x] E6: UI, симулятор, docker compose, e2e (Playwright)
+- [x] E1–E2: клинический движок (62 юнит-теста)
+- [x] E3–E5: API (97 интеграционных тестов)
+- [x] E6: UI, симулятор, docker compose, e2e (14 Playwright)
+- [x] Кейс-дефициты P1–P9: Авиандр в KB, маршрутизация, НЯ, приверженность, парсинг историй, врач↔пациент чат, КР Минздрава
+- [x] Security audit F1–F12: pgcrypto шифрование ПДн, уничтожение при отзыве, ротация refresh, httpOnly cookies, fail-fast секреты, backup, threat model (ГОСТ 14971)
+
+**Регрессия:** 62 core + 97 API + 14 e2e = 173 теста.
 
 Ключевые ограничения: см. красные линии в 01 §4 и 02 §7.2 (без «автодиагноза», без биометрии, 152-ФЗ).
 Открытые вопросы метрик — 15.10 (открытие чемпионата).
