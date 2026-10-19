@@ -13,6 +13,7 @@ import re
 from langgraph.graph import END, START, StateGraph
 
 from compass.agent import RAGChunk, build_rag_answer, detect_redline
+from compass.depersonalize import depersonalize
 
 from app.services import kb as kb_store
 from app.services.embeddings import build_embedder
@@ -153,3 +154,54 @@ class AgentFactory:
 
 
 __all__ = ["AgentFactory", "AgentState"]
+
+# --- Граница LLM: деперсонализация (docs/12) -------------------------------
+
+def scrub_for_llm(
+    query: str,
+    patient_context: dict | None,
+    names: list[str] | None = None,
+) -> tuple[str, dict | None, dict]:
+    """Маскирует ПДн в запросе и контексте пациента перед вызовом LLM.
+
+    Возвращает (query, patient_context, отчёт). Отчёт содержит только категории
+    и количество — исходные значения ПДн не покидают процесс.
+
+    Маскируются: запрос врача целиком (он может содержать ФИО/телефон/адрес) и
+    свободный текст карты (ФИО, дневниковые записи). Числовые поля (баллы,
+    триаж, тренд) — не ПДн и остаются как есть.
+    """
+    counts: dict[str, int] = {}
+
+    def _add(found) -> None:
+        for f in found:
+            counts[f.kind] = counts.get(f.kind, 0) + 1
+
+    masked_query = depersonalize(query, names=names)
+    _add(masked_query.findings)
+
+    masked_ctx = None
+    if patient_context is not None:
+        masked_ctx = dict(patient_context)
+        fio = masked_ctx.get("fio")
+        if fio:
+            # ФИО пациента маскируется всегда, даже если его нет в deny-list
+            # (врач мог открыть карту по id без явного упоминания).
+            name_findings = depersonalize(str(fio), names=names or [str(fio)]).findings
+            _add(name_findings)
+            masked_ctx["fio"] = "[ПАЦИЕНТ]"
+        diary = masked_ctx.get("recent_diary") or []
+        masked_diary = []
+        for entry in diary:
+            content = entry.get("content")
+            if content:
+                scrubbed = depersonalize(str(content), names=names)
+                _add(scrubbed.findings)
+                masked_diary.append({**entry, "content": scrubbed.text})
+            else:
+                masked_diary.append(entry)
+        if "recent_diary" in masked_ctx:
+            masked_ctx["recent_diary"] = masked_diary
+
+    report = {"applied": bool(counts), "masked": counts}
+    return masked_query.text, masked_ctx, report

@@ -62,9 +62,15 @@ def ask(
     if body.patient_id is not None:
         patient_ctx = services.clinician.patient_context(db, user.id, body.patient_id, ip=ip)
         db.commit()  # PDn-access audit персистируется ДО вызова агента (152-ФЗ: read уже был)
-    result = _agent_factory().invoke(
-        body.query, topic=body.topic, limit=body.limit, patient_context=patient_ctx
+    # Граница LLM (docs/12): ни запрос, ни карта не уходят наружу с ПДн.
+    names = services.clinician.roster_names(db, user.id)
+    query, patient_ctx, depersonalization = services.agent.scrub_for_llm(
+        body.query, patient_ctx, names
     )
+    result = _agent_factory().invoke(
+        query, topic=body.topic, limit=body.limit, patient_context=patient_ctx
+    )
+    result["depersonalization"] = depersonalization
     if body.patient_id is None:
         services.audit.record(db, user.id, "ASK_ASSISTANT", "kb", object_id=None, ip=ip)
         db.commit()

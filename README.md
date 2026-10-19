@@ -17,6 +17,7 @@
 | [07-векторная-БД](docs/07-векторная-БД.md) | ADR: выбор векторной БД (Qdrant) для ИИ-агента врача, гибридный поиск |
 | [08-база-знаний](docs/08-база-знаний.md) | дизайн базы знаний: состав корпуса, chunking, эмбеддинги bge-m3, пайплайн индексации |
 | [10-модель-угроз](docs/10-модель-угроз.md) | STRIDE + реестр рисков R1-R12 (ГОСТ 14971) |
+| [12-деперсонализация](docs/12-деперсонализация.md) | деперсонализация входа LLM (ФИО/адреса/документы/тел.) |
 | [11-апробация-и-метрики](docs/11-апробация-и-метрики.md) | клинические сценарии, замеры метрик 1/4/6 |
 | [09-дефициты-и-решения](docs/09-дефициты-и-решения.md) | сопоставление проекта с кейсом (9 условий, 8 задач, 13 метрик) + 13 дефицитов и дизайн решений; P1-P8 реализованы (Авиандр в KB, маршрутизация, НЯ, приверженность, парсинг историй, врач↔пациент чат, КР Минздрава) |
 | [bench/](bench/README.md) | бенчмарк качества поиска: выбор эмбеддера для RU-EN психиатрии на реальных мета-анализах и гайдлайнах ВОЗ |
@@ -113,7 +114,7 @@ python3 -m venv .venv && .venv/bin/pip install -e "core" -e "api[dev]"
 # тестовая БД (dev-override публикует порт на 127.0.0.1; базовый compose — нет)
 docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up -d postgres qdrant
 cd api && alembic upgrade head                                # схема из миграций (не create_all)
-.venv/bin/pytest core api                                     # 67 + 104 тестов
+.venv/bin/pytest core api                                     # 80 + 106 тестов
 cd ui && npm install && npm run dev                           # UI на :5173 (proxy → :8000)
 cd e2e && npx playwright install chromium && npx playwright test
 ```
@@ -159,13 +160,13 @@ cd android && ./gradlew assembleDebug           # APK: app/build/outputs/apk/deb
 - [x] Спецификация
 - [x] SDD
 - [x] TDD
-- [x] E1–E2: клинический движок (67 юнит-тестов)
-- [x] E3–E5: API (104 интеграционных теста)
+- [x] E1–E2: клинический движок (80 юнит-тестов)
+- [x] E3–E5: API (106 интеграционных теста)
 - [x] E6: UI, симулятор, docker compose, e2e (14 Playwright)
 - [x] Кейс-дефициты P1–P9: Авиандр в KB, маршрутизация, НЯ, приверженность, парсинг историй, врач↔пациент чат, КР Минздрава
 - [x] Security audit F1–F12 + NEW-1..5: pgcrypto на всех free-text ПДн, уничтожение при отзыве, ротация refresh, httpOnly cookies, fail-fast секреты, AES-256 backup, threat model (ГОСТ 14971), gate привилегированной регистрации
 
-**Регрессия:** 67 core + 104 API + 14 e2e = 185 тестов.
+**Регрессия:** 80 core + 106 API + 14 e2e = 200 тестов.
 
 **Первый администратор (прод):** публичная регистрация CLINICIAN/ADMIN запрещена вне демо-режима (NEW-1):
 `docker compose -f infra/docker-compose.yml run --rm --entrypoint /app/.venv/bin/python api -m app.bootstrap_user --email admin@clinic.ru --role ADMIN`

@@ -228,3 +228,75 @@ def test_assistant_patient_context_audited(client, kb_collection):
     assert resp.status_code == 200
     actions = [e["action"] for e in resp.json()["items"]]
     assert "ASK_ASSISTANT_WITH_PATIENT" in actions
+
+
+# --- Граница LLM: деперсонализация (docs/12) ---
+
+def _set_fio(db_session, user_id: str, fio: str) -> None:
+    from sqlalchemy import update
+
+    from app.models import User
+
+    db_session.execute(update(User).where(User.id == user_id).values(fio=fio))
+    db_session.commit()
+
+
+def _ask_with_patient(client, clinician_h, patient_id, query, diary_content=None, diary_h=None):
+    if diary_content is not None:
+        client.post("/api/v1/diary", json={"content": diary_content, "mood": 4}, headers=diary_h)
+    return client.post(
+        "/api/v1/assistant/ask",
+        json={"query": query, "patient_id": patient_id},
+        headers=clinician_h,
+    )
+
+
+def test_assistant_depersonalizes_query_and_fio(client, kb_collection, db_session):
+    """Граница LLM: ФИО из deny-list (ростер) и контекст маскируются.
+
+    В ответе не должно быть ни одного исходного ФИО/контента дневника, и должен
+    присутствовать отчёт деперсонализации с категориями.
+    """
+    from app.models import User
+
+    ph, pid = patient_ctx(client, "dep1@test.ru")
+    ch, cid = clinician_ctx(client, "depc1@test.ru")
+    ah, _ = admin_ctx(client, "depa1@test.ru")
+    _grant(client, ah, pid, cid)
+    _set_fio(db_session, pid, "Иванов Иван Иванович")
+    finish_screening(client, ph, GREEN_ANSWERS)
+    _ask_with_patient(client, ph, pid, "", diary_content="Встреча с Петровым Петром по адресу ул. Ленина 5, тел +7 999 111-22-33", diary_h=ph)
+
+    # deny-list — только ростeр врача, поэтому «Пётр» из дневника уйдёт как есть,
+    # а «Иванов» врача — скроется: проверяем, что ФИО/телефон/адрес не утекают.
+    resp = client.post(
+        "/api/v1/assistant/ask",
+        json={"query": f"какая динамика у Иванова Ивана Ивановича", "patient_id": pid},
+        headers=ch,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    raw = resp.text
+    assert "Иванов" not in raw, raw
+    report = body.get("depersonalization")
+    assert report is not None and report["applied"] is True
+    assert "FIO" in report["masked"], report
+
+
+def test_assistant_query_without_patient_still_depersonalized(client, kb_collection, db_session):
+    """Запрос без @-упоминания: ФИО врача в тексте запроса маскируется."""
+    ph, pid = patient_ctx(client, "dep2@test.ru")
+    ch, cid = clinician_ctx(client, "depc2@test.ru")
+    ah, _ = admin_ctx(client, "depa2@test.ru")
+    _grant(client, ah, pid, cid)
+    _set_fio(db_session, pid, "Петрова Анна Сергеевна")
+
+    resp = client.post(
+        "/api/v1/assistant/ask",
+        json={"query": "сравни с Петровой Анной Сергеевной"},
+        headers=ch,
+    )
+    assert resp.status_code == 200, resp.text
+    raw = resp.text
+    assert "Петрова" not in raw, raw
+    assert resp.json()["depersonalization"]["applied"] is True

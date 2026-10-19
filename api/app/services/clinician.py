@@ -19,6 +19,19 @@ from .audit import record as audit_record
 from .history_extract import extract_history
 
 
+def roster_names(db: Session, clinician_id) -> list[str]:
+    """ФИО пациентов врача — deny-list для деперсонализации (docs/12).
+
+    Только непустые fio; пустой список → маскируются лишь структурные сущности.
+    """
+    rows = db.execute(
+        select(User.fio)
+        .join(ClinicianRoster, ClinicianRoster.patient_id == User.id)
+        .where(ClinicianRoster.clinician_id == clinician_id, User.fio.is_not(None))
+    ).all()
+    return [r[0] for r in rows if r[0].strip()]
+
+
 def _require_roster(db: Session, clinician_id, patient_id) -> None:
     row = db.get(ClinicianRoster, (clinician_id, patient_id))
     if row is None:
