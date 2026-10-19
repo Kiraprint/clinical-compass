@@ -66,3 +66,4 @@ mobile/android/keystore.properties
 /test-results/
 e2e/test-results/
 tools/backups/
+infra/.env

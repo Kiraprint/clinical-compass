@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime
 
@@ -132,7 +133,22 @@ class DiaryEntry(Base):
     content: Mapped[str] = mapped_column(EncryptedText())
     mood: Mapped[int | None] = mapped_column(nullable=True)  # 1..10
     sleep_h: Mapped[float | None] = mapped_column(nullable=True)
-    tags: Mapped[list] = mapped_column(JSONB, default=list)
+    # NEW-2: теги — свободный текст пациента (ПДн). В БД лежит зашифрованная
+    # JSON-строка; наружу отдаётся list[str] через property ниже.
+    tags_json: Mapped[str] = mapped_column("tags", EncryptedText, default="[]")
+
+    @property
+    def tags(self) -> list[str]:
+        if not self.tags_json:
+            return []
+        try:
+            return json.loads(self.tags_json)
+        except (ValueError, TypeError):
+            return []
+
+    @tags.setter
+    def tags(self, value) -> None:
+        self.tags_json = json.dumps(list(value), ensure_ascii=False) if value else None
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)
 
 
@@ -242,7 +258,7 @@ class AdverseEvent(Base):
     event_text: Mapped[str] = mapped_column(EncryptedText())
     severity: Mapped[str] = mapped_column(String(16))   # mild | moderate | severe
     onset_date: Mapped[datetime] = mapped_column(Date)
-    suspected_drug: Mapped[str | None] = mapped_column(String(128))
+    suspected_drug: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)  # NEW-3: контекст лечения
     action_taken: Mapped[str | None] = mapped_column(String(32))  # none|monitoring|dose_reduced|stopped|referred
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)
 

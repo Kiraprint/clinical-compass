@@ -191,3 +191,35 @@ def test_prod_mode_rejects_demo_secrets():
         assert "CC_ALLOW_DEMO_SECRETS" in str(e) or "демо" in str(e).lower()
     finally:
         os.environ["CC_ALLOW_DEMO_SECRETS"] = "true"
+
+
+def test_privileged_registration_requires_admin_or_demo(client, monkeypatch):
+    """NEW-1 (HIGH): вне демо-режима публичная регистрация CLINICIAN/ADMIN → 403.
+    Иначе неаутентифицированный пользователь создаёт ADMIN и читает карты пациентов."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "allow_demo_secrets", False)
+    # без токена — запрещено
+    r = client.post("/api/v1/auth/register",
+                    json={"email": "evil-doc@t.ru", "password": "Str0ng-Pass!", "role": "CLINICIAN"})
+    assert r.status_code == 403 and r.json()["code"] == "REGISTRATION_FORBIDDEN"
+    r = client.post("/api/v1/auth/register",
+                    json={"email": "evil-admin@t.ru", "password": "Str0ng-Pass!", "role": "ADMIN"})
+    assert r.status_code == 403
+    # PATIENT по-прежнему свободно
+    r = client.post("/api/v1/auth/register",
+                    json={"email": "ok-pat@t.ru", "password": "Str0ng-Pass!", "role": "PATIENT"})
+    assert r.status_code == 201
+
+    # действующий ADMIN может создать CLINICIAN через API.
+    # Бутстрап первого ADMIN — операторский путь (python -m app.bootstrap_user),
+    # поэтому в тесте создаём его при включённом демо-флаге.
+    from .conftest import admin_ctx
+
+    monkeypatch.setattr(settings, "allow_demo_secrets", True)
+    ha, _ = admin_ctx(client, "real-admin@t.ru")
+    monkeypatch.setattr(settings, "allow_demo_secrets", False)
+    r = client.post("/api/v1/auth/register",
+                    json={"email": "new-doc@t.ru", "password": "Str0ng-Pass!", "role": "CLINICIAN"},
+                    headers=ha)
+    assert r.status_code == 201

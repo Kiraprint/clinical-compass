@@ -5,8 +5,11 @@ services:
       POSTGRES_USER: compass
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-compass}
       POSTGRES_DB: compass
-    ports:
-      - "5432:5432"
+    # NEW-4: БД не публикуется на 0.0.0.0 — доступ только внутри compose-сети.
+    # Для локального доступа к тестовой БД: docker compose port postgres 5432
+    # или профиль `-f infra/docker-compose.dev.yml` (см. tools/ci.sh).
+    expose:
+      - "5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -17,9 +20,10 @@ services:
 
   qdrant:
     image: qdrant/qdrant:v1.19.2
-    ports:
-      - "6333:6333"
-      - "6334:6334"
+    # NEW-4: Qdrant доступен только api/kb-seed внутри compose-сети.
+    expose:
+      - "6333"
+      - "6334"
     volumes:
       - qdrant-data:/qdrant/storage
     healthcheck:
@@ -39,7 +43,7 @@ services:
       CC_DATABASE_URL: postgresql+psycopg://compass:${POSTGRES_PASSWORD:-compass}@postgres:5432/compass
       CC_JWT_SECRET: ${CC_JWT_SECRET:-demo-jwt-secret-0123456789abcdefghij}
       CC_DATA_KEY: ${CC_DATA_KEY:-compass-demo-data-key-do-not-use-in-prod-0123456789}
-      CC_ALLOW_DEMO_SECRETS: "${CC_ALLOW_DEMO_SECRETS:-true}"
+      CC_ALLOW_DEMO_SECRETS: "${CC_ALLOW_DEMO_SECRETS:-false}"  # NEW-5: по умолчанию fail-fast
       CC_COOKIE_SECURE: "${CC_COOKIE_SECURE:-false}"  # демо HTTP; prod HTTPS → true
       CC_VAPID_PRIVATE_KEY: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JR0hBZ0VBTUJNR0J5cUdTTTQ5QWdFR0NDcUdTTTQ5QXdFSEJHMHdhd0lCQVFRZ3dVN2MwMkZiYXBVVndxVmUKWkJFcUMrRTJGZ2NScm9SeDNiZkFmSlVEOHN5aFJBTkNBQVJUaTg4TlpBK3hxaUxVM1c4RGxwNUxrL25WejBSNwptZDZEZnp6aUc2YWZ2a3ZsankwQVlSWFRzVmp3Y2l4SzdSQTAzWlBNbjA5UEg1Smkrbi9SeStkLwotLS0tLUVORCBQUklWQVRFIEtFWS0tLS0tCg==
       CC_QDRANT_URL: http://qdrant:6333
@@ -66,7 +70,7 @@ services:
     environment:
       CC_QDRANT_URL: http://qdrant:6333
       CC_DATABASE_URL: postgresql+psycopg://compass:${POSTGRES_PASSWORD:-compass}@postgres:5432/compass
-      CC_ALLOW_DEMO_SECRETS: "${CC_ALLOW_DEMO_SECRETS:-true}"
+      CC_ALLOW_DEMO_SECRETS: "${CC_ALLOW_DEMO_SECRETS:-false}"  # NEW-5: по умолчанию fail-fast
       CC_DATA_KEY: ${CC_DATA_KEY:-compass-demo-data-key-do-not-use-in-prod-0123456789}
     depends_on:
       qdrant:
@@ -97,7 +101,7 @@ services:
     environment:
       CC_DATABASE_URL: postgresql+psycopg://compass:${POSTGRES_PASSWORD:-compass}@postgres:5432/compass
       CC_DEMO_TOTP: JBSWY3DPEHPK3PXP
-      CC_ALLOW_DEMO_SECRETS: "${CC_ALLOW_DEMO_SECRETS:-true}"
+      CC_ALLOW_DEMO_SECRETS: "${CC_ALLOW_DEMO_SECRETS:-false}"  # NEW-5: по умолчанию fail-fast
       CC_DATA_KEY: ${CC_DATA_KEY:-compass-demo-data-key-do-not-use-in-prod-0123456789}
     depends_on:
       api:

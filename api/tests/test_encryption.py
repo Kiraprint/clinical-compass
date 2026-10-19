@@ -68,3 +68,55 @@ def test_adherence_medication_encrypted_at_rest(db_session):
 
     rec = db_session.query(AdherenceRecord).filter(AdherenceRecord.patient_id == uid).one()
     assert rec.medication == "Авиандр"
+
+
+def test_diary_tags_encrypted_at_rest(db_session):
+    """NEW-2: DiaryEntry.tags — свободный текст пациента, зашифрован at rest."""
+    from sqlalchemy import text as sql_text
+    from app.models import DiaryEntry, User
+    import uuid
+
+    uid = uuid.uuid4()
+    db_session.add(User(id=uid, email=f"tags-{uid}@t.ru", password_hash="x", role="PATIENT"))
+    db_session.flush()
+    db_session.add(DiaryEntry(patient_id=uid, content="x", tags=["паника", "бессонница"]))
+    db_session.commit()
+
+    row = db_session.execute(
+        sql_text("SELECT tags::text AS c FROM diary_entries WHERE patient_id = CAST(:p AS uuid)"),
+        {"p": str(uid)},
+    ).first()
+    assert row is not None
+    assert "паника" not in (row.c or "")
+
+    rec = db_session.query(DiaryEntry).filter(DiaryEntry.patient_id == uid).one()
+    assert rec.tags == ["паника", "бессонница"]
+
+
+def test_suspected_drug_encrypted_at_rest(db_session):
+    """NEW-3: AdverseEvent.suspected_drug — контекст лечения, зашифрован at rest."""
+    from sqlalchemy import text as sql_text
+    from app.models import AdverseEvent, User
+    import uuid
+    from datetime import date
+
+    uid = uuid.uuid4()
+    cid = uuid.uuid4()
+    db_session.add(User(id=uid, email=f"ae-{uid}@t.ru", password_hash="x", role="PATIENT"))
+    db_session.add(User(id=cid, email=f"aedoc-{uid}@t.ru", password_hash="x", role="CLINICIAN", totp_secret="JBSWY3DPEHPK3PXP"))
+    db_session.flush()
+    db_session.add(AdverseEvent(
+        patient_id=uid, clinician_id=cid, event_text="тошнота",
+        severity="mild", onset_date=date.today(), suspected_drug="Авиандр",
+    ))
+    db_session.commit()
+
+    row = db_session.execute(
+        sql_text("SELECT suspected_drug::text AS c FROM adverse_events WHERE patient_id = CAST(:p AS uuid)"),
+        {"p": str(uid)},
+    ).first()
+    assert row is not None
+    assert "Авиандр" not in (row.c or "")
+
+    rec = db_session.query(AdverseEvent).filter(AdverseEvent.patient_id == uid).one()
+    assert rec.suspected_drug == "Авиандр"

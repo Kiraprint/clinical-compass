@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 from compass.models import RiskFlag, Severity, Triage
+from compass.rules import load_rules
 
 
 class RoutingCategory:
@@ -49,37 +50,24 @@ def routing_for(
 ) -> Routing:
     """Возвращает рекомендацию маршрутизации к психиатру.
 
-    Правила (суицидальный флаг важнее severity):
-    - SUICIDAL_IDEATION → REQUIRED (неотложно, независимо от балла);
-    - SEVERE или triage RED → REQUIRED;
-    - MODERATE → DESIRABLE;
-    - MILD с ухудшением (delta_7 > 0) → DESIRABLE;
-    - иначе → NONE (наблюдение).
+    Правила читаются из `compass/data/alert_rules.json` (метрика кейса 10):
+    порядок правил в конфиге определяет приоритет, первое совпавшее выигрывает.
+    По умолчанию: суицидальный флаг → REQUIRED; SEVERE/RED → REQUIRED;
+    MODERATE → DESIRABLE; MILD с ухудшением (delta_7 > 0) → DESIRABLE; иначе NONE.
     """
-    if any(f.kind == "SUICIDAL_IDEATION" for f in risk_flags):
-        return Routing(
-            RoutingCategory.REQUIRED, "психиатр",
-            "суицидальная идеация по шкале — неотложное направление",
-        )
-    if severity == Severity.SEVERE or triage_value == Triage.RED:
-        return Routing(
-            RoutingCategory.REQUIRED, "психиатр",
-            "тяжёлая симптоматика (SEVERE/RED)",
-        )
-    if severity == Severity.MODERATE:
-        return Routing(
-            RoutingCategory.DESIRABLE, "психиатр",
-            "симптоматика умеренной тяжести",
-        )
-    if severity == Severity.MILD and delta_7 is not None and delta_7 > 0:
-        return Routing(
-            RoutingCategory.DESIRABLE, "психиатр",
-            "лёгкая симптоматика с отрицательной динамикой (ухудшение за 7 дней)",
-        )
-    return Routing(
-        RoutingCategory.NONE, "психиатр",
-        "направление не показано — динамическое наблюдение",
-    )
+    rules = load_rules()
+    flag_kinds = tuple(f.kind for f in risk_flags)
+    for rule in rules.routing:
+        if rules.matches(
+            rule,
+            flags=flag_kinds,
+            severity=severity,
+            triage_value=triage_value,
+            delta_7=delta_7,
+        ):
+            return Routing(rule.category, rule.target, rule.reason)
+    d = rules.routing_default
+    return Routing(d.category, d.target, d.reason)
 
 
 __all__ = ["Routing", "RoutingCategory", "ROUTING_LABELS", "routing_for"]

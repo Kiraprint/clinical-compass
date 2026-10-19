@@ -240,3 +240,19 @@ The round-3 audit found residual gaps inside "FIXED" findings. All closed:
 **Regression after round-3:** 62 core + 101 API + 14 e2e = **177 green**. Live-verified: migration `e8b9c0d1e2f3` applied to demo DB, e2e 14/14 through the stack.
 
 **IDOR/cross-clinician isolation:** confirmed clean — every patient-scoped clinician function calls `_require_roster` (`clinician.py:22`); patient endpoints derive `patient_id` from JWT not path param; test `test_clinician_cannot_see_unrostered` proves 403 NO_ROSTER.
+
+---
+
+## Round-4 audit (post 4191df7) — NEW-1..NEW-5
+
+Round 4 verified 10/10 prior claims PASS, and found 5 new issues. All fixed:
+
+| ID | Severity | Issue | Fix |
+|----|----------|-------|-----|
+| NEW-1 | **HIGH** | Public `POST /auth/register` accepted `role=ADMIN\|CLINICIAN` with no gate → unauthenticated attacker creates ADMIN, grants roster, reads decrypted patient cards | `auth.py:_privileged_registration_allowed` — privileged roles require demo mode or an authenticated ADMIN; new operator CLI `python -m app.bootstrap_user` for first-admin bootstrap |
+| NEW-2 | MEDIUM | `DiaryEntry.tags` (JSONB) plaintext — patient free text | `tags_json` maps to `EncryptedText`; `tags` property does JSON in/out; migration `e9c0d1e2f3a4` |
+| NEW-3 | MEDIUM | `AdverseEvent.suspected_drug` plaintext — treatment context | `EncryptedText`, same migration |
+| NEW-4 | MEDIUM | Postgres/Qdrant published on `0.0.0.0` with default creds | base compose uses `expose` only; `infra/docker-compose.dev.yml` publishes to `127.0.0.1` for dev/CI |
+| NEW-5 | MEDIUM | compose defaulted `CC_ALLOW_DEMO_SECRETS=true`, defeating F3 | default is now `false` (fail-fast); demo needs explicit `.env` (`infra/.env.example`) |
+
+**Regression after round 4:** 67 core + 104 API + 14 e2e = **185 green**. Live: migrations `e9c0d1e2f3a4` applied, demo reseeded, e2e 14/14.

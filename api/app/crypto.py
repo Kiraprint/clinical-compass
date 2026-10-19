@@ -14,6 +14,8 @@ KMS (Yandex/VK Cloud) + LUKS-том + TDE, pgcrypto — уровень прил�
 """
 from __future__ import annotations
 
+import json
+
 from sqlalchemy import func
 from sqlalchemy.types import Text, TypeDecorator
 

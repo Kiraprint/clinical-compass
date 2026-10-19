@@ -47,12 +47,42 @@ def _clear_auth_cookies(response: Response) -> None:
     response.delete_cookie("cc_access", path="/api/v1")
     response.delete_cookie("cc_refresh", path="/api/v1/auth")
 
+def _privileged_registration_allowed(request: Request, db: Session) -> bool:
+    """NEW-1: привилегированные роли — только демо-режим или действующий ADMIN."""
+    if settings.allow_demo_secrets:
+        return True
+    auth = request.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        return False
+    try:
+        payload = security.decode_token(auth.removeprefix("Bearer "))
+    except Exception:
+        return False
+    if payload.get("type") != "access":
+        return False
+    actor = db.get(User, uuid.UUID(payload["sub"]))
+    return actor is not None and actor.role == "ADMIN"
+
+
 @router.post("/register", status_code=201)
-def register(body: RegisterBody, db: Session = Depends(get_db)):
+def register(body: RegisterBody, request: Request, db: Session = Depends(get_db)):
+    """Регистрация пользователя.
+
+    NEW-1 (HIGH): публичная регистрация привилегированных ролей (CLINICIAN/ADMIN)
+    запрещена вне демо-режима — иначе любой неаутентифицированный пользователь
+    создаёт себе ADMIN, выдаёт ростер и читает расшифрованные карты пациентов.
+    Демо-стенд разрешает это явно (`CC_ALLOW_DEMO_SECRETS=true`); прод требует
+    создания привилегированных ролей аутентифицированным ADMIN.
+    """
     email = body.email.strip().lower()
     exists = db.scalar(select(User).where(User.email == email))
     if exists:
         raise Problem(409, "CONFLICT", "Пользователь с таким email уже зарегистрирован")
+    if body.role != "PATIENT" and not _privileged_registration_allowed(request, db):
+        raise Problem(
+            403, "REGISTRATION_FORBIDDEN",
+            "Создание роли CLINICIAN/ADMIN требует аутентифицированного администратора",
+        )
     user = User(email=email, password_hash=security.hash_password(body.password), role=body.role)
     totp_secret: str | None = None
     if body.role != "PATIENT":
