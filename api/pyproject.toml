@@ -28,6 +28,11 @@ dependencies = [
 dev = ["pytest>=8", "httpx>=0.27"]
 # NER-детекция ФИО для деперсонализации (docs/12): ставится отдельно,
 # включается CC_DEPERSONALIZE_NER=true; без него — regex/deny-list.
+###############################################################
+# NER-детекция ФИО (docs/12): ОПЦИОНАЛЬНО.
+# natasha тянет pymorphy2 (старый, сломан на py>=3.11) как import-time модуль —
+# наш адаптер никогда не конструирует MorphVocab (try/except, деградация),
+# инференс полностью оффлайн (модели в wheel), см. тест no_network_egress.
 ner = ["natasha>=1.1"]
 
 [tool.setuptools.packages.find]

@@ -7,6 +7,11 @@ test.describe("Питч-сценарий", () => {
     await login(page, "p1@compass.demo", DEMO_PASSWORD);
     await expect(page.getByRole("button", { name: "Скрининг", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Скрининг", exact: true }).click();
+    // Многошкальный режим (Option A): если врач назначил >1 шкалы, сначала выбираем первую.
+    const chooser = page.getByText("Шкалы назначены вашим врачом — выберите одну:");
+    if (await chooser.isVisible().catch(() => false)) {
+      await page.locator(".card .row button").first().click();
+    }
     await page.getByRole("button", { name: "Начать скрининг" }).click();
 
     const questions = page.locator(".qa");

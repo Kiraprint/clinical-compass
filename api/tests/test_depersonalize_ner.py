@@ -137,3 +137,42 @@ def test_scrub_for_llm_without_ner_keeps_default(monkeypatch):
     assert called == []
     assert query == "к Сидорову Петру заходить"
     assert report["applied"] is False
+def test_no_network_egress_on_scrub_path(monkeypatch):
+    """Гарантия безопасности: весь путь деперсонализации (regex + NER) не делает
+    ни одного сетевого вызова — ни сокета, ни DNS, ни HTTP. Это регрессионный
+    тест на факт-чек 'pymorphy2 шлёт строки в сервис Яндекса' → неверно:
+    pymorphy2 не имеет сетевого кода вовсе, модели natasha упакованы в wheel."""
+    import socket as _socket
+
+    attempts = []
+
+    def _boom(what):
+        def f(*a, **k):
+            attempts.append(what)
+            raise AssertionError(f"NETWORK EGRESS BLOCKED: {what} {a} {k}")
+        return f
+
+    monkeypatch.setattr(_socket, "socket", _boom("socket()"))
+    monkeypatch.setattr(_socket, "create_connection", _boom("create_connection"))
+    monkeypatch.setattr(_socket, "getaddrinfo", _boom("getaddrinfo"))
+
+    # regex-путь (флаг выключен) — не должен даже касаться сети
+    from app.services.agent import scrub_for_llm
+
+    q, ctx, rep = scrub_for_llm(
+        "пациент Иванов, тел +7 999 123-45-67", patient_context=None, names=["Иванов"]
+    )
+    assert "Иванов" not in q and "[ФИО]" in q and "[ТЕЛЕФОН]" in q
+    assert not attempts
+
+    # NER-путь (флаг on) — при наличии natasha тоже полностью оффлайн
+    try:
+        from app.services.depersonalize import build_name_extractor
+    except ImportError:
+        build_name_extractor = None
+    if build_name_extractor is not None:
+        settings.depersonalize_ner = True
+        ex = build_name_extractor()
+        _ = ex.extract("Проверка оффлайн NER")  # не должно упасть с NETWORK EGRESS
+        settings.depersonalize_ner = False
+    assert not attempts, f"сетевые попытки: {attempts}"
