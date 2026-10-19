@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, ImportHistoryResult, PatientCard, Report } from "../api";
+import { api, ImportHistoryResult, PatientCard, Report, Visit } from "../api";
 import TrendChart from "../TrendChart";
 import AssistantTab from "./AssistantTab";
 
@@ -161,6 +161,13 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
   const [histText, setHistText] = useState("");
   const [histResult, setHistResult] = useState<ImportHistoryResult | null>(null);
   const [histErr, setHistErr] = useState("");
+  const [visits, setVisits] = useState<Visit[]>([]);
+  const [visitDate, setVisitDate] = useState(new Date().toISOString().slice(0, 10));
+  const [visitType, setVisitType] = useState<"in_person" | "online" | "phone">("in_person");
+  const [visitDuration, setVisitDuration] = useState("");
+  const [visitNotes, setVisitNotes] = useState("");
+  const [visitErr, setVisitErr] = useState("");
+  const [visitSaved, setVisitSaved] = useState<number | null>(null);
   useEffect(() => {
     if (report) { setPicked(report.prescribed_scales ?? []); setAeList(report.adverse_events ?? []); }
   }, [report]);
@@ -172,6 +179,43 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
       .catch(() => { if (!cancelled) setChatMsgs([]); });
     return () => { cancelled = true; };
   }, [report]);
+
+  useEffect(() => {
+    if (!report) return;
+    let cancelled = false;
+    api.clinicianVisits(report.patient_id)
+      .then((r) => { if (!cancelled) setVisits(r.items); })
+      .catch(() => { if (!cancelled) setVisits([]); });
+    return () => { cancelled = true; };
+  }, [report]);
+
+  const addVisit = async () => {
+    if (!report || !visitNotes.trim()) return;
+    setVisitErr("");
+    try {
+      const v = await api.createVisit(report.patient_id, {
+        visited_at: new Date(visitDate + "T12:00:00").toISOString(),
+        visit_type: visitType,
+        duration_min: visitDuration.trim() ? Number(visitDuration) : undefined,
+        notes: visitNotes.trim(),
+      });
+      setVisits([v, ...visits]);
+      setVisitNotes(""); setVisitDuration(""); setVisitSaved(Date.now());
+    } catch (e: unknown) {
+      setVisitErr(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const removeVisit = async (visitId: string) => {
+    if (!report) return;
+    setVisitErr("");
+    try {
+      await api.deleteVisit(report.patient_id, visitId);
+      setVisits(visits.filter((v) => v.id !== visitId));
+    } catch (e: unknown) {
+      setVisitErr(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   const saveScale = async () => {
     if (!report || picked.length === 0) return;
@@ -402,6 +446,60 @@ function ReportView({ report, error, onBack }: { report: Report | null; error: s
         <button onClick={sendChat} disabled={!chatInput.trim()}>Отправить</button>
       </div>
       {chatErr && <p className="error">{chatErr}</p>}
+
+      <h3>Приёмы (запись беседы врач-пациент)</h3>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, maxWidth: 560, marginTop: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <input type="date" value={visitDate} onChange={(e) => setVisitDate(e.target.value)} />
+          <select value={visitType} onChange={(e) => setVisitType(e.target.value as "in_person" | "online" | "phone")}>
+            <option value="in_person">Очный</option>
+            <option value="online">Онлайн</option>
+            <option value="phone">Телефон</option>
+          </select>
+          <input
+            type="number" min={1} max={480} placeholder="Длительность, мин"
+            value={visitDuration} onChange={(e) => setVisitDuration(e.target.value)}
+            style={{ width: 150 }}
+          />
+        </div>
+        <textarea
+          rows={4}
+          placeholder="Тема беседы, результаты, план, договорённости…"
+          value={visitNotes}
+          onChange={(e) => setVisitNotes(e.target.value)}
+        />
+        <div>
+          <button onClick={addVisit} disabled={!visitNotes.trim()}>Сохранить приём</button>
+          {visitSaved !== null && <span style={{ marginLeft: 10, color: "#2e7d32" }}>Сохранено</span>}
+        </div>
+        {visitErr && <p className="error">{visitErr}</p>}
+      </div>
+      {visits.length > 0 ? (
+        <div className="table-wrap" style={{ marginTop: 10 }}>
+          <table>
+            <thead><tr><th>Дата</th><th>Формат</th><th>Мин</th><th>Запись</th><th></th></tr></thead>
+            <tbody>
+              {visits.map((v) => (
+                <tr key={v.id}>
+                  <td>{v.visited_at.slice(0, 10)}</td>
+                  <td>{{ in_person: "Очный", online: "Онлайн", phone: "Телефон" }[v.visit_type] ?? v.visit_type}</td>
+                  <td>{v.duration_min ?? "—"}</td>
+                  <td style={{ whiteSpace: "pre-wrap" }}>{v.notes}</td>
+                  <td>
+                    <button
+                      className="link"
+                      style={{ color: "#c62828", fontSize: 12 }}
+                      onClick={() => removeVisit(v.id)}
+                    >Удалить</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p style={{ color: "#5a6478", fontSize: 13 }}>Записей о приёмах пока нет.</p>
+      )}
 
       <h3>Импорт истории болезни (метрика кейса 2)</h3>
       <p style={{ color: "#5a6478", fontSize: 13 }}>

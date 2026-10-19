@@ -217,6 +217,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ text, template_name: templateName }),
     }),
+  clinicianVisits: (patientId: string) =>
+    req<{ items: Visit[] }>(`/api/v1/clinician/patients/${patientId}/visits`),
+  createVisit: (patientId: string, body: {
+    visited_at: string; visit_type: "in_person" | "online" | "phone";
+    duration_min?: number; notes: string;
+  }) =>
+    req<Visit>(`/api/v1/clinician/patients/${patientId}/visits`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  deleteVisit: (patientId: string, visitId: string) =>
+    req<void>(`/api/v1/clinician/patients/${patientId}/visits/${visitId}`, { method: "DELETE" }),
   vapidPublicKey: () => req<{ public_key: string }>("/api/v1/push/vapid-public-key"),
   subscribePush: (endpoint: string, keys: { p256dh: string; auth: string }) =>
     req<{ subscribed: boolean }>("/api/v1/push/subscribe", {
@@ -315,6 +327,15 @@ export interface ImportHistoryResult {
   therapy: string[];
   scale_scores: string[];
   requires_confirmation: boolean;
+}
+
+export interface Visit {
+  id: string;
+  visited_at: string;
+  visit_type: string;
+  duration_min: number | null;
+  notes: string;
+  created_at: string;
 }
 
 export interface Report {

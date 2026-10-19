@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
@@ -75,6 +75,41 @@ def adherence_summary(
 ):
     """Агрегат приверженности лечению (задача кейса 7). Roster-гейт."""
     return services.clinician.adherence_summary(db, user.id, patient_id, days)
+
+class VisitBody(BaseModel):
+    visited_at: datetime
+    visit_type: str = Field(pattern="^(in_person|online|phone)$")
+    duration_min: int | None = Field(default=None, ge=1, le=480)
+    notes: str = Field(min_length=1)
+
+@router.post("/clinician/patients/{patient_id}/visits", status_code=201)
+def create_visit(
+    patient_id: uuid.UUID, body: VisitBody, request: Request,
+    user: User = Depends(require_clinician), db: Session = Depends(get_db),
+):
+    """Запись приёма врач-пациент (задача кейса 6, п. «приём»). Roster + аудит VISIT."""
+    ip = request.client.host if request.client else None
+    return services.clinician.create_visit(
+        db, user.id, patient_id,
+        body.visited_at, body.visit_type, body.duration_min, body.notes, ip=ip,
+    )
+
+@router.get("/clinician/patients/{patient_id}/visits")
+def list_visits(
+    patient_id: uuid.UUID,
+    user: User = Depends(require_clinician), db: Session = Depends(get_db),
+):
+    """История приёмов пациента (задача кейса 6, п. «приём»). Roster-гейт."""
+    return {"items": services.clinician.list_visits(db, user.id, patient_id)}
+
+@router.delete("/clinician/patients/{patient_id}/visits/{visit_id}", status_code=204)
+def delete_visit(
+    patient_id: uuid.UUID, visit_id: uuid.UUID, request: Request,
+    user: User = Depends(require_clinician), db: Session = Depends(get_db),
+):
+    """Удаление ошибочной записи приёма (исправление опечаток). Roster + аудит VISIT_DELETE."""
+    ip = request.client.host if request.client else None
+    services.clinician.delete_visit(db, user.id, patient_id, visit_id, ip=ip)
 
 class ClinicianChatBody(BaseModel):
     content: str = Field(min_length=1)

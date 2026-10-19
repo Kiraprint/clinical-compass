@@ -13,7 +13,7 @@ from compass.scales import ALL_SCALES
 from compass.trend import trends
 
 from app.errors import Problem
-from app.models import AdherenceRecord, AdverseEvent, Assessment, ChatMessage, ClinicianRoster, Consent, DiaryEntry, Escalation, Prescription, User
+from app.models import AdherenceRecord, AdverseEvent, Assessment, ChatMessage, ClinicianRoster, Consent, DiaryEntry, Escalation, Prescription, User, Visit
 
 from .audit import record as audit_record
 from .history_extract import extract_history
@@ -337,6 +337,60 @@ def _adherence_dict(r: AdherenceRecord) -> dict:
         "note": r.note,
         "created_at": r.created_at.isoformat(),
     }
+
+
+def create_visit(
+    db: Session, clinician_id, patient_id,
+    visited_at: datetime, visit_type: str, duration_min: int | None, notes: str,
+    ip: str | None = None,
+) -> dict:
+    """Запись приёма (задача кейса 6, п. «приём»). Roster + аудит VISIT."""
+    _require_roster(db, clinician_id, patient_id)
+    v = Visit(
+        patient_id=patient_id, clinician_id=clinician_id,
+        visited_at=visited_at, visit_type=visit_type,
+        duration_min=duration_min, notes=notes,
+    )
+    db.add(v)
+    db.flush()
+    audit_record(db, clinician_id, "VISIT", "patient", str(patient_id), ip=ip)
+    db.commit()
+    return _visit_dict(v)
+
+
+def list_visits(db: Session, clinician_id, patient_id) -> list[dict]:
+    """История приёмов пациента (задача кейса 6). Roster-гейт."""
+    _require_roster(db, clinician_id, patient_id)
+    rows = db.scalars(
+        select(Visit)
+        .where(Visit.patient_id == patient_id)
+        .order_by(Visit.visited_at.desc(), Visit.created_at.desc())
+    ).all()
+    return [_visit_dict(v) for v in rows]
+
+
+def _visit_dict(v: Visit) -> dict:
+    return {
+        "id": str(v.id),
+        "visited_at": v.visited_at.isoformat(),
+        "visit_type": v.visit_type,
+        "duration_min": v.duration_min,
+        "notes": v.notes,
+        "created_at": v.created_at.isoformat(),
+    }
+
+def delete_visit(
+    db: Session, clinician_id, patient_id, visit_id,
+    ip: str | None = None,
+) -> None:
+    """Удаление ошибочной записи приёма. Roster + аудит VISIT_DELETE."""
+    _require_roster(db, clinician_id, patient_id)
+    v = db.get(Visit, visit_id)
+    if v is None or v.patient_id != patient_id:
+        raise Problem(404, "NOT_FOUND", "Запись приёма не найдена")
+    db.delete(v)
+    audit_record(db, clinician_id, "VISIT_DELETE", "patient", str(patient_id), ip=ip)
+    db.commit()
 
 
 def create_adherence(

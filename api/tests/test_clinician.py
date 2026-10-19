@@ -270,3 +270,96 @@ def test_import_history_roster_gated(client):
                     json={"text": TEMPLATE_A}, headers=c)
     assert r.status_code == 403
     assert r.json()["code"] == "NO_ROSTER"
+
+def test_visit_create_list_and_audit(client):
+    """задача кейса 6, п. «приём»: запись беседы, история, аудит VISIT."""
+    _, pid = _with_patient(client, "visit@test.ru")
+    c, cid = clinician_ctx(client, "visitc@test.ru")
+    a, _ = admin_ctx(client, "visita@test.ru")
+    _grant(client, a, pid, cid)
+
+    body = {
+        "visited_at": "2026-10-18T12:00:00+03:00",
+        "visit_type": "online",
+        "duration_min": 50,
+        "notes": "Обсудили динамику тревоги, план — продолжить терапию.",
+    }
+    resp = client.post(f"/api/v1/clinician/patients/{pid}/visits", json=body, headers=c)
+    assert resp.status_code == 201, resp.text
+    v = resp.json()
+    assert v["visit_type"] == "online" and v["duration_min"] == 50
+    assert v["notes"].startswith("Обсудили динамику")
+
+    items = client.get(f"/api/v1/clinician/patients/{pid}/visits", headers=c).json()["items"]
+    assert len(items) == 1 and items[0]["id"] == v["id"]
+
+    audit = client.get("/api/v1/admin/audit", headers=a).json()["items"]
+    assert any(e["action"] == "VISIT" and e["object_id"] == str(pid) for e in audit)
+
+def test_visit_delete_removes_and_audits(client):
+    """Ошибочную запись приёма можно удалить; удаление аудируется."""
+    _, pid = _with_patient(client, "visit3@test.ru")
+    c, cid = clinician_ctx(client, "visitc3@test.ru")
+    a, _ = admin_ctx(client, "visita3@test.ru")
+    _grant(client, a, pid, cid)
+
+    r = client.post(f"/api/v1/clinician/patients/{pid}/visits", headers=c, json={
+        "visited_at": "2026-10-18T12:00:00+03:00", "visit_type": "phone", "notes": "Опечатка",
+    })
+    assert r.status_code == 201, r.text
+    vid = r.json()["id"]
+
+    d = client.delete(f"/api/v1/clinician/patients/{pid}/visits/{vid}", headers=c)
+    assert d.status_code == 204, d.text
+    assert client.get(f"/api/v1/clinician/patients/{pid}/visits", headers=c).json()["items"] == []
+
+    audit = client.get("/api/v1/admin/audit", headers=a).json()["items"]
+    assert any(e["action"] == "VISIT_DELETE" and e["object_id"] == str(pid) for e in audit)
+
+    assert client.delete(f"/api/v1/clinician/patients/{pid}/visits/{vid}", headers=c).status_code == 404
+
+def test_visit_notes_encrypted_at_rest(client, db_session):
+    """152-ФЗ: заметка приёма не лежит в БД открытым текстом."""
+    _, pid = _with_patient(client, "visit2@test.ru")
+    c, cid = clinician_ctx(client, "visitc2@test.ru")
+    a, _ = admin_ctx(client, "visita2@test.ru")
+    _grant(client, a, pid, cid)
+
+    secret = "Пациент упомянул конфликт на работе"
+    r = client.post(f"/api/v1/clinician/patients/{pid}/visits", headers=c, json={
+        "visited_at": "2026-10-18T12:00:00+03:00", "visit_type": "in_person",
+        "notes": secret,
+    })
+    assert r.status_code == 201, r.text
+
+    from sqlalchemy import text as sql_text
+    raw = db_session.execute(sql_text("select notes from visits")).scalar_one()
+    assert isinstance(raw, (bytes, bytearray, memoryview))
+    assert secret.encode() not in bytes(raw)
+
+def test_visit_roster_gated(client):
+    """Roster-гейт: чужой пациент недоступен (403 NO_ROSTER)."""
+    _, pid = _with_patient(client, "visit3@test.ru")
+    c, _ = clinician_ctx(client, "visitc3@test.ru")
+    r = client.post(f"/api/v1/clinician/patients/{pid}/visits", headers=c, json={
+        "visited_at": "2026-10-18T12:00:00+03:00", "visit_type": "phone", "notes": "x",
+    })
+    assert r.status_code == 403
+    assert r.json()["code"] == "NO_ROSTER"
+
+def test_visit_rejects_bad_type_and_duration(client):
+    """Валидация: недопустимый формат/длительность — 422."""
+    _, pid = _with_patient(client, "visit4@test.ru")
+    c, cid = clinician_ctx(client, "visitc4@test.ru")
+    a, _ = admin_ctx(client, "visita4@test.ru")
+    _grant(client, a, pid, cid)
+
+    bad_type = client.post(f"/api/v1/clinician/patients/{pid}/visits", headers=c, json={
+        "visited_at": "2026-10-18T12:00:00+03:00", "visit_type": "carrier_pigeon", "notes": "x",
+    })
+    assert bad_type.status_code == 422
+    bad_dur = client.post(f"/api/v1/clinician/patients/{pid}/visits", headers=c, json={
+        "visited_at": "2026-10-18T12:00:00+03:00", "visit_type": "online",
+        "duration_min": 0, "notes": "x",
+    })
+    assert bad_dur.status_code == 422

@@ -6,7 +6,7 @@ import json
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, CheckConstraint, Date, DateTime, ForeignKey, Identity, Index, String, Text, text
+from sqlalchemy import BigInteger, CheckConstraint, Date, DateTime, ForeignKey, Identity, Index, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -291,6 +291,32 @@ class AdherenceRecord(Base):
 
     __table_args__ = (
         CheckConstraint("status in ('taken','partial','missed')", name="adherence_records_status"),
+    )
+
+
+class Visit(Base):
+    """Приём: запись очной/дистанционной беседы врача с пациентом (задача кейса 6,
+    п. «приём» в карточке пациента). Спецкатегория ПДн (152-ФЗ) — notes шифруются.
+
+    Вносит врач (clinician_id): дата приёма, формат (in_person/online/phone),
+    длительность в минутах и свободная заметка. История приёмов видна в карточке —
+    врач отслеживает динамику общения между скринингами.
+    """
+
+    __tablename__ = "visits"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    clinician_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    visited_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    visit_type: Mapped[str] = mapped_column(String(16))  # in_person | online | phone
+    duration_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    notes: Mapped[str] = mapped_column(EncryptedText())  # F1: запись беседы
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
+    __table_args__ = (
+        CheckConstraint("visit_type in ('in_person','online','phone')", name="visits_type"),
+        CheckConstraint("duration_min is null or (duration_min between 1 and 480)", name="visits_duration"),
     )
 
 
