@@ -152,6 +152,23 @@ cd android && ./gradlew assembleDebug           # APK: app/build/outputs/apk/deb
 - **Подпись**: debug-APK подписывается автоматически; release — из `ANDROID_KEYSTORE_B64` + паролей (см. workflow).
 - **Локальная сборка release-APK через CLI** (без локальных Java/SDK): `tools/build-apk.sh` собирает образ `compass-android-builder` (JDK 21 + Android SDK 36), генерирует персистентный demo-keystore, запускает `gradlew assembleRelease` и кладёт подписанный APK в `dist/compass-release.apk`. Перед запуском пересобери веб-часть с `VITE_API_BASE` и `npx cap sync android` (см. блок выше).
 
+## ИИ-ассистент врача: раздел БЗ выбирает LLM
+
+Поиск ассистента (`/assistant/ask`) идёт по базе знаний в 4 разделах (ШКАЛЫ/ТРИАЖ/РЕКОМЕНДАЦИИ/ЛЕКАРСТВА). Раздел **не выбирается пользователем**: LLM-роутер получает очищенный от ПДн запрос и вызывает тулзу `search_<раздел>` (docs/04 FR-17, docs/08 §9). Ответ всегда строит детерминированный `build_rag_answer` — LLM не отвечает клинически (красные линии). Если LLM недоступен/ошибся/вопрос вне разделов — поиск по всем разделам (fallback).
+
+```bash
+# 1) Локальный llama.cpp-сервер (OpenAI-совместимый /v1; модель 27B на RTX 5090)
+./tools/llm.sh            # печатает http://127.0.0.1:18080/v1
+./tools/llm.sh status
+./tools/llm.sh --stop
+# 2) Подключить к стеку: в infra/.env
+#    CC_ASSISTANT_LLM_URL=http://host.docker.internal:18080/v1
+#    CC_ASSISTANT_LLM_MODEL=local
+#    затем: docker compose -f infra/docker-compose.yml up -d api
+```
+
+Без `CC_ASSISTANT_LLM_URL` роутер выключен (эквивалент «Все разделы») — весь стек и e2e работают без LLM.
+
 ## Дорожная карта
 
 - [x] Бизнес-анализ
@@ -161,12 +178,13 @@ cd android && ./gradlew assembleDebug           # APK: app/build/outputs/apk/deb
 - [x] SDD
 - [x] TDD
 - [x] E1–E2: клинический движок (80 юнит-тестов)
-- [x] E3–E5: API (119 интеграционных тестов)
+- [x] E3–E5: API (131 интеграционный тест)
 - [x] E6: UI, симулятор, docker compose, e2e (26 Playwright)
 - [x] Кейс-дефициты P1–P9: Авиандр в KB, маршрутизация, НЯ, приверженность, парсинг историй, врач↔пациент чат, КР Минздрава
+- [x] ИИ-ассистент врача: раздел БЗ выбирает LLM-роутер (тулколлинг search_<раздел>, fallback все разделы)
 - [x] Security audit F1–F12 + NEW-1..5: pgcrypto на всех free-text ПДн, уничтожение при отзыве, ротация refresh, httpOnly cookies, fail-fast секреты, AES-256 backup, threat model (ГОСТ 14971), gate привилегированной регистрации
 
-**Регрессия:** 80 core + 119 API + 26 e2e = 225 тестов.
+**Регрессия:** 80 core + 131 API + 26 e2e = 237 тестов.
 
 **Первый администратор (прод):** публичная регистрация CLINICIAN/ADMIN запрещена вне демо-режима (NEW-1):
 `docker compose -f infra/docker-compose.yml run --rm --entrypoint /app/.venv/bin/python api -m app.bootstrap_user --email admin@clinic.ru --role ADMIN`

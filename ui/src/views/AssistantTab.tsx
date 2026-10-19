@@ -1,17 +1,8 @@
 import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import { api, AssistantAnswer, PatientCard } from "../api";
 
-const TOPICS = [
-  { value: "", label: "Все" },
-  { value: "ШКАЛЫ", label: "Шкалы" },
-  { value: "ТРИАЖ", label: "Триаж" },
-  { value: "РЕКОМЕНДАЦИИ", label: "Рекомендации" },
-  { value: "ПРЕПАРАТЫ", label: "Препараты" },
-] as const;
-
 export default function AssistantTab() {
   const [query, setQuery] = useState("");
-  const [topic, setTopic] = useState("");
   const [answer, setAnswer] = useState<AssistantAnswer | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -71,7 +62,7 @@ export default function AssistantTab() {
     setError("");
     setAnswer(null);
     try {
-      setAnswer(await api.assistantAsk(query.trim(), topic || undefined, 5, patientId ?? undefined));
+      setAnswer(await api.assistantAsk(query.trim(), 5, patientId ?? undefined));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -87,19 +78,6 @@ export default function AssistantTab() {
         через «@», чтобы подгрузить его контекст.
         {points !== null && <> Корпус: {points} чанков.</>}
       </p>
-
-      <div className="row">
-        <label>
-          Раздел
-          <select value={topic} onChange={(e) => setTopic(e.target.value)}>
-            {TOPICS.map((t) => (
-              <option key={t.value} value={t.value}>
-                {t.label}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
 
       {patientId !== null && (
         <div className="row" style={{ marginTop: 8 }}>

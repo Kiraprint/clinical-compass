@@ -38,7 +38,7 @@ def _agent_factory() -> AgentFactory:
 
 class AskBody(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
-    topic: str | None = Field(default=None, max_length=40)  # фильтр: ШКАЛЫ|ТРИАЖ|РЕКОМЕНДАЦИИ|ПРЕПАРАТЫ
+    topic: str | None = Field(default=None, max_length=40)  # ручной фильтр: ШКАЛЫ|ТРИАЖ|РЕКОМЕНДАЦИИ|ЛЕКАРСТВА (иначе LLM-роутер)
     limit: int = Field(default=5, ge=1, le=20)
     patient_id: uuid.UUID | None = Field(default=None)  # @-упоминание пациента → контекст в агент
 

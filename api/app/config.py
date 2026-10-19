@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://127.0.0.1:6333"  # векторная БД ИИ-агента (docs/07)
     qdrant_collection: str = "kb"  # документы: открытый не-ПДн корпус (docs/08)
     embedder: str = "hash"  # hash | bge-m3 (docs/08 §4; по умолчанию офлайн-демо)
+    # CC_ASSISTANT_LLM_URL: OpenAI-совместимый /v1 (llama-server, vLLM, Ollama).
+    # Пусто → LLM-роутинг топиков выключен (поиск по всем разделам). LLM получает
+    # только очищенный от ПДн запрос и выбирает тулзу search_<раздел> (docs/12).
+    assistant_llm_url: str = ""
+    assistant_llm_model: str = "local"  # CC_ASSISTANT_LLM_MODEL: имя модели на сервере
+    assistant_llm_timeout: float = 10.0  # CC_ASSISTANT_LLM_TIMEOUT: сек на выбор тулзы
     # CC_DEPERSONALIZE_NER: off | natasha | rubert (docs/12). true/1 = natasha
     # (обратная совместимость). rubert — redmadrobot-rnd/rubert-base-pii-ner:
     # Apache-2.0, FIO F1 0.933 на redmadrobot-rnd/pii_benchmark (bench/ner).

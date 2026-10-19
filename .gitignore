@@ -42,6 +42,8 @@ tools/bin/
 tools/.tunnel.pid
 tools/.tunnel.log
 tools/.tunnel.url
+tools/.llm.pid
+tools/.llm.log
 tools/.ngrok.pid
 tools/.ngrok.log
 tools/.ngrok.url

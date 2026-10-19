@@ -115,7 +115,16 @@ class AgentFactory:
                 if len(hits) >= limit:
                     break
         return [
-            RAGChunk(text=h["text"], source_title=h["source_title"], guideline_id=h["guideline_id"], topic=h["topic"], score=h["score"])
+            RAGChunk(
+                text=h["text"],
+                source_title=h["source_title"],
+                guideline_id=h["guideline_id"],
+                topic=h["topic"],
+                score=h["score"],
+                year=h.get("year"),
+                design=h.get("design", ""),
+                source_url=h.get("source_url", ""),
+            )
             for h in hits
         ]
 
@@ -133,7 +142,14 @@ class AgentFactory:
                 "refused": result.refused,
                 "refusal_code": result.refusal_code,
                 "citations": [
-                    {"source_title": c.source_title, "guideline_id": c.guideline_id, "topic": c.topic, "score": c.score}
+                    {
+                        "source_title": c.source_title,
+                        "guideline_id": c.guideline_id,
+                        "topic": c.topic,
+                        "score": c.score,
+                        "source_url": c.source_url,
+                        "design": c.design,
+                    }
                     for c in result.citations
                 ],
             }
@@ -151,6 +167,13 @@ class AgentFactory:
         return self._graph
 
     def invoke(self, query: str, *, topic: str | None = None, limit: int = 5, patient_context: dict | None = None) -> dict:
+        # LLM-роутинг раздела (docs/04 FR-14): если клиент явно не задал topic и
+        # LLM-роутер включён — топик выбирает LLM (тулза search_<раздел>).
+        # Redline-запросы LLM не трогаем: отказ детерминирован и дешевле.
+        if topic is None and detect_redline(query) is None:
+            from app.services import llm_router  # lazy: config-зависимый импорт
+
+            topic = llm_router.route_topic(query)
         return self.build().invoke(
             {"query": query, "topic": topic, "limit": limit, "patient_context": patient_context}
         )["answer"]
