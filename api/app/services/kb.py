@@ -82,6 +82,9 @@ def upsert_documents(
                     "guideline_id": doc["guideline_id"],
                     "source_title": doc["source_title"],
                     "topic": doc.get("topic", ""),
+                    "year": doc.get("year"),
+                    "design": doc.get("design", ""),
+                    "source_url": doc.get("source_url", ""),
                     "chunk_index": i,
                     "text": text,
                     "text_hash": text_hash,
@@ -98,12 +101,16 @@ def hybrid_search(
     query: str,
     *,
     topic: str | None = None,
+    min_year: int | None = None,
     limit: int = 5,
 ) -> list[dict]:
     """Гибридный поиск: dense + sparse prefetch → RRF fusion.
 
-    Возвращает [{guideline_id, source_title, topic, score, text}] — текст берём
-    из базового фрагмента (полный корпус хранится отдельно; здесь метаданные).
+    `min_year` ограничивает свежесть (docs/13: статьи ≤ 5 лет); применяется
+    только к чанкам, у которых year задан — остальной корпус не отсекается.
+    Возвращает [{guideline_id, source_title, topic, year, design, source_url,
+    score, text}] — текст берём из базового фрагмента (полный корпус хранится
+    отдельно; здесь метаданные).
     """
     dense = embedder.dense(query)
     indices, values = embedder.sparse(query)
@@ -111,7 +118,21 @@ def hybrid_search(
         qm.Prefetch(query=dense, using=DENSE_NAME, limit=max(limit * 3, 10)),
         qm.Prefetch(query=qm.SparseVector(indices=indices, values=values), using=SPARSE_NAME, limit=max(limit * 3, 10)),
     ]
-    filter_ = qm.Filter(must=[qm.FieldCondition(key="topic", match=qm.MatchValue(value=topic))]) if topic else None
+    conditions = []
+    if topic:
+        conditions.append(qm.FieldCondition(key="topic", match=qm.MatchValue(value=topic)))
+    if min_year is not None:
+        # Статьи без года (КР/препараты/шкалы) не отсекаются: условие на year
+        # комбинируется через should с отсутствием поля.
+        conditions.append(
+            qm.Filter(
+                should=[
+                    qm.FieldCondition(key="year", range=qm.Range(gte=min_year)),
+                    qm.IsEmptyCondition(is_empty=qm.PayloadField(key="year")),
+                ]
+            )
+        )
+    filter_ = qm.Filter(must=conditions) if conditions else None
     res = client.query_points(
         collection_name=COLLECTION,
         prefetch=prefetch,
@@ -125,6 +146,9 @@ def hybrid_search(
             "guideline_id": p.payload["guideline_id"],
             "source_title": p.payload["source_title"],
             "topic": p.payload.get("topic", ""),
+            "year": p.payload.get("year"),
+            "design": p.payload.get("design", ""),
+            "source_url": p.payload.get("source_url", ""),
             "text": p.payload.get("text", ""),
             "score": p.score,
         }

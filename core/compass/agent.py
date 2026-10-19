@@ -49,12 +49,18 @@ _TREATMENT_PATTERNS = (
 
 @dataclass(frozen=True)
 class RAGChunk:
-    """Фрагмент корпуса, найденный поиском. Метаданные — payload Qdrant (docs/08 §3)."""
+    """Фрагмент корпуса, найденный поиском. Метаданные — payload Qdrant (docs/08 §3).
+
+    year/design/source_url — только для НАУЧНЫХ-СТАТЕЙ (docs/13); у остальных пусто.
+    """
     text: str
     source_title: str
     guideline_id: str
     topic: str = ""
     score: float = 0.0
+    year: int | None = None
+    design: str = ""
+    source_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -63,6 +69,8 @@ class Citation:
     guideline_id: str
     topic: str
     score: float
+    source_url: str = ""
+    design: str = ""
 
 
 @dataclass(frozen=True)
@@ -165,6 +173,16 @@ def _patient_card_text(ctx: dict) -> str:
     return " ".join(parts)
 
 
+def _cit_repr(c: Citation) -> str:
+    """Строка цитаты: у научных статей — с URL и дизайном (docs/13)."""
+    extra = ""
+    if c.source_url:
+        extra = f", {c.source_url}"
+    elif c.design:
+        extra = f", {c.design}"
+    return f"«{c.source_title}» ({c.guideline_id}{extra})"
+
+
 def build_rag_answer(
     query: str,
     chunks: Sequence[RAGChunk],
@@ -205,6 +223,8 @@ def build_rag_answer(
                 guideline_id=chunk.guideline_id,
                 topic=chunk.topic,
                 score=round(chunk.score, 4),
+                source_url=chunk.source_url,
+                design=chunk.design,
             )
         )
         points.append(f"— {snippet}")
@@ -233,7 +253,7 @@ def build_rag_answer(
         lead = "По базе знаний найдено следующее:"
     answer = (
         lead + "\n" + body + "\n\n"
-        "Источники: " + ", ".join(f"«{c.source_title}» ({c.guideline_id})" for c in citations) + "."
+        "Источники: " + ", ".join(_cit_repr(c) for c in citations) + "."
     )
     return RAGAnswer(answer=answer, citations=tuple(citations), grounded=True)
 

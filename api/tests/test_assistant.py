@@ -52,7 +52,7 @@ def test_assistant_requires_clinician(client):
 
 
 def test_kb_corpus_includes_drugs_and_guidelines():
-    """Корпус KB: шкалы + триаж + красные линии + препараты (Авиандр) + КР Минздрава."""
+    """Корпус KB: шкалы + триаж + красные линии + препараты (Авиандр) + КР Минздрава + статьи (docs/13)."""
     docs = build_corpus()
     gids = {d["guideline_id"] for d in docs}
     topics = {d["topic"] for d in docs}
@@ -62,6 +62,17 @@ def test_kb_corpus_includes_drugs_and_guidelines():
     # Чанк Авиандра цитирует регистрационное удостоверение (усл.7 кейса — ГРЛС).
     aviandr = next(d for d in docs if d["guideline_id"] == "drug-aviandr")
     assert "РУ" in aviandr["text"] and "ЛП-" in aviandr["text"]
+
+def test_kb_corpus_includes_articles_with_metadata():
+    """Научные статьи проходят критерии docs/13: свежесть ≤5 лет, дизайн, URL."""
+    docs = build_corpus()
+    articles = [d for d in docs if d["topic"] == "НАУЧНЫЕ-СТАТЬИ"]
+    assert articles, "корпус должен содержать научные статьи"
+    for a in articles:
+        assert a["year"] and a["year"] >= 2021, f"свежесть ≤5 лет: {a['guideline_id']}"
+        assert a["design"], f"дизайн указан: {a['guideline_id']}"
+        assert a["source_url"].startswith("http"), f"URL источника: {a['guideline_id']}"
+    assert any("вортиоксетин" in a["source_title"].lower() for a in articles)
 
 
 def test_assistant_grounded_answer_with_citations(client, kb_collection):
@@ -109,6 +120,21 @@ def test_assistant_topic_filter(client, kb_collection):
     body = resp.json()
     assert body["grounded"] is True
     assert all(c["topic"] == "ТРИАЖ" for c in body["citations"])
+
+def test_assistant_article_search_cites_url_and_design(client, kb_collection):
+    """Научные статьи (docs/13) находятся поиском и цитируются с URL/дизайном."""
+    h, _ = clinician_ctx(client, "c-assist5b@test.ru")
+    resp = client.post(
+        "/api/v1/assistant/ask",
+        json={"query": "вортиоксетин при депрессии с тревогой", "topic": "НАУЧНЫЕ-СТАТЬИ"},
+        headers=h,
+    )
+    body = resp.json()
+    assert body["grounded"] is True
+    cits = [c for c in body["citations"] if c["topic"] == "НАУЧНЫЕ-СТАТЬИ"]
+    assert cits, "статьи должны цитироваться"
+    assert all(c["source_url"].startswith("http") for c in cits), "URL источника в цитате"
+    assert all(c["design"] for c in cits), "дизайн исследования в цитате"
 
 
 def test_assistant_status_reports_points(client, kb_collection):
