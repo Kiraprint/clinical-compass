@@ -15,5 +15,6 @@ COPY api/ /app/api/
 RUN uv sync --frozen --no-dev --all-packages
 WORKDIR /app/api
 EXPOSE 8000
-# venv-бинарь напрямую (uv run ре-синкает на каждом старте — лишние ~10с и сеть).
-CMD ["/app/.venv/bin/uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# F6: --proxy-headers → uvicorn читает X-Forwarded-For/X-Real-IP от nginx,
+# request.client.host = реальный IP клиента (для audit_log.ip).
+CMD ["/app/.venv/bin/uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]

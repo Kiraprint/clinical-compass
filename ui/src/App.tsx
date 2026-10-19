@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, getToken, setToken, setRefreshToken, setOnAuthFail, ApiError } from "./api";
+import { api, setToken, setRefreshToken, setOnAuthFail, ApiError } from "./api";
 import PatientView from "./views/PatientView";
 import ClinicianView from "./views/ClinicianView";
 import AdminView from "./views/AdminView";
@@ -22,11 +22,13 @@ export default function App() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
-  if (session && !getToken()) return null; // защита от неконсистентного состояния
+  // F9: web-режим использует httpOnly cookies — getToken() возвращает null,
+  // но сессия валидна (cookie отправляется автоматически). localStorage нужен
+  // только для UI-состояния (role/email), не для токенов.
 
   const logout = () => {
-    api.logout(); // F4: отзыв refresh-токена на сервере (best-effort)
-    setToken(null);
+    api.logout(); // F4: отзыв refresh + очистка cookies на сервере
+    setToken(null);      // F9: no-op в web (cookies), очищает localStorage в native
     setRefreshToken(null);
     localStorage.removeItem("cc_role");
     localStorage.removeItem("cc_email");

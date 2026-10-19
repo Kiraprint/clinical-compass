@@ -32,6 +32,11 @@ def upgrade() -> None:
             f"USING pgp_sym_encrypt(resolution, '{k}')"
         )
     )
+    # NEW-3 (re-audit): ключ виден в pg_stat_activity только на время выполнения
+    # этой одноразовой миграции. PG не допускает bind-param в ALTER TYPE USING
+    # (IndeterminateDatatype). Mitigation: запускать в maintenance window без
+    # peer-соединений. Runtime-путь (EncryptedText.bind_expression) использует
+    # bind param — ключ в pg_stat_activity не виден.
 
 
 def downgrade() -> None:

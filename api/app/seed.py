@@ -133,7 +133,8 @@ def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: bool = 
                          signed_at=datetime.now(timezone.utc) - timedelta(days=days)))
             s.add(Prescription(patient_id=pid, scale_code=code))
             s.execute(
-                text(f"INSERT INTO clinician_roster(clinician_id, patient_id) VALUES ('{doc_id}', '{pid}') ON CONFLICT DO NOTHING")
+                text("INSERT INTO clinician_roster(clinician_id, patient_id) VALUES (:cid, :pid) ON CONFLICT DO NOTHING"),
+                {"cid": doc_id, "pid": pid},
             )
             s.flush()  # чтобы prescribed_scales() видел назначение в цикле скринингов ниже
 

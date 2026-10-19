@@ -37,6 +37,7 @@ services:
       CC_JWT_SECRET: demo-jwt-secret-0123456789abcdefghij
       CC_DATA_KEY: compass-demo-data-key-do-not-use-in-prod-0123456789
       CC_ALLOW_DEMO_SECRETS: "true"  # F3: демо-стек; prod-деплой НЕ ставит этот флаг → fail-fast
+      CC_COOKIE_SECURE: "false"  # F9: демо на HTTP (nginx без TLS); prod HTTPS → true (default)
       CC_VAPID_PRIVATE_KEY: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JR0hBZ0VBTUJNR0J5cUdTTTQ5QWdFR0NDcUdTTTQ5QXdFSEJHMHdhd0lCQVFRZ3dVN2MwMkZiYXBVVndxVmUKWkJFcUMrRTJGZ2NScm9SeDNiZkFmSlVEOHN5aFJBTkNBQVJUaTg4TlpBK3hxaUxVM1c4RGxwNUxrL25WejBSNwptZDZEZnp6aUc2YWZ2a3ZsankwQVlSWFRzVmp3Y2l4SzdSQTAzWlBNbjA5UEg1Smkrbi9SeStkLwotLS0tLUVORCBQUklWQVRFIEtFWS0tLS0tCg==
       CC_QDRANT_URL: http://qdrant:6333
     depends_on:
@@ -44,8 +45,10 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_healthy
-    ports:
-      - "8000:8000"
+    # F12: порт 8000 не экспонируется на хост — только через nginx (ui:8090).
+    # Прямой HTTP-доступ в обход TLS/nginx отсутствует.
+    expose:
+      - "8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 5s
@@ -56,10 +59,12 @@ services:
     build:
       context: ..
       dockerfile: api/Dockerfile
-    command: ["python", "-m", "app.kb_seed", "--reset"]
+    command: ["/app/.venv/bin/python", "-m", "app.kb_seed", "--reset"]
     environment:
       CC_QDRANT_URL: http://qdrant:6333
       CC_DATABASE_URL: postgresql+psycopg://compass:compass@postgres:5432/compass
+      CC_ALLOW_DEMO_SECRETS: "true"
+      CC_DATA_KEY: compass-demo-data-key-do-not-use-in-prod-0123456789
     depends_on:
       qdrant:
         condition: service_healthy
@@ -85,10 +90,12 @@ services:
     build:
       context: ..
       dockerfile: api/Dockerfile
-    command: ["python", "-m", "app.seed", "--reset", "--patients", "12", "--days", "14"]
+    command: ["/app/.venv/bin/python", "-m", "app.seed", "--reset", "--patients", "12", "--days", "14"]
     environment:
       CC_DATABASE_URL: postgresql+psycopg://compass:compass@postgres:5432/compass
       CC_DEMO_TOTP: JBSWY3DPEHPK3PXP
+      CC_ALLOW_DEMO_SECRETS: "true"
+      CC_DATA_KEY: compass-demo-data-key-do-not-use-in-prod-0123456789
     depends_on:
       api:
         condition: service_healthy

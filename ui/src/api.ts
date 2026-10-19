@@ -2,6 +2,9 @@
 // Пустой BASE = same-origin (веб, nginx-прокси). Для нативной сборки (Capacitor)
 // хост задаётся на этапе сборки через VITE_API_BASE (см. mobile/ и release-android).
 const BASE: string = import.meta.env.VITE_API_BASE ?? "";
+// F9: web (same-origin) использует httpOnly cookies; native (cross-origin) —
+// localStorage + Authorization header. cookies недоступны из JS → XSS-safe.
+const USE_COOKIES: boolean = BASE === "";
 
 export class ApiError extends Error {
   status: number;
@@ -16,17 +19,21 @@ export class ApiError extends Error {
 }
 
 export function setToken(token: string | null) {
+  if (USE_COOKIES) return;  // F9: web — токен в httpOnly cookie, не в localStorage
   if (token) localStorage.setItem("cc_token", token);
   else localStorage.removeItem("cc_token");
 }
 export function getToken(): string | null {
+  if (USE_COOKIES) return null;  // F9: web — токен недоступен из JS
   return localStorage.getItem("cc_token");
 }
 export function setRefreshToken(token: string | null) {
+  if (USE_COOKIES) return;
   if (token) localStorage.setItem("cc_refresh", token);
   else localStorage.removeItem("cc_refresh");
 }
 export function getRefreshToken(): string | null {
+  if (USE_COOKIES) return null;
   return localStorage.getItem("cc_refresh");
 }
 
@@ -37,19 +44,28 @@ export function setOnAuthFail(fn: (() => void) | null) {
 }
 
 async function refreshAccessToken(): Promise<boolean> {
-  const refreshToken = getRefreshToken();
-  if (!refreshToken) return false;
+  // F9: web — refresh_token приходит из cc_refresh cookie (credentials: include).
+  // native — из localStorage (body).
+  const body: Record<string, string> = {};
+  if (!USE_COOKIES) {
+    const rt = getRefreshToken();
+    if (!rt) return false;
+    body.refresh_token = rt;
+  }
   try {
     const resp = await fetch(`${BASE}/api/v1/auth/refresh`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: refreshToken }),
+      body: USE_COOKIES ? undefined : JSON.stringify(body),
+      credentials: "include",  // F9: cookies отправляются автоматически
     });
     if (!resp.ok) return false;
-    // F4: сервер ротирует refresh — сохраняем новый, иначе следующий refresh 401.
-    const body = (await resp.json()) as { access_token: string; refresh_token: string };
-    setToken(body.access_token);
-    setRefreshToken(body.refresh_token);
+    // F4: сервер ротирует refresh — сохраняем новый (native), web — cookie обновляется.
+    const respBody = (await resp.json()) as { access_token: string; refresh_token: string };
+    if (!USE_COOKIES) {
+      setToken(respBody.access_token);
+      setRefreshToken(respBody.refresh_token);
+    }
     return true;
   } catch {
     return false;
@@ -63,7 +79,9 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getToken();
   if (token) headers["Authorization"] = `Bearer ${token}`;
   if (init.body) headers["Content-Type"] = "application/json";
-  const resp = await fetch(`${BASE}${path}`, { ...init, headers });
+  // F9: credentials: include — httpOnly cookies (cc_access/cc_refresh) отправляются
+  // автоматически для same-origin (web). Для cross-origin (native) — Authorization header.
+  const resp = await fetch(`${BASE}${path}`, { ...init, headers, credentials: "include" });
   // 401 после истечения access-токена: одна попытка refresh, затем повтор исходного запроса.
   if (resp.status === 401 && !refreshing) {
     refreshing = true;
@@ -112,12 +130,14 @@ export const api = {
   register: verb<RegisterResp>("POST")("/api/v1/auth/register"),
   login: verb<LoginResp>("POST")("/api/v1/auth/login"),
   // F4: отзыв refresh-токена на сервере (best-effort, не блокирует UI).
+  // F9: web-режим — refresh_token в cookie, body пустой; native — из localStorage.
   logout: () => {
     const rt = getRefreshToken();
-    if (rt) fetch(`${BASE}/api/v1/auth/logout`, {
+    fetch(`${BASE}/api/v1/auth/logout`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: rt }),
+      body: rt ? JSON.stringify({ refresh_token: rt }) : undefined,
+      credentials: "include",  // F9: cookie очищается сервером
       keepalive: true,
     }).catch(() => {});
   },

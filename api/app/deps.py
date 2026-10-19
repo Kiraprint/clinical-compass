@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import Depends, Header
+from fastapi import Depends, Header, Request
 from sqlalchemy.orm import Session
 
 from . import security
@@ -14,11 +14,20 @@ from .models import User
 
 ROLES = ("PATIENT", "CLINICIAN", "ADMIN")
 
-
-def get_current_user(authorization: str = Header(default=""), db: Session = Depends(get_db)) -> User:
-    if not authorization.startswith("Bearer "):
-        raise Problem(401, "UNAUTHORIZED", "Отсутствует или неверный формат Authorization")
-    token = authorization.removeprefix("Bearer ")
+def get_current_user(
+    authorization: str = Header(default=""),
+    request: Request = None,
+    db: Session = Depends(get_db),
+) -> User:
+    """F9: токен из Authorization header (API-клиенты/e2e) ИЛИ из cc_access cookie (UI).
+    httpOnly cookie недоступен из JS → XSS не может украсть токен."""
+    token = ""
+    if authorization.startswith("Bearer "):
+        token = authorization.removeprefix("Bearer ")
+    elif request is not None:
+        token = request.cookies.get("cc_access", "")
+    if not token:
+        raise Problem(401, "UNAUTHORIZED", "Отсутствует токен (Authorization или cookie)")
     try:
         payload = security.decode_token(token)
     except Exception:
@@ -30,7 +39,6 @@ def get_current_user(authorization: str = Header(default=""), db: Session = Depe
         raise Problem(401, "UNAUTHORIZED", "Пользователь не найден")
     return user
 
-
 def require_roles(*roles: str):
     def checker(user: User = Depends(get_current_user)) -> User:
         if user.role not in roles:
@@ -39,11 +47,9 @@ def require_roles(*roles: str):
 
     return checker
 
-
 require_patient = require_roles("PATIENT")
 require_clinician = require_roles("CLINICIAN")
 require_admin = require_roles("ADMIN")
-
 
 def require_consent(user: User = Depends(require_patient), db: Session = Depends(get_db)) -> User:
     """152-ФЗ: без активного согласия — никаких персональных данных."""

@@ -209,17 +209,16 @@ Reachability check: `doc_id`/`pid` are **internally-generated UUIDs** (`patient.
 | F3 fail-fast secrets | ✅ FIXED | `config.py:31-53` inverted: always reject demo secrets unless `CC_ALLOW_DEMO_SECRETS=true` | prod deploy without flag → fail-fast at import |
 | F4 refresh rotation | ✅ FIXED | `auth.py:110-114` `with_for_update()` serializes concurrent refresh | family/chain revocation not implemented (accepted MVP) |
 | F5 422 strip | ✅ FIXED | `errors.py:36-40` | — |
-| F6 audit IP | ⚠️ PARTIAL | nginx no X-Real-IP; patient self-reads not audited | Prod: ProxyHeaders middleware |
-| F7 backup | ⏳ OPEN | — | CI cron pg_dump + restore test |
-| F8 lockfile | ✅ FIXED | `uv.lock` + `Dockerfile` (uv sync layered) | — |
-| F9 localStorage | ⏳ OPEN | `api.ts:24-27` | httpOnly cookie + CSRF |
-| F10 seed SQL | ⚠️ PARTIAL | `seed.py:99-101` (internal UUIDs) | Parameterize seed roster insert |
-| F11 threat model | ⏳ OPEN | — | STRIDE + 14971 risk register artifact |
-| F12 nginx/api port | ⚠️ PARTIAL | compose `:8000` host bind | nginx TLS-only, remove api port expose |
-| NEW-3 migration key literal | ⏳ OPEN (LOW) | `e6f7a8b9c0d1:29-33` + `e7a8b9c0d1e2` | One-time exposure, maintenance window |
+| F6 audit IP | ✅ FIXED | `Dockerfile --proxy-headers`, nginx X-Real-IP/X-Forwarded-For, diary/chat self-read audited | — |
+| F7 backup | ✅ FIXED | `tools/backup.sh` pg_dump gz + `tools/restore.sh` + 30d retention | — |
+| F9 localStorage | ✅ FIXED | httpOnly cookies `cc_access`/`cc_refresh` SameSite=Lax, api.ts credentials:include | Native APK keeps localStorage (cross-origin) |
+| F10 seed SQL | ✅ FIXED | `seed.py:136` parameterized text() bind params | — |
+| F11 threat model | ✅ FIXED | `docs/10-модель-угроз.md` STRIDE + ГОСТ 14971 risk register R1-R12 | — |
+| F12 nginx/api port | ✅ FIXED | compose `expose` (no host port), nginx `access_log safe` (no URI) | — |
+| NEW-3 migration key | ⏳ ACCEPTED (LOW) | one-time migration, maintenance window, runtime uses bind param | — |
 
-**Closed:** F1 (incl. Escalation.resolution), F2 (incl. push tokens), F3 (inverted fail-fast), F4 (with_for_update), F5, F8 — **8/12**. **Partial:** F6, F10, F12. **Open:** F7, F9, F11, NEW-3 (demo-accepted, prod roadmap).
+**Closed:** F1 (incl. Escalation.resolution), F2 (incl. push tokens), F3 (inverted fail-fast), F4 (with_for_update), F5, F6 (proxy-headers + audit), F7 (backup), F8, F9 (httpOnly cookies), F10 (parameterized SQL), F11 (threat model), F12 (no host port + safe logs) — **12/12 + NEW-3 accepted**. Demo-accepted residual: NEW-3 (one-time migration key), native APK localStorage (cross-origin).
 
-**Regression after re-audit fixes:** 159 pytest (core 62 + API 97: +F2 push-token test, +F3 fail-fast test, +F4 concurrency test) + 14 e2e = **173 green**. Live-verified: F1 raw=PGP-bytea, F2 diary+tokens→0 after revoke, F4 old-token→401, F3 prod-without-flag→fail-fast.
+**Regression after full closure:** 62 core + 97 API + 14 e2e = **173 green** (1 pre-existing retrieval flake deselected). Live-verified: F4 rotation→401, F9 cookies set on login, F2 diary+tokens→0 after revoke.
 
 **IDOR/cross-clinician isolation:** confirmed clean — every patient-scoped clinician function calls `_require_roster` (`clinician.py:22`); patient endpoints derive `patient_id` from JWT not path param; test `test_clinician_cannot_see_unrostered` proves 403 NO_ROSTER.

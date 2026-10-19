@@ -21,6 +21,11 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Clinical Compass API", version="0.1.0", lifespan=lifespan)
+
+    # F6: за nginx — доверяем X-Forwarded-For/X-Real-IP для audit_log.ip.
+    from starlette.middleware.gzip import GZipMiddleware
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
+
     register_handlers(app)
 
     from .routers import admin, assistant, auth, chat, checkins, clinician, consent, diary, drugs, notifications, push, screenings

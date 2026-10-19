@@ -1,7 +1,7 @@
 # E5: diary. Контракт: docs/04 §3.1; тесты — docs/06 §3.
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -27,5 +27,8 @@ def create(body: DiaryBody, user: User = Depends(require_consent), db: Session =
 
 
 @router.get("/diary")
-def list_diary(user: User = Depends(require_consent), db: Session = Depends(get_db)):
+def list_diary(request: Request, user: User = Depends(require_consent), db: Session = Depends(get_db)):
+    # F6: аудит чтения пациентом своего PHI (дневник)
+    ip = request.client.host if request.client else None
+    services.audit.record(db, user.id, "READ_DIARY", "patient", ip=ip)
     return {"items": [services.diary.to_dict(e) for e in services.diary.list_for_patient(db, user.id)]}

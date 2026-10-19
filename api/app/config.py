@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     # (с demo-jwt-secret) → Settings() падает при импорте → сервер не стартует.
     allow_demo_secrets: bool = False
     prod_mode: bool = False  # CC_PROD_MODE: дополнительные строгие проверки (KMS-класс data_key и т.д.)
+    cookie_secure: bool = True  # CC_COOKIE_SECURE: Secure flag на httpOnly cookies (False для HTTP-демо)
     model_config = {"env_prefix": "CC_"}
 
     @model_validator(mode="after")

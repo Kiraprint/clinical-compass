@@ -65,3 +65,4 @@ mobile/android/keystore.properties
 *.apk
 /test-results/
 e2e/test-results/
+tools/backups/
