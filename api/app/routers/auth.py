@@ -33,6 +33,11 @@ class LoginBody(BaseModel):
 class RefreshBody(BaseModel):
     refresh_token: str | None = None  # F9: опционально — может прийти из cookie
 
+@router.get("/config")
+def auth_config():
+    """Публичная конфигурация входа (без токена): CC_REQUIRE_OTP для UI."""
+    return {"require_otp": settings.require_otp}
+
 def _set_auth_cookies(response: Response, access: str, refresh: str) -> None:
     """F9: httpOnly cookies для access+refresh токенов.
     SameSite=Lax — CSRF-защита (cross-site POST блокируется, top-level GET разрешён).

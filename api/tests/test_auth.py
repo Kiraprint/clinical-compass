@@ -271,3 +271,14 @@ def test_prod_mode_requires_otp():
         raise AssertionError("ожидали ValidationError")
     except ValidationError as exc:
         assert "CC_REQUIRE_OTP" in str(exc)
+
+
+def test_auth_config_reports_require_otp(client, monkeypatch):
+    """GET /auth/config (публичный): отражает CC_REQUIRE_OTP для UI."""
+    from app.config import settings
+
+    r = client.get("/api/v1/auth/config")
+    assert r.status_code == 200 and r.json() == {"require_otp": True}
+    monkeypatch.setattr(settings, "require_otp", False)
+    r = client.get("/api/v1/auth/config")
+    assert r.status_code == 200 and r.json() == {"require_otp": False}

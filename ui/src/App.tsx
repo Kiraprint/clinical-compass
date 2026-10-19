@@ -21,6 +21,18 @@ export default function App() {
   const [role, setRole] = useState("PATIENT");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  // CC_REQUIRE_OTP: если false — поле 2FA не показываем (проверка отключена
+  // сервером), но totp_secret всё равно хранится в БД. Дефолт true — конфиг
+  // недоступен → показываем поле (безопаснее).
+  const [requireOtp, setRequireOtp] = useState(true);
+
+  // Публичный конфиг входа — UI показывает/скрывает поле 2FA.
+  useEffect(() => {
+    api
+      .authConfig()
+      .then((cfg) => setRequireOtp(cfg.require_otp))
+      .catch(() => {});
+  }, []);
 
   // F9: web-режим использует httpOnly cookies — getToken() возвращает null,
   // но сессия валидна (cookie отправляется автоматически). localStorage нужен
@@ -101,10 +113,12 @@ export default function App() {
             Пароль
             <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
           </label>
-          <label>
-            Код 2FA (для врача и администратора)
-            <input value={otp} onChange={(e) => setOtp(e.target.value)} placeholder="6 цифр TOTP" />
-          </label>
+          {requireOtp && (
+            <label>
+              Код 2FA (для врача и администратора)
+              <input value={otp} onChange={(e) => setOtp(e.target.value)} placeholder="6 цифр TOTP" />
+            </label>
+          )}
           {mode === "register" && (
             <>
               <label>Роль</label>
@@ -120,7 +134,7 @@ export default function App() {
             </button>
           </div>
           <p style={{ marginTop: 16, fontSize: 12, color: "#8a94a8" }}>
-            Демо-доступы (из симулятора): врач doc@compass.demo / Demo-Pass-1 (2FA TOTP),
+            Демо-доступы (из симулятора): врач doc@compass.demo / Demo-Pass-1{requireOtp ? " (2FA TOTP)" : ""},
             пациент p1@compass.demo / Demo-Pass-1
           </p>
         </div>

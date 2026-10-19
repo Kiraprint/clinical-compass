@@ -119,6 +119,10 @@ export interface LoginResp {
   refresh_token: string;
   role: string;
 }
+/** Публичная конфигурация входа (CC_REQUIRE_OTP) — GET /auth/config. */
+export interface AuthConfig {
+  require_otp: boolean;
+}
 export interface ScreeningRun {
   run_id: string;
   questionnaire_code: string;
@@ -129,6 +133,7 @@ export interface ScreeningRun {
 export const api = {
   register: verb<RegisterResp>("POST")("/api/v1/auth/register"),
   login: verb<LoginResp>("POST")("/api/v1/auth/login"),
+  authConfig: () => req<AuthConfig>("/api/v1/auth/config"),
   // F4: отзыв refresh-токена на сервере (best-effort, не блокирует UI).
   // F9: web-режим — refresh_token в cookie, body пустой; native — из localStorage.
   logout: () => {
