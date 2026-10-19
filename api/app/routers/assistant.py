@@ -58,13 +58,13 @@ def ask(
     как опора; в Qdrant не попадает. Запрос без пациента аудируется ASK_ASSISTANT.
     """
     patient_ctx = None
+    ip = request.client.host if request.client else None
     if body.patient_id is not None:
-        patient_ctx = services.clinician.patient_context(db, user.id, body.patient_id)
+        patient_ctx = services.clinician.patient_context(db, user.id, body.patient_id, ip=ip)
         db.commit()  # PDn-access audit персистируется ДО вызова агента (152-ФЗ: read уже был)
     result = _agent_factory().invoke(
         body.query, topic=body.topic, limit=body.limit, patient_context=patient_ctx
     )
-    ip = request.client.host if request.client else None
     if body.patient_id is None:
         services.audit.record(db, user.id, "ASK_ASSISTANT", "kb", object_id=None, ip=ip)
         db.commit()

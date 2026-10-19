@@ -31,7 +31,7 @@ def _prescribed_scales_of(db: Session, patient_id) -> list[str]:
     ).all()
     return [r.scale_code for r in rows]
 
-def prescribe_scales(db: Session, clinician_id, patient_id, scale_codes: list[str]) -> dict:
+def prescribe_scales(db: Session, clinician_id, patient_id, scale_codes: list[str], ip: str | None = None) -> dict:
     """Врач назначает пациенту множество шкал скрининга (item 1, multi-scale).
 
     Заменяет весь набор: отсутствующие в scale_codes удаляются, новые добавляются,
@@ -59,7 +59,7 @@ def prescribe_scales(db: Session, clinician_id, patient_id, scale_codes: list[st
     for code in uniq:
         if code not in existing:
             db.add(Prescription(patient_id=patient_id, scale_code=code))
-    audit_record(db, clinician_id, "PRESCRIBE_SCALE", "user", str(patient_id))
+    audit_record(db, clinician_id, "PRESCRIBE_SCALE", "user", str(patient_id), ip=ip)
     db.commit()
     return {"patient_id": str(patient_id), "scales": uniq}
 
@@ -237,16 +237,16 @@ def _patient_card(db: Session, patient_id) -> dict:
     }
 
 
-def report(db: Session, clinician_id, patient_id) -> dict:
+def report(db: Session, clinician_id, patient_id, ip: str | None = None) -> dict:
     """Полная карта пациента для панели врача (FR-8). Roster + READ_REPORT audit."""
     _require_roster(db, clinician_id, patient_id)
     card = _patient_card(db, patient_id)
-    audit_record(db, clinician_id, "READ_REPORT", "patient", str(patient_id))
+    audit_record(db, clinician_id, "READ_REPORT", "patient", str(patient_id), ip=ip)
     db.commit()
     return card
 
 
-def patient_context(db: Session, clinician_id, patient_id) -> dict:
+def patient_context(db: Session, clinician_id, patient_id, ip: str | None = None) -> dict:
     """Компактный контекст пациента для ИИ-ассистента врача (docs/07 §7).
 
     Спецкатегория ПДн (152-ФЗ): roster-gate + активное согласие пациента +
@@ -260,7 +260,7 @@ def patient_context(db: Session, clinician_id, patient_id) -> dict:
     if active is None:
         raise Problem(403, "CONSENT_REQUIRED", "Нет активного согласия пациента — карта недоступна (152-ФЗ)")
     card = _patient_card(db, patient_id)
-    audit_record(db, clinician_id, "ASK_ASSISTANT_WITH_PATIENT", "patient", str(patient_id))
+    audit_record(db, clinician_id, "ASK_ASSISTANT_WITH_PATIENT", "patient", str(patient_id), ip=ip)
     return {
         "patient_id": card["patient_id"],
         "fio": card["fio"],
@@ -277,6 +277,7 @@ def create_adverse_event(
     db: Session, clinician_id, patient_id,
     event_text: str, severity: str, onset_date: date,
     suspected_drug: str | None, action_taken: str | None,
+    ip: str | None = None,
 ) -> dict:
     """Регистрация нежелательного явления (задача кейса 3). Roster + аудит ADVERSE_EVENT."""
     _require_roster(db, clinician_id, patient_id)
@@ -287,7 +288,7 @@ def create_adverse_event(
     )
     db.add(ev)
     db.flush()
-    audit_record(db, clinician_id, "ADVERSE_EVENT", "patient", str(patient_id))
+    audit_record(db, clinician_id, "ADVERSE_EVENT", "patient", str(patient_id), ip=ip)
     db.commit()
     return _adverse_event_dict(ev)
 
@@ -371,13 +372,13 @@ def _chat_dict(m: ChatMessage) -> dict:
     }
 
 
-def clinician_post_chat(db: Session, clinician_id, patient_id, content: str) -> dict:
+def clinician_post_chat(db: Session, clinician_id, patient_id, content: str, ip: str | None = None) -> dict:
     """Врач пишет пациенту в канал коммуникации (задача кейса 6). Roster + аудит CLINICIAN_CHAT."""
     _require_roster(db, clinician_id, patient_id)
     msg = ChatMessage(patient_id=patient_id, sender="CLINICIAN", kind="TEXT", content=content)
     db.add(msg)
     db.flush()
-    audit_record(db, clinician_id, "CLINICIAN_CHAT", "patient", str(patient_id))
+    audit_record(db, clinician_id, "CLINICIAN_CHAT", "patient", str(patient_id), ip=ip)
     db.commit()
     return _chat_dict(msg)
 
@@ -395,7 +396,7 @@ def clinician_list_chat(db: Session, clinician_id, patient_id) -> list[dict]:
     return [_chat_dict(m) for m in reversed(rows)]
 
 
-def import_history(db: Session, clinician_id, patient_id, text: str, template_name: str | None) -> dict:
+def import_history(db: Session, clinician_id, patient_id, text: str, template_name: str | None, ip: str | None = None) -> dict:
     """Разбор клинической истории (метрика кейса 2). Roster + аудит IMPORT_HISTORY.
 
     Возвращает ЧЕРНОВИК извлечённых полей — врач подтверждает вручную. В клиническую
@@ -403,7 +404,7 @@ def import_history(db: Session, clinician_id, patient_id, text: str, template_na
     """
     _require_roster(db, clinician_id, patient_id)
     ext = extract_history(text, template_name)
-    audit_record(db, clinician_id, "IMPORT_HISTORY", "patient", str(patient_id))
+    audit_record(db, clinician_id, "IMPORT_HISTORY", "patient", str(patient_id), ip=ip)
     db.commit()
     return {
         "template": ext.template,

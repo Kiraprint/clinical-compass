@@ -219,6 +219,24 @@ Reachability check: `doc_id`/`pid` are **internally-generated UUIDs** (`patient.
 
 **Closed:** F1 (incl. Escalation.resolution), F2 (incl. push tokens), F3 (inverted fail-fast), F4 (with_for_update), F5, F6 (proxy-headers + audit), F7 (backup), F8, F9 (httpOnly cookies), F10 (parameterized SQL), F11 (threat model), F12 (no host port + safe logs) — **12/12 + NEW-3 accepted**. Demo-accepted residual: NEW-3 (one-time migration key), native APK localStorage (cross-origin).
 
-**Regression after full closure:** 62 core + 97 API + 14 e2e = **173 green** (1 pre-existing retrieval flake deselected). Live-verified: F4 rotation→401, F9 cookies set on login, F2 diary+tokens→0 after revoke.
+## Round-3 re-audit closure (commit after d3af600)
+
+The round-3 audit found residual gaps inside "FIXED" findings. All closed:
+
+| Residual gap | Fix |
+|--------------|-----|
+| F6: clinician audit calls omitted `ip` (6 sites) | `ip` threaded from routers → `services/clinician.py` audit_record calls |
+| F6: `GET /me/prescribed-scales` unaudited | READ_PRESCRIBED_SCALES audit |
+| F6: `GET /admin/audit` unaudited | READ_AUDIT audit |
+| F2: push/notification endpoints not consent-gated | new `require_consent_if_patient` dependency on all push/notification routes |
+| F1: `AdherenceRecord.medication` plaintext (treatment context) | `EncryptedText` + migration `e8b9c0d1e2f3` |
+| F7: backups were plaintext gzip | AES-256 (`openssl enc -pbkdf2`), key `CC_BACKUP_KEY`, refuses without key |
+| F10: seed backdate UPDATE used f-string | parameterized `:delta`/`:rid` binds |
+| F8: CI used `pip install -e`, no CVE audit | `uv sync --frozen` + `pip-audit`; workspace dev-group in `pyproject.toml` |
+| F3: compose had committed secrets as the only path | `${VAR:-demo}` parameterization + `tools/gen-secrets.sh` |
+| docs/02 falsely claimed AES-256 on all columns | corrected to actual pgcrypto scope + encrypted backups |
+| docs/09 P10 claimed backup unimplemented | updated to implemented |
+
+**Regression after round-3:** 62 core + 101 API + 14 e2e = **177 green**. Live-verified: migration `e8b9c0d1e2f3` applied to demo DB, e2e 14/14 through the stack.
 
 **IDOR/cross-clinician isolation:** confirmed clean — every patient-scoped clinician function calls `_require_roster` (`clinician.py:22`); patient endpoints derive `patient_id` from JWT not path param; test `test_clinician_cannot_see_unrostered` proves 403 NO_ROSTER.

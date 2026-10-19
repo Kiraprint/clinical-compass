@@ -114,3 +114,47 @@ def test_consent_revoke_destroys_push_tokens(client, db_session):
 
     assert _count(PushSubscription) == 0
     assert _count(DeviceToken) == 0
+
+
+def test_push_blocked_after_consent_revoke(client):
+    """F2 round-3: после отзыва согласия пациент не может восстановить каналы
+    доставки push (иначе _destroy_patient_pdn бесполезен)."""
+    h, _pid = patient_ctx(client, "f2pushgate@test.ru")
+    # до отзыва — push-эндпоинты доступны
+    assert client.get("/api/v1/push/vapid-public-key", headers=h).status_code == 200
+    assert client.post("/api/v1/consent/revoke", headers=h).status_code == 204
+    # после отзыва — 403 CONSENT_REQUIRED на всех push/notification эндпоинтах
+    for method, path, body in (
+        ("get", "/api/v1/push/vapid-public-key", None),
+        ("post", "/api/v1/push/subscribe", {"endpoint": "https://x/y", "p256dh": "k", "auth": "a"}),
+        ("post", "/api/v1/push/device-token", {"token": "t", "platform": "android"}),
+        ("get", "/api/v1/push/fcm/status", None),
+        ("get", "/api/v1/me/notifications", None),
+    ):
+        r = getattr(client, method)(path, **({"json": body} if body else {}), headers=h)
+        assert r.status_code == 403, f"{method} {path} → {r.status_code}"
+        assert r.json()["code"] == "CONSENT_REQUIRED"
+
+
+def test_clinician_audit_records_client_ip(client, db_session):
+    """F6 round-3: действия врача аудируются с ip (--proxy-headers → request.client)."""
+    from sqlalchemy import select
+
+    from app.models import AuditLog
+
+    from .conftest import admin_ctx, clinician_ctx
+
+    h, cid = clinician_ctx(client, "f6ip@test.ru")
+    _hp, pid = patient_ctx(client, "f6ippat@test.ru")
+    # ростер: врач получает пациента
+    ha, _aid = admin_ctx(client, "f6ipadmin@test.ru")
+    assert client.post(
+        "/api/v1/admin/roster",
+        json={"clinician_id": cid, "patient_id": pid},
+        headers=ha,
+    ).status_code in (201, 200)
+    assert client.get(f"/api/v1/clinician/patients/{pid}/report", headers=h).status_code == 200
+    row = db_session.execute(
+        select(AuditLog).where(AuditLog.action == "READ_REPORT").order_by(AuditLog.occurred_at.desc())
+    ).scalars().first()
+    assert row is not None and row.ip, "READ_REPORT должен содержать ip"

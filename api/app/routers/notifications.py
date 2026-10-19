@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.deps import get_current_user
+from app.deps import require_consent_if_patient
 from app.models import User
 from app.services import push
 
@@ -20,7 +20,7 @@ class ReadBody(BaseModel):
 @router.get("/me/notifications")
 def my_notifications(
     limit: int = Query(default=50, ge=1, le=200),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_consent_if_patient),
     db: Session = Depends(get_db),
 ):
     return push.list_notifications(db, user.id, limit)
@@ -28,7 +28,7 @@ def my_notifications(
 
 @router.post("/me/notifications/read")
 def read_notifications(
-    body: ReadBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+    body: ReadBody, user: User = Depends(require_consent_if_patient), db: Session = Depends(get_db)
 ):
     push.mark_read(db, user.id, body.ids)
     return {"read": True}

@@ -3,7 +3,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: compass
-      POSTGRES_PASSWORD: compass
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-compass}
       POSTGRES_DB: compass
     ports:
       - "5432:5432"
@@ -33,11 +33,14 @@ services:
       context: ..
       dockerfile: api/Dockerfile
     environment:
-      CC_DATABASE_URL: postgresql+psycopg://compass:compass@postgres:5432/compass
-      CC_JWT_SECRET: demo-jwt-secret-0123456789abcdefghij
-      CC_DATA_KEY: compass-demo-data-key-do-not-use-in-prod-0123456789
-      CC_ALLOW_DEMO_SECRETS: "true"  # F3: демо-стек; prod-деплой НЕ ставит этот флаг → fail-fast
-      CC_COOKIE_SECURE: "false"  # F9: демо на HTTP (nginx без TLS); prod HTTPS → true (default)
+      # F3: секреты читаются из .env (docker compose подхватывает автоматически).
+      # Демо-значения — только дефолты, если .env отсутствует. Прод: `tools/gen-secrets.sh`
+      # + CC_ALLOW_DEMO_SECRETS=false → приложение падает на демо-секретах (fail-fast).
+      CC_DATABASE_URL: postgresql+psycopg://compass:${POSTGRES_PASSWORD:-compass}@postgres:5432/compass
+      CC_JWT_SECRET: ${CC_JWT_SECRET:-demo-jwt-secret-0123456789abcdefghij}
+      CC_DATA_KEY: ${CC_DATA_KEY:-compass-demo-data-key-do-not-use-in-prod-0123456789}
+      CC_ALLOW_DEMO_SECRETS: "${CC_ALLOW_DEMO_SECRETS:-true}"
+      CC_COOKIE_SECURE: "${CC_COOKIE_SECURE:-false}"  # демо HTTP; prod HTTPS → true
       CC_VAPID_PRIVATE_KEY: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JR0hBZ0VBTUJNR0J5cUdTTTQ5QWdFR0NDcUdTTTQ5QXdFSEJHMHdhd0lCQVFRZ3dVN2MwMkZiYXBVVndxVmUKWkJFcUMrRTJGZ2NScm9SeDNiZkFmSlVEOHN5aFJBTkNBQVJUaTg4TlpBK3hxaUxVM1c4RGxwNUxrL25WejBSNwptZDZEZnp6aUc2YWZ2a3ZsankwQVlSWFRzVmp3Y2l4SzdSQTAzWlBNbjA5UEg1Smkrbi9SeStkLwotLS0tLUVORCBQUklWQVRFIEtFWS0tLS0tCg==
       CC_QDRANT_URL: http://qdrant:6333
     depends_on:
@@ -62,9 +65,9 @@ services:
     command: ["/app/.venv/bin/python", "-m", "app.kb_seed", "--reset"]
     environment:
       CC_QDRANT_URL: http://qdrant:6333
-      CC_DATABASE_URL: postgresql+psycopg://compass:compass@postgres:5432/compass
-      CC_ALLOW_DEMO_SECRETS: "true"
-      CC_DATA_KEY: compass-demo-data-key-do-not-use-in-prod-0123456789
+      CC_DATABASE_URL: postgresql+psycopg://compass:${POSTGRES_PASSWORD:-compass}@postgres:5432/compass
+      CC_ALLOW_DEMO_SECRETS: "${CC_ALLOW_DEMO_SECRETS:-true}"
+      CC_DATA_KEY: ${CC_DATA_KEY:-compass-demo-data-key-do-not-use-in-prod-0123456789}
     depends_on:
       qdrant:
         condition: service_healthy
@@ -92,10 +95,10 @@ services:
       dockerfile: api/Dockerfile
     command: ["/app/.venv/bin/python", "-m", "app.seed", "--reset", "--patients", "12", "--days", "14"]
     environment:
-      CC_DATABASE_URL: postgresql+psycopg://compass:compass@postgres:5432/compass
+      CC_DATABASE_URL: postgresql+psycopg://compass:${POSTGRES_PASSWORD:-compass}@postgres:5432/compass
       CC_DEMO_TOTP: JBSWY3DPEHPK3PXP
-      CC_ALLOW_DEMO_SECRETS: "true"
-      CC_DATA_KEY: compass-demo-data-key-do-not-use-in-prod-0123456789
+      CC_ALLOW_DEMO_SECRETS: "${CC_ALLOW_DEMO_SECRETS:-true}"
+      CC_DATA_KEY: ${CC_DATA_KEY:-compass-demo-data-key-do-not-use-in-prod-0123456789}
     depends_on:
       api:
         condition: service_healthy

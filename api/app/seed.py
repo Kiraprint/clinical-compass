@@ -150,11 +150,17 @@ def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: bool = 
                 # backdate на (days - day) дней назад: согласованные time-метки всей цепочки
                 offset = days - day
                 if offset:
+                    # F10: параметризованный SQL (без f-string интерполяции значений).
+                    delta = timedelta(days=offset)
                     for table, col in (("runs", "started_at"), ("runs", "finished_at"), ("assessments", "computed_at")):
-                        s.execute(text(f"UPDATE {table} SET {col} = {col} - interval '{offset} days' WHERE id = '{run.id}'"))
-                    s.execute(text(
-                        f"UPDATE answers SET answered_at = answered_at - interval '{offset} days' WHERE run_id = '{run.id}'"
-                    ))
+                        s.execute(
+                            text(f"UPDATE {table} SET {col} = {col} - :delta WHERE id = :rid"),
+                            {"delta": delta, "rid": run.id},
+                        )
+                    s.execute(
+                        text("UPDATE answers SET answered_at = answered_at - :delta WHERE run_id = :rid"),
+                        {"delta": delta, "rid": run.id},
+                    )
             # Дневник: 3 записи по настроению из траектории (created_at — в прошлые дни)
             for day in (3, 8, days - 1):
                 mood = max(1, min(10, round(5 + (totals[-1] - totals[0]) / 4 + rng.uniform(-1.5, 1.5))))

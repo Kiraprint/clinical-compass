@@ -267,7 +267,7 @@ class AdherenceRecord(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
-    medication: Mapped[str | None] = mapped_column(String(128))
+    medication: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)  # F1: контекст лечения
     status: Mapped[str] = mapped_column(String(16))   # taken | partial | missed
     note: Mapped[str | None] = mapped_column(EncryptedText())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)

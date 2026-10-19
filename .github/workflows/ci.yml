@@ -37,11 +37,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.19"
+          enable-cache: true
+
       - name: Setup Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
 
       - name: Create test database
         env:
@@ -49,16 +54,20 @@ jobs:
         run: |
           psql -h 127.0.0.1 -U compass -d compass -c "CREATE DATABASE compass_test"
 
-      - name: Install deps (core + api[dev])
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e "core" -e "api[dev]"
+      # F8: uv sync --frozen — воспроизводимая установка строго из uv.lock
+      # (pip install -e игнорировал lockfile и мог подтянуть другие версии).
+      - name: Install deps (uv sync --frozen)
+        run: uv sync --frozen --all-packages
+
+      # F8: аудит зависимостей на известные CVE (ГОСТ Р 56939).
+      - name: Dependency audit (pip-audit)
+        run: uv run pip-audit --skip-editable || true  # отчёт без падения на транзитивных CVE
 
       - name: Pytest — core (coverage ≥ 95%)
-        run: pytest core/tests --cov=compass --cov-fail-under=95 -q
+        run: uv run pytest core/tests --cov=compass --cov-fail-under=95 -q
 
       - name: Pytest — api (real Postgres, alembic upgrade head)
-        run: pytest api/tests -q
+        run: uv run pytest api/tests -q
         env:
           CC_TEST_DATABASE_URL: postgresql+psycopg://compass:compass@127.0.0.1:5432/compass_test
           CC_QDRANT_URL: http://127.0.0.1:6333

@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -41,10 +41,15 @@ def add_roster(body: RosterBody, user: User = Depends(require_admin), db: Sessio
 
 @router.get("/audit")
 def list_audit(
+    request: Request,
     after: datetime | None = Query(default=None),
     user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
+    """F6: чтение журнала аудита само аудируется (доступ к истории спецкатегории)."""
+    ip = request.client.host if request.client else None
+    services.audit.record(db, user.id, "READ_AUDIT", "audit_log", ip=ip)
+    db.commit()
     q = select(AuditLog).order_by(AuditLog.occurred_at.desc()).limit(500)
     if after is not None:
         q = q.where(AuditLog.occurred_at >= after)

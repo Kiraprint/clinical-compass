@@ -51,6 +51,27 @@ require_patient = require_roles("PATIENT")
 require_clinician = require_roles("CLINICIAN")
 require_admin = require_roles("ADMIN")
 
+def require_consent_if_patient(
+    user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> User:
+    """F2 (152-ФЗ ст.9 ч.2-3): для PATIENT — активное согласие обязательно.
+    CLINICIAN/ADMIN проходят: их действия не обрабатывают спецкатегорию пациента
+    (пациент-специфичные чтения врача отдельно roster-гейтятся и аудируются).
+    Нужен для push/notifications: после отзыва согласия пациент не должен
+    восстанавливать каналы доставки или читать уведомления.
+    """
+    if user.role != "PATIENT":
+        return user
+    from sqlalchemy import select
+
+    from .models import Consent
+
+    active = db.scalar(select(Consent).where(Consent.user_id == user.id, Consent.revoked_at.is_(None)))
+    if active is None:
+        raise Problem(403, "CONSENT_REQUIRED", "Требуется активное согласие на обработку персональных данных (152-ФЗ)")
+    return user
+
+
 def require_consent(user: User = Depends(require_patient), db: Session = Depends(get_db)) -> User:
     """152-ФЗ: без активного согласия — никаких персональных данных."""
     from sqlalchemy import select

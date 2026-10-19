@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -20,11 +20,12 @@ class PrescribeBody(BaseModel):
 
 @router.put("/clinician/patients/{patient_id}/prescribed-scales")
 def prescribe(
-    patient_id: uuid.UUID, body: PrescribeBody,
+    patient_id: uuid.UUID, body: PrescribeBody, request: Request,
     user: User = Depends(require_clinician), db: Session = Depends(get_db),
 ):
     """Врач назначает пациенту множество шкал скрининга (item 1, multi-scale). Рост-гейт 403 NO_ROSTER."""
-    return services.clinician.prescribe_scales(db, user.id, patient_id, body.scales)
+    ip = request.client.host if request.client else None
+    return services.clinician.prescribe_scales(db, user.id, patient_id, body.scales, ip=ip)
 
 
 @router.get("/clinician/patients")
@@ -37,8 +38,9 @@ def patients(
 
 
 @router.get("/clinician/patients/{patient_id}/report")
-def report(patient_id: uuid.UUID, user: User = Depends(require_clinician), db: Session = Depends(get_db)):
-    return services.clinician.report(db, user.id, patient_id)
+def report(patient_id: uuid.UUID, request: Request, user: User = Depends(require_clinician), db: Session = Depends(get_db)):
+    ip = request.client.host if request.client else None
+    return services.clinician.report(db, user.id, patient_id, ip=ip)
 
 class AdverseEventBody(BaseModel):
     event_text: str = Field(min_length=1)
@@ -49,13 +51,14 @@ class AdverseEventBody(BaseModel):
 
 @router.post("/clinician/patients/{patient_id}/adverse-events", status_code=201)
 def create_adverse_event(
-    patient_id: uuid.UUID, body: AdverseEventBody,
+    patient_id: uuid.UUID, body: AdverseEventBody, request: Request,
     user: User = Depends(require_clinician), db: Session = Depends(get_db),
 ):
     """Регистрация нежелательного явления (задача кейса 3). Roster-гейт + аудит."""
+    ip = request.client.host if request.client else None
     return services.clinician.create_adverse_event(
         db, user.id, patient_id, body.event_text, body.severity, body.onset_date,
-        body.suspected_drug, body.action_taken,
+        body.suspected_drug, body.action_taken, ip=ip,
     )
 
 @router.get("/clinician/patients/{patient_id}/adverse-events")
@@ -78,11 +81,12 @@ class ClinicianChatBody(BaseModel):
 
 @router.post("/clinician/patients/{patient_id}/chat", status_code=201)
 def clinician_chat_post(
-    patient_id: uuid.UUID, body: ClinicianChatBody,
+    patient_id: uuid.UUID, body: ClinicianChatBody, request: Request,
     user: User = Depends(require_clinician), db: Session = Depends(get_db),
 ):
     """Врач пишет пациенту (задача кейса 6 — канал коммуникации). Roster + аудит."""
-    return services.clinician.clinician_post_chat(db, user.id, patient_id, body.content)
+    ip = request.client.host if request.client else None
+    return services.clinician.clinician_post_chat(db, user.id, patient_id, body.content, ip=ip)
 
 @router.get("/clinician/patients/{patient_id}/chat")
 def clinician_chat_list(
@@ -98,11 +102,12 @@ class HistoryBody(BaseModel):
 
 @router.post("/clinician/patients/{patient_id}/import-history")
 def import_history(
-    patient_id: uuid.UUID, body: HistoryBody,
+    patient_id: uuid.UUID, body: HistoryBody, request: Request,
     user: User = Depends(require_clinician), db: Session = Depends(get_db),
 ):
     """Разбор клинической истории в черновик полей (метрика кейса 2). Roster + аудит."""
-    return services.clinician.import_history(db, user.id, patient_id, body.text, body.template_name)
+    ip = request.client.host if request.client else None
+    return services.clinician.import_history(db, user.id, patient_id, body.text, body.template_name, ip=ip)
 
 
 me_router = APIRouter(tags=["me"])

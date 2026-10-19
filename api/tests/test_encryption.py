@@ -43,3 +43,28 @@ def test_chat_message_encrypted_at_rest(db_session):
     assert "тревожно ночью" not in row.c  # не plaintext в покое
     msg = db_session.execute(select(ChatMessage).where(ChatMessage.patient_id == pid)).scalar_one()
     assert msg.content == "тревожно ночью"  # ORM расшифровал
+
+
+def test_adherence_medication_encrypted_at_rest(db_session):
+    """F1 round-3: AdherenceRecord.medication (название препарата = контекст лечения)
+    зашифрован at rest; ORM читает plaintext."""
+    from sqlalchemy import text as sql_text
+
+    from app.models import AdherenceRecord, User
+    import uuid
+
+    uid = uuid.uuid4()
+    db_session.add(User(id=uid, email=f"med-{uid}@t.ru", password_hash="x", role="PATIENT"))
+    db_session.flush()
+    db_session.add(AdherenceRecord(patient_id=uid, medication="Авиандр", status="taken"))
+    db_session.commit()
+
+    row = db_session.execute(
+        sql_text("SELECT medication::text AS c FROM adherence_records WHERE patient_id = CAST(:p AS uuid)"),
+        {"p": str(uid)},
+    ).first()
+    assert row is not None
+    assert "Авиандр" not in (row.c or ""), "medication должен быть зашифрован at rest"
+
+    rec = db_session.query(AdherenceRecord).filter(AdherenceRecord.patient_id == uid).one()
+    assert rec.medication == "Авиандр"

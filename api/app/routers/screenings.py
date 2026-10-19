@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -41,10 +41,16 @@ def list_questionnaires(user: User = Depends(require_consent), db: Session = Dep
 
 
 @router.get("/me/prescribed-scales")
-def my_prescribed_scales(user: User = Depends(require_consent), db: Session = Depends(get_db)):
-    """Шкалы, назначенные пациенту врачом (item 1, multi-scale). Без назначения — дефолт [PHQ-9]."""
+def my_prescribed_scales(request: Request, user: User = Depends(require_consent), db: Session = Depends(get_db)):
+    """Шкалы, назначенные пациенту врачом (item 1, multi-scale). Без назначения — дефолт [PHQ-9].
+
+    F6: чтение назначенных шкал раскрывает контекст лечения — аудируется.
+    """
     from compass.scales import ALL_SCALES
 
+    ip = request.client.host if request.client else None
+    services.audit.record(db, user.id, "READ_PRESCRIBED_SCALES", "patient", ip=ip)
+    db.commit()
     codes = services.screening.prescribed_scales(db, user.id)
     return {"scales": [{"code": c, "title": ALL_SCALES[c].title} for c in codes]}
 
