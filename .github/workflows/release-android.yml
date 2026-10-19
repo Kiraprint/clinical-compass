@@ -69,7 +69,7 @@ jobs:
         run: |
           if [ -n "${{ secrets.ANDROID_KEYSTORE_B64 }}" ]; then
             echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 -d > mobile/android/app/release.keystore
-            echo "storeFile=release.keystore" > mobile/android/keystore.properties
+            echo "storeFile=app/release.keystore" > mobile/android/keystore.properties
             echo "storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> mobile/android/keystore.properties
             echo "keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}" >> mobile/android/keystore.properties
             echo "keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}" >> mobile/android/keystore.properties
