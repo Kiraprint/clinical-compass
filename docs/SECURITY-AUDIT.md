@@ -256,3 +256,18 @@ Round 4 verified 10/10 prior claims PASS, and found 5 new issues. All fixed:
 | NEW-5 | MEDIUM | compose defaulted `CC_ALLOW_DEMO_SECRETS=true`, defeating F3 | default is now `false` (fail-fast); demo needs explicit `.env` (`infra/.env.example`) |
 
 **Regression after round 4:** 67 core + 104 API + 14 e2e = **185 green**. Live: migrations `e9c0d1e2f3a4` applied, demo reseeded, e2e 14/14.
+
+### Round-5 verification — CLEAN
+
+Round 5 (8m30s, 10 files) verified all 5 round-4 fixes: **5/5 PASS, no new CRITICAL/HIGH/MEDIUM**.
+
+Two LOW observations were actionable and are now fixed:
+
+| LOW | Issue | Fix |
+|-----|-------|-----|
+| tags setter | `entry.tags = []` wrote `None` into a NOT NULL column → IntegrityError | setter always serialises `"[]"` |
+| data_key gating | demo `CC_DATA_KEY` was only rejected under `prod_mode`, so a strong JWT secret could mask a known encryption key | demo data key now rejected whenever `allow_demo_secrets` is false |
+
+Remaining LOW (accepted): migration key literal in `ALTER ... USING` (one-off DDL, operator-controlled, documented); demo-mode registration of privileged roles (by design, requires explicit `CC_ALLOW_DEMO_SECRETS=true`).
+
+**Final regression:** 67 core + 104 API + 14 e2e = **185 green**. Live stack: only `ui:8090` published; postgres/qdrant/api internal.

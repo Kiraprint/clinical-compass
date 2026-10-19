@@ -110,7 +110,8 @@ export NGROK_URL=<ваш>.ngrok-free.app           # dev-домен из dashboa
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e "core" -e "api[dev]"
-docker compose -f infra/docker-compose.yml up -d postgres   # тестовая БД
+# тестовая БД (dev-override публикует порт на 127.0.0.1; базовый compose — нет)
+docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up -d postgres qdrant
 cd api && alembic upgrade head                                # схема из миграций (не create_all)
 .venv/bin/pytest core api                                     # 67 + 104 тестов
 cd ui && npm install && npm run dev                           # UI на :5173 (proxy → :8000)
@@ -165,6 +166,9 @@ cd android && ./gradlew assembleDebug           # APK: app/build/outputs/apk/deb
 - [x] Security audit F1–F12 + NEW-1..5: pgcrypto на всех free-text ПДн, уничтожение при отзыве, ротация refresh, httpOnly cookies, fail-fast секреты, AES-256 backup, threat model (ГОСТ 14971), gate привилегированной регистрации
 
 **Регрессия:** 67 core + 104 API + 14 e2e = 185 тестов.
+
+**Первый администратор (прод):** публичная регистрация CLINICIAN/ADMIN запрещена вне демо-режима (NEW-1):
+`docker compose -f infra/docker-compose.yml run --rm --entrypoint /app/.venv/bin/python api -m app.bootstrap_user --email admin@clinic.ru --role ADMIN`
 
 Ключевые ограничения: см. красные линии в 01 §4 и 02 §7.2 (без «автодиагноза», без биометрии, 152-ФЗ).
 Открытые вопросы метрик — 15.10 (открытие чемпионата).

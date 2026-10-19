@@ -148,7 +148,8 @@ class DiaryEntry(Base):
 
     @tags.setter
     def tags(self, value) -> None:
-        self.tags_json = json.dumps(list(value), ensure_ascii=False) if value else None
+        # NOT NULL колонка: пустой список хранится как "[]", не NULL.
+        self.tags_json = json.dumps(list(value or []), ensure_ascii=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)
 
 

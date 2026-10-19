@@ -46,15 +46,20 @@ class Settings(BaseSettings):
                 "CC_JWT_SECRET — демо-значение из git; для демо/теста поставьте "
                 "CC_ALLOW_DEMO_SECRETS=true, для prod — сгенерируйте >=32 байт энтропии"
             )
+        # Ключ шифрования ПДн: короткий ИЛИ известный демо-ключ запрещены без
+        # явного демо-флага — иначе сильный JWT-секрет маскировал бы известный
+        # ключ шифрования (ПДн шифровались бы ключом из git).
         if len(self.data_key) < 32 and not self.allow_demo_secrets:
             raise ValueError(
                 "CC_DATA_KEY (>=32 байт) обязателен для шифрования ПДн; "
                 "для демо/теста поставьте CC_ALLOW_DEMO_SECRETS=true"
             )
+        if self.data_key in _DEMO_KEYS and not self.allow_demo_secrets:
+            raise ValueError(
+                "CC_DATA_KEY — демо-значение из git; сгенерируйте свой ключ "
+                "(tools/gen-secrets.sh) или поставьте CC_ALLOW_DEMO_SECRETS=true для демо"
+            )
         if self.prod_mode:
-            # Дополнительные prod-проверки (KMS-класс, не-демо data_key).
-            if self.data_key in _DEMO_KEYS:
-                raise ValueError("CC_PROD_MODE: CC_DATA_KEY не должен быть демо-значением")
             if self.allow_demo_secrets:
                 raise ValueError("CC_PROD_MODE несовместим с CC_ALLOW_DEMO_SECRETS")
         return self
