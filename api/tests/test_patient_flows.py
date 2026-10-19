@@ -9,11 +9,19 @@ def test_questionnaire_catalog_serves_scales(client):
     resp = client.get("/api/v1/questionnaires", headers=h)
     assert resp.status_code == 200
     codes = [q["code"] for q in resp.json()]
-    assert codes == ["PHQ-9", "GAD-7", "HADS-A", "HADS-D"]
+    # HCL-32/HDRS-17/PSS-10 — врач-назначаемые (docs/14 §4): в каталоге присутствуют,
+    # но не выдаются пациенту без предписания (проверяет test_screening_*)
+    assert codes == ["PHQ-9", "GAD-7", "HADS-A", "HADS-D", "HCL-32", "HDRS-17", "PSS-10"]
     phq = next(q for q in resp.json() if q["code"] == "PHQ-9")
     assert len(phq["items"]) == 9
     assert phq["items"][0]["key"] == "q1"
     assert phq["items"][0]["max_value"] == 3
+    hdr = next(q for q in resp.json() if q["code"] == "HDRS-17")
+    assert len(hdr["items"]) == 17
+    assert hdr["items"][2]["key"] == "h3"  # суицидальный пункт — риск-флаг
+    hcl = next(q for q in resp.json() if q["code"] == "HCL-32")
+    assert len(hcl["items"]) == 32
+    assert all(i["max_value"] == 1 for i in hcl["items"])  # бинарный скринер
 
 
 def test_diary_create_and_list(client):
