@@ -27,4 +27,5 @@ def thread(request: Request, user: User = Depends(require_consent), db: Session 
     # F6: аудит чтения пациентом своего PHI (чат)
     ip = request.client.host if request.client else None
     services.audit.record(db, user.id, "READ_CHAT", "patient", ip=ip)
+    db.commit()  # F6: аудит чтения своего PHI должен сохраняться
     return {"items": [services.chat.to_dict(m) for m in services.chat.list_messages(db, user.id)]}

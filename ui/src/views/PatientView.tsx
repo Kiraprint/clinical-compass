@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  AdherenceRecord,
   api,
   ApiError,
   Assessment,
@@ -12,11 +13,13 @@ import {
 } from "../api";
 import TrendChart from "../TrendChart";
 
-type Tab = "screening" | "checkin" | "diary" | "chat" | "trend" | "adherence";
+type Tab = "today" | "screening" | "diary" | "chat" | "trend" | "adherence";
 
+// «Сегодня» — один ежедневный экран: чек-ин + дневник + приём лекарств.
+// Дневник и Приверженность остаются как история, запись идёт только из «Сегодня».
 const TABS: { id: Tab; label: string }[] = [
+  { id: "today", label: "Сегодня" },
   { id: "screening", label: "Скрининг" },
-  { id: "checkin", label: "Ежедневный чек-ин" },
   { id: "diary", label: "Дневник" },
   { id: "adherence", label: "Приверженность" },
   { id: "chat", label: "Чат поддержки" },
@@ -26,7 +29,7 @@ const TABS: { id: Tab; label: string }[] = [
 export default function PatientView() {
   const [consent, setConsent] = useState<Consent | null>(null);
   const [consentChecked, setConsentChecked] = useState(false);
-  const [tab, setTab] = useState<Tab>("screening");
+  const [tab, setTab] = useState<Tab>("today");
 
   const loadConsent = useCallback(async () => {
     try {
@@ -83,8 +86,8 @@ export default function PatientView() {
           </button>
         ))}
       </div>
+      {tab === "today" && <TodayTab />}
       {tab === "screening" && <ScreeningTab />}
-      {tab === "checkin" && <CheckinTab />}
       {tab === "diary" && <DiaryTab />}
       {tab === "adherence" && <AdherenceTab />}
       {tab === "chat" && <ChatTab />}
@@ -231,80 +234,116 @@ function ScreeningTab() {
   );
 }
 
-function CheckinTab() {
+const ADH_LABELS: Record<string, string> = { taken: "Принял", partial: "Частично", missed: "Пропустил" };
+
+const sameDay = (iso: string, ref: Date) => new Date(iso).toDateString() === ref.toDateString();
+
+function TodayTab() {
   const [today, setToday] = useState<CheckinToday | null>(null);
   const [answers, setAnswers] = useState<Record<string, number>>({});
   const [done, setDone] = useState(false);
-
-  const load = async () => {
-    const t = await api.getTodayCheckin();
-    setToday(t);
-    setDone(t.done);
-  };
-
-  useEffect(() => {
-    load();
-  }, []);
-
-  const submit = async () => {
-    await api.completeCheckin(answers);
-    setDone(true);
-    await load();
-  };
-
-  if (done) {
-    return (
-      <div className="card">
-        <h2>Чек-ин за сегодня выполнен</h2>
-        <p style={{ color: "#5a6478" }}>Возвращайтесь завтра — вопросы адаптируются под ваше состояние.</p>
-      </div>
-    );
-  }
-  if (!today || today.items.length === 0) return <div className="card">Загрузка…</div>;
-
-  return (
-    <div className="card">
-      <h2>Как вы себя чувствуете сегодня?</h2>
-      {today.items.map((item) => (
-        <div key={item.key} className="qa">
-          <p>{item.text}</p>
-          <div className="row">
-            {[0, 1, 2, 3].map((v) => (
-              <button key={v} className={answers[item.key] === v ? "on" : ""} onClick={() => setAnswers((a) => ({ ...a, [item.key]: v }))}>
-                {v}
-              </button>
-            ))}
-          </div>
-        </div>
-      ))}
-      <button onClick={submit}>Отправить</button>
-    </div>
-  );
-}
-
-function DiaryTab() {
   const [content, setContent] = useState("");
   const [mood, setMood] = useState(5);
   const [sleep, setSleep] = useState(7);
-  const [items, setItems] = useState<DiaryEntry[]>([]);
+  const [entriesToday, setEntriesToday] = useState<DiaryEntry[]>([]);
+  const [status, setStatus] = useState<"taken" | "partial" | "missed" | null>(null);
+  const [medication, setMedication] = useState("");
+  const [adhNote, setAdhNote] = useState("");
+  const [adhToday, setAdhToday] = useState<AdherenceRecord | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState("");
+  const [err, setErr] = useState("");
 
-  const load = async () => setItems((await api.getDiary()).items);
+  const load = async () => {
+    const [t, d, a] = await Promise.all([api.getTodayCheckin(), api.getDiary(), api.getMyAdherence()]);
+    setToday(t);
+    setDone(t.done);
+    const ref = new Date();
+    setEntriesToday(d.items.filter((e) => sameDay(e.created_at, ref)));
+    setAdhToday(a.today);
+  };
+
   useEffect(() => {
-    load();
+    load().catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)));
   }, []);
 
-  const add = async () => {
-    if (!content.trim()) return;
-    await api.postDiary({ content, mood, sleep_h: sleep, tags: [] });
-    setContent("");
-    await load();
+  const save = async () => {
+    setErr("");
+    setSaved("");
+    const items = today?.items ?? [];
+    const missing = done ? [] : items.filter((i) => answers[i.key] === undefined);
+    setBusy(true);
+    const parts: string[] = [];
+    try {
+      if (!done && items.length > 0 && missing.length === 0) {
+        await api.completeCheckin(answers);
+        parts.push("чек-ин");
+      }
+      if (content.trim()) {
+        await api.postDiary({ content, mood, sleep_h: sleep, tags: [] });
+        setContent("");
+        parts.push("дневник");
+      }
+      if (!adhToday && status) {
+        await api.recordAdherence({
+          medication: medication.trim() || undefined,
+          status,
+          note: adhNote.trim() || undefined,
+        });
+        setMedication("");
+        setAdhNote("");
+        parts.push("приём лекарств");
+      }
+      await load();
+      setSaved(parts.length > 0 ? `Сохранено: ${parts.join(" · ")}` : "Всё уже отмечено за сегодня");
+      // Неполный чек-ин не блокирует дневник и отметку о приёме — говорим, чего не хватает.
+      if (missing.length > 0 && missing.length < items.length) {
+        setErr(`Чек-ин не сохранён: ответьте ещё на ${missing.length}`);
+      }
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
   };
+
+  if (!today) return <div className="card">Загрузка…</div>;
 
   return (
     <div className="card">
-      <h2>Дневник самочувствия</h2>
-      <label>Как прошёл день?</label>
-      <textarea rows={3} value={content} onChange={(e) => setContent(e.target.value)} />
+      <h2>Сегодня</h2>
+      <p style={{ color: "#5a6478", fontSize: 14 }}>
+        {new Date().toLocaleDateString("ru-RU", { weekday: "long", day: "numeric", month: "long" })} — чек-ин,
+        дневник и приём лекарств в одной форме.
+      </p>
+
+      <h3>Чек-ин</h3>
+      {done ? (
+        <p style={{ color: "#2e7d32", fontWeight: 600 }}>Чек-ин за сегодня выполнен</p>
+      ) : today.items.length === 0 ? (
+        <p style={{ color: "#5a6478" }}>Вопросы появятся после первого скрининга.</p>
+      ) : (
+        today.items.map((item) => (
+          <div key={item.key} className="qa">
+            <p>{item.text}</p>
+            <div className="row">
+              {Array.from({ length: item.max_value + 1 }, (_, v) => v).map((v) => (
+                <button
+                  key={v}
+                  className={answers[item.key] === v ? "on" : ""}
+                  onClick={() => setAnswers((a) => ({ ...a, [item.key]: v }))}
+                >
+                  {v}
+                </button>
+              ))}
+            </div>
+          </div>
+        ))
+      )}
+
+      <h3>Дневник</h3>
+      <label htmlFor="today-diary">Как прошёл день?</label>
+      <textarea id="today-diary" rows={3} value={content} onChange={(e) => setContent(e.target.value)} />
       <div className="two">
         <div>
           <label>Настроение (1–10): {mood}</label>
@@ -315,57 +354,116 @@ function DiaryTab() {
           <input type="range" min={0} max={12} step={0.5} value={sleep} onChange={(e) => setSleep(Number(e.target.value))} />
         </div>
       </div>
-      <button onClick={add}>Сохранить запись</button>
-      <div style={{ marginTop: 14 }}>
-        {items.map((entry) => (
-          <div key={entry.id} className="msg">
-            <b>{entry.mood ? `Настроение: ${entry.mood}/10` : ""}</b> {entry.content}
+      {entriesToday.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          {entriesToday.map((e) => (
+            <div key={e.id} className="msg">
+              <b>{e.mood ? `Настроение: ${e.mood}/10` : ""}</b> {e.content}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <h3>Приём лекарств</h3>
+      {adhToday ? (
+        <p style={{ color: "#2e7d32", fontWeight: 600 }}>
+          За сегодня отмечено: {ADH_LABELS[adhToday.status] ?? adhToday.status}
+          {adhToday.medication ? ` (${adhToday.medication})` : ""}
+        </p>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 8, margin: "8px 0" }}>
+            {(["taken", "partial", "missed"] as const).map((s) => (
+              <button key={s} className={status === s ? "active" : "ghost"} onClick={() => setStatus(s)}>
+                {ADH_LABELS[s]}
+              </button>
+            ))}
           </div>
-        ))}
+          <input
+            placeholder="Препарат (напр. Авиандр) — необязательно"
+            value={medication}
+            onChange={(e) => setMedication(e.target.value)}
+          />
+          <input placeholder="Заметка (необязательно)" value={adhNote} onChange={(e) => setAdhNote(e.target.value)} />
+        </>
+      )}
+
+      <div style={{ marginTop: 14, display: "flex", gap: 10, alignItems: "center" }}>
+        <button onClick={save} disabled={busy}>
+          {busy ? "Сохраняем…" : "Сохранить за сегодня"}
+        </button>
+        {saved && <span style={{ color: "#2e7d32", fontSize: 13 }}>{saved}</span>}
       </div>
+      {err && <p className="error">{err}</p>}
+    </div>
+  );
+}
+
+function DiaryTab() {
+  const [items, setItems] = useState<DiaryEntry[]>([]);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    api.getDiary().then((d) => setItems(d.items)).catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)));
+  }, []);
+
+  return (
+    <div className="card">
+      <h2>Дневник самочувствия</h2>
+      <p style={{ color: "#5a6478", fontSize: 14 }}>
+        История записей. Новую запись добавляйте на вкладке «Сегодня» — вместе с чек-ином и отметкой о приёме лекарств.
+      </p>
+      {err && <p className="error">{err}</p>}
+      {items.length === 0 && <p style={{ color: "#5a6478" }}>Пока пусто.</p>}
+      {items.map((entry) => (
+        <div key={entry.id} className="msg">
+          <b>{entry.mood ? `Настроение: ${entry.mood}/10` : ""}</b> {entry.content}
+          <div style={{ color: "#5a6478", fontSize: 12 }}>
+            {new Date(entry.created_at).toLocaleString("ru-RU")}
+            {entry.sleep_h != null ? ` · сон ${entry.sleep_h} ч` : ""}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
 
 function AdherenceTab() {
-  const [medication, setMedication] = useState("");
-  const [status, setStatus] = useState<"taken" | "partial" | "missed">("taken");
-  const [note, setNote] = useState("");
-  const [saved, setSaved] = useState<number | null>(null);
+  const [data, setData] = useState<{ items: AdherenceRecord[]; today: AdherenceRecord | null } | null>(null);
   const [err, setErr] = useState("");
 
-  const submit = async () => {
-    setErr("");
-    try {
-      await api.recordAdherence({ medication: medication.trim() || undefined, status, note: note.trim() || undefined });
-      setSaved(Date.now()); setNote("");
-    } catch (e: unknown) {
-      setErr(e instanceof Error ? e.message : String(e));
-    }
-  };
+  useEffect(() => {
+    api
+      .getMyAdherence(14)
+      .then(setData)
+      .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)));
+  }, []);
+
+  const items = data?.items ?? [];
+  const total = items.length;
+  const score = items.reduce((acc, r) => acc + (r.status === "taken" ? 1 : r.status === "partial" ? 0.5 : 0), 0);
+  const pct = total > 0 ? Math.round((score / total) * 1000) / 10 : null;
 
   return (
     <div className="card">
       <h2>Приверженность лечению</h2>
       <p style={{ color: "#5a6478", fontSize: 14 }}>
-        Отметьте, как вы следовали назначенному лечению сегодня. Это поможет врачу оценить динамику и
-        корректировать терапию (задача кейса 7).
+        Отметки за последние 14 дней. Сегодняшнюю отметку ставьте на вкладке «Сегодня».
       </p>
-      <input placeholder="Препарат (напр. Авиандр) — необязательно" value={medication} onChange={(e) => setMedication(e.target.value)} />
-      <div style={{ display: "flex", gap: 8, margin: "8px 0" }}>
-        {(["taken", "partial", "missed"] as const).map((s) => (
-          <button key={s} className={status === s ? "active" : "ghost"}
-            onClick={() => setStatus(s)}>
-            {s === "taken" ? "Принял" : s === "partial" ? "Частично" : "Пропустил"}
-          </button>
-        ))}
-      </div>
-      <input placeholder="Заметка (необязательно)" value={note} onChange={(e) => setNote(e.target.value)} />
-      <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center" }}>
-        <button onClick={submit}>Записать</button>
-        {saved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
-      </div>
+      <p>
+        <b>Приверженность: {pct != null ? `${pct}%` : "—"}</b>{" "}
+        <span style={{ color: "#5a6478", fontSize: 13 }}>({total} отметок за 14 дней)</span>
+      </p>
       {err && <p className="error">{err}</p>}
+      {total === 0 && <p style={{ color: "#5a6478" }}>Отметок пока нет.</p>}
+      {items.map((r) => (
+        <div key={r.id} className="msg">
+          <b>{ADH_LABELS[r.status] ?? r.status}</b>
+          {r.medication ? ` · ${r.medication}` : ""}
+          {r.note ? ` · ${r.note}` : ""}
+          <div style={{ color: "#5a6478", fontSize: 12 }}>{new Date(r.created_at).toLocaleString("ru-RU")}</div>
+        </div>
+      ))}
     </div>
   );
 }

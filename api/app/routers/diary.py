@@ -31,4 +31,5 @@ def list_diary(request: Request, user: User = Depends(require_consent), db: Sess
     # F6: аудит чтения пациентом своего PHI (дневник)
     ip = request.client.host if request.client else None
     services.audit.record(db, user.id, "READ_DIARY", "patient", ip=ip)
+    db.commit()  # F6: аудит чтения своего PHI должен сохраняться
     return {"items": [services.diary.to_dict(e) for e in services.diary.list_for_patient(db, user.id)]}

@@ -170,6 +170,8 @@ export const api = {
   getTimeline: (days = 90) => req<Timeline>(`/api/v1/me/timeline?days=${days}`),
   postDiary: verb<DiaryEntry>("POST")("/api/v1/diary"),
   getDiary: () => req<{ items: DiaryEntry[] }>("/api/v1/diary"),
+  getMyAdherence: (days = 14) =>
+    req<{ items: AdherenceRecord[]; today: AdherenceRecord | null }>(`/api/v1/me/adherence?days=${days}`),
   postChat: (content: string) =>
     req<ChatReply>("/api/v1/chat/thread", { method: "POST", body: JSON.stringify({ content }) }),
   getChat: () => req<{ items: ChatMessage[] }>("/api/v1/chat/thread"),
@@ -305,6 +307,13 @@ export interface DiaryEntry {
   tags: string[];
   created_at: string;
 }
+export interface AdherenceRecord {
+  id: string;
+  medication: string | null;
+  status: string;
+  note: string | null;
+  created_at: string;
+}
 export interface ChatMessage {
   id: string;
   sender: string;
@@ -368,7 +377,7 @@ export interface Report {
   } | null;
   adherence: {
     pct: number | null; total: number; taken: number; partial: number; missed: number;
-    records: { id: string; medication: string | null; status: string; note: string | null; created_at: string }[];
+    records: AdherenceRecord[];
   };
   adverse_events: {
     id: string; event_text: string; severity: string; onset_date: string;

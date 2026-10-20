@@ -1,4 +1,6 @@
 # E5: панель врача, roster, аудит доступа. Контракт: docs/04 §3.1; docs/06 §3.
+from app.models import AuditLog
+
 from .conftest import admin_ctx, auth_header, clinician_ctx, finish_screening, patient_ctx
 
 PHQ_ALL = {f"q{i}": 0 for i in range(1, 10)}
@@ -192,6 +194,22 @@ def test_adherence_patient_records_and_doctor_aggregate(client):
     assert report["adherence"]["pct"] == 66.7
     assert report["adherence"]["records"][0]["medication"] == "Авиандр"
 
+
+def test_patient_reads_own_adherence_and_read_is_audited(client, db_session):
+    """Экран «Сегодня»: пациент читает свои отметки; GET /me/adherence пишет READ_ADHERENCE в аудит."""
+    h, pid = _with_patient(client, "adr@test.ru")
+    r = client.post("/api/v1/me/adherence", json={"medication": "Авиандр", "status": "partial"}, headers=h)
+    assert r.status_code == 201, r.text
+
+    got = client.get("/api/v1/me/adherence", headers=h)
+    assert got.status_code == 200, got.text
+    body = got.json()
+    assert len(body["items"]) == 1 and body["items"][0]["status"] == "partial"
+    assert body["today"] is not None and body["today"]["status"] == "partial"
+
+    db_session.expire_all()
+    actions = [a.action for a in db_session.query(AuditLog).filter(AuditLog.actor_id == pid).all()]
+    assert "READ_ADHERENCE" in actions
 
 def test_clinician_chat_patient_sees_message(client):
     """задача кейса 6: врач пишет пациенту, пациент видит сообщение в своём чате."""

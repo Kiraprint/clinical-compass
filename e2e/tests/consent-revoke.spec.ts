@@ -13,9 +13,9 @@ test.describe("Отзыв согласия на обработку ПДн", () =
 
     // Записываем дневник (ПДн), убеждаемся, что он виден.
     const content = `ПДн e2e ${Date.now()}`;
-    await page.getByRole("button", { name: "Дневник" }).click();
-    await page.locator("textarea").fill(content);
-    await page.getByRole("button", { name: "Сохранить запись" }).click();
+    await page.getByRole("button", { name: "Сегодня", exact: true }).click();
+    await page.locator("#today-diary").fill(content);
+    await page.getByRole("button", { name: "Сохранить за сегодня" }).click();
     await expect(page.getByText(content)).toBeVisible();
 
     // Отзыв согласия → возвращается гейт 152-ФЗ, скрининг недоступен.

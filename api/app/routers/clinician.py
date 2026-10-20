@@ -172,6 +172,18 @@ class AdherenceBody(BaseModel):
     status: str = Field(pattern="^(taken|partial|missed)$")
     note: str | None = None
 
+@me_router.get("/me/adherence")
+def my_adherence(
+    request: Request, days: int = Query(default=14, ge=1, le=365),
+    user: User = Depends(require_consent), db: Session = Depends(get_db),
+):
+    """Пациент читает свои отметки приверженности (экран «Сегодня», задача кейса 7)."""
+    ip = request.client.host if request.client else None
+    services.audit.record(db, user.id, "READ_ADHERENCE", "patient", ip=ip)
+    db.commit()  # F6: аудит чтения своего PHI должен сохраняться
+    return services.clinician.my_adherence(db, user.id, days)
+
+
 @me_router.post("/me/adherence", status_code=201)
 def record_adherence(
     body: AdherenceBody,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -434,6 +435,31 @@ def create_adherence(
     db.add(rec)
     db.commit()
     return _adherence_dict(rec)
+
+
+MOSCOW = ZoneInfo("Europe/Moscow")
+
+
+def my_adherence(db: Session, patient_id, days: int = 14) -> dict:
+    """Пациент читает свои отметки приверженности (экран «Сегодня»). Consent-гейт у роутера.
+
+    Возвращает записи за окно (свежие первыми) и отметку за текущие сутки по Москве,
+    чтобы экран показывал «сегодня уже отмечено».
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    rows = db.scalars(
+        select(AdherenceRecord)
+        .where(AdherenceRecord.patient_id == patient_id, AdherenceRecord.created_at >= since)
+        .order_by(AdherenceRecord.created_at.desc())
+    ).all()
+    today = datetime.now(MOSCOW).date()
+    today_rec = next(
+        (r for r in rows if r.created_at.astimezone(MOSCOW).date() == today), None
+    )
+    return {
+        "items": [_adherence_dict(r) for r in rows],
+        "today": _adherence_dict(today_rec) if today_rec is not None else None,
+    }
 
 
 def adherence_summary(db: Session, clinician_id, patient_id, days: int = 14) -> dict:
