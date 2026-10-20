@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clinical-compass-api"
+version = "0.1.0"
+description = "FastAPI-сервис: auth/RBAC, consent, аудит, скрининг, чек-ины, дашборд врача."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy>=2.0.30",
+    "alembic>=1.13",
+    "pywebpush>=2.0",
+    "psycopg[binary]>=3.2",
+    "PyJWT>=2.8",
+    "argon2-cffi>=23.1",
+    "pyotp>=2.9",
+    "qdrant-client>=1.10",
+    "langgraph>=0.2",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "clinical-compass-core>=0.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.27"]
+# NER-детекция ФИО для деперсонализации (docs/12): ставится отдельно,
+# включается CC_DEPERSONALIZE_NER=true; без него — regex/deny-list.
+###############################################################
+# NER-детекция ФИО (docs/12): ОПЦИОНАЛЬНО.
+# natasha тянет pymorphy2 (старый, сломан на py>=3.11) как import-time модуль —
+# наш адаптер никогда не конструирует MorphVocab (try/except, деградация),
+# инференс полностью оффлайн (модели в wheel), см. тест no_network_egress.
+ner = ["natasha>=1.1"]
+# rubert-base-pii-ner (Apache-2.0): FIO F1 0.933 на redmadrobot-rnd/pii_benchmark
+# (bench/ner), в 5.5x точнее natasha; тяжёлые ML-зависимости — только этот extra.
+ner-rubert = ["torch>=2.2", "transformers>=4.40"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

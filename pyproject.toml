@@ -1,0 +1,21 @@
+[project]
+name = "clinical-compass"
+version = "0.1.0"
+description = "Клинический компас — цифровой ассистент врача (скрининг тревоги/депрессии)."
+requires-python = ">=3.12"
+
+[tool.uv.workspace]
+members = ["core", "api"]
+
+[tool.uv.sources]
+clinical-compass-core = { workspace = true }
+
+# F8: dev-группа на уровне workspace — `uv sync` ставит тестовый инструментарий,
+# `uv sync --no-dev` (Dockerfile) — нет. CI использует `uv sync --frozen`.
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=4",
+    "httpx>=0.27",
+    "pip-audit>=2.7",
+]

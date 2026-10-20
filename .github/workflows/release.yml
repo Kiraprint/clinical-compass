@@ -1,0 +1,71 @@
+name: Release
+
+# Сборка и публикация образов в GHCR + GitHub Release на тегах v*.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    name: Build + publish images, draft release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag/ref
+        id: meta
+        run: |
+          echo "ref=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "api=ghcr.io/${GITHUB_REPOSITORY,,}/compass-api:${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "ui=ghcr.io/${GITHUB_REPOSITORY,,}/compass-ui:${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "api_latest=ghcr.io/${GITHUB_REPOSITORY,,}/compass-api:latest" >> "$GITHUB_OUTPUT"
+          echo "ui_latest=ghcr.io/${GITHUB_REPOSITORY,,}/compass-ui:latest" >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push api
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: api/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.api }}
+            ${{ steps.meta.outputs.api_latest }}
+
+      - name: Build + push ui
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ui/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.ui }}
+            ${{ steps.meta.outputs.ui_latest }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.ref }}
+          generate_release_notes: true
+          draft: true
+          body: |
+            ## Клинический компас 2026 — release ${{ steps.meta.outputs.ref }}
+
+            Образы в GHCR:
+            - `${{ steps.meta.outputs.api }}`
+            - `${{ steps.meta.outputs.ui }}`
+
+            Демо-стек: `docker compose -f infra/docker-compose.yml up -d --build`
+            (или `docker compose pull && docker compose up -d` для использования опубликованных образов).
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

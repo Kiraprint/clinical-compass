@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "_comment": "Правила триажа и маршрутизации к психиатру (метрика кейса 10: добавление правила без изменения ядра). Границы severity — [ДОПУЩЕНИЕ — подтвердить медиком команды].",
+  "triage": {
+    "red_flags_any": ["SUICIDAL_IDEATION"],
+    "red_severities": ["SEVERE"],
+    "yellow_severities": ["MILD", "MODERATE"],
+    "green_fallback": "GREEN"
+  },
+  "routing": [
+    {
+      "id": "suicidal-ideation",
+      "when": {"flags_any": ["SUICIDAL_IDEATION"]},
+      "category": "REQUIRED",
+      "target": "психиатр",
+      "reason": "суицидальная идеация по шкале — неотложное направление"
+    },
+    {
+      "id": "severe-or-red",
+      "when": {"severities": ["SEVERE"], "triages": ["RED"]},
+      "match": "any",
+      "category": "REQUIRED",
+      "target": "психиатр",
+      "reason": "тяжёлая симптоматика (SEVERE/RED)"
+    },
+    {
+      "id": "moderate",
+      "when": {"severities": ["MODERATE"]},
+      "category": "DESIRABLE",
+      "target": "психиатр",
+      "reason": "симптоматика умеренной тяжести"
+    },
+    {
+      "id": "mild-worsening",
+      "when": {"severities": ["MILD"], "delta_7_gt": 0},
+      "category": "DESIRABLE",
+      "target": "психиатр",
+      "reason": "лёгкая симптоматика с отрицательной динамикой (ухудшение за 7 дней)"
+    }
+  ],
+  "routing_default": {
+    "category": "NONE",
+    "target": "психиатр",
+    "reason": "динамическое наблюдение у лечащего врача"
+  }
+}

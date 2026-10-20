@@ -1,0 +1,121 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: compass
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-compass}
+      POSTGRES_DB: compass
+    # NEW-4: БД не публикуется на 0.0.0.0 — доступ только внутри compose-сети.
+    # Для локального доступа к тестовой БД: docker compose port postgres 5432
+    # или профиль `-f infra/docker-compose.dev.yml` (см. tools/ci.sh).
+    expose:
+      - "5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U compass -d compass"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:v1.19.2
+    # NEW-4: Qdrant доступен только api/kb-seed внутри compose-сети.
+    expose:
+      - "6333"
+      - "6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 && printf \"GET /healthz HTTP/1.0\\r\\n\\r\\n\" >&3 && grep -q 200 <&3'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+    environment:
+      # F3: секреты читаются из .env (docker compose подхватывает автоматически).
+      # Демо-значения — только дефолты, если .env отсутствует. Прод: `tools/gen-secrets.sh`
+      # + CC_ALLOW_DEMO_SECRETS=false → приложение падает на демо-секретах (fail-fast).
+      CC_DATABASE_URL: postgresql+psycopg://compass:${POSTGRES_PASSWORD:-compass}@postgres:5432/compass
+      CC_JWT_SECRET: ${CC_JWT_SECRET:-demo-jwt-secret-0123456789abcdefghij}
+      CC_DATA_KEY: ${CC_DATA_KEY:-compass-demo-data-key-do-not-use-in-prod-0123456789}
+      CC_ALLOW_DEMO_SECRETS: "${CC_ALLOW_DEMO_SECRETS:-false}"  # NEW-5: по умолчанию fail-fast
+      CC_COOKIE_SECURE: "${CC_COOKIE_SECURE:-false}"  # демо HTTP; prod HTTPS → true
+      CC_REQUIRE_OTP: "${CC_REQUIRE_OTP:-true}"  # false — вход без TOTP (секрет остаётся в БД); прод — true
+      # LLM-роутер раздела БЗ (docs/04 FR-17): пусто → поиск по всем разделам.
+      # host.docker.internal:18080 — llama.cpp с tools/llm.sh на хосте.
+      CC_ASSISTANT_LLM_URL: "${CC_ASSISTANT_LLM_URL:-}"
+      CC_ASSISTANT_LLM_MODEL: "${CC_ASSISTANT_LLM_MODEL:-local}"
+      CC_VAPID_PRIVATE_KEY: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JR0hBZ0VBTUJNR0J5cUdTTTQ5QWdFR0NDcUdTTTQ5QXdFSEJHMHdhd0lCQVFRZ3dVN2MwMkZiYXBVVndxVmUKWkJFcUMrRTJGZ2NScm9SeDNiZkFmSlVEOHN5aFJBTkNBQVJUaTg4TlpBK3hxaUxVM1c4RGxwNUxrL25WejBSNwptZDZEZnp6aUc2YWZ2a3ZsankwQVlSWFRzVmp3Y2l4SzdSQTAzWlBNbjA5UEg1Smkrbi9SeStkLwotLS0tLUVORCBQUklWQVRFIEtFWS0tLS0tCg==
+      CC_QDRANT_URL: http://qdrant:6333
+    # LLM-роутер раздела БЗ (docs/04 FR-17): хост с tools/llm.sh доступен из контейнера.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    # F12: порт 8000 не экспонируется на хост — только через nginx (ui:8090).
+    # Прямой HTTP-доступ в обход TLS/nginx отсутствует.
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  kb-seed:
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+    command: ["/app/.venv/bin/python", "-m", "app.kb_seed", "--reset"]
+    environment:
+      CC_QDRANT_URL: http://qdrant:6333
+      CC_DATABASE_URL: postgresql+psycopg://compass:${POSTGRES_PASSWORD:-compass}@postgres:5432/compass
+      CC_ALLOW_DEMO_SECRETS: "${CC_ALLOW_DEMO_SECRETS:-false}"  # NEW-5: по умолчанию fail-fast
+      CC_DATA_KEY: ${CC_DATA_KEY:-compass-demo-data-key-do-not-use-in-prod-0123456789}
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+    restart: "no"
+
+  ui:
+    build:
+      context: ..
+      dockerfile: ui/Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+      kb-seed:
+        condition: service_completed_successfully
+    ports:
+      - "8090:80"
+
+  seed:
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+    command: ["/app/.venv/bin/python", "-m", "app.seed", "--reset", "--patients", "12", "--days", "14"]
+    environment:
+      CC_DATABASE_URL: postgresql+psycopg://compass:${POSTGRES_PASSWORD:-compass}@postgres:5432/compass
+      CC_DEMO_TOTP: JBSWY3DPEHPK3PXP
+      CC_ALLOW_DEMO_SECRETS: "${CC_ALLOW_DEMO_SECRETS:-false}"  # NEW-5: по умолчанию fail-fast
+      CC_DATA_KEY: ${CC_DATA_KEY:-compass-demo-data-key-do-not-use-in-prod-0123456789}
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  pgdata:
+  qdrant-data:

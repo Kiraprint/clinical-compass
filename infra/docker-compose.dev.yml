@@ -1,0 +1,15 @@
+# NEW-4: локальный dev/CI-профиль — публикует БД и Qdrant на 127.0.0.1
+# (не на 0.0.0.0). Базовый compose.yml не публикует их вовсе (защита демо-хоста).
+#
+# Usage:
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up -d postgres qdrant
+#   CC_TEST_DATABASE_URL=postgresql+psycopg://compass:compass@127.0.0.1:5432/compass_test
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  qdrant:
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"

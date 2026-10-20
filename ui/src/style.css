@@ -1,0 +1,89 @@
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: #f6f7f9;
+  color: #1c2333;
+}
+header.top {
+  background: #1c2333;
+  color: #fff;
+  padding: 10px 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+header.top h1 { font-size: 18px; margin: 0; }
+main { max-width: 960px; margin: 16px auto; padding: 0 16px; }
+.card { background: #fff; border: 1px solid #e2e6ee; border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+button { cursor: pointer; border: 0; border-radius: 8px; padding: 8px 14px; background: #2f6fed; color: #fff; font-size: 14px; }
+button.ghost { background: transparent; color: #2f6fed; border: 1px solid #2f6fed; }
+button.danger { background: #d64545; }
+button:disabled { opacity: 0.5; cursor: default; }
+input, select, textarea { padding: 8px 10px; border: 1px solid #cfd6e2; border-radius: 8px; font-size: 14px; width: 100%; box-sizing: border-box; }
+input[type="checkbox"] { width: auto; height: auto; padding: 0; border: none; margin: 0; cursor: pointer; }
+label { font-size: 13px; color: #5a6478; display: block; margin: 6px 0 2px; }
+.badge { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+.badge.GREEN { background: #e2f5e8; color: #1f7a3d; }
+.badge.YELLOW { background: #fff3d9; color: #96680b; }
+.badge.RED { background: #fde3e3; color: #b3261e; }
+.alert-danger { background: #fde3e3; border: 1px solid #d64545; color: #8f1d13; border-radius: 10px; padding: 12px 16px; margin-bottom: 14px; }
+.alert-warn { background: #fdf3d8; border: 1px solid #c9a227; color: #7a5a12; border-radius: 10px; padding: 12px 16px; margin-bottom: 14px; }
+.alert-info { background: #e8f1fe; border: 1px solid #2f6fed; color: #174a9c; border-radius: 10px; padding: 12px 16px; margin-bottom: 14px; }
+.error { color: #b3261e; font-size: 13px; }
+.tabs { display: flex; gap: 4px; margin-bottom: 14px; flex-wrap: wrap; }
+.tabs button { background: #e4e8f0; color: #2a3350; }
+.tabs button.active { background: #2f6fed; color: #fff; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eef1f6; white-space: nowrap; }
+.scale-table { width: 100%; margin: 0; border-collapse: collapse; }
+.scale-table td { padding: 4px 0; border-bottom: none; white-space: normal; }
+.qa { margin-bottom: 12px; }
+.qa p { margin: 0 0 4px; font-size: 14px; }
+.qa .row { gap: 6px; }
+.qa .row button { padding: 6px 10px; background: #e4e8f0; color: #2a3350; }
+.qa .row button.on { background: #2f6fed; color: #fff; }
+.msg { margin-bottom: 8px; }
+.msg.system { color: #5a6478; font-style: italic; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.table-wrap { overflow-x: auto; }
+@media (max-width: 700px) { .two { grid-template-columns: 1fr; } }
+small { color: #8a94a8; }
+
+@media (max-width: 700px) {
+  table { font-size: 12px; }
+  th, td { padding: 6px 8px; }
+  button { padding: 10px 14px; }
+}
+
+/* Уведомления (item 3) */
+.bell { position: relative; }
+.bell-btn { background: transparent; color: #fff; border: 1px solid #4a5b8c; border-radius: 8px; padding: 6px 10px; font-size: 16px; }
+.bell-btn:hover { border-color: #7f93c9; }
+.badge-badge { position: absolute; top: -4px; right: -6px; background: #d64545; color: #fff; border-radius: 10px; font-size: 11px; padding: 1px 5px; line-height: 1; }
+.bell-panel { position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; background: #fff; color: #1c2333; border: 1px solid #e2e6ee; border-radius: 10px; box-shadow: 0 6px 18px rgba(0,0,0,.12); width: 320px; max-height: 420px; overflow-y: auto; }
+.bell-head { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-bottom: 1px solid #eef1f6; font-size: 14px; }
+.bell-head button { padding: 4px 8px; font-size: 12px; }
+.bell-item { padding: 8px 12px; border-bottom: 1px solid #f2f4f8; cursor: pointer; }
+.bell-item.unread { background: #f4f8ff; }
+.bell-title { font-weight: 600; font-size: 13px; position: relative; }
+.bell-title .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #d64545; margin-left: 6px; }
+.bell-body { font-size: 13px; color: #3a4356; margin-top: 2px; }
+.bell-time { font-size: 11px; color: #8a94a8; margin-top: 2px; }
+/* ИИ-агент врача: ответ и источники (item 5) */
+.assistant-answer {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  background: #f7f9fc;
+  border: 1px solid #e3e8f0;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 0;
+}
+.assistant-sources { margin-top: 10px; font-size: 13px; color: #3a4356; }
+.assistant-sources ul { margin: 6px 0 0; padding-left: 18px; }

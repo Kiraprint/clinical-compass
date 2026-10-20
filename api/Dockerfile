@@ -1,0 +1,20 @@
+FROM python:3.12-slim
+WORKDIR /app
+# F8 (ГОСТ 56939): воспроизводимая сборка через uv.lock (полное разрешение
+# зависимостей, не snapshot pip freeze). Слой зависимостей кешируется отдельно.
+COPY --from=ghcr.io/astral-sh/uv:0.11.19 /uv /usr/local/bin/uv
+COPY pyproject.toml uv.lock ./
+COPY core/pyproject.toml /app/core/pyproject.toml
+COPY api/pyproject.toml /app/api/pyproject.toml
+# F8 layer caching: первый sync — только сторонние зависимости всех workspace-членов
+# (--all-packages нужен т.к. рут-проект не имеет deps, deps в членах core/api),
+# без установки самих пакетов (--no-install-workspace) → кеш при change кода.
+RUN uv sync --frozen --no-dev --all-packages --no-install-workspace
+COPY core/ /app/core/
+COPY api/ /app/api/
+RUN uv sync --frozen --no-dev --all-packages
+WORKDIR /app/api
+EXPOSE 8000
+# F6: --proxy-headers → uvicorn читает X-Forwarded-For/X-Real-IP от nginx,
+# request.client.host = реальный IP клиента (для audit_log.ip).
+CMD ["/app/.venv/bin/uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]

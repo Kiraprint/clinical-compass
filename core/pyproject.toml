@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clinical-compass-core"
+version = "0.1.0"
+description = "Клинический движок: шкалы, скоринг, триаж, риск-флаги. Чистый Python SDK без I/O."
+requires-python = ">=3.12"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-cov>=4"]
+
+[tool.setuptools]
+packages = ["compass", "compass.data"]
+
+# P11: конфиг правил триажа/маршрутизации поставляется в пакете.
+[tool.setuptools.package-data]
+"compass.data" = ["*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

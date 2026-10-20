@@ -1,0 +1,19 @@
+# Пример конфига ngrok (v3). Авторизация задаётся через `ngrok config add-authtoken`, поэтому
+# этот файл опционален — нужен только чтобы закрепить исходящий трафик через Xray (или другие флаги).
+# Обычно деv-домен и прокси достаточно задать через env (см. tools/ngrok.sh):
+#   export NGROK_URL=<ваш>.ngrok-free.app
+#   export NGROK_PROXY=socks5://127.0.0.1:1080
+#
+# Если хочешь держать прокси в конфиге, а не в env:
+#
+# version: 3
+#
+# agent:
+#   authtoken: "<TOKEN из dashboard.ngrok.com>"   # либо хранится глобально через add-authtoken
+#   proxy_url: socks5://127.0.0.1:1080             # HTTP или SOCKS5 прокси для туннельного соединения
+#
+# endpoints:
+#   - name: compass-demo
+#     url: https://<ваш>.ngrok-free.app
+#     upstream:
+#       url: http://127.0.0.1:8090
