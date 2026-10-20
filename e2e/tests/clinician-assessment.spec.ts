@@ -50,8 +50,9 @@ test.describe("Врачебная оценка (HDRS-17)", () => {
     await page.getByRole("button", { name: "Сохранить оценку" }).click();
 
     // Итог сразу в форме, а карточка перезагружается — появляется эскалация.
-    await expect(page.getByText(/· RED/)).toBeVisible();
-    await expect(page.getByText("Открытые эскалации:")).toBeVisible();
+    // Карточка/форма перезагружаются после получения ответа — даём запас на холодный старт CI.
+    await expect(page.getByText(/· RED/)).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText("Открытые эскалации:")).toBeVisible({ timeout: 15000 });
 
     // Пациенту такая шкала недоступна: каталог её не содержит.
     const cat = await request.get(`${BASE}/api/v1/questionnaires`, {
