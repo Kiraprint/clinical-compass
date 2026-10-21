@@ -1,16 +1,18 @@
 name: Release
 
-# Сборка и публикация образов в GHCR + GitHub Release на тегах v*.
+# Тег v* → образы api/ui в GHCR + единый GitHub Release (не draft).
+# APK собирается переиспользуемым workflow release-android.yml и прикрепляется
+# к тому же Release (jobs идут последовательно: образы → APK).
 on:
   push:
     tags: ["v*"]
 
 jobs:
-  release:
-    name: Build + publish images, draft release
+  images:
+    name: Build + publish images (GHCR)
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
@@ -57,11 +59,14 @@ jobs:
         with:
           tag_name: ${{ steps.meta.outputs.ref }}
           generate_release_notes: true
-          draft: true
+          draft: false
+          name: Компас ${{ steps.meta.outputs.ref }}
           body: |
             ## Клинический компас 2026 — release ${{ steps.meta.outputs.ref }}
 
-            Образы в GHCR:
+            Android APK прикрепляется этим же прогоном (job `APK`).
+
+            Образы в GHCR (GitHub Packages):
             - `${{ steps.meta.outputs.api }}`
             - `${{ steps.meta.outputs.ui }}`
 
@@ -69,3 +74,10 @@ jobs:
             (или `docker compose pull && docker compose up -d` для использования опубликованных образов).
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  apk:
+    name: Android APK
+    needs: images
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-android.yml

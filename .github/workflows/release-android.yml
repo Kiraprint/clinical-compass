@@ -8,17 +8,21 @@ name: Android APK
 #   - (release на v* тегах) keystore-подпись: secrets.ANDROID_KEYSTORE_B64,
 #     ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD.
 #     Без них билдится подписанный debug-APK.
+#
+# Куда попадает результат:
+#   - ветки main/master, ручной запуск → artifact `compass-apk`;
+#   - теги v* → этот workflow вызывается из release.yml (workflow_call) после
+#     публикации образов и прикрепляет APK к тому же GitHub Release.
 on:
   push:
     branches: [master, main]
-    tags: ["v*"]
+  workflow_dispatch:
+  workflow_call:
 
 jobs:
   build-apk:
     name: Build APK (Capacitor + FCM)
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +38,25 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: ui/package-lock.json
+
+      - name: Resolve version (tag vX.Y.Z → versionCode X*10000+Y*100+Z)
+        id: ver
+        shell: bash
+        run: |
+          ref="${GITHUB_REF_NAME}"
+          if [[ "$ref" == v* ]]; then
+            name="${ref#v}"
+            IFS=. read -r major minor patch <<< "$name"
+            code=$(( 10#${major:-0} * 10000 + 10#${minor:-0} * 100 + 10#${patch:-0} ))
+            echo "label=$name" >> "$GITHUB_OUTPUT"
+          else
+            name="1.0-${GITHUB_SHA::7}"
+            code=$(( 1000 + GITHUB_RUN_NUMBER ))
+            echo "label=$name" >> "$GITHUB_OUTPUT"
+          fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "versionName=$name versionCode=$code"
 
       - name: Build web SPA (VITE_API_BASE → нативная сборка)
         working-directory: ui
@@ -76,40 +99,54 @@ jobs:
             echo "release=yes" >> "$GITHUB_OUTPUT"
           else
             echo "release=no" >> "$GITHUB_OUTPUT"
+            echo "::warning::ANDROID_KEYSTORE_B64 не задан — APK будет debug-подписи"
           fi
 
       - name: Build APK (debug by default, release when signed)
         working-directory: mobile/android
         env:
           SIGNING_RELEASE: ${{ steps.signing.outputs.release }}
+          VERSION_CODE: ${{ steps.ver.outputs.code }}
+          VERSION_NAME: ${{ steps.ver.outputs.name }}
         run: |
           chmod +x gradlew
           if [ "$SIGNING_RELEASE" = "yes" ]; then
-            ./gradlew assembleRelease
+            ./gradlew assembleRelease -PccVersionCode="$VERSION_CODE" -PccVersionName="$VERSION_NAME"
           else
-            ./gradlew assembleDebug
+            ./gradlew assembleDebug -PccVersionCode="$VERSION_CODE" -PccVersionName="$VERSION_NAME"
           fi
+
+      - name: Name APK by version
+        shell: bash
+        env:
+          VERSION_LABEL: ${{ steps.ver.outputs.label }}
+          SIGNING_RELEASE: ${{ steps.signing.outputs.release }}
+        run: |
+          mkdir -p dist
+          if [ "$SIGNING_RELEASE" = "yes" ]; then
+            cp mobile/android/app/build/outputs/apk/release/app-release.apk \
+               "dist/compass-${VERSION_LABEL}-release.apk"
+          else
+            cp mobile/android/app/build/outputs/apk/debug/app-debug.apk \
+               "dist/compass-${VERSION_LABEL}-debug.apk"
+          fi
+          ls -lh dist
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: compass-apk
-          path: |
-            mobile/android/app/build/outputs/apk/debug/*.apk
-            mobile/android/app/build/outputs/apk/release/*.apk
+          path: dist/*.apk
           if-no-files-found: error
 
-      - name: Attach to GitHub Release (v* tag)
+      - name: Attach APK to GitHub Release (v* tag)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            mobile/android/app/build/outputs/apk/debug/*.apk
-            mobile/android/app/build/outputs/apk/release/*.apk
-          generate_release_notes: true
-          draft: true
+          files: dist/*.apk
+          append_body: true
           body: |
-            ## Компас — Android APK (Capacitor + FCM)
 
-            Собран из веб-клиента; API-хост задан через `VITE_API_BASE`.
+            ### Android APK
+            `versionName`: ${{ steps.ver.outputs.name }}, release keystore (CI).
             Для доставки пушей в google-services.json должен быть Firebase-проект.
