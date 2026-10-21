@@ -6,7 +6,7 @@
 
 ## 1. Стратегия
 
-- Пирамида (фактически достигнуто, см. `core/tests` + `api/tests`): unit (ядро) 88, integration (API+БД) 143, e2e (UI-флоу) 33. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
+- Пирамида (фактически достигнуто, см. `core/tests` + `api/tests`): unit (ядро) 88, integration (API+БД) 222 (из них 78 — обогащение КБ, FR-20), e2e (UI-флоу) 33. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
 - Ядро: 100% детерминированные чистые функции — табличные параметризованные тесты порогов.
 - Интеграция: реальные HTTP-запросы к тестовому Postgres (отдельная БД), не мок-эхо.
 - Запрещены тесты «на копирование»: только поведение контрактов (вход → выход/инвариант/ошибка).
@@ -102,6 +102,15 @@
 | push_subscribe_unsubscribe | VAPID-ключ, подписка/отписка по endpoint | подписка апсерт по endpoint; чужая подписка не удаляется; без токена 401 |
 | fcm_device_token_register_delete | POST/DELETE /push/device-token | апсерт по токену; чужой токен не удаляется; без токена 401 |
 | fcm_upgrade_then_cooldown | POST /push/fcm/upgrade дважды | первый 200 `{upgraded}`; второй 429 `FCM_COOLDOWN`; /push/fcm/status окно активно |
+| `test_guideline_with_confirmed_license_is_auto_published` / `…without_license_waits_for_human` | гайдлайн с CC BY-NC-SA в тексте и без лицензии | авто `approved` только при подтверждённой лицензии; иначе `candidate` |
+| `test_article_is_candidate_until_approved`, `test_article_without_psychiatry_is_excluded` | статья PubMed проходит/не проходит жёсткие критерии | `candidate` до approve; непсихиатрическая тема → `excluded`, в индексе нет |
+| `test_proprietary_guideline_cannot_be_approved`, `test_retracted_article_cannot_be_approved` | `All rights reserved`; ретракция | approve → `ReviewError`/409, точек в Qdrant 0 |
+| `test_rerun_is_idempotent`, `test_rerun_keeps_approved_article_and_its_chunks`, `test_new_article_version_requires_new_approval` | повторные прогоны и новая версия | unchanged не переиндексируется, решение человека сохраняется, новая версия → `candidate` |
+| `test_reindex_after_external_collection_reset` | коллекция Qdrant wiped | сверка `remote_count` восстанавливает approved-контент |
+| `test_articles_index_has_provenance_and_abstract_only` | payload статьи | каждый чанк несёт PMID/DOI/URL; полный текст статьи не хранится |
+| `test_fetch_documents_rejects_mismatched_handle`, `test_offline_mode_never_calls_network` | подмена ответа IRIS; `CC_ENRICH_OFFLINE` | SourceError; сеть не вызывается |
+| `test_admin_approve_publishes_to_qdrant`, `test_admin_reject_requires_reason_and_records_it` | approve/reject через API | индексация, причина reject, аудит, 409/422 |
+| `test_clinician_can_hide_and_restore_source`, `test_assistant_retrieval_respects_personal_exclusion` | персональное исключение | источник скрыт только у этого врача, в обоих путях retrieval |
 
 ## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/`)
 
