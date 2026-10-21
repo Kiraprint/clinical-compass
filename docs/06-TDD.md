@@ -111,6 +111,9 @@
 | `test_fetch_documents_rejects_mismatched_handle`, `test_offline_mode_never_calls_network` | подмена ответа IRIS; `CC_ENRICH_OFFLINE` | SourceError; сеть не вызывается |
 | `test_admin_approve_publishes_to_qdrant`, `test_admin_reject_requires_reason_and_records_it` | approve/reject через API | индексация, причина reject, аудит, 409/422 |
 | `test_clinician_can_hide_and_restore_source`, `test_assistant_retrieval_respects_personal_exclusion` | персональное исключение | источник скрыт только у этого врача, в обоих путях retrieval |
+| `test_commit_failure_never_publishes_uncommitted_content` | сбой commit реестра во время прогона | ни одной точки в Qdrant, `failed_documents=1`, записи `kb_works` нет |
+| `test_failed_reindex_restores_previous_points` | upsert новой версии падает после delete | опубликованная версия восстановлена (точки и payload прежние) |
+| `test_excluded_work_cannot_be_approved` | `excluded`-работа | `ReviewError`: approve допустим только для `candidate` |
 
 ## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/`)
 

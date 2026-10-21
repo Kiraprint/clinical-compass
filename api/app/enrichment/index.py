@@ -228,19 +228,50 @@ def index_work(
     chunk_chars: int = 1800,
     chunk_overlap: int = 120,
 ) -> int:
-    """Заменяет точки работы: сначала готовим чанки, затем delete → upsert.
+    """Заменяет точки работы: prepare → snapshot → delete → upsert.
 
     Эмбеддинги считаются до удаления: сбой эмбеддера не должен стирать
-    действующую опубликованную версию.
+    действующую опубликованную версию. Прежние точки снимаются в память и
+    возвращаются, если upsert упал — иначе неудачная замена оставила бы
+    approved-версию без чанков.
     """
     kb_store.ensure_collection(client, embedder.dense_size)
     documents = build_documents(work, chunk_chars=chunk_chars, chunk_overlap=chunk_overlap)
     points = _points_for(documents, embedder)
+    previous = _snapshot_work(client, work.id)
     remove_work(client, work)
     if not points:
         return 0
-    client.upsert(collection_name=kb_store.COLLECTION, points=points, wait=True)
+    try:
+        client.upsert(collection_name=kb_store.COLLECTION, points=points, wait=True)
+    except Exception:  # noqa: BLE001 — восстанавливаем действующую версию
+        if previous:
+            client.upsert(collection_name=kb_store.COLLECTION, points=previous, wait=True)
+        raise
     return len(points)
+
+
+def _snapshot_work(client: QdrantClient, work_id) -> list[qm.PointStruct]:
+    """Точки работы в виде, пригодном для восстановления через upsert."""
+    if not client.collection_exists(kb_store.COLLECTION):
+        return []
+    work_filter = qm.Filter(
+        must=[qm.FieldCondition(key="work_id", match=qm.MatchValue(value=str(work_id)))]
+    )
+    points: list[qm.PointStruct] = []
+    offset = None
+    while True:
+        batch, offset = client.scroll(
+            collection_name=kb_store.COLLECTION,
+            scroll_filter=work_filter,
+            limit=256,
+            offset=offset,
+            with_payload=True,
+            with_vectors=True,
+        )
+        points.extend(qm.PointStruct(id=p.id, vector=p.vector, payload=p.payload) for p in batch)
+        if offset is None:
+            return points
 
 
 def index_documents(client: QdrantClient, embedder, documents: Sequence[dict]) -> int:

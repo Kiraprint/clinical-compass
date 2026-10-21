@@ -372,3 +372,91 @@ def test_same_title_with_conflicting_ids_is_not_merged(db_session, qdrant, cfg):
     assert summary.errors == []
     assert len(works) == 2
     assert {work.external_id for work in works} == {"40000001", "40000002"}
+
+
+def _guideline_points(client, guideline_id: str) -> int:
+    if not client.collection_exists(kb_store.COLLECTION):
+        return 0
+    return client.count(
+        collection_name=kb_store.COLLECTION,
+        count_filter=qm.Filter(
+            must=[qm.FieldCondition(key="guideline_id", match=qm.MatchValue(value=guideline_id))]
+        ),
+        exact=True,
+    ).count
+
+
+def test_commit_failure_never_publishes_uncommitted_content(db_session, qdrant, cfg, monkeypatch):
+    """Реестр коммитится до индексации: сбой коммита не оставляет чанков без work."""
+    doc = make_guideline()
+
+    original_commit = db_session.commit
+    calls = {"n": 0}
+
+    def flaky_commit():
+        calls["n"] += 1
+        # 1-й commit — журнал прогона, 2-й — документ (падает), дальше — итог.
+        if calls["n"] == 2:
+            raise RuntimeError("commit failed")
+        return original_commit()
+
+    monkeypatch.setattr(db_session, "commit", flaky_commit)
+    summary = pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+
+    assert summary.stats["published"] == 0
+    assert summary.stats["failed_documents"] == 1
+    assert any("commit failed" in error for error in summary.errors)
+    assert _guideline_points(qdrant, doc.guideline_id) == 0
+    monkeypatch.undo()
+    assert db_session.scalar(
+        select(KBWork).where(KBWork.guideline_id == doc.guideline_id)
+    ) is None
+
+
+def test_failed_reindex_restores_previous_points(db_session, qdrant, cfg, monkeypatch):
+    """Неудачный upsert новой версии не должен стирать опубликованную версию."""
+    doc = make_guideline()
+    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
+    assert work.status == "approved"
+    before = _points(qdrant, work)
+    assert before > 0
+
+    original_upsert = qdrant.upsert
+    state = {"failed": False}
+
+    def flaky_upsert(*args, **kwargs):
+        if not state["failed"]:
+            state["failed"] = True
+            raise RuntimeError("upsert down")
+        return original_upsert(*args, **kwargs)
+
+    monkeypatch.setattr(qdrant, "upsert", flaky_upsert)
+    work.title = "Изменённый заголовок версии"
+    with pytest.raises(RuntimeError):
+        pipeline.index_mod.index_work(qdrant, HashEmbedder(), work, chunk_chars=1200)
+
+    assert _points(qdrant, work) == before
+    payloads = qdrant.scroll(
+        collection_name=kb_store.COLLECTION,
+        scroll_filter=qm.Filter(
+            must=[qm.FieldCondition(key="work_id", match=qm.MatchValue(value=str(work.id)))]
+        ),
+        limit=100,
+        with_payload=True,
+    )[0]
+    assert all("Изменённый заголовок" not in (point.payload or {}).get("text", "") for point in payloads)
+
+
+def test_excluded_work_cannot_be_approved(db_session, qdrant, cfg):
+    doc = make_doc(
+        title="Statin therapy for hyperlipidaemia: a meta-analysis",
+        abstract="METHODS: pooled 12 trials of statins. RESULTS: LDL fell by 40%.",
+        results="LDL fell by 40%.",
+        text="",
+    )
+    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
+    assert work.status == "excluded"
+    with pytest.raises(review.ReviewError):
+        review.approve(db_session, qdrant, work.id, None, cfg)

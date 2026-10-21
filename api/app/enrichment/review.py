@@ -25,8 +25,10 @@ class ReviewError(ValueError):
     """Недопустимый переход статуса (например, approve уже отклонённого)."""
 
 
-def get_work(db: Session, work_id: uuid.UUID) -> KBWork | None:
-    return db.get(KBWork, work_id)
+def get_work(db: Session, work_id: uuid.UUID, *, for_update: bool = False) -> KBWork | None:
+    # for_update: два админа (или админ + прогон) не должны решать судьбу одной
+    # записи параллельно — иначе approve и reject перетирают друг друга.
+    return db.get(KBWork, work_id, with_for_update=for_update)
 
 
 def get_work_by_guideline(db: Session, guideline_id: str) -> KBWork | None:
@@ -58,11 +60,13 @@ def approve(
     *,
     embedder=None,
 ) -> KBWork:
-    work = get_work(db, work_id)
+    work = get_work(db, work_id, for_update=True)
     if work is None:
         raise ReviewError("Источник не найден.")
-    if work.status not in {"candidate", "excluded"}:
-        raise ReviewError(f"Approve допустим только для candidate/excluded (сейчас {work.status}).")
+    if work.status != "candidate":
+        raise ReviewError(
+            f"Approve допустим только для candidate (сейчас {work.status})."
+        )
     # Approve — не обход методологии: подтверждённые нарушения жёстких
     # критериев (ретракция, проприетарная лицензия, не психиатрия) блокируют
     # публикацию до появления исправленной версии.
@@ -109,7 +113,7 @@ def reject(
     *,
     client=None,
 ) -> KBWork:
-    work = get_work(db, work_id)
+    work = get_work(db, work_id, for_update=True)
     if work is None:
         raise ReviewError("Источник не найден.")
     reason = (reason or "").strip()

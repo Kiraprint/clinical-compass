@@ -278,6 +278,9 @@ def execute(
         )
         db.add(run)
         db.flush()
+        # Журнал прогона фиксируется сразу: откат отдельного документа
+        # (rollback в обработчике) не должен лишать прогон записи в kb_runs.
+        db.commit()
 
     errors: list[str] = list(source_errors or [])
     if documents is None:
@@ -309,10 +312,11 @@ def execute(
         unique.append(doc)
 
     for doc in unique:
-        # Savepoint на документ: сбой ORM одного источника не отравляет сессию
-        # и не мешает обработать остальные (run.status=partial).
-        savepoint = None if dry_run else db.begin_nested()
+        # Транзакция на документ: запись реестра коммитится ДО публикации в
+        # Qdrant, поэтому сбой коммита не оставляет в индексе точку без work.
+        # Сбой ORM одного источника не мешает обработать остальные (partial).
         work: KBWork | None = None
+        work_id = None
         published = False
         try:
             design_result = design_mod.classify(doc)
@@ -355,6 +359,10 @@ def execute(
                 if existing is None:
                     db.add(work)
                 db.flush()
+                # id фиксируется до публикации: точки снимаются по нему, даже
+                # если ORM-объект уже откатан.
+                work_id = work.id
+                db.commit()
 
                 if status == "approved":
                     # Сверка с фактическим индексом: коллекцию мог пересоздать
@@ -377,6 +385,8 @@ def execute(
                     index_mod.remove_work(client, work)
                     work.indexed_hash = None
                     work.chunk_count = 0
+                # Фиксируем результат публикации (chunk_count/indexed_hash).
+                db.commit()
 
             decisions.append(
                 WorkDecision(
@@ -395,18 +405,13 @@ def execute(
                     updated=changed,
                 )
             )
-            if savepoint is not None:
-                savepoint.commit()
         except Exception as exc:  # noqa: BLE001 — один документ не должен валить прогон
-            if savepoint is not None:
-                savepoint.rollback()
+            db.rollback()
             # Qdrant не участвует в транзакции: если публикация успела создать
-            # точки, а БД откатилась, снимаем их по work_id (best effort).
-            # Если публикации не было, трогать индекс нельзя: прежняя версия
-            # могла оставаться опубликованной до этого прогона.
-            if published and work is not None and client is not None:
+            # точки, а коммит реестра — нет, снимаем их по work_id (best effort).
+            if published and work_id is not None and client is not None:
                 try:
-                    index_mod.remove_work(client, work)
+                    index_mod.remove_work_id(client, work_id)
                 except Exception:  # noqa: BLE001 — уборка не должна маскировать исходную ошибку
                     pass
             stats["failed_documents"] += 1
@@ -433,9 +438,12 @@ def execute(
         run.status = "partial"
     else:
         run.status = "ok"
-    db.flush()
+    run_id = str(run.id)
+    # Прогон фиксируется здесь: вызывающий код (CLI/сервис) не обязан помнить
+    # про commit, иначе запись журнала терялась бы при его сбое.
+    db.commit()
     return RunSummary(
-        run_id=str(run.id),
+        run_id=run_id,
         status=run.status,
         stats=stats,
         errors=errors,
