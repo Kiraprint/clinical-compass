@@ -130,11 +130,14 @@ cd e2e && npx playwright install chromium && npx playwright test
 ./tools/ci.sh --e2e      # + подъём стека и e2e-прогон
 ```
 
-GitHub Actions (запускаются после пуша в репозиторий; сейчас remote не задан):
+GitHub Actions (`origin` — `Kiraprint/clinical-compass`):
 
 - `.github/workflows/ci.yml` — на push/PR: тесты ядра и API (Postgres в service-контейнере) + сборка docker-образов; e2e-джоб на `master`/`main`.
-- `.github/workflows/release.yml` — на тег `v*`: сборка и публикация образов в GHCR (`compass-api`, `compass-ui`) + черновой GitHub Release.
-- `.github/workflows/release-android.yml` — универсальный Android APK (Capacitor + FCM) из веб-клиента `mobile/`; APK — артефакт (на `v*` — в релиз).
+- `.github/workflows/release.yml` — на тег `v*`: публикация образов в GHCR (`compass-api`, `compass-ui` → GitHub Packages), создание GitHub Release (не draft), затем вызов APK-джоба.
+- `.github/workflows/release-android.yml` — Android APK (Capacitor + FCM): на push `main`/`master` и `workflow_dispatch` — artifact `compass-apk`; на теге `v*` вызывается из `release.yml` и прикрепляет APK к тому же Release.
+
+Выпуск версии: `git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z`.
+Из тега берутся `versionName` (`X.Y.Z`) и `versionCode` (`X*10000+Y*100+Z`); сборки из веток получают `1.0-<sha>` и `1000+run_number`.
 
 ## Мобильное приложение (Android APK, item 4)
 
