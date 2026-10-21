@@ -13,6 +13,8 @@ from app import services
 from app.config import settings
 from app.db import get_db
 from app.deps import require_clinician
+from app.errors import Problem
+from app.enrichment import review as kb_review
 from app.models import User
 from app.services.agent import AgentFactory
 
@@ -67,8 +69,13 @@ def ask(
     query, patient_ctx, depersonalization = services.agent.scrub_for_llm(
         body.query, patient_ctx, names
     )
+    excluded = kb_review.excluded_ids(db, user.id)
     result = _agent_factory().invoke(
-        query, topic=body.topic, limit=body.limit, patient_context=patient_ctx
+        query,
+        topic=body.topic,
+        limit=body.limit,
+        patient_context=patient_ctx,
+        exclude_ids=excluded,
     )
     result["depersonalization"] = depersonalization
     if body.patient_id is None:
@@ -80,3 +87,41 @@ def ask(
 def status(user: User = Depends(require_clinician)):
     """Состояние базы знаний: число проиндексированных чанков."""
     return {"collection": settings.qdrant_collection, "points": services.kb.count_points(_client())}
+
+
+class SourceExclusionBody(BaseModel):
+    excluded: bool = True
+
+
+@router.get("/assistant/sources")
+def sources(user: User = Depends(require_clinician), db: Session = Depends(get_db)):
+    """Опубликованные источники КБ + персональные исключения врача (docs/15 §6)."""
+    works = kb_review.list_works(db, status="approved", limit=200)
+    excluded = kb_review.excluded_ids(db, user.id)
+    return {
+        "sources": [
+            kb_review.serialize(work, excluded=work.guideline_id in excluded) for work in works
+        ],
+        "excluded_guideline_ids": sorted(excluded),
+    }
+
+
+@router.post("/assistant/sources/{guideline_id}/exclude")
+def exclude_source(
+    guideline_id: str,
+    body: SourceExclusionBody,
+    user: User = Depends(require_clinician),
+    db: Session = Depends(get_db),
+):
+    """Скрыть/вернуть источник в выдаче этого врача.
+
+    Источник не удаляется из общей КБ: решение персональное и обратимое.
+    """
+    if not guideline_id or len(guideline_id) > 96:
+        raise Problem(400, "BAD_GUIDELINE_ID", "Некорректный идентификатор источника.")
+    work = kb_review.get_work_by_guideline(db, guideline_id)
+    if work is None or work.status != "approved":
+        raise Problem(404, "SOURCE_NOT_FOUND", "Источник не найден в КБ.")
+    excluded = kb_review.set_exclusion(db, user.id, guideline_id, body.excluded)
+    db.commit()
+    return {"excluded_guideline_ids": excluded}

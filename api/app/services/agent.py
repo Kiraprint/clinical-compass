@@ -70,6 +70,7 @@ class AgentState(TypedDict, total=False):
     topic: str | None
     limit: int
     chunks: list[RAGChunk]
+    exclude_ids: set[str]
     patient_context: dict | None
     answer: dict
 
@@ -79,7 +80,14 @@ class AgentFactory:
         self._client = client
         self._graph = None  # компиляция графа один раз, не на каждый запрос
 
-    def search_kb(self, query: str, *, topic: str | None = None, limit: int = 5) -> list[RAGChunk]:
+    def search_kb(
+        self,
+        query: str,
+        *,
+        topic: str | None = None,
+        limit: int = 5,
+        exclude_ids: set[str] | None = None,
+    ) -> list[RAGChunk]:
         """Инструмент doctor-search: гибридный поиск по Qdrant (docs/07 §7).
 
         Отдельный переиспользуемый tool — ядро RAG-модуля. Redline-запрос
@@ -93,6 +101,7 @@ class AgentFactory:
             query,
             topic=topic,
             limit=limit,
+            exclude_ids=exclude_ids,
         )
         hits = _relevance_gate(query, hits, limit)
         # Keyword-fallback по полному корпусу: hash-эмбеддер ненадёжен (косинус
@@ -103,7 +112,8 @@ class AgentFactory:
             seen = {h.get("guideline_id") for h in hits}
             kw = sorted(
                 ((_lexical_overlap(query, d["text"]), d) for d in build_corpus()
-                 if topic is None or d.get("topic") == topic),
+                 if (topic is None or d.get("topic") == topic)
+                 and (not exclude_ids or d["guideline_id"] not in exclude_ids)),
                 key=lambda x: x[0],
             )
             for ov, d in reversed(kw):
@@ -126,7 +136,14 @@ class AgentFactory:
         ]
 
     def _retrieve(self, state: AgentState) -> AgentState:
-        return {"chunks": self.search_kb(state["query"], topic=state.get("topic"), limit=state.get("limit", 5))}
+        return {
+            "chunks": self.search_kb(
+                state["query"],
+                topic=state.get("topic"),
+                limit=state.get("limit", 5),
+                exclude_ids=state.get("exclude_ids"),
+            )
+        }
 
     def _answer(self, state: AgentState) -> AgentState:
         result = build_rag_answer(
@@ -161,7 +178,15 @@ class AgentFactory:
             self._graph = graph.compile()
         return self._graph
 
-    def invoke(self, query: str, *, topic: str | None = None, limit: int = 5, patient_context: dict | None = None) -> dict:
+    def invoke(
+        self,
+        query: str,
+        *,
+        topic: str | None = None,
+        limit: int = 5,
+        patient_context: dict | None = None,
+        exclude_ids: set[str] | None = None,
+    ) -> dict:
         # LLM-роутинг раздела (docs/04 FR-14): если клиент явно не задал topic и
         # LLM-роутер включён — топик выбирает LLM (тулза search_<раздел>).
         # Redline-запросы LLM не трогаем: отказ детерминирован и дешевле.
@@ -170,7 +195,13 @@ class AgentFactory:
 
             topic = llm_router.route_topic(query)
         return self.build().invoke(
-            {"query": query, "topic": topic, "limit": limit, "patient_context": patient_context}
+            {
+                "query": query,
+                "topic": topic,
+                "limit": limit,
+                "patient_context": patient_context,
+                "exclude_ids": exclude_ids or set(),
+            }
         )["answer"]
 
 

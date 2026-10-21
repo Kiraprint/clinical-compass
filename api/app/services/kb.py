@@ -99,6 +99,7 @@ def hybrid_search(
     *,
     topic: str | None = None,
     limit: int = 5,
+    exclude_ids: set[str] | None = None,
 ) -> list[dict]:
     """Гибридный поиск: dense + sparse prefetch → RRF fusion.
 
@@ -111,7 +112,14 @@ def hybrid_search(
         qm.Prefetch(query=dense, using=DENSE_NAME, limit=max(limit * 3, 10)),
         qm.Prefetch(query=qm.SparseVector(indices=indices, values=values), using=SPARSE_NAME, limit=max(limit * 3, 10)),
     ]
-    filter_ = qm.Filter(must=[qm.FieldCondition(key="topic", match=qm.MatchValue(value=topic))]) if topic else None
+    must: list = []
+    must_not: list = []
+    if topic:
+        must.append(qm.FieldCondition(key="topic", match=qm.MatchValue(value=topic)))
+    if exclude_ids:
+        # Персональные исключения врача: источники остаются в КБ, но не в выдаче.
+        must_not.append(qm.FieldCondition(key="guideline_id", match=qm.MatchAny(any=sorted(exclude_ids))))
+    filter_ = qm.Filter(must=must, must_not=must_not) if (must or must_not) else None
     res = client.query_points(
         collection_name=COLLECTION,
         prefetch=prefetch,

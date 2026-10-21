@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ChangeEvent } from "react";
-import { api, AssistantAnswer, PatientCard } from "../api";
+import { api, AssistantAnswer, KB_DESIGN_LABELS, KbWork, PatientCard } from "../api";
 
 export default function AssistantTab() {
   const [query, setQuery] = useState("");
@@ -12,10 +12,23 @@ export default function AssistantTab() {
   const [mentionQ, setMentionQ] = useState("");
   const [patientId, setPatientId] = useState<string | null>(null);
   const [patientLabel, setPatientLabel] = useState("");
+  const [sources, setSources] = useState<KbWork[]>([]);
+  const [excludedIds, setExcludedIds] = useState<string[]>([]);
+  const [sourcesLoaded, setSourcesLoaded] = useState(false);
+  const [sourcesError, setSourcesError] = useState("");
+  const [savingSource, setSavingSource] = useState<string | null>(null);
 
   useEffect(() => {
     api.assistantStatus().then((s) => setPoints(s.points)).catch(() => setPoints(null));
     api.clinicianPatients().then((r) => setPatients(r.items)).catch(() => setPatients([]));
+    api
+      .assistantSources()
+      .then((r) => {
+        setSources(r.sources);
+        setExcludedIds(r.excluded_guideline_ids);
+      })
+      .catch((e: unknown) => setSourcesError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setSourcesLoaded(true));
   }, []);
 
   // @-упоминание: фильтр по ротстеру врача (подстрока по ФИО/email).
@@ -67,6 +80,21 @@ export default function AssistantTab() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  // Персональное исключение: сервер возвращает полный список скрытых id — им и
+  // синхронизируем состояние, чтобы не расходиться с другими вкладками.
+  const toggleSource = async (guidelineId: string, excluded: boolean) => {
+    setSavingSource(guidelineId);
+    setSourcesError("");
+    try {
+      const r = await api.assistantSetSourceExcluded(guidelineId, excluded);
+      setExcludedIds(r.excluded_guideline_ids);
+    } catch (e: unknown) {
+      setSourcesError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingSource(null);
     }
   };
 
@@ -179,6 +207,52 @@ export default function AssistantTab() {
           )}
         </div>
       )}
+
+      <details style={{ marginTop: 16 }}>
+        <summary style={{ cursor: "pointer", fontSize: 14, fontWeight: 600, color: "#2f6fed" }}>
+          Источники ({sources.length})
+        </summary>
+        <p style={{ fontSize: 12, color: "#8a94a8", margin: "6px 0" }}>
+          Одобренные источники базы знаний. Скрытый источник остаётся в общей базе, но не
+          попадает в вашу выдачу.
+        </p>
+        {!sourcesLoaded && <p style={{ color: "#5a6478", fontSize: 13 }}>Загрузка…</p>}
+        {sourcesError && (
+          <p className="error">Не удалось загрузить источники: {sourcesError}</p>
+        )}
+        {sourcesLoaded && sources.length === 0 && !sourcesError && (
+          <p style={{ color: "#5a6478", fontSize: 13 }}>Одобренных источников пока нет.</p>
+        )}
+        {sources.map((s) => {
+          const hidden = excludedIds.includes(s.guideline_id);
+          const link = s.fulltext_url ?? s.url;
+          const design = s.design?.design ?? "";
+          return (
+            <div key={s.id} style={{ borderTop: "1px solid #e2e6ee", padding: "8px 0" }}>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>{s.title}</div>
+              <div className="row" style={{ fontSize: 12, color: "#5a6478" }}>
+                <span>{s.kind === "guideline" ? "Гайдлайн ВОЗ" : "Статья"}</span>
+                {s.year ? <span>{s.year}</span> : null}
+                <span>{KB_DESIGN_LABELS[design] ?? (design || "дизайн не определён")}</span>
+                {link && (
+                  <a href={link} target="_blank" rel="noreferrer">
+                    Открыть источник
+                  </a>
+                )}
+              </div>
+              <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+                <input
+                  type="checkbox"
+                  checked={hidden}
+                  disabled={savingSource === s.guideline_id}
+                  onChange={(e) => void toggleSource(s.guideline_id, e.target.checked)}
+                />
+                Скрыть из моей выдачи
+              </label>
+            </div>
+          );
+        })}
+      </details>
     </div>
   );
 }

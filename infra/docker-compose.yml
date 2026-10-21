@@ -86,6 +86,32 @@ services:
       seed:
         condition: service_completed_successfully
     restart: "no"
+  # Обогащение КБ (docs/15): отдельный процесс с исходящим трафиком в PubMed/ВОЗ.
+  # Пишет в те же Postgres/Qdrant, что и API, но не обслуживает запросы пациентов.
+  kb-enrichment:
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+    command: ["/app/.venv/bin/python", "-m", "app.enrichment", "serve"]
+    environment:
+      CC_DATABASE_URL: postgresql+psycopg://compass:${POSTGRES_PASSWORD:-compass}@postgres:5432/compass
+      CC_QDRANT_URL: http://qdrant:6333
+      CC_ALLOW_DEMO_SECRETS: "${CC_ALLOW_DEMO_SECRETS:-false}"
+      CC_DATA_KEY: ${CC_DATA_KEY:-compass-demo-data-key-do-not-use-in-prod-0123456789}
+      # PubMed: без ключа 3 req/s; email желателен (правила NCBI).
+      CC_ENRICH_PUBMED_EMAIL: "${CC_ENRICH_PUBMED_EMAIL:-}"
+      CC_ENRICH_PUBMED_API_KEY: "${CC_ENRICH_PUBMED_API_KEY:-}"
+      CC_ENRICH_PUBMED_DAYS: "${CC_ENRICH_PUBMED_DAYS:-30}"
+      CC_ENRICH_INTERVAL_HOURS: "${CC_ENRICH_INTERVAL_HOURS:-24}"
+      CC_ENRICH_OFFLINE: "${CC_ENRICH_OFFLINE:-false}"
+    depends_on:
+      # api прогоняет alembic upgrade head в lifespan — ждём схему, а не гоняем
+      # миграции из двух процессов одновременно.
+      api:
+        condition: service_healthy
+      kb-seed:
+        condition: service_completed_successfully
+    restart: unless-stopped
 
   ui:
     build:
