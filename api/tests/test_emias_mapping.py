@@ -91,6 +91,7 @@ def test_medication_maps_status_and_date():
         "dosage": "50 мг вечером",
         "started_on": mapping._parse_date("2026-01-19"),
         "status": "stopped",
+        "source": "emias",
     }
     assert mapping.medication_fields({**MEDICATION, "status": "on-hold"})["status"] == "unknown"
 
