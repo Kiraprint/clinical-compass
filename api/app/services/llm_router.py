@@ -99,11 +99,10 @@ def route_topic(query: str) -> str | None:
             "tools": _tools_schema(),
             "tool_choice": "auto",
             "temperature": 0.0,
-            # 200 токенов хватает под сам tool_call, но reasoning-модели
-            # (deepseek-v4.1 через omniroute, Qwen3.8) успевают выговорить
-            # бюджет и вернуть finish_reason=length без вызова тулзы.
-            "max_tokens": 600,
-            # llama.cpp-сервер понимает этот флаг; прочие шлюзы его игнорируют.
+            # max_tokens не передаём: reasoning-модели тратят бюджет на thinking
+            # до tool_call, и любой наш лимит возвращал finish_reason=length без
+            # выбора раздела. Потолок задаёт сам сервер/шлюз по модели.
+            # chat_template_kwargs: llama.cpp понимает флаг, прочие шлюзы игнорируют.
             "chat_template_kwargs": {"enable_thinking": False},
         }
         data = json.dumps(payload).encode("utf-8")

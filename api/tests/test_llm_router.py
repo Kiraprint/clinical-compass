@@ -172,3 +172,13 @@ def test_router_omits_auth_header_without_key(monkeypatch):
     captured = _fake_chat(monkeypatch, "search_skaly")
     assert llm_router.route_topic("шкала PHQ-9") == "ШКАЛЫ"
     assert "Authorization" not in captured["headers"]
+
+
+def test_router_does_not_cap_output_tokens(monkeypatch):
+    """Лимит вывода не передаём: thinking съедает бюджет, tool_call не влезает."""
+    from app.services import llm_router
+
+    monkeypatch.setattr(settings, "assistant_llm_url", "http://omniroute:20128/v1")
+    captured = _fake_chat(monkeypatch, "search_skaly")
+    assert llm_router.route_topic("шкала PHQ-9") == "ШКАЛЫ"
+    assert "max_tokens" not in captured["body"]
