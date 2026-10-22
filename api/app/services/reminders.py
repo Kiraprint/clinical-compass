@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
+from sqlalchemy.engine import Connection
 
 from app.errors import Problem
 from app.models import ClinicianReminder, Notification, User
@@ -86,7 +87,7 @@ def _patient_name(db: Session, patient_id: uuid.UUID) -> str:
     patient = db.get(User, patient_id)
     if patient is None:
         return "пациент"
-    return patient.fio or patient.email
+    return patient.fio or "пациент"
 
 def _serialize(row: ClinicianReminder, patient_fio: str, now: datetime) -> dict:
     return {
@@ -256,55 +257,73 @@ def deliver_due(db: Session, now: datetime | None = None) -> int:
     Возвращает число доставленных напоминаний.
     """
     now = now or _now()
-    locked = bool(db.execute(text(f"SELECT pg_try_advisory_lock(hashtext('{DELIVERY_LOCK_KEY}'))")).scalar())
-    if not locked:
-        log.info("reminders: другой воркер уже держит лок, пропуск тика")
-        return 0
+    bind = db.get_bind()
+    engine = bind.engine if isinstance(bind, Connection) else bind
+    # Лок берём на отдельном соединении: после ошибки транзакция сессии может
+    # быть aborted, и pg_advisory_unlock на ней же не выполнится — лок утечёт
+    # на пул-соединение и заблокирует все следующие тики этого воркера.
+    lock_conn = engine.connect()
+    pushes: list[tuple[uuid.UUID, str, str]] = []
     try:
-        rows = db.scalars(
-            select(ClinicianReminder)
-            .where(
-                ClinicianReminder.status == "open",
-                ClinicianReminder.due_at <= now,
-                ClinicianReminder.notified_at.is_(None),
-            )
-            .order_by(ClinicianReminder.due_at)
-            .limit(DELIVERY_BATCH)
-            .with_for_update(skip_locked=True)
-        ).all()
-        if not rows:
-            db.rollback()
+        locked = bool(
+            lock_conn.execute(
+                text("SELECT pg_try_advisory_lock(hashtext(:k))"), {"k": DELIVERY_LOCK_KEY}
+            ).scalar()
+        )
+        if not locked:
+            log.info("reminders: другой воркер уже держит лок, пропуск тика")
             return 0
-
-        names: dict[uuid.UUID, str] = {}
-        pushes: list[tuple[uuid.UUID, str, str]] = []
-        for row in rows:
-            if row.patient_id not in names:
-                names[row.patient_id] = _patient_name(db, row.patient_id)
-            fio = names[row.patient_id]
-            label = KIND_LABELS.get(row.kind, row.kind)
-            title = "Напоминание врача"
-            body = f"{fio}: {label.lower()}"
-            exists = db.scalar(
-                select(Notification.id).where(Notification.reminder_id == row.id).limit(1)
-            )
-            if exists is None:
-                db.add(
-                    Notification(
-                        user_id=row.clinician_id,
-                        kind="REMINDER",
-                        title=title,
-                        body=body,
-                        patient_id=row.patient_id,
-                        reminder_id=row.id,
-                    )
+        try:
+            rows = db.scalars(
+                select(ClinicianReminder)
+                .where(
+                    ClinicianReminder.status == "open",
+                    ClinicianReminder.due_at <= now,
+                    ClinicianReminder.notified_at.is_(None),
                 )
-            row.notified_at = now
-            pushes.append((row.clinician_id, title, body))
-        db.commit()
+                .order_by(ClinicianReminder.due_at)
+                .limit(DELIVERY_BATCH)
+                .with_for_update(skip_locked=True)
+            ).all()
+            if not rows:
+                db.rollback()
+                return 0
+
+            names: dict[uuid.UUID, str] = {}
+            for row in rows:
+                if row.patient_id not in names:
+                    names[row.patient_id] = _patient_name(db, row.patient_id)
+                fio = names[row.patient_id]
+                label = KIND_LABELS.get(row.kind, row.kind)
+                title = "Напоминание врача"
+                body = f"{fio}: {label.lower()}"
+                exists = db.scalar(
+                    select(Notification.id).where(Notification.reminder_id == row.id).limit(1)
+                )
+                if exists is None:
+                    db.add(
+                        Notification(
+                            user_id=row.clinician_id,
+                            kind="REMINDER",
+                            title=title,
+                            body=body,
+                            patient_id=row.patient_id,
+                            reminder_id=row.id,
+                        )
+                    )
+                row.notified_at = now
+                pushes.append((row.clinician_id, title, body))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            lock_conn.execute(
+                text("SELECT pg_advisory_unlock(hashtext(:k))"), {"k": DELIVERY_LOCK_KEY}
+            )
+            lock_conn.commit()
     finally:
-        db.execute(text("SELECT pg_advisory_unlock(hashtext(:k))"), {"k": DELIVERY_LOCK_KEY})
-        db.commit()
+        lock_conn.close()
 
     # Push — best-effort и вне критической секции лока: сбой доставки не откатывает БД.
     for clinician_id, title, body in pushes:

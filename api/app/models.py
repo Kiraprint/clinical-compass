@@ -244,8 +244,9 @@ class Notification(Base):
     escalation_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("escalations.id"), nullable=True)
     # FR-24: ключ дедупликации напоминания — один Notification на напоминание
     # (уникальный индекс). Повторный тик воркера не плодит уведомления.
+    # CASCADE — удаление напоминания (отзыв согласия) не должно упираться в FK.
     reminder_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("clinician_reminders.id"), nullable=True, unique=True
+        ForeignKey("clinician_reminders.id", ondelete="CASCADE"), nullable=True, unique=True
     )
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)

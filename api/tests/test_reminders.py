@@ -192,13 +192,61 @@ def test_worker_respects_advisory_lock(client, frozen, engine):
     with db.SessionLocal() as s:
         assert reminders.deliver_due(s, now=NOW) == 1
 
+def test_failed_tick_releases_advisory_lock(client, frozen, engine, monkeypatch):
+    _, pid, c, _ = _setup(client, "rfail@test.ru", "rfailc@test.ru")
+    _create(client, c, pid, due_at=PAST)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("tick failed")
+
+    monkeypatch.setattr(reminders, "_patient_name", boom)
+    with db.SessionLocal() as s:
+        with pytest.raises(RuntimeError):
+            reminders.deliver_due(s, now=NOW)
+
+    # Лок обязан освободиться: иначе утечка на пул-соединение заблокирует все
+    # последующие тики этого инстанса (и маскирует исходную ошибку).
+    with engine.connect() as conn:
+        acquired = conn.execute(
+            text("SELECT pg_try_advisory_lock(hashtext(:k))"), {"k": reminders.DELIVERY_LOCK_KEY}
+        ).scalar()
+        try:
+            assert acquired is True
+        finally:
+            conn.execute(
+                text("SELECT pg_advisory_unlock(hashtext(:k))"), {"k": reminders.DELIVERY_LOCK_KEY}
+            )
+            conn.commit()
+
+def test_reminder_delete_cascades_notification(client, frozen):
+    _, pid, c, _ = _setup(client, "rcd@test.ru", "rcdc@test.ru")
+    reminder = _create(client, c, pid, due_at=PAST)
+    with db.SessionLocal() as s:
+        assert reminders.deliver_due(s, now=NOW) == 1
+
+    # FK notifications.reminder_id ON DELETE CASCADE: удаление напоминания
+    # (в т.ч. гонка с отзывом согласия) не должно упираться в FK.
+    with db.SessionLocal() as s:
+        s.execute(text("DELETE FROM clinician_reminders WHERE id = :id"), {"id": reminder["id"]})
+        s.commit()
+        left = s.execute(
+            text("SELECT count(*) FROM notifications WHERE reminder_id = :id"), {"id": reminder["id"]}
+        ).scalar()
+    assert left == 0
+
 def test_consent_revocation_destroys_reminders(client, frozen):
     h, pid, c, _ = _setup(client, "rrev@test.ru", "rrevc@test.ru")
-    _create(client, c, pid, note="ФИО и состояние")
+    _create(client, c, pid, due_at=PAST, note="ФИО и состояние")
+    with db.SessionLocal() as s:
+        assert reminders.deliver_due(s, now=NOW) == 1
 
     assert client.post("/api/v1/consent/revoke", headers=h).status_code == 204
     with db.SessionLocal() as s:
         left = s.execute(
             text("SELECT count(*) FROM clinician_reminders WHERE patient_id = :p"), {"p": pid}
         ).scalar()
+        pushed = s.execute(
+            text("SELECT count(*) FROM notifications WHERE patient_id = :p"), {"p": pid}
+        ).scalar()
     assert left == 0
+    assert pushed == 0

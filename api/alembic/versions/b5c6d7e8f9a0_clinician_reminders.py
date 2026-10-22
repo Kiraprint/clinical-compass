@@ -59,6 +59,7 @@ def upgrade() -> None:
         "clinician_reminders",
         ["reminder_id"],
         ["id"],
+        ondelete="CASCADE",
     )
     op.create_index(
         "notifications_reminder_id_key", "notifications", ["reminder_id"], unique=True
