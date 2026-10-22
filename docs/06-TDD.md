@@ -154,6 +154,14 @@
 | `test_audit_rows_written` | чтение/правка контактов врачом и пациентом | `READ_*`/`UPDATE_*_CONTACTS` в audit_log без ПДн в payload |
 | `test_patient_self_update_only_own` | два пациента, PATCH своего профиля | чужой `users`-ряд не изменён; маршрута с чужим id нет |
 | `test_consent_revocation_clears_contacts` | контакты заданы → POST /consent/revoke | `users.phone`/`birth_date` = NULL; контакты недоступны (403 `CONSENT_REQUIRED`) |
+| `test_create_and_list_with_due_states` | напоминания с разными сроками; GET с `due=` | `due_state` overdue/today/soon/later; «сегодня» — день МСК; `overdue`-счётчик для бейджа |
+| `test_unrostered_patient_forbidden` | создание по пациенту вне roster; GET его напоминаний | 403 `NO_ROSTER` в обоих случаях |
+| `test_idor_other_clinician_cannot_see_or_touch` | PATCH/done/cancel чужого напоминания, список другого врача | 404 на чужое (не подтверждаем существование), свой список пуст; пациенту — 403 |
+| `test_patch_and_transitions` | PATCH note/kind/due_at; done → done; cancel; повтор | значения применены; `status`/`done_at` выставлены; повтор → 409 `REMINDER_CLOSED` |
+| `test_note_encrypted_at_rest` | note с ФИО/состоянием | в БД bytea без plaintext; через API текст расшифрован |
+| `test_worker_tick_creates_one_notification_idempotent` | два тика `deliver_due` по одному due-напоминанию | ровно один `Notification kind='REMINDER'`; `notified_at` заполнен; второй тик — 0 |
+| `test_worker_respects_advisory_lock` | лок удерживает другой коннект | тик возвращает 0 и не создаёт уведомление; после снятия лока — доставка |
+| `test_consent_revocation_destroys_reminders` | напоминание задано → POST /consent/revoke | строк пациента в `clinician_reminders` нет |
 
 ## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/`)
 

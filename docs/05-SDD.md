@@ -120,6 +120,7 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | E10 | Интеграция с ЕМИАС: host-side клиент (OAuth/FHIR, ретраи, allowlist), идемпотентный sync в `emias_links/patient_medications/visits`, админ-API + CLI, мок-сервис `emias-mock`, блок «ЕМИАС» в карточке врача | FR-25 | оффлайн-тесты мока/клиента/маппинга/sync/API на реальном Postgres; повторный прогон без дублей; `docker compose config` валиден |
 | E11 | Контакты пациента в карточке: `users.phone` (шифруется) + `users.birth_date`, нормализация РФ-номера, маскирование в витринах, self-service пациента, уничтожение при отзыве согласия | FR-22 | `test_patient_contacts.py` (RBAC/roster, нормализация и границы даты, маска в списке, аудит, отзыв согласия) + `npm run build` |
 | E12 | История приёма и назначений: `patient_medications` для назначений врача (`source`, `clinician_id`, `ended_on`, `notes`; импорт ЕМИАС read-only), CRUD назначений и остановка приёма, единая лента карточки (приёмы/назначения/скрининги/НЯ) с курсором и фильтром типов, блоки «Назначения» и «История пациента» в UI | FR-23 | `test_patient_medications.py`, `test_patient_history.py` (roster/IDOR, шифрование, EMIAS read-only, валидация, курсор, аудит, отзыв согласия) + `npm run build` |
+| E13 | Напоминания врача по пациентам: `clinician_reminders` (kind/note/sha), roster-скоуп, фильтры срока, done/cancel, доставка воркером `python -m app.reminders_worker` (advisory-lock, `notifications.reminder_id`), панель «Напоминания» и бейдж просроченных в UI | FR-24 | `test_reminders.py` (RBAC/IDOR, фильтры срока, переходы, шифрование note, тик воркера + идемпотентность, advisory-lock, отзыв согласия) + `docker compose config` + `npm run build` |
 
 ## 5. DoD (Definition of Done) эпика
 
@@ -157,6 +158,7 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | FR-21 | E9 | `test_assistant_threads.py` (изоляция, roster-гейт, история, аудит, каскад) |
 | FR-22 | E11 | `test_patient_contacts.py` (RBAC, нормализация телефона, границы даты рождения, маска, аудит, отзыв согласия) |
 | FR-23 | E12 | `test_patient_medications.py`, `test_patient_history.py` (roster/IDOR, шифрование в покое, EMIAS read-only, валидация дат, курсор/фильтр ленты, аудит, отзыв согласия) |
+| FR-24 | E13 | `test_reminders.py` (RBAC/IDOR, фильтры overdue/today/week, done/cancel, шифрование note, тик воркера и идемпотентность, advisory-lock, отзыв согласия) |
 | FR-25 | E10 | `test_emias_mock.py`, `test_emias_client.py`, `test_emias_mapping.py`, `test_emias_sync.py`, `test_emias_api.py` |
 
 ## 7. Границы инкремента

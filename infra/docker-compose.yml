@@ -125,6 +125,28 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # FR-24: доставка напоминаний врача. Отдельный процесс (как kb-enrichment):
+  # в MVP нет Celery/APScheduler. Период тика — CC_REMINDER_TICK_SECONDS.
+  reminders-worker:
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+    command: ["/app/.venv/bin/python", "-m", "app.reminders_worker"]
+    environment:
+      CC_DATABASE_URL: postgresql+psycopg://compass:${POSTGRES_PASSWORD:-compass}@postgres:5432/compass
+      CC_ALLOW_DEMO_SECRETS: "${CC_ALLOW_DEMO_SECRETS:-false}"
+      CC_DATA_KEY: ${CC_DATA_KEY:-compass-demo-data-key-do-not-use-in-prod-0123456789}
+      CC_PUSH_ENABLED: "${CC_PUSH_ENABLED:-true}"
+      CC_VAPID_PRIVATE_KEY: "${CC_VAPID_PRIVATE_KEY:-}"
+      CC_REMINDER_TICK_SECONDS: "${CC_REMINDER_TICK_SECONDS:-60}"
+    depends_on:
+      # Схему создаёт api (alembic upgrade head в lifespan) — воркер ждёт health.
+      api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   ui:
     build:
       context: ..

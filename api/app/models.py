@@ -182,6 +182,37 @@ class ClinicianRoster(Base):
     patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
     granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
 
+class ClinicianReminder(Base):
+    """FR-24: личное напоминание врача по пациенту (позвонить/написать/приём/своё).
+
+    note — свободный текст, может содержать ФИО/состояние (спецкатегория ПДн),
+    поэтому EncryptedText (F1). due_at — момент, когда напоминание пора доставить;
+    notified_at ставит воркер при создании in-app Notification (идемпотентность).
+    Все выборки сервиса ограничены clinician_id владельца.
+    """
+
+    __tablename__ = "clinician_reminders"
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('call','write','appointment','custom')", name="clinician_reminders_kind"
+        ),
+        CheckConstraint(
+            "status in ('open','done','cancelled')", name="clinician_reminders_status"
+        ),
+        Index("clinician_reminders_clinician_due", "clinician_id", "status", "due_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    clinician_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    kind: Mapped[str] = mapped_column(String)
+    note: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    status: Mapped[str] = mapped_column(String, default="open")
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
 class Prescription(Base):
     """Назначенные пациенту шкалы скрининга (множество). PK (patient_id, scale_code).
     Кто назначил — в audit_log (PRESCRIBE_SCALE); строка хранит только сам набор."""
@@ -206,16 +237,21 @@ class Notification(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
-    kind: Mapped[str] = mapped_column(String)  # RED_ESCALATION
+    kind: Mapped[str] = mapped_column(String)  # RED_ESCALATION | REMINDER
     title: Mapped[str] = mapped_column(String)
     body: Mapped[str] = mapped_column(String)
     patient_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     escalation_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("escalations.id"), nullable=True)
+    # FR-24: ключ дедупликации напоминания — один Notification на напоминание
+    # (уникальный индекс). Повторный тик воркера не плодит уведомления.
+    reminder_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("clinician_reminders.id"), nullable=True, unique=True
+    )
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)
 
     __table_args__ = (
-        CheckConstraint("kind in ('RED_ESCALATION')", name="notifications_kind"),
+        CheckConstraint("kind in ('RED_ESCALATION','REMINDER')", name="notifications_kind"),
         Index("notifications_user_read", "user_id", "read_at"),
     )
 

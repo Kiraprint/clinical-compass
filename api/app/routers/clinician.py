@@ -287,6 +287,86 @@ def import_history(
     return services.clinician.import_history(db, user.id, patient_id, body.text, body.template_name, ip=ip)
 
 
+
+# --- FR-24: напоминания врача по пациентам ---------------------------------
+
+class ReminderBody(BaseModel):
+    patient_id: uuid.UUID
+    kind: str = Field(pattern="^(call|write|appointment|custom)$")
+    note: str | None = Field(default=None, max_length=2000)
+    due_at: datetime
+
+class ReminderPatchBody(BaseModel):
+    note: str | None = Field(default=None, max_length=2000)
+    due_at: datetime | None = None
+    kind: str | None = Field(default=None, pattern="^(call|write|appointment|custom)$")
+
+@router.get("/clinician/reminders")
+def list_reminders(
+    status: str = Query(default="open", pattern="^(open|done|cancelled|all)$"),
+    due: str | None = Query(default=None, pattern="^(overdue|today|week)$"),
+    user: User = Depends(require_clinician),
+    db: Session = Depends(get_db),
+):
+    """Напоминания врача: open по умолчанию, фильтр срока overdue/today/week."""
+    return services.reminders.list_reminders(db, user.id, status=status, due=due)
+
+@router.post("/clinician/reminders", status_code=201)
+def create_reminder(
+    body: ReminderBody,
+    user: User = Depends(require_clinician),
+    db: Session = Depends(get_db),
+):
+    """Создать напоминание по пациенту из roster (иначе 403 NO_ROSTER)."""
+    return services.reminders.create(
+        db, user.id, body.patient_id, body.kind, body.note, body.due_at
+    )
+
+@router.patch("/clinician/reminders/{reminder_id}")
+def patch_reminder(
+    reminder_id: uuid.UUID,
+    body: ReminderPatchBody,
+    user: User = Depends(require_clinician),
+    db: Session = Depends(get_db),
+):
+    """Правка открытого напоминания (закрытое → 409 REMINDER_CLOSED)."""
+    return services.reminders.update(
+        db,
+        user.id,
+        reminder_id,
+        note=body.note,
+        note_set="note" in body.model_fields_set,
+        due_at=body.due_at,
+        kind=body.kind,
+    )
+
+@router.post("/clinician/reminders/{reminder_id}/done")
+def complete_reminder(
+    reminder_id: uuid.UUID,
+    user: User = Depends(require_clinician),
+    db: Session = Depends(get_db),
+):
+    return services.reminders.complete(db, user.id, reminder_id)
+
+@router.post("/clinician/reminders/{reminder_id}/cancel")
+def cancel_reminder(
+    reminder_id: uuid.UUID,
+    user: User = Depends(require_clinician),
+    db: Session = Depends(get_db),
+):
+    return services.reminders.cancel(db, user.id, reminder_id)
+
+@router.get("/clinician/patients/{patient_id}/reminders")
+def patient_reminders(
+    patient_id: uuid.UUID,
+    status: str = Query(default="open", pattern="^(open|done|cancelled|all)$"),
+    user: User = Depends(require_clinician),
+    db: Session = Depends(get_db),
+):
+    """Напоминания по одному пациенту карточки (roster-гейт 403 NO_ROSTER)."""
+    services.clinician.require_roster(db, user.id, patient_id)
+    return services.reminders.list_reminders(db, user.id, status=status, patient_id=patient_id)
+
 me_router = APIRouter(tags=["me"])
 
 

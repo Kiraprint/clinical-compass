@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, ApiError, Assessment, EmiasSummary, HistoryType, ImportHistoryResult, PatientCard, PatientContacts, PatientHistoryItem, PatientMedication, Report, Visit } from "../api";
+import { api, ApiError, Assessment, ClinicianReminder, EmiasSummary, HistoryType, ImportHistoryResult, PatientCard, PatientContacts, PatientHistoryItem, PatientMedication, RemindersResponse, Report, Visit } from "../api";
 import TrendChart from "../TrendChart";
 import AssistantTab from "./AssistantTab";
 import DrugLibraryTab from "./DrugLibraryTab";
@@ -22,6 +22,17 @@ export default function ClinicianView() {
   // Счётчик перезагрузки: врачебная оценка меняет триаж/эскалации, и карточка
   // с списком должны показать это сразу, без ручного F5.
   const [reportVersion, setReportVersion] = useState(0);
+  // FR-24: панель напоминаний и бейдж просроченных в шапке врача.
+  const [showReminders, setShowReminders] = useState(false);
+  const [overdueCount, setOverdueCount] = useState(0);
+  const [reminderVersion, setReminderVersion] = useState(0);
+
+  useEffect(() => {
+    api
+      .clinicianReminders()
+      .then((r) => setOverdueCount(r.overdue))
+      .catch(() => setOverdueCount(0));
+  }, [reminderVersion, reportVersion]);
 
   const load = async (f: string) => {
     const data = await api.clinicianPatients(f || undefined);
@@ -108,6 +119,27 @@ export default function ClinicianView() {
         </button>
         <button onClick={() => setSection("assistant")}>Ассистент</button>
         <button onClick={() => setSection("library")}>Библиотека</button>
+        <button
+          className={showReminders ? "active" : ""}
+          onClick={() => setShowReminders((v) => !v)}
+          style={{ marginLeft: "auto" }}
+        >
+          Напоминания
+          {overdueCount > 0 && (
+            <span
+              style={{
+                marginLeft: 6,
+                background: "#d32f2f",
+                color: "#fff",
+                borderRadius: 8,
+                padding: "0 6px",
+                fontSize: 12,
+              }}
+            >
+              {overdueCount}
+            </span>
+          )}
+        </button>
       </div>
       <div className="tabs">
         {TRIAGE_FILTERS.map((f) => (
@@ -116,6 +148,9 @@ export default function ClinicianView() {
           </button>
         ))}
       </div>
+      {showReminders && (
+        <RemindersPanel cards={cards} onChanged={() => setReminderVersion((v) => v + 1)} />
+      )}
       {!selected ? (
         <div className="card">
           <h2>Мои пациенты ({cards.length})</h2>
@@ -1064,6 +1099,173 @@ function HistoryBlock({ patientId }: { patientId: string }) {
         </div>
       )}
       {err && <p className="error">{err}</p>}
+    </div>
+  );
+}
+
+const REMINDER_KINDS: { value: ClinicianReminder["kind"]; label: string }[] = [
+  { value: "call", label: "Позвонить" },
+  { value: "write", label: "Написать" },
+  { value: "appointment", label: "Назначить приём" },
+  { value: "custom", label: "Другое" },
+];
+
+// Порядок групп в панели: сначала просроченное, затем сегодня/скоро/позже.
+const REMINDER_GROUPS: { key: NonNullable<ClinicianReminder["due_state"]>; label: string }[] = [
+  { key: "overdue", label: "Просрочено" },
+  { key: "today", label: "Сегодня" },
+  { key: "soon", label: "Ближайшие 7 дней" },
+  { key: "later", label: "Позже" },
+];
+
+function RemindersPanel({ cards, onChanged }: { cards: PatientCard[]; onChanged: () => void }) {
+  const [data, setData] = useState<RemindersResponse>({ items: [], overdue: 0 });
+  const [patientId, setPatientId] = useState("");
+  const [kind, setKind] = useState<ClinicianReminder["kind"]>("call");
+  const [note, setNote] = useState("");
+  // datetime-local ждёт локальное время без зоны: YYYY-MM-DDTHH:MM.
+  const [due, setDue] = useState(() => {
+    const d = new Date(Date.now() + 3600_000);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  });
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const reload = () => {
+    api
+      .clinicianReminders()
+      .then((r) => {
+        setData(r);
+        setErr("");
+      })
+      .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)));
+  };
+
+  useEffect(() => {
+    reload();
+  }, []);
+
+  useEffect(() => {
+    // Список пациентов грузится асинхронно — подставляем первого, когда он появился.
+    if (!patientId && cards.length > 0) setPatientId(cards[0].patient_id);
+  }, [cards, patientId]);
+
+  const create = async () => {
+    if (!patientId || !due) {
+      setErr("Выберите пациента и срок");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.createReminder({
+        patient_id: patientId,
+        kind,
+        note: note.trim() || null,
+        due_at: new Date(due).toISOString(),
+      });
+      setNote("");
+      reload();
+      onChanged();
+    } catch (e: unknown) {
+      setErr(e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const act = async (fn: (id: string) => Promise<unknown>, id: string) => {
+    try {
+      await fn(id);
+      reload();
+      onChanged();
+    } catch (e: unknown) {
+      setErr(e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <div className="card">
+      <h2>Напоминания {data.overdue > 0 && <span className="badge RED">{data.overdue} просрочено</span>}</h2>
+      <div className="row" style={{ alignItems: "flex-end", gap: 8, flexWrap: "wrap" }}>
+        <label>
+          Пациент
+          <select value={patientId} onChange={(e) => setPatientId(e.target.value)}>
+            {cards.map((c) => (
+              <option key={c.patient_id} value={c.patient_id}>
+                {c.fio ?? c.email}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Вид
+          <select value={kind} onChange={(e) => setKind(e.target.value as ClinicianReminder["kind"])}>
+            {REMINDER_KINDS.map((k) => (
+              <option key={k.value} value={k.value}>
+                {k.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Срок
+          <input type="datetime-local" value={due} onChange={(e) => setDue(e.target.value)} />
+        </label>
+        <label style={{ flex: 1, minWidth: 220 }}>
+          Заметка (необязательно, шифруется)
+          <input
+            value={note}
+            maxLength={2000}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="например, уточнить дозу"
+          />
+        </label>
+        <button disabled={busy} onClick={create}>
+          Добавить
+        </button>
+      </div>
+      {err && <p className="error">{err}</p>}
+      {data.items.length === 0 && <p style={{ color: "#5a6478" }}>Открытых напоминаний нет.</p>}
+      {REMINDER_GROUPS.map((group) => {
+        const items = data.items.filter((r) => r.due_state === group.key);
+        if (items.length === 0) return null;
+        return (
+          <div key={group.key} style={{ marginTop: 12 }}>
+            <h3 style={{ fontSize: 15, margin: "8px 0" }}>
+              {group.label} ({items.length})
+            </h3>
+            {items.map((r) => (
+              <div
+                key={r.id}
+                className="row"
+                style={{ alignItems: "center", gap: 8, flexWrap: "wrap", padding: "4px 0" }}
+              >
+                <a
+                  href={"#patient=" + r.patient_id}
+                  style={{ color: "#2f6fed", textDecoration: "none", fontWeight: 600 }}
+                >
+                  {r.patient_fio}
+                </a>
+                <span>{r.kind_label}</span>
+                <small style={{ color: "#5a6478" }}>
+                  {new Date(r.due_at).toLocaleString("ru-RU")}
+                  {group.key === "overdue" && r.overdue_minutes > 0
+                    ? ` · просрочено ${Math.floor(r.overdue_minutes / 60)} ч ${r.overdue_minutes % 60} мин`
+                    : ""}
+                </small>
+                {r.note && <small style={{ color: "#5a6478" }}>— {r.note}</small>}
+                <button className="ghost" onClick={() => act(api.doneReminder, r.id)}>
+                  Готово
+                </button>
+                <button className="ghost" onClick={() => act(api.cancelReminder, r.id)}>
+                  Отменить
+                </button>
+              </div>
+            ))}
+          </div>
+        );
+      })}
     </div>
   );
 }
