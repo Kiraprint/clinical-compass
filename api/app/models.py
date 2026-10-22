@@ -452,3 +452,53 @@ class KBExclusion(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
     guideline_id: Mapped[str] = mapped_column(String(96))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
+
+class AssistantThread(Base):
+    """Сессия клинического ассистента врача (FR-21): контекст диалога живёт
+    между запросами. Область пациентов — assistant_thread_patients (мультипациент).
+    """
+
+    __tablename__ = "assistant_threads"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    clinician_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    title: Mapped[str] = mapped_column(EncryptedText, default="Новый диалог")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), onupdate=text("now()"), index=True
+    )
+
+
+class AssistantThreadPatient(Base):
+    """Область пациентов треда. Только roster-пациенты врача (гейт в сервисе)."""
+
+    __tablename__ = "assistant_thread_patients"
+
+    thread_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assistant_threads.id", ondelete="CASCADE"), primary_key=True
+    )
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
+
+
+class AssistantMessage(Base):
+    """Сообщение треда: вопрос врача или ответ ассистента. Текст — спецкатегория
+    ПДн (может упоминать пациента/симптомы) → EncryptedText. citations —
+    публичные источники KB (не ПДн), topic — раздел БЗ для роутинга.
+    """
+
+    __tablename__ = "assistant_messages"
+    __table_args__ = (
+        CheckConstraint("role in ('CLINICIAN','ASSISTANT')", name="assistant_messages_role"),
+        Index("ix_assistant_messages_thread_created", "thread_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    thread_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assistant_threads.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(16))  # CLINICIAN | ASSISTANT
+    content: Mapped[str] = mapped_column(EncryptedText)
+    citations: Mapped[list] = mapped_column(JSONB, default=list)
+    topic: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)

@@ -171,13 +171,15 @@ def build_rag_answer(
     *,
     max_citations: int = 3,
     patient_context: dict | None = None,
+    patient_contexts: Sequence[dict] | None = None,
 ) -> RAGAnswer:
     """Собирает ответ из найденных фрагментов (гибридный поиск уже отработал).
 
     - запрос требует диагноз/терапию → отказ с красной линией (даже при наличии
       карты пациента — агент не ставит диагноз и не назначает терапию);
-    - есть карта пациента → ответ опирается на неё + найденные фрагменты корпуса
-      (карта цитируется особым источником topic=ПАЦИЕНТ, в Qdrant не попадает);
+    - есть карта пациента (или несколько — мультипациентский тред, FR-21) →
+      ответ опирается на них + найденные фрагменты корпуса (карты цитируются
+      особым источником topic=ПАЦИЕНТ, в Qdrant не попадают);
     - нет ни фрагментов, ни карты → пустой ответ (NO_KB_DATA);
     - иначе — связный ответ с обязательной цитатой источника.
     """
@@ -185,7 +187,10 @@ def build_rag_answer(
     if redline is not None:
         return _refusal_answer(redline)
 
-    has_patient = patient_context is not None
+    contexts = [
+        c for c in ([patient_context] if patient_context else []) + list(patient_contexts or []) if c
+    ]
+    has_patient = bool(contexts)
     if not chunks and not has_patient:
         return _refusal_answer(REDLINE_EMPTY)
 
@@ -209,23 +214,27 @@ def build_rag_answer(
         )
         points.append(f"— {snippet}")
 
-    if has_patient:
-        ctx = patient_context or {}
+    for ctx in contexts:
         patient_gid = f"patient:{ctx.get('patient_id')}"
-        if patient_gid not in seen:
-            seen.add(patient_gid)
-            citations.append(
-                Citation(
-                    source_title=f"Карта пациента: {ctx.get('fio') or 'без ФИО'}",
-                    guideline_id=patient_gid,
-                    topic="ПАЦИЕНТ",
-                    score=1.0,
-                )
+        if patient_gid in seen:
+            continue
+        seen.add(patient_gid)
+        citations.append(
+            Citation(
+                source_title=f"Карта пациента: {ctx.get('fio') or 'без ФИО'}",
+                guideline_id=patient_gid,
+                topic="ПАЦИЕНТ",
+                score=1.0,
             )
-            points.append(f"— {_patient_card_text(ctx)}")
+        )
+        points.append(f"— {_patient_card_text(ctx)}")
 
     body = "\n".join(f"{i + 1}. {p}" for i, p in enumerate(points))
-    if has_patient and chunks:
+    if has_patient and len(contexts) > 1 and chunks:
+        lead = "По базе знаний и картам пациентов найдено следующее:"
+    elif has_patient and len(contexts) > 1:
+        lead = "По картам пациентов:"
+    elif has_patient and chunks:
         lead = "По базе знаний и карте пациента найдено следующее:"
     elif has_patient:
         lead = "По карте пациента:"

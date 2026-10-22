@@ -29,10 +29,8 @@ _embedder = build_embedder()  # по CC_EMBEDDER: hash (демо/тесты) | b
 _GATE_MIN_TOKENS = 1
 _STOP = {"что", "как", "какой", "какая", "какое", "у", "в", "на", "и", "это", "для", "из"}
 
-
 def _content_tokens(text: str) -> set[str]:
     return {t for t in re.findall(r"[a-zа-яё0-9]{3,}", text.lower()) if t not in _STOP}
-
 
 def _lexical_overlap(query: str, text: str) -> int:
     """Число значимых токенов запроса, найденных в тексте чанка.
@@ -53,7 +51,6 @@ def _lexical_overlap(query: str, text: str) -> int:
             n += 1
     return n
 
-
 def _relevance_gate(query: str, hits: list[dict], limit: int) -> list[dict]:
     """Оставляет чанки, где покрыт хотя бы один значимый токен запроса.
 
@@ -64,7 +61,6 @@ def _relevance_gate(query: str, hits: list[dict], limit: int) -> list[dict]:
     kept = [h for h in hits if _lexical_overlap(query, h.get("text", "")) >= _GATE_MIN_TOKENS]
     return kept[:limit]
 
-
 class AgentState(TypedDict, total=False):
     query: str
     topic: str | None
@@ -72,8 +68,11 @@ class AgentState(TypedDict, total=False):
     chunks: list[RAGChunk]
     exclude_ids: set[str]
     patient_context: dict | None
+    patient_contexts: list[dict] | None
+    # Поисковый запрос с контекстом треда (FR-21): retrieval идёт по расширенному
+    # тексту, red line и ответ — по текущему вопросу врача.
+    retrieval_query: str | None
     answer: dict
-
 
 class AgentFactory:
     def __init__(self, client) -> None:
@@ -87,13 +86,16 @@ class AgentFactory:
         topic: str | None = None,
         limit: int = 5,
         exclude_ids: set[str] | None = None,
+        redline_query: str | None = None,
     ) -> list[RAGChunk]:
         """Инструмент doctor-search: гибридный поиск по Qdrant (docs/07 §7).
 
         Отдельный переиспользуемый tool — ядро RAG-модуля. Redline-запрос
         (диагноз/терапия) поиска не делает; отказ формируется в _answer.
+        ``redline_query`` — текст, по которому проверяется red line (по умолчанию
+        сам ``query``); в треде это текущий вопрос без истории (FR-21).
         """
-        if detect_redline(query) is not None:
+        if detect_redline(redline_query if redline_query is not None else query) is not None:
             return []
         hits = kb_store.hybrid_search(
             self._client,
@@ -136,18 +138,26 @@ class AgentFactory:
         ]
 
     def _retrieve(self, state: AgentState) -> AgentState:
+        # Red line — по текущему вопросу врача; история треда её не расширяет,
+        # иначе redline-реплика в истории глушит retrieval всех следующих ходов.
+        if detect_redline(state["query"]) is not None:
+            return {"chunks": []}
         return {
             "chunks": self.search_kb(
-                state["query"],
+                state.get("retrieval_query") or state["query"],
                 topic=state.get("topic"),
                 limit=state.get("limit", 5),
                 exclude_ids=state.get("exclude_ids"),
+                redline_query=state["query"],
             )
         }
 
     def _answer(self, state: AgentState) -> AgentState:
         result = build_rag_answer(
-            state["query"], state.get("chunks", []), patient_context=state.get("patient_context")
+            state["query"],
+            state.get("chunks", []),
+            patient_context=state.get("patient_context"),
+            patient_contexts=state.get("patient_contexts"),
         )
         return {
             "answer": {
@@ -155,6 +165,7 @@ class AgentFactory:
                 "grounded": result.grounded,
                 "refused": result.refused,
                 "refusal_code": result.refusal_code,
+                "topic": state.get("topic"),
                 "citations": [
                     {
                         "source_title": c.source_title,
@@ -185,7 +196,9 @@ class AgentFactory:
         topic: str | None = None,
         limit: int = 5,
         patient_context: dict | None = None,
+        patient_contexts: list[dict] | None = None,
         exclude_ids: set[str] | None = None,
+        retrieval_query: str | None = None,
     ) -> dict:
         # LLM-роутинг раздела (docs/04 FR-14): если клиент явно не задал topic и
         # LLM-роутер включён — топик выбирает LLM (тулза search_<раздел>).
@@ -200,12 +213,33 @@ class AgentFactory:
                 "topic": topic,
                 "limit": limit,
                 "patient_context": patient_context,
+                "patient_contexts": patient_contexts,
+                "retrieval_query": retrieval_query,
                 "exclude_ids": exclude_ids or set(),
             }
         )["answer"]
 
+# --- Разделяемые клиенты процесса -------------------------------------------
+# Один Qdrant-клиент и один скомпилированный граф на процесс: LangGraph
+# компилируется лениво в build(), graph.invoke потокобезопасен.
+_qdrant_client = None
+_shared_factory: AgentFactory | None = None
 
-__all__ = ["AgentFactory", "AgentState"]
+def qdrant_client():
+    global _qdrant_client
+    if _qdrant_client is None:
+        from qdrant_client import QdrantClient
+
+        _qdrant_client = QdrantClient(url=settings.qdrant_url)
+    return _qdrant_client
+
+def shared_factory() -> AgentFactory:
+    global _shared_factory
+    if _shared_factory is None:
+        _shared_factory = AgentFactory(qdrant_client())
+    return _shared_factory
+
+__all__ = ["AgentFactory", "AgentState", "qdrant_client", "shared_factory"]
 
 # --- Граница LLM: деперсонализация (docs/12) -------------------------------
 

@@ -114,6 +114,16 @@
 | `test_commit_failure_never_publishes_uncommitted_content` | сбой commit реестра во время прогона | ни одной точки в Qdrant, `failed_documents=1`, записи `kb_works` нет |
 | `test_failed_reindex_restores_previous_points` | upsert новой версии падает после delete | опубликованная версия восстановлена (точки и payload прежние) |
 | `test_excluded_work_cannot_be_approved` | `excluded`-работа | `ReviewError`: approve допустим только для `candidate` |
+| `test_thread_create_message_and_read_back` | тред с 2 пациентами → вопрос → чтение | оба сообщения и цитаты в истории, карты обоих пациентов в ответе, дедуп `patient_ids` |
+| `test_foreign_thread_is_404` | чужой тред: GET/PATCH/POST/DELETE | 404 `THREAD_NOT_FOUND`, чужой тред не виден в списке |
+| `test_patient_ids_roster_gate` | пациент вне roster в `patient_ids` | 403 `PATIENT_NOT_IN_ROSTER` (создание и сообщение) |
+| `test_patient_limit` | >10 `patient_ids` | 422 `TOO_MANY_PATIENTS` |
+| `test_history_window_trims_old_messages` | 15 сообщений; длинные сообщения | контекст = 10 последних, суммарно ≤6000 символов, новые важнее |
+| `test_read_thread_with_patients_is_audited` | чтение треда с пациентами | запись `READ_ASSISTANT_THREAD` в audit_log |
+| `test_delete_thread_cascades` | DELETE треда | 404 после удаления, сообщения и привязки удалены каскадом |
+| `test_redline_in_history_does_not_poison_next_turn` | ход 1 — redline (диагноз), ход 2 — обычный вопрос по КБ | ход 2 не refused и возвращает KB-цитаты (red line только по текущему вопросу) |
+| `test_revoked_consent_skips_patient_card` | отзыв согласия после создания треда | `skipped_patient_ids == [p1]`, карты p1 нет в цитатах, запись `READ_ASSISTANT_THREAD` |
+| `test_history_is_scrubbed_before_retrieval` | ФИО в прошлой реплике | в retrieval-строке `[ФИО]`, исходное ФИО отсутствует |
 
 ## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/`)
 

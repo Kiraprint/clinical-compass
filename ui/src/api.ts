@@ -185,6 +185,32 @@ export const api = {
       body: JSON.stringify({ query, limit, patient_id: patientId }),
     }),
   assistantStatus: () => req<{ collection: string; points: number }>("/api/v1/assistant/status"),
+  // FR-21: сессии ассистента (треды) — persistent-контекст + мультипациент.
+  assistantThreads: () => req<{ items: AssistantThread[] }>("/api/v1/assistant/threads"),
+  assistantThread: (id: string) =>
+    req<AssistantThreadDetail>(`/api/v1/assistant/threads/${id}`),
+  assistantCreateThread: (title?: string, patientIds: string[] = []) =>
+    req<AssistantThread>("/api/v1/assistant/threads", {
+      method: "POST",
+      body: JSON.stringify({ title: title ?? null, patient_ids: patientIds }),
+    }),
+  assistantUpdateThread: (
+    id: string,
+    body: { title?: string; patient_ids?: string[] },
+  ) =>
+    req<AssistantThread>(`/api/v1/assistant/threads/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  assistantDeleteThread: (id: string) =>
+    req<void>(`/api/v1/assistant/threads/${id}`, { method: "DELETE" }),
+  assistantPostMessage: (id: string, content: string, patientIds?: string[]) =>
+    req<AssistantThreadAnswer>(`/api/v1/assistant/threads/${id}/messages`, {
+      method: "POST",
+      body: JSON.stringify(
+        patientIds ? { content, patient_ids: patientIds } : { content },
+      ),
+    }),
   adminAudit: () => req<{ items: AuditEvent[] }>("/api/v1/admin/audit"),
   // --- Обогащение КБ (docs/15): ревью источников администратором ---
   adminKbHealth: () => req<KbHealth>("/api/v1/admin/kb/health"),
@@ -452,6 +478,36 @@ export interface AssistantAnswer {
   refused: boolean;
   refusal_code: string | null;
   citations: AssistantCitation[];
+}
+/** FR-21: тред ассистента — persistent-контекст + область пациентов. */
+export interface AssistantThread {
+  id: string;
+  title: string;
+  patient_ids: string[];
+  created_at: string | null;
+  updated_at: string | null;
+  message_count: number;
+}
+export interface AssistantThreadMessage {
+  id: string;
+  role: "CLINICIAN" | "ASSISTANT";
+  content: string;
+  citations: AssistantCitation[];
+  topic: string | null;
+  created_at: string | null;
+}
+export interface AssistantThreadDetail extends AssistantThread {
+  messages: AssistantThreadMessage[];
+}
+export interface AssistantThreadAnswer {
+  answer: string;
+  citations: AssistantCitation[];
+  topic: string | null;
+  grounded: boolean;
+  refused: boolean;
+  refusal_code: string | null;
+  skipped_patient_ids: string[];
+  message_ids: string[];
 }
 /** Справочник препаратов (ГРЛС). Не ПДн: публичные факты рег. удостоверения. */
 export interface Drug {

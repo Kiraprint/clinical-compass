@@ -1,26 +1,63 @@
-import { useEffect, useMemo, useState, type ChangeEvent } from "react";
-import { api, AssistantAnswer, KB_DESIGN_LABELS, KbWork, PatientCard } from "../api";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  api,
+  AssistantThread,
+  AssistantThreadDetail,
+  KB_DESIGN_LABELS,
+  KbWork,
+  PatientCard,
+} from "../api";
+
+const chipStyle = (active: boolean): CSSProperties => ({
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  background: active ? "#eef2ff" : "#f6f7fb",
+  border: `1px solid ${active ? "#c7d2fe" : "#d4d8e3"}`,
+  borderRadius: 12,
+  padding: "2px 10px",
+  fontSize: 13,
+  cursor: "pointer",
+});
 
 export default function AssistantTab() {
-  const [query, setQuery] = useState("");
-  const [answer, setAnswer] = useState<AssistantAnswer | null>(null);
+  // FR-21: сессии ассистента — треды с persistent-контекстом и пациентами.
+  const [threads, setThreads] = useState<AssistantThread[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<AssistantThreadDetail | null>(null);
+  const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [renaming, setRenaming] = useState("");
   const [points, setPoints] = useState<number | null>(null);
   const [patients, setPatients] = useState<PatientCard[]>([]);
-  const [mentionOpen, setMentionOpen] = useState(false);
-  const [mentionQ, setMentionQ] = useState("");
-  const [patientId, setPatientId] = useState<string | null>(null);
-  const [patientLabel, setPatientLabel] = useState("");
   const [sources, setSources] = useState<KbWork[]>([]);
   const [excludedIds, setExcludedIds] = useState<string[]>([]);
   const [sourcesLoaded, setSourcesLoaded] = useState(false);
   const [sourcesError, setSourcesError] = useState("");
   const [savingSource, setSavingSource] = useState<string | null>(null);
 
+  // Номер последнего запроса детали треда: ответ старого запроса не должен
+  // перезаписать открытый сейчас диалог.
+  const selectSeq = useRef(0);
+
+  const patientLabels = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const p of patients) map[p.patient_id] = p.fio || p.email;
+    return map;
+  }, [patients]);
+
   useEffect(() => {
     api.assistantStatus().then((s) => setPoints(s.points)).catch(() => setPoints(null));
     api.clinicianPatients().then((r) => setPatients(r.items)).catch(() => setPatients([]));
+    api
+      .assistantThreads()
+      .then((r) => {
+        setThreads(r.items);
+        if (r.items.length > 0) void selectThread(r.items[0].id);
+      })
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
     api
       .assistantSources()
       .then((r) => {
@@ -31,60 +68,129 @@ export default function AssistantTab() {
       .finally(() => setSourcesLoaded(true));
   }, []);
 
-  // @-упоминание: фильтр по ротстеру врача (подстрока по ФИО/email).
-  // Для ротстера демо-масштаба этого достаточно; tsvector/pg_trgm — YAGNI.
-  const mentionMatches = useMemo(() => {
-    if (!mentionOpen) return [];
-    const q = mentionQ.toLowerCase();
-    return patients.filter((p) => (p.fio || p.email).toLowerCase().includes(q)).slice(0, 8);
-  }, [mentionOpen, mentionQ, patients]);
+  const refreshThreads = async () => {
+    const r = await api.assistantThreads();
+    setThreads(r.items);
+    return r.items;
+  };
 
-  const handleChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
-    const v = e.target.value;
-    setQuery(v);
-    const m = v.match(/@([^\s@]*)$/);
-    if (m) {
-      setMentionOpen(true);
-      setMentionQ(m[1]);
-    } else {
-      setMentionOpen(false);
+  async function selectThread(id: string) {
+    const seq = ++selectSeq.current;
+    setActiveId(id);
+    setDetail(null);
+    setError("");
+    setNotice("");
+    try {
+      const loaded = await api.assistantThread(id);
+      if (selectSeq.current !== seq) return; // ответ устаревшего запроса
+      setDetail(loaded);
+    } catch (e: unknown) {
+      if (selectSeq.current !== seq) return;
+      setError(e instanceof Error ? e.message : String(e));
     }
-    // Если тег выбранного пациента удалили из текста — открепляем контекст.
-    if (patientLabel && !v.includes(`@${patientLabel}`)) {
-      setPatientId(null);
-      setPatientLabel("");
-    }
-  };
+  }
 
-  const selectPatient = (p: PatientCard) => {
-    const label = p.fio ?? p.email;
-    setQuery((q) => q.replace(/@([^\s@]*)$/, `@${label} `));
-    setPatientId(p.patient_id);
-    setPatientLabel(label);
-    setMentionOpen(false);
-  };
-
-  const clearPatient = () => {
-    setPatientId(null);
-    setPatientLabel("");
-  };
-
-  const ask = async () => {
-    if (!query.trim()) return;
+  const createThread = async () => {
     setBusy(true);
     setError("");
-    setAnswer(null);
     try {
-      setAnswer(await api.assistantAsk(query.trim(), 5, patientId ?? undefined));
-    } catch (e) {
+      const thread = await api.assistantCreateThread();
+      setThreads((t) => [thread, ...t]);
+      await selectThread(thread.id);
+    } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
   };
 
-  // Персональное исключение: сервер возвращает полный список скрытых id — им и
-  // синхронизируем состояние, чтобы не расходиться с другими вкладками.
+  const renameThread = async () => {
+    if (!detail) return;
+    const title = renaming.trim();
+    if (!title || title === detail.title) {
+      setRenaming("");
+      return;
+    }
+    setBusy(true);
+    try {
+      const updated = await api.assistantUpdateThread(detail.id, { title });
+      setDetail((cur) =>
+        cur && cur.id === detail.id ? { ...cur, ...updated } : cur,
+      );
+      await refreshThreads();
+      setRenaming("");
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteThread = async () => {
+    if (!detail) return;
+    if (!window.confirm(`Удалить диалог «${detail.title}» со всеми сообщениями?`)) return;
+    setBusy(true);
+    try {
+      await api.assistantDeleteThread(detail.id);
+      setDetail(null);
+      setActiveId(null);
+      const rest = await refreshThreads();
+      if (rest.length > 0) await selectThread(rest[0].id);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Область пациентов треда: roster-пациенты чекбоксами; сервер дедуплицирует
+  // и проверяет привязку (не roster → 403 PATIENT_NOT_IN_ROSTER).
+  const togglePatient = async (patientId: string) => {
+    if (!detail) return;
+    const ids = detail.patient_ids.includes(patientId)
+      ? detail.patient_ids.filter((id) => id !== patientId)
+      : [...detail.patient_ids, patientId];
+    setBusy(true);
+    setError("");
+    try {
+      const updated = await api.assistantUpdateThread(detail.id, { patient_ids: ids });
+      setDetail((cur) => (cur && cur.id === detail.id ? { ...cur, ...updated } : cur));
+      await refreshThreads();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const send = async () => {
+    if (!detail || !input.trim()) return;
+    const targetId = detail.id;
+    const seq = ++selectSeq.current;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    const text = input.trim();
+    try {
+      const result = await api.assistantPostMessage(targetId, text);
+      setInput("");
+      if (result.skipped_patient_ids.length > 0) {
+        setNotice(
+          `Пропущены пациенты без доступа: ${result.skipped_patient_ids
+            .map((id) => patientLabels[id] ?? id)
+            .join(", ")}`,
+        );
+      }
+      const fresh = await api.assistantThread(targetId);
+      if (selectSeq.current === seq) setDetail(fresh); // врач не переключил тред
+      await refreshThreads();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const toggleSource = async (guidelineId: string, excluded: boolean) => {
     setSavingSource(guidelineId);
     setSourcesError("");
@@ -102,111 +208,172 @@ export default function AssistantTab() {
     <div className="card">
       <h2>Ассистент врача</h2>
       <p style={{ color: "#5a6478", fontSize: 13 }}>
-        Справочный поиск по базе клинических рекомендаций и шкал. Упомяните пациента
-        через «@», чтобы подгрузить его контекст.
+        Диалоги с контекстом: ассистент помнит предыдущие вопросы и карты пациентов,
+        закреплённых за тредом.
         {points !== null && <> Корпус: {points} чанков.</>}
       </p>
 
-      {patientId !== null && (
-        <div className="row" style={{ marginTop: 8 }}>
-          <span
-            className="patient-chip"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 6,
-              background: "#eef2ff",
-              border: "1px solid #c7d2fe",
-              borderRadius: 12,
-              padding: "2px 10px",
-              fontSize: 13,
-            }}
-          >
-            Контекст пациента: {patientLabel}
-            <button
-              onClick={clearPatient}
-              style={{ border: "none", background: "transparent", cursor: "pointer", fontWeight: 700 }}
-            >
-              ✕
-            </button>
-          </span>
-        </div>
-      )}
-
-      <label style={{ position: "relative" }}>
-        Вопрос
-        <textarea
-          rows={2}
-          value={query}
-          onChange={handleChange}
-          placeholder="Например: @Иван — какой порог тяжести у шкалы PHQ-9?"
-        />
-        {mentionOpen && mentionMatches.length > 0 && (
-          <div
-            className="mention-dropdown"
-            style={{
-              position: "absolute",
-              left: 0,
-              right: 0,
-              top: "100%",
-              background: "#fff",
-              border: "1px solid #d4d8e3",
-              borderRadius: 6,
-              boxShadow: "0 4px 12px rgba(0,0,0,0.12)",
-              zIndex: 10,
-              maxHeight: 220,
-              overflow: "auto",
-            }}
-          >
-            {mentionMatches.map((p) => (
+      <div style={{ display: "flex", gap: 16, marginTop: 12, alignItems: "flex-start" }}>
+        <aside style={{ width: 240, flexShrink: 0 }}>
+          <button onClick={() => void createThread()} disabled={busy} style={{ width: "100%" }}>
+            + Новый диалог
+          </button>
+          <div style={{ marginTop: 8 }}>
+            {threads.map((t) => (
               <button
-                key={p.patient_id}
-                onClick={() => selectPatient(p)}
+                key={t.id}
+                onClick={() => void selectThread(t.id)}
                 style={{
                   display: "block",
                   width: "100%",
                   textAlign: "left",
                   border: "none",
-                  background: "transparent",
+                  borderLeft: `3px solid ${t.id === activeId ? "#2f6fed" : "transparent"}`,
+                  background: t.id === activeId ? "#eef2ff" : "transparent",
                   color: "#2a3350",
-                  padding: "6px 10px",
+                  padding: "6px 8px",
                   cursor: "pointer",
                   fontSize: 13,
                 }}
               >
-                {p.fio || p.email}
-                {p.last_triage && <span style={{ color: "#5a6478", marginLeft: 8 }}>· {p.last_triage}</span>}
+                <div style={{ fontWeight: 600 }}>{t.title}</div>
+                <div style={{ color: "#8a94a8", fontSize: 11 }}>
+                  {t.message_count} сообщ. · {t.patient_ids.length} пациент(ов)
+                </div>
               </button>
             ))}
+            {threads.length === 0 && (
+              <p style={{ color: "#8a94a8", fontSize: 12 }}>Диалогов пока нет.</p>
+            )}
           </div>
-        )}
-      </label>
+        </aside>
 
-      <div className="row" style={{ marginTop: 10 }}>
-        <button disabled={busy || !query.trim()} onClick={ask}>
-          {busy ? "Поиск…" : "Спросить"}
-        </button>
-      </div>
+        <section style={{ flex: 1, minWidth: 0 }}>
+          {detail === null ? (
+            <p style={{ color: "#5a6478", fontSize: 13 }}>
+              Создайте диалог, чтобы задать вопрос по базе знаний.
+            </p>
+          ) : (
+            <>
+              <div className="row" style={{ alignItems: "center", gap: 8 }}>
+                {renaming !== "" ? (
+                  <>
+                    <input
+                      value={renaming}
+                      onChange={(e) => setRenaming(e.target.value)}
+                      maxLength={200}
+                      style={{ flex: 1 }}
+                    />
+                    <button onClick={() => void renameThread()} disabled={busy}>
+                      Сохранить
+                    </button>
+                    <button onClick={() => setRenaming("")}>Отмена</button>
+                  </>
+                ) : (
+                  <>
+                    <strong style={{ flex: 1 }}>{detail.title}</strong>
+                    <button onClick={() => setRenaming(detail.title)} disabled={busy}>
+                      Переименовать
+                    </button>
+                    <button onClick={() => void deleteThread()} disabled={busy}>
+                      Удалить
+                    </button>
+                  </>
+                )}
+              </div>
 
-      {error && <p className="error">{error}</p>}
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontSize: 12, color: "#5a6478", marginBottom: 4 }}>
+                  Пациенты в контексте (roster):
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {patients.map((p) => {
+                    const active = detail.patient_ids.includes(p.patient_id);
+                    return (
+                      <button
+                        key={p.patient_id}
+                        style={chipStyle(active)}
+                        disabled={busy}
+                        onClick={() => void togglePatient(p.patient_id)}
+                        title={active ? "Убрать из контекста" : "Добавить в контекст"}
+                      >
+                        {p.fio || p.email}
+                        {active ? " ✓" : ""}
+                      </button>
+                    );
+                  })}
+                  {patients.length === 0 && (
+                    <span style={{ color: "#8a94a8", fontSize: 12 }}>
+                      Нет закреплённых пациентов.
+                    </span>
+                  )}
+                </div>
+              </div>
 
-      {answer && (
-        <div style={{ marginTop: 16 }}>
-          <pre className="assistant-answer">{answer.answer}</pre>
-          {answer.citations.length > 0 && (
-            <div className="assistant-sources">
-              <strong>Источники:</strong>
-              <ul>
-                {answer.citations.map((c, i) => (
-                  <li key={i}>
-                    «{c.source_title}» · {c.topic}
-                  </li>
+              <div style={{ marginTop: 12, maxHeight: 420, overflow: "auto" }}>
+                {detail.messages.length === 0 && (
+                  <p style={{ color: "#8a94a8", fontSize: 13 }}>Сообщений пока нет.</p>
+                )}
+                {detail.messages.map((m) => (
+                  <div
+                    key={m.id}
+                    style={{
+                      margin: "8px 0",
+                      padding: "8px 10px",
+                      borderRadius: 8,
+                      background: m.role === "CLINICIAN" ? "#f6f7fb" : "#ffffff",
+                      border: "1px solid #e2e6ee",
+                    }}
+                  >
+                    <div style={{ fontSize: 11, color: "#8a94a8" }}>
+                      {m.role === "CLINICIAN" ? "Врач" : "Ассистент"}
+                      {m.topic ? ` · ${m.topic}` : ""}
+                    </div>
+                    {m.role === "ASSISTANT" ? (
+                      <pre className="assistant-answer" style={{ whiteSpace: "pre-wrap" }}>
+                        {m.content}
+                      </pre>
+                    ) : (
+                      <div style={{ whiteSpace: "pre-wrap" }}>{m.content}</div>
+                    )}
+                    {m.citations.length > 0 && (
+                      <div className="assistant-sources">
+                        <strong>Источники:</strong>
+                        <ul>
+                          {m.citations.map((c, i) => (
+                            <li key={i}>
+                              «{c.source_title}» · {c.topic}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
                 ))}
-              </ul>
-            </div>
+              </div>
+
+              <label style={{ display: "block", marginTop: 8 }}>
+                Вопрос
+                <textarea
+                  rows={2}
+                  value={input}
+                  maxLength={2000}
+                  onChange={(e) => setInput(e.target.value)}
+                  placeholder="Например: какова динамика пациента из контекста и что говорит шкала PHQ-9?"
+                />
+              </label>
+              <div className="row" style={{ marginTop: 8 }}>
+                <button disabled={busy || !input.trim()} onClick={() => void send()}>
+                  {busy ? "Ассистент думает…" : "Спросить"}
+                </button>
+              </div>
+            </>
           )}
-        </div>
-      )}
+
+          {notice && <p style={{ color: "#9a6b00", fontSize: 13 }}>{notice}</p>}
+          {error && <p className="error">{error}</p>}
+        </section>
+      </div>
 
       <details style={{ marginTop: 16 }}>
         <summary style={{ cursor: "pointer", fontSize: 14, fontWeight: 600, color: "#2f6fed" }}>
