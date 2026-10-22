@@ -491,3 +491,31 @@ def test_failed_indexing_returns_work_to_review_queue(db_session, qdrant, cfg, m
     assert work.approved_at is None
     assert work.indexed_hash is None
     assert _points(qdrant, work) == 0
+
+
+def test_approve_is_cancelled_when_version_replaced_during_indexing(
+    db_session, qdrant, cfg, monkeypatch
+):
+    """Параллельный прогон подменил версию — точки старой версии не остаются."""
+    doc = make_guideline(
+        license="",
+        text=make_guideline().text.replace("Creative Commons", "Proprietary"),
+    )
+    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
+    assert work.status == "candidate"
+
+    original_index = review.index_mod.index_work
+
+    def replaced_version(*args, **kwargs):
+        chunks = original_index(*args, **kwargs)
+        work.content_hash = "0" * 64
+        db_session.commit()
+        return chunks
+
+    monkeypatch.setattr(review.index_mod, "index_work", replaced_version)
+    with pytest.raises(review.ReviewError):
+        review.approve(db_session, qdrant, work.id, None, cfg)
+
+    db_session.refresh(work)
+    assert _points(qdrant, work) == 0

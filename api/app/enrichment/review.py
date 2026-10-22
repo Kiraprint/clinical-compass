@@ -88,6 +88,10 @@ def approve(
         raise ReviewError(f"Жёсткие критерии не выполнены, approve запрещён. {labels}")
     embedder = embedder or build_embedder()
     now = dt.datetime.now(dt.timezone.utc)
+    # Хэш версии снимается в значение: после индексации объект перечитывается
+    # под блокировкой (populate_existing обновляет тот же instance), и сравнение
+    # content_hash с самим собой не поймало бы подмену версии параллельным прогоном.
+    version_hash = work.content_hash
     # Статус фиксируется ДО индексации: точка в Qdrant не может существовать
     # для работы, которая в реестре всё ещё candidate (сбой финального commit
     # в вызывающем коде иначе оставлял бы неодобренный контент в выдаче).
@@ -115,7 +119,7 @@ def approve(
         if (
             current is not None
             and current.status == "approved"
-            and current.content_hash == work.content_hash
+            and current.content_hash == version_hash
         ):
             current.status = "candidate"
             current.approved_by = None
@@ -134,7 +138,7 @@ def approve(
     if (
         current is None
         or current.status != "approved"
-        or current.content_hash != work.content_hash
+        or current.content_hash != version_hash
     ):
         try:
             index_mod.remove_work_id(client, work.id)
