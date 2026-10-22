@@ -179,6 +179,17 @@ export const api = {
     req<{ items: PatientCard[] }>(`/api/v1/clinician/patients${triage ? `?triage=${triage}` : ""}`),
   clinicianReport: (patientId: string) =>
     req<Report>(`/api/v1/clinician/patients/${patientId}/report`),
+  // FR-22: контакты пациента. Врач — roster+consent, пациент — только свои.
+  clinicianContacts: (patientId: string) =>
+    req<PatientContacts>(`/api/v1/clinician/patients/${patientId}/contacts`),
+  clinicianContactsUpdate: (patientId: string, body: ContactPatch) =>
+    req<PatientContacts>(`/api/v1/clinician/patients/${patientId}/contacts`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  myContacts: () => req<PatientContacts>("/api/v1/profile/contacts"),
+  myContactsUpdate: (body: ContactPatch) =>
+    req<PatientContacts>("/api/v1/profile/contacts", { method: "PATCH", body: JSON.stringify(body) }),
   assistantAsk: (query: string, limit = 5, patientId?: string) =>
     req<AssistantAnswer>("/api/v1/assistant/ask", {
       method: "POST",
@@ -392,6 +403,20 @@ export interface PatientCard {
   last_severity: string | null;
   last_assessment_at: string | null;
   open_escalations: number;
+  // FR-22: телефон только маской (+7•••123-45-67); полное значение — endpoint контактов.
+  phone: string | null;
+  birth_date: string | null;
+  age: number | null;
+}
+export interface PatientContacts {
+  phone: string | null;
+  birth_date: string | null;
+  age: number | null;
+  adult: boolean | null;
+}
+export interface ContactPatch {
+  phone?: string | null;
+  birth_date?: string | null;
 }
 export interface ImportHistoryResult {
   template: string;
@@ -463,6 +488,8 @@ export interface Report {
     items: { key: string; text: string; max_value: number }[];
   }[];
   open_escalations: { id: string; kind: string; notified_at: string | null }[];
+  // FR-22: null, если у пациента нет активного согласия (152-ФЗ).
+  contacts: { phone: string | null; birth_date: string | null; age: number | null; adult: boolean | null } | null;
 }
 export interface AuditEvent {
   id: number;

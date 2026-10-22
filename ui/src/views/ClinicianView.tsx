@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, Assessment, EmiasSummary, ImportHistoryResult, PatientCard, Report, Visit } from "../api";
+import { api, ApiError, Assessment, EmiasSummary, ImportHistoryResult, PatientCard, PatientContacts, Report, Visit } from "../api";
 import TrendChart from "../TrendChart";
 import AssistantTab from "./AssistantTab";
 import DrugLibraryTab from "./DrugLibraryTab";
@@ -143,6 +143,12 @@ export default function ClinicianView() {
                       </a>
                       <br />
                       <small>{c.email}</small>
+                      {c.phone && (
+                        <>
+                          <br />
+                          <small title="Телефон скрыт частично (152-ФЗ)">{c.phone}</small>
+                        </>
+                      )}
                     </td>
                     <td>{c.last_triage ? <span className={`badge ${c.last_triage}`}>{c.last_triage}</span> : "—"}</td>
                     <td>{c.last_score ?? "—"}</td>
@@ -358,6 +364,8 @@ function ReportView({ report, error, onBack, onRefresh }: {
           <span style={{ color: "#5a6478", fontSize: 14, fontWeight: 400 }}>{report.email}</span>
         )}
       </h2>
+
+      <ContactsBlock patientId={report.patient_id} hasConsent={report.contacts !== null} />
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <h3 style={{ margin: 0 }}>Шкалы скрининга</h3>
@@ -738,6 +746,89 @@ function EmiasBlock({ patientId }: { patientId: string }) {
       ) : (
         <p style={{ color: "#5a6478", fontSize: 13 }}>Назначений из ЕМИАС нет.</p>
       )}
+    </div>
+  );
+}
+
+// FR-22: контакты пациента. Полный телефон отдаёт только endpoint контактов
+// (аудит READ_PATIENT_CONTACTS); в списке и карте телефон маскирован.
+function ContactsBlock({ patientId, hasConsent }: { patientId: string; hasConsent: boolean }) {
+  const [contacts, setContacts] = useState<PatientContacts | null>(null);
+  const [phone, setPhone] = useState("");
+  const [birthDate, setBirthDate] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    if (!hasConsent) return;
+    api
+      .clinicianContacts(patientId)
+      .then((c) => {
+        setContacts(c);
+        setPhone(c.phone ?? "");
+        setBirthDate(c.birth_date ?? "");
+      })
+      .catch((e) => setErr(e instanceof ApiError ? e.detail : String(e)));
+  }, [patientId, hasConsent]);
+
+  if (!hasConsent) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <h3 style={{ margin: 0 }}>Контакты</h3>
+        <p style={{ color: "#5a6478", fontSize: 13, margin: 0 }}>
+          Нет активного согласия пациента — контакты недоступны (152-ФЗ).
+        </p>
+      </div>
+    );
+  }
+
+  const save = async () => {
+    setErr("");
+    setSaved(false);
+    try {
+      const c = await api.clinicianContactsUpdate(patientId, {
+        phone: phone.trim() === "" ? null : phone.trim(),
+        birth_date: birthDate.trim() === "" ? null : birthDate.trim(),
+      });
+      setContacts(c);
+      setPhone(c.phone ?? "");
+      setBirthDate(c.birth_date ?? "");
+      setSaved(true);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.detail : String(e));
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <h3 style={{ margin: 0 }}>Контакты</h3>
+      <div className="row" style={{ alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <label htmlFor="contact-phone" style={{ fontSize: 14 }}>Телефон</label>
+        <input
+          id="contact-phone"
+          value={phone}
+          placeholder="+7XXXXXXXXXX"
+          onChange={(e) => setPhone(e.target.value)}
+          style={{ maxWidth: 220 }}
+        />
+        <label htmlFor="contact-birth" style={{ fontSize: 14 }}>Дата рождения</label>
+        <input
+          id="contact-birth"
+          type="date"
+          value={birthDate}
+          onChange={(e) => setBirthDate(e.target.value)}
+          style={{ maxWidth: 180 }}
+        />
+        <button onClick={save}>Сохранить контакты</button>
+        {saved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
+      </div>
+      {contacts && (
+        <div style={{ color: "#5a6478", fontSize: 13 }}>
+          {contacts.age !== null && <>Возраст: {contacts.age}</>}
+          {contacts.adult === false && <> · несовершеннолетний</>}
+        </div>
+      )}
+      {err && <p className="error">{err}</p>}
     </div>
   );
 }

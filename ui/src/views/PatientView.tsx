@@ -13,7 +13,7 @@ import {
 } from "../api";
 import TrendChart from "../TrendChart";
 
-type Tab = "today" | "screening" | "diary" | "chat" | "trend" | "adherence";
+type Tab = "today" | "screening" | "diary" | "chat" | "trend" | "adherence" | "contacts";
 
 // «Сегодня» — один ежедневный экран: чек-ин + дневник + приём лекарств.
 // Дневник и Приверженность остаются как история, запись идёт только из «Сегодня».
@@ -24,6 +24,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "adherence", label: "Приверженность" },
   { id: "chat", label: "Чат поддержки" },
   { id: "trend", label: "Мой тренд" },
+  { id: "contacts", label: "Контакты" },
 ];
 
 export default function PatientView() {
@@ -92,6 +93,7 @@ export default function PatientView() {
       {tab === "adherence" && <AdherenceTab />}
       {tab === "chat" && <ChatTab />}
       {tab === "trend" && <TrendTab />}
+      {tab === "contacts" && <ContactsTab />}
     </>
   );
 }
@@ -519,6 +521,75 @@ function TrendTab() {
       <h2>Динамика за 90 дней</h2>
       <TrendChart timeline={timeline} />
       {timeline.runs.length === 0 && <p style={{ color: "#5a6478" }}>Пройдите первый скрининг, чтобы увидеть тренд.</p>}
+    </div>
+  );
+}
+
+// FR-22: свои контакты. Без активного согласия раздел недоступен (require_consent).
+function ContactsTab() {
+  const [phone, setPhone] = useState("");
+  const [birthDate, setBirthDate] = useState("");
+  const [age, setAge] = useState<number | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    api
+      .myContacts()
+      .then((c) => {
+        setPhone(c.phone ?? "");
+        setBirthDate(c.birth_date ?? "");
+        setAge(c.age);
+      })
+      .catch((e) => setError(e instanceof ApiError ? e.detail : String(e)));
+  }, []);
+
+  const save = async () => {
+    setError("");
+    setSaved(false);
+    try {
+      const c = await api.myContactsUpdate({
+        phone: phone.trim() === "" ? null : phone.trim(),
+        birth_date: birthDate.trim() === "" ? null : birthDate.trim(),
+      });
+      setPhone(c.phone ?? "");
+      setBirthDate(c.birth_date ?? "");
+      setAge(c.age);
+      setSaved(true);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.detail : String(e));
+    }
+  };
+
+  return (
+    <div className="card">
+      <h2>Контакты</h2>
+      <p style={{ color: "#5a6478", fontSize: 14 }}>
+        Телефон и дата рождения видны вашему лечащему врачу. Телефон хранится в зашифрованном виде,
+        в списке пациентов показывается маской. При отзыве согласия контакты удаляются.
+      </p>
+      <div className="row" style={{ alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <label htmlFor="my-phone" style={{ fontSize: 14 }}>Телефон</label>
+        <input
+          id="my-phone"
+          value={phone}
+          placeholder="+7XXXXXXXXXX"
+          onChange={(e) => setPhone(e.target.value)}
+          style={{ maxWidth: 220 }}
+        />
+        <label htmlFor="my-birth" style={{ fontSize: 14 }}>Дата рождения</label>
+        <input
+          id="my-birth"
+          type="date"
+          value={birthDate}
+          onChange={(e) => setBirthDate(e.target.value)}
+          style={{ maxWidth: 180 }}
+        />
+        <button onClick={save}>Сохранить</button>
+        {saved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
+      </div>
+      {age !== null && <p style={{ color: "#5a6478", fontSize: 13 }}>Возраст: {age}</p>}
+      {error && <p className="error">{error}</p>}
     </div>
   );
 }

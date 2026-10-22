@@ -27,6 +27,12 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String)
     role: Mapped[str] = mapped_column(String)  # PATIENT | CLINICIAN | ADMIN
     totp_secret: Mapped[str | None] = mapped_column(String, nullable=True)
+    # FR-22: контакты пациента. Телефон — ПДн, шифруется (F1, EncryptedText).
+    # Дата рождения — календарная дата без текста, хранится открыто: шифрование
+    # не даёт выигрыша (энтропия даты ~ диапазон лет), доступ закрыт roster/consent
+    # (обоснование — docs/02 §5).
+    phone: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
+    birth_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     # Шкалы скрининга назначаются врачом (roster) через таблицу prescriptions —
     # пациент выбирает только из назначенного множества (см. services/screening.py).
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))

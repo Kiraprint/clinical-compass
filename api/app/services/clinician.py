@@ -17,6 +17,7 @@ from app.errors import Problem
 from app.models import AdherenceRecord, AdverseEvent, Answer, Assessment, ChatMessage, ClinicianRoster, Consent, DiaryEntry, Escalation, Prescription, Run, User, Visit
 
 from .audit import record as audit_record
+from .contacts import contacts_payload
 from .history_extract import extract_history
 
 
@@ -37,6 +38,12 @@ def _require_roster(db: Session, clinician_id, patient_id) -> None:
     row = db.get(ClinicianRoster, (clinician_id, patient_id))
     if row is None:
         raise Problem(403, "NO_ROSTER", "Пациент не закреплён за этим врачом")
+
+
+def require_roster(db: Session, clinician_id, patient_id) -> None:
+    """Публичный roster-гейт для других сервисов (FR-22 контакты)."""
+    _require_roster(db, clinician_id, patient_id)
+
 
 def _prescribed_scales_of(db: Session, patient_id) -> list[str]:
     """Коды назначенных пациенту шкал (упорядочены по времени назначения)."""
@@ -129,6 +136,7 @@ def list_patients(db: Session, clinician_id, triage: str | None = None) -> list[
             .select_from(Escalation)
             .where(Escalation.patient_id == row.patient_id, Escalation.resolved_at.is_(None))
         )
+        contacts = contacts_payload(patient, masked=True)  # FR-22: телефон — только маска
         cards.append({
             "patient_id": str(row.patient_id),
             "email": patient.email,
@@ -138,6 +146,9 @@ def list_patients(db: Session, clinician_id, triage: str | None = None) -> list[
             "last_severity": last.severity if last else None,
             "last_assessment_at": last.computed_at.isoformat() if last else None,
             "open_escalations": open_esc or 0,
+            "phone": contacts["phone"],
+            "birth_date": contacts["birth_date"],
+            "age": contacts["age"],
         })
     return cards
 
@@ -235,6 +246,11 @@ def _patient_card(db: Session, patient_id) -> dict:
             "target": r_obj.target, "reason": r_obj.reason,
         }
 
+    # FR-22: контакты отдаются только при активном согласии пациента (152-ФЗ);
+    # roster-гейт проверяют вызывающие (report/patient_context).
+    has_consent = db.scalar(
+        select(Consent.id).where(Consent.user_id == patient_id, Consent.revoked_at.is_(None))
+    ) is not None
     return {
         "patient_id": str(patient_id),
         "email": patient.email,
@@ -281,6 +297,7 @@ def _patient_card(db: Session, patient_id) -> dict:
             {"id": str(e.id), "kind": e.kind, "notified_at": e.notified_clinician_at.isoformat() if e.notified_clinician_at else None}
             for e in escalations
         ],
+        "contacts": contacts_payload(patient, masked=True) if has_consent else None,
     }
 
 
