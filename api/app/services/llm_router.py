@@ -99,16 +99,20 @@ def route_topic(query: str) -> str | None:
             "tools": _tools_schema(),
             "tool_choice": "auto",
             "temperature": 0.0,
-            "max_tokens": 200,
-            # reasoning-модели (Qwen3.8) тратят бюджет на рассуждения — для
-            # маршрутизации thinking не нужен, выключаем (время ответа ~5x ниже)
+            # 200 токенов хватает под сам tool_call, но reasoning-модели
+            # (deepseek-v4.1 через omniroute, Qwen3.8) успевают выговорить
+            # бюджет и вернуть finish_reason=length без вызова тулзы.
+            "max_tokens": 600,
+            # llama.cpp-сервер понимает этот флаг; прочие шлюзы его игнорируют.
             "chat_template_kwargs": {"enable_thinking": False},
         }
         data = json.dumps(payload).encode("utf-8")
         url = settings.assistant_llm_url.rstrip("/") + "/chat/completions"
-        req = urllib.request.Request(
-            url, data=data, headers={"Content-Type": "application/json"}
-        )
+        headers = {"Content-Type": "application/json"}
+        api_key = settings.assistant_llm_api_key.strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        req = urllib.request.Request(url, data=data, headers=headers)
         with urllib.request.urlopen(req, timeout=settings.assistant_llm_timeout) as resp:
             body = json.loads(resp.read().decode("utf-8"))
         msg = body["choices"][0]["message"]
