@@ -102,7 +102,7 @@ def route_topic(query: str) -> str | None:
             # max_tokens не передаём: reasoning-модели тратят бюджет на thinking
             # до tool_call, и любой наш лимит возвращал finish_reason=length без
             # выбора раздела. Потолок задаёт сам сервер/шлюз по модели.
-            # llama.cpp-сервер понимает этот флаг; прочие шлюзы его игнорируют.
+            # chat_template_kwargs: llama.cpp понимает флаг, прочие шлюзы игнорируют.
             "chat_template_kwargs": {"enable_thinking": False},
         }
         data = json.dumps(payload).encode("utf-8")
