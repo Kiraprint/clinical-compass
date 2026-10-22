@@ -20,6 +20,8 @@
 | [12-деперсонализация](docs/12-деперсонализация.md) | деперсонализация входа LLM (ФИО/адреса/документы/тел.) |
 | [11-апробация-и-метрики](docs/11-апробация-и-метрики.md) | клинические сценарии, замеры метрик 1/4/6 |
 | [09-дефициты-и-решения](docs/09-дефициты-и-решения.md) | сопоставление проекта с кейсом (9 условий, 8 задач, 13 метрик) + 13 дефицитов и дизайн решений; P1-P8 реализованы (Авиандр в KB, маршрутизация, НЯ, приверженность, парсинг историй, врач↔пациент чат, КР Минздрава) |
+| [13-критерии-отбора-статей](docs/13-критерии-отбора-статей.md) | критерии отбора статей: свежесть, дизайн, релевантность, язык, ретракции; исполнение в коде (v0.2 — PubMed + ВОЗ) |
+| [15-обогащение-базы-знаний](docs/15-обогащение-базы-знаний.md) | реестр `kb_works` как источник истины, Qdrant как индекс; источники, критерии, ревью, воспроизводимость, эксплуатация, ограничения |
 | [bench/](bench/README.md) | бенчмарк качества поиска: выбор эмбеддера для RU-EN психиатрии на реальных мета-анализах и гайдлайнах ВОЗ |
 
 ## Структура
@@ -28,12 +30,12 @@
 core/   — клинический движок (SDK): шкалы, скоринг, триаж, риск-флаги, чек-ины, тренды (чистый Python)
 api/    — FastAPI: auth/2FA, RBAC, consent (152-ФЗ), аудит (append-only), скрининг, эскалации,
           дневник, чат, панель врача, ростер, ИИ-агент (гибридный поиск по базе знаний),
-          симулятор демо-данных
+          обогащение базы знаний (app/enrichment/: PubMed, ВОЗ IRIS, критерии, ревью), симулятор демо-данных
 ui/     — React + Vite: пациент (скрининг/чек-ин/дневник/чат/тренд), панель врача
-          (включая вкладку «Ассистент»), админ-аудит
-infra/  — docker compose (postgres + qdrant + api + kb-seed + ui + seed)
+          (включая «Ассистент» и «Библиотеку препаратов»), админ-аудит и панель «База знаний»
+infra/  — docker compose (postgres + qdrant + api + kb-seed + kb-enrichment + ui + seed)
 e2e/    — Playwright: питч-сценарий (docs/04 §6), потоки пациента + врача
-docs/   — ТЗ (ГОСТ 19.201-78) + 01–06 (разработочная документация), карта соответствия ГОСТ 19
+docs/   — ТЗ (ГОСТ 19.201-78) + 01–15 (разработочная документация), карта соответствия ГОСТ 19
 ```
 
 ## Запуск (демо / демо-день)
@@ -120,6 +122,48 @@ cd e2e && npx playwright install chromium && npx playwright test
 ```
 
 Изменения схемы — только через `cd api && alembic revision --autogenerate -m "..."` + проверка `alembic upgrade head`. `Base.metadata.create_all` не используется: он не альтерирует существующие таблицы и копит дрейф.
+
+## Обогащение базы знаний (kb-enrichment)
+
+Внешние источники (PubMed, гайдлайны ВОЗ/IRIS) забирает отдельный сервис;
+подробности — [docs/15](docs/15-обогащение-базы-знаний.md). В compose он поднимается
+как сервис `kb-enrichment` (тот же образ, что `api`, команда
+`python -m app.enrichment serve`) и ждёт готовности `api` — миграции применяет API
+в своём lifespan.
+
+```bash
+cd api
+alembic upgrade head                       # таблицы kb_works / kb_runs / kb_exclusions
+
+# один прогон: сначала без записи в БД и Qdrant
+CC_ENRICH_PUBMED_EMAIL=you@example.org python -m app.enrichment run --dry-run
+CC_ENRICH_PUBMED_EMAIL=you@example.org python -m app.enrichment run
+python -m app.enrichment run --source who           # только гайдлайны ВОЗ
+python -m app.enrichment runs --limit 5             # история прогонов (воспроизводимость)
+
+# ревью: статьи индексируются только после approve
+python -m app.enrichment review list --status candidate
+python -m app.enrichment review approve <work_id>
+python -m app.enrichment review reject <work_id> --reason "вне скоупа продукта"
+
+# цикл по расписанию (в compose этим занимается сервис kb-enrichment)
+python -m app.enrichment serve
+```
+
+В контейнере те же команды: `docker compose -f infra/docker-compose.yml exec kb-enrichment /app/.venv/bin/python -m app.enrichment run`.
+
+Переменные (все — `CC_ENRICH_*`, полный список — docs/15 §11):
+
+| Переменная | Обязательна | Смысл |
+|---|---|---|
+| `CC_DATABASE_URL`, `CC_QDRANT_URL` | да (compose задаёт) | общие с API: реестр и индекс |
+| `CC_ENRICH_PUBMED_EMAIL` | желательна | контакт для NCBI; без ключа лимит 3 запроса/с |
+| `CC_ENRICH_PUBMED_API_KEY` | нет | ключ NCBI |
+| `CC_ENRICH_PUBMED_DAYS` | нет (30) | окно дат публикации |
+| `CC_ENRICH_INTERVAL_HOURS` | нет (24) | интервал `serve` |
+| `CC_ENRICH_OFFLINE` | нет (false) | `true` — не ходить в сеть (прогон вернёт `failed` с пояснением) |
+
+Ревью также доступно по HTTP (`/api/v1/admin/kb/*`, роль ADMIN) — docs/04 §3.1.
 
 ## CI и релизы
 

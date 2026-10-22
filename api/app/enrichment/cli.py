@@ -1,0 +1,208 @@
+"""CLI сервиса kb-enrichment: `python -m app.enrichment <команда>`.
+
+Команды:
+  run [--dry-run] [--source pubmed|who]   один прогон
+  serve                                   цикл по CC_ENRICH_INTERVAL_HOURS
+  review list|show|approve|reject         ревью источников (врач/админ)
+  runs [--limit N]                        история прогонов (воспроизводимость)
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+
+from sqlalchemy import text
+
+from app import db as db_module
+from app.config import settings
+from app.enrichment import pipeline, review
+from app.enrichment.config import EnrichmentConfig
+from app.models import KBRun, KBWork
+
+
+def _session():
+    if db_module.engine is None:
+        db_module.setup(settings.database_url)
+    return db_module.SessionLocal()
+
+
+def _client():
+    from qdrant_client import QdrantClient
+
+    return QdrantClient(url=settings.qdrant_url)
+
+
+def _print(payload, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        return
+    print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+
+
+def _cmd_run(args) -> int:
+    cfg = EnrichmentConfig.from_env()
+    if args.source == "pubmed":
+        cfg = _with_enabled(cfg, pubmed=True, who=False)
+    elif args.source == "who":
+        cfg = _with_enabled(cfg, pubmed=False, who=True)
+    with _session() as session:
+        summary = pipeline.execute(
+            session,
+            None if args.dry_run else _client(),
+            cfg,
+            trigger="cli",
+            dry_run=args.dry_run,
+        )
+        if not args.dry_run:
+            session.commit()
+    _print(summary.as_dict(), args.json)
+    return 0 if summary.status in {"ok", "partial"} else 1
+
+
+def _with_enabled(cfg: EnrichmentConfig, *, pubmed: bool, who: bool) -> EnrichmentConfig:
+    from dataclasses import replace
+
+    return replace(
+        cfg,
+        pubmed=replace(cfg.pubmed, enabled=pubmed),
+        who=replace(cfg.who, enabled=who),
+    )
+
+
+def _cmd_serve(args) -> int:
+    cfg = EnrichmentConfig.from_env()
+    interval = max(cfg.interval_hours, 0.05) * 3600
+    if not cfg.run_on_start:
+        time.sleep(interval)
+    while True:
+        with _session() as session:
+            locked = bool(
+                session.execute(text("SELECT pg_try_advisory_lock(hashtext('kb-enrichment'))")).scalar()
+            )
+            if not locked:
+                print("kb-enrichment: другой прогон уже идёт, пропуск", flush=True)
+            else:
+                try:
+                    summary = pipeline.execute(session, _client(), cfg, trigger="schedule")
+                    session.commit()
+                    print(
+                        f"kb-enrichment: run {summary.run_id} {summary.status} "
+                        f"{summary.stats} errors={len(summary.errors)}",
+                        flush=True,
+                    )
+                except Exception as exc:  # noqa: BLE001 — сервис не должен падать на одном прогоне
+                    session.rollback()
+                    print(f"kb-enrichment: прогон упал: {exc}", flush=True)
+                finally:
+                    session.execute(text("SELECT pg_advisory_unlock(hashtext('kb-enrichment'))"))
+                    session.commit()
+        time.sleep(interval)
+
+
+def _cmd_review(args) -> int:
+    cfg = EnrichmentConfig.from_env()
+    with _session() as session:
+        if args.action == "list":
+            works = review.list_works(
+                session, status=args.status, kind=args.kind, limit=args.limit
+            )
+            payload = [review.serialize(w) for w in works]
+        elif args.action == "show":
+            work = review.get_work(session, _uuid(args.id))
+            if work is None:
+                print("не найдено", file=sys.stderr)
+                return 2
+            payload = review.serialize(work)
+        elif args.action == "approve":
+            work_id = _uuid(args.id)
+            # review.approve сам коммитит статус до индексации и откатывает его
+            # при сбое публикации — компенсация в CLI больше не нужна.
+            work = review.approve(session, _client(), work_id, None, cfg)
+            payload = review.serialize(work)
+        elif args.action == "reject":
+            work = review.reject(
+                session, _uuid(args.id), None, args.reason, client=_client()
+            )
+            session.commit()
+            payload = review.serialize(work)
+        else:  # pragma: no cover - argparse ограничивает выбор
+            raise SystemExit(f"неизвестное действие {args.action}")
+    _print(payload, args.json)
+    return 0
+
+
+def _cmd_runs(args) -> int:
+    with _session() as session:
+        rows = session.query(KBRun).order_by(KBRun.started_at.desc()).limit(args.limit).all()
+        payload = [
+            {
+                "id": str(run.id),
+                "trigger": run.trigger,
+                "status": run.status,
+                "started_at": run.started_at,
+                "finished_at": run.finished_at,
+                "stats": run.stats,
+                "errors": run.errors,
+                "versions": run.versions,
+                "query_plan": run.query_plan,
+            }
+            for run in rows
+        ]
+    _print(payload, args.json)
+    return 0
+
+
+def _uuid(value: str):
+    import uuid
+
+    try:
+        return uuid.UUID(value)
+    except ValueError as exc:
+        raise SystemExit(f"некорректный UUID: {value}") from exc
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="app.enrichment", description="Обогащение КБ (PubMed + ВОЗ)")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    run = sub.add_parser("run", help="один прогон ингеста")
+    run.add_argument("--dry-run", action="store_true", help="без записи в БД и Qdrant")
+    run.add_argument("--source", choices=["all", "pubmed", "who"], default="all")
+    run.add_argument("--json", action="store_true")
+    run.set_defaults(func=_cmd_run)
+
+    serve = sub.add_parser("serve", help="цикл прогонов (cron-замена)")
+    serve.set_defaults(func=_cmd_serve)
+
+    review_parser = sub.add_parser("review", help="ревью источников")
+    review_parser.add_argument("action", choices=["list", "show", "approve", "reject"])
+    review_parser.add_argument("id", nargs="?")
+    review_parser.add_argument("--status", default="candidate")
+    review_parser.add_argument("--kind", choices=["article", "guideline"], default=None)
+    review_parser.add_argument("--limit", type=int, default=50)
+    review_parser.add_argument("--reason", default="")
+    review_parser.add_argument("--json", action="store_true")
+    review_parser.set_defaults(func=_cmd_review)
+
+    runs = sub.add_parser("runs", help="история прогонов")
+    runs.add_argument("--limit", type=int, default=10)
+    runs.add_argument("--json", action="store_true")
+    runs.set_defaults(func=_cmd_runs)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except review.ReviewError as exc:
+        print(f"ошибка ревью: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

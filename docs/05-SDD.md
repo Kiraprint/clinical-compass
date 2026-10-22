@@ -34,20 +34,31 @@ clinical-compass/
 │   │   ├── db.py, models.py   # SQLAlchemy (DDL из 04 §5)
 │   │   ├── auth.py            # JWT, 2FA, RBAC-зависимости
 │   │   ├── routers/           # auth, consent, questionnaires, screenings, checkins,
-│   │   │                      # diary, chat, clinician, admin
-│   │   ├── services/          # screening, checkin, roster, audit, escalation
+│   │   │                      # diary, chat, clinician, admin, kb_admin
+│   │   ├── services/          # screening, checkin, roster, audit, escalation,
+│   │   │                      # agent, kb, embeddings, llm_router, push, depersonalize
+│   │   ├── enrichment/        # PubMed/ВОЗ → критерии → реестр kb_works → Qdrant (docs/15)
 │   │   ├── gateways/          # SPI: llm.py, tts.py, sms.py (mock-и по умолчанию)
 │   │   └── simulator.py       # seed-генератор (FR-14)
 │   └── tests/                 # интеграционные тесты (API+БД)
 ├── ui/                        # React + Vite + TS
 │   └── src/  (pages: patient/diary, patient/checkin, patient/chat,
-│               clinician/dashboard, clinician/patient, admin/audit, consent)
+│               clinician/dashboard, clinician/patient, admin/audit, admin/kb, consent)
 ├── infra/
-│   ├── docker-compose.yml     # postgres api ui seed
+│   ├── docker-compose.yml     # postgres qdrant api kb-seed kb-enrichment ui seed
+│   ├── docker-compose.dev.yml # только postgres+qdrant для локальных тестов
 │   ├── ui/nginx.conf          # nginx: статика + reverse proxy (TLS на пилоте)
 │   └── backup.sh  (pg_dump, ротация)
-├── docs/                      # 01–06
+├── docs/                      # 01–15 + ТЗ, SDD/TDD, SECURITY-AUDIT
+├── .worktrees/                # локальные git worktree (не в git), см. §2.1
 └── README.md
+```
+
+### 2.1. Изоляция работы над фичами
+
+Каждая фича разрабатывается в отдельном worktree **внутри** репозитория:
+`git worktree add .worktrees/<name> -b <branch>`, каталог `.worktrees/` в
+`.git/info/exclude`. Соседние каталоги `../clinical-compass-*` не используются.
 ```
 
 ## 3. Контракты ядра (сигнатуры — то, что реализуем и тестируем)
@@ -104,6 +115,7 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | E5 | API: diary, chat (mock gateways), clinician panel, report | FR-8, FR-9, FR-10 | интеграционные тесты roster-доступа и report |
 | E6 | UI: patient app, clinician dashboard, admin; simulator seed | FR-14 + всё | e2e-сценарий питча (04 §6) проходит на docker compose |
 | E7 | ИИ-агент: KB (Qdrant) + гибридный поиск + LangGraph + UI-вкладка | FR-17 | тесты агента (red line, цитаты, offtopic) + e2e вкладки «Ассистент» |
+| E8 | `kb-enrichment`: источники PubMed/ВОЗ, критерии, ревью, производный индекс | FR-20 | оффлайн-тесты коннекторов/критериев/пайплайна + прогон, воспроизводимый по `kb_runs` |
 
 ## 5. DoD (Definition of Done) эпика
 
@@ -134,6 +146,10 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | FR-14 | E6 | покрывается e2e-питч-сценарием (`seed` → RED-траектории), не юнит-тестом |
 | FR-15 | E5/E6 | `red_escalation_notifies_rostered_clinician`, `push_subscribe_unsubscribe` (API) + e2e «колокол уведомлений» |
 | FR-16 | E7 | `fcm_device_token_register_delete`, `fcm_upgrade_then_cooldown` (API) + CI `release-android.yml` (Capacitor-сборка APK) |
+| FR-17 | E7 | `test_assistant.py`, `test_llm_router.py` |
+| FR-18 | E4 | `test_clinician.py` (CLINICIAN-шкалы) |
+| FR-19 | E5 | `test_patient_flows.py` (чек-ин + дневник + приём) |
+| FR-20 | E8 | `test_enrichment_domain.py`, `test_enrichment_pubmed.py`, `test_enrichment_who.py`, `test_enrichment_pipeline.py`, `test_kb_admin_api.py` |
 
 ## 7. Границы инкремента
 

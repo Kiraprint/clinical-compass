@@ -186,6 +186,36 @@ export const api = {
     }),
   assistantStatus: () => req<{ collection: string; points: number }>("/api/v1/assistant/status"),
   adminAudit: () => req<{ items: AuditEvent[] }>("/api/v1/admin/audit"),
+  // --- Обогащение КБ (docs/15): ревью источников администратором ---
+  adminKbHealth: () => req<KbHealth>("/api/v1/admin/kb/health"),
+  adminKbRuns: (limit = 20) => req<{ runs: KbRun[] }>(`/api/v1/admin/kb/runs?limit=${limit}`),
+  // status: "candidate" | "approved" | "rejected" | "excluded" | "superseded" | "" (все).
+  // null = параметр не передаётся (сервер вернёт кандидатов по умолчанию).
+  adminKbWorks: (
+    params: { status?: string | null; kind?: string; limit?: number; offset?: number } = {},
+  ) => {
+    const q = new URLSearchParams();
+    if (params.status !== null && params.status !== undefined) q.set("status", params.status);
+    if (params.kind) q.set("kind", params.kind);
+    if (params.limit !== undefined) q.set("limit", String(params.limit));
+    if (params.offset !== undefined) q.set("offset", String(params.offset));
+    const query = q.toString();
+    return req<KbWorksResp>(`/api/v1/admin/kb/works${query ? `?${query}` : ""}`);
+  },
+  adminKbApprove: (workId: string) =>
+    req<KbWork>(`/api/v1/admin/kb/works/${encodeURIComponent(workId)}/approve`, { method: "POST" }),
+  adminKbReject: (workId: string, reason: string) =>
+    req<KbWork>(`/api/v1/admin/kb/works/${encodeURIComponent(workId)}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    }),
+  // Персональные источники врача (docs/15 §6): исключение не удаляет источник из КБ.
+  assistantSources: () => req<KbSourcesResp>("/api/v1/assistant/sources"),
+  assistantSetSourceExcluded: (guidelineId: string, excluded: boolean) =>
+    req<{ excluded_guideline_ids: string[] }>(
+      `/api/v1/assistant/sources/${encodeURIComponent(guidelineId)}/exclude`,
+      { method: "POST", body: JSON.stringify({ excluded }) },
+    ),
   drugs: (q?: string) =>
     req<{ items: Drug[] }>(`/api/v1/drugs${q ? `?q=${encodeURIComponent(q)}` : ""}`),
   drug: (drugId: string) => req<Drug>(`/api/v1/drugs/${encodeURIComponent(drugId)}`),
@@ -440,3 +470,125 @@ export interface Drug {
   adverse_events: string;
   special_notes: string;
 }
+
+// --- Обогащение КБ (docs/15): прогоны, источники, вердикты ---
+export type KbVerdictStatus = "met" | "not_met" | "insufficient_info" | "not_checked";
+export type KbWorkKind = "article" | "guideline";
+export type KbWorkStatus = "candidate" | "approved" | "rejected" | "excluded" | "superseded";
+
+export interface KbRun {
+  id: string;
+  trigger: string;
+  status: "running" | "ok" | "partial" | "failed";
+  started_at: string | null;
+  finished_at: string | null;
+  stats: Record<string, unknown>;
+  errors: string[];
+  query_plan: Record<string, unknown>;
+  versions: Record<string, unknown>;
+}
+export interface KbHealth {
+  last_run: KbRun | null;
+  counts: Record<string, number>;
+}
+export interface KbEvidence {
+  quote: string;
+  locator: string;
+  source_url: string;
+}
+export interface KbVerdict {
+  key: string;
+  label: string;
+  status: KbVerdictStatus;
+  explanation: string;
+  evidence: KbEvidence | null;
+  confidence: "high" | "medium" | "low";
+  manual_review: boolean;
+  manual_review_reason: string;
+}
+export interface KbCriteria {
+  version: string;
+  decision: "include" | "exclude";
+  reasons: string[];
+  relevance_score: number;
+  verdicts: KbVerdict[];
+}
+export interface KbDesign {
+  design: string;
+  confidence: "high" | "medium" | "low";
+  rationale: string;
+  matched_rules: string[];
+}
+export interface KbAppraisalItem {
+  key: string;
+  label: string;
+  status: KbVerdictStatus;
+  explanation: string;
+  evidence: KbEvidence | null;
+}
+export interface KbAppraisal {
+  tool: string;
+  tool_label: string;
+  applicable: boolean;
+  reason: string;
+  items: KbAppraisalItem[];
+  overall: string;
+  experimental: boolean;
+  summary: string;
+}
+export interface KbWork {
+  id: string;
+  source: "pubmed" | "who";
+  external_id: string;
+  guideline_id: string;
+  kind: KbWorkKind;
+  status: KbWorkStatus;
+  title: string;
+  revision: string | null;
+  year: number | null;
+  doi: string | null;
+  pmid: string | null;
+  url: string | null;
+  fulltext_url: string | null;
+  license: string | null;
+  journal: string | null;
+  abstract: string | null;
+  results: string | null;
+  publication_types: string[];
+  retraction: "none" | "retracted" | "correction" | "not_checked" | "unknown";
+  design: KbDesign;
+  criteria: KbCriteria;
+  appraisal: KbAppraisal;
+  chunk_count: number;
+  indexed: boolean;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  published_at: string | null;
+  approved_at: string | null;
+  reject_reason: string | null;
+  excluded?: boolean;
+}
+export interface KbWorksResp {
+  works: KbWork[];
+  counts: Record<string, number>;
+}
+export interface KbSourcesResp {
+  sources: KbWork[];
+  excluded_guideline_ids: string[];
+}
+
+/** Человекочитаемые названия дизайнов (зеркало api/app/enrichment/design.py). */
+export const KB_DESIGN_LABELS: Record<string, string> = {
+  network_meta_analysis: "Сетевой метаанализ",
+  umbrella_review: "Обзор обзоров",
+  systematic_review_meta_analysis: "Систематический обзор с метаанализом",
+  meta_analysis: "Метаанализ",
+  systematic_review: "Систематический обзор",
+  rct: "Рандомизированное контролируемое исследование",
+  cohort: "Когортное исследование",
+  case_control: "Исследование случай–контроль",
+  cross_sectional: "Поперечное исследование",
+  guideline: "Клинический гайдлайн",
+  narrative_review: "Нарративный обзор",
+  other: "Дизайн не определён",
+};

@@ -86,10 +86,16 @@ def test_router_selects_topic_via_tool_call(monkeypatch):
     monkeypatch.setattr(settings, "assistant_llm_url", "http://llm:18080/v1")
     captured = _fake_chat(monkeypatch, "search_lekarstva")
     assert llm_router.route_topic("дозировка Авиандра?") == "ЛЕКАРСТВА"
-    # в тело ушли tools (все 4 раздела), запрос — очищенный текст
+    # в тело ушли tools (все разделы корпуса), запрос — очищенный текст
     assert "tools" in captured["body"]
     names = {t["function"]["name"] for t in captured["body"]["tools"]}
-    assert names == {"search_skaly", "search_triazh", "search_rekomendacii", "search_lekarstva"}
+    assert names == {
+        "search_skaly",
+        "search_triazh",
+        "search_rekomendacii",
+        "search_lekarstva",
+        "search_nauchnye_stati",
+    }
 
 
 @pytest.mark.parametrize("tool_name,expected", [
@@ -97,6 +103,7 @@ def test_router_selects_topic_via_tool_call(monkeypatch):
     ("search_triazh", "ТРИАЖ"),
     ("search_rekomendacii", "РЕКОМЕНДАЦИИ"),
     ("search_lekarstva", "ЛЕКАРСТВА"),
+    ("search_nauchnye_stati", "НАУЧНЫЕ-СТАТЬИ"),
 ])
 def test_router_topic_mapping(monkeypatch, tool_name, expected):
     from app.services import llm_router

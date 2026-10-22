@@ -6,7 +6,7 @@ import json
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, CheckConstraint, Date, DateTime, ForeignKey, Identity, Index, Integer, String, Text, text
+from sqlalchemy import BigInteger, CheckConstraint, Date, DateTime, ForeignKey, Identity, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -361,3 +361,94 @@ class RefreshToken(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class KBWork(Base):
+    """Единица внешнего корпуса (статья PubMed / гайдлайн ВОЗ) — реестр источников.
+
+    Qdrant — производный индекс: чанки пишутся только из этой таблицы
+    (app/enrichment/index.py), поэтому источник истины и провенанс — здесь.
+    Статусы: candidate (ждёт врача) → approved (в индексе) | rejected;
+    guideline публикуется сразу, superseded — версия заменена новой редакцией,
+    прежние чанки удалены из Qdrant.
+    """
+
+    __tablename__ = "kb_works"
+    __table_args__ = (
+        CheckConstraint("kind in ('article','guideline')", name="kb_works_kind"),
+        CheckConstraint(
+            "status in ('candidate','approved','rejected','excluded','superseded')",
+            name="kb_works_status",
+        ),
+        UniqueConstraint("source", "external_id", name="kb_works_source_external"),
+        UniqueConstraint("guideline_id", name="kb_works_guideline_id"),
+        Index("ix_kb_works_status", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    kind: Mapped[str] = mapped_column(String(16))  # article | guideline
+    source: Mapped[str] = mapped_column(String(16))  # pubmed | who
+    external_id: Mapped[str] = mapped_column(String(64))  # PMID | IRIS handle
+    # Идентификатор чанков в Qdrant: pmid-123 / who-10665-374250.
+    guideline_id: Mapped[str] = mapped_column(String(96))
+    revision: Mapped[str] = mapped_column(String(64))
+    content_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="candidate")
+    title: Mapped[str] = mapped_column(Text)
+    # Полный текст есть только у гайдлайнов ВОЗ (TEXT bitstream IRIS); статьи
+    # хранят абстракт в meta. Отдельная колонка — чтобы не раздувать meta,
+    # которую отдают API-эндпоинты ревью.
+    full_text: Mapped[str] = mapped_column(Text, default="")
+    # journal/year/authors/doi/pmid/url/license/abstract/results/publication_types/
+    # language/fulltext_url — структурированные метаданные источника.
+    meta: Mapped[dict] = mapped_column(JSONB, default=dict)
+    design: Mapped[dict] = mapped_column(JSONB, default=dict)
+    criteria: Mapped[dict] = mapped_column(JSONB, default=dict)
+    appraisal: Mapped[dict] = mapped_column(JSONB, default=dict)
+    retraction: Mapped[str] = mapped_column(String(16), default="unknown")
+    revision_history: Mapped[list] = mapped_column(JSONB, default=list)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    indexed_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    chunk_count: Mapped[int] = mapped_column(default=0)
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reject_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class KBRun(Base):
+    """Прогон обогащения КБ: воспроизводимость поиска (docs/15).
+
+    query_plan — фактические запросы по каждой базе, versions — версии алгоритмов,
+    схем критериев/оценки и эмбеддера; stats/errors — что найдено и что упало.
+    """
+
+    __tablename__ = "kb_runs"
+    __table_args__ = (
+        CheckConstraint("status in ('running','ok','partial','failed')", name="kb_runs_status"),
+        Index("ix_kb_runs_started_at", "started_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    trigger: Mapped[str] = mapped_column(String(16))  # schedule | manual | cli
+    status: Mapped[str] = mapped_column(String(16), default="running")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    query_plan: Mapped[dict] = mapped_column(JSONB, default=dict)
+    versions: Mapped[dict] = mapped_column(JSONB, default=dict)
+    stats: Mapped[dict] = mapped_column(JSONB, default=dict)
+    errors: Mapped[list] = mapped_column(JSONB, default=list)
+
+
+class KBExclusion(Base):
+    """Персональное исключение источника врачом: источник остаётся в КБ, но
+    не попадает в выдачу этого пользователя (фильтр retrieval, docs/15 §6)."""
+
+    __tablename__ = "kb_exclusions"
+    __table_args__ = (UniqueConstraint("user_id", "guideline_id", name="kb_exclusions_user_guideline"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    guideline_id: Mapped[str] = mapped_column(String(96))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
