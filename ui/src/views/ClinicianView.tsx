@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { api, ApiError, Assessment, EmiasSummary, ImportHistoryResult, PatientCard, PatientContacts, Report, Visit } from "../api";
+import { useEffect, useRef, useState } from "react";
+import { api, ApiError, Assessment, EmiasSummary, HistoryType, ImportHistoryResult, PatientCard, PatientContacts, PatientHistoryItem, PatientMedication, Report, Visit } from "../api";
 import TrendChart from "../TrendChart";
 import AssistantTab from "./AssistantTab";
 import DrugLibraryTab from "./DrugLibraryTab";
@@ -623,6 +623,8 @@ function ReportView({ report, error, onBack, onRefresh }: {
         <p style={{ color: "#5a6478", fontSize: 13 }}>Записей о приёмах пока нет.</p>
       )}
       <EmiasBlock patientId={report.patient_id} />
+      <MedicationsBlock patientId={report.patient_id} />
+      <HistoryBlock patientId={report.patient_id} />
 
       <h3>Импорт истории болезни (метрика кейса 2)</h3>
       <p style={{ color: "#5a6478", fontSize: 13 }}>
@@ -727,25 +729,7 @@ function EmiasBlock({ patientId }: { patientId: string }) {
         последняя синхронизация: {data.last_sync ? data.last_sync.slice(0, 16).replace("T", " ") : "—"}
         {data.enabled ? "" : " · интеграция отключена (показаны сохранённые данные)"}
       </p>
-      {data.medications.length > 0 ? (
-        <div className="table-wrap">
-          <table>
-            <thead><tr><th>Назначение</th><th>Дозировка</th><th>С</th><th>Статус</th></tr></thead>
-            <tbody>
-              {data.medications.map((m) => (
-                <tr key={m.id}>
-                  <td>{m.title}</td>
-                  <td>{m.dosage ?? "—"}</td>
-                  <td>{m.started_on ?? "—"}</td>
-                  <td>{MED_STATUS_LABELS[m.status] ?? m.status}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <p style={{ color: "#5a6478", fontSize: 13 }}>Назначений из ЕМИАС нет.</p>
-      )}
+      {/* назначения (включая импортированные) — в блоке «Назначения» (FR-23) */}
     </div>
   );
 }
@@ -826,6 +810,257 @@ function ContactsBlock({ patientId, hasConsent }: { patientId: string; hasConsen
         <div style={{ color: "#5a6478", fontSize: 13 }}>
           {contacts.age !== null && <>Возраст: {contacts.age}</>}
           {contacts.adult === false && <> · несовершеннолетний</>}
+        </div>
+      )}
+      {err && <p className="error">{err}</p>}
+    </div>
+  );
+}
+
+// FR-23: назначения препаратов в карточке. Импорт ЕМИАС — только чтение,
+// локальные назначения врач останавливает/удаляет.
+function MedicationsBlock({ patientId }: { patientId: string }) {
+  const [items, setItems] = useState<PatientMedication[]>([]);
+  const [title, setTitle] = useState("");
+  const [dosage, setDosage] = useState("");
+  const [startedOn, setStartedOn] = useState(new Date().toISOString().slice(0, 10));
+  const [notes, setNotes] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  // Защита от гонки: ответ устаревшего запроса не перезаписывает свежий список.
+  const reqRef = useRef(0);
+
+  const load = () => {
+    const token = ++reqRef.current;
+    api.clinicianMedications(patientId)
+      .then((r) => { if (token === reqRef.current) setItems(r.items); })
+      .catch((e) => { if (token === reqRef.current) setErr(e instanceof ApiError ? e.detail : String(e)); });
+  };
+  useEffect(() => {
+    reqRef.current += 1;
+    setItems([]);
+    setErr("");
+    load();
+  }, [patientId]);
+
+  const add = async () => {
+    if (!title.trim()) return;
+    setBusy(true);
+    setErr("");
+    try {
+      await api.createMedication(patientId, {
+        title: title.trim(),
+        dosage: dosage.trim() || undefined,
+        started_on: startedOn || undefined,
+        notes: notes.trim() || undefined,
+      });
+      setTitle("");
+      setDosage("");
+      setNotes("");
+      load();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const stop = async (medId: string) => {
+    setErr("");
+    try {
+      await api.stopMedication(patientId, medId);
+      load();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.detail : String(e));
+    }
+  };
+
+  const remove = async (medId: string) => {
+    if (!window.confirm("Удалить назначение? Запись будет удалена без возможности восстановления.")) return;
+    setErr("");
+    try {
+      await api.deleteMedication(patientId, medId);
+      load();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.detail : String(e));
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <h3>Назначения (FR-23)</h3>
+      {items.length > 0 ? (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Препарат</th><th>Дозировка</th><th>С</th><th>По</th><th>Статус</th><th>Заметка</th><th></th></tr>
+            </thead>
+            <tbody>
+              {items.map((m) => (
+                <tr key={m.id}>
+                  <td>
+                    {m.title}{" "}
+                    {m.source === "emias" && (
+                      <span style={{
+                        fontSize: 11, color: "#5a6478", border: "1px solid #cfd6e4",
+                        borderRadius: 4, padding: "0 4px", whiteSpace: "nowrap",
+                      }}>ЕМИАС</span>
+                    )}
+                  </td>
+                  <td>{m.dosage ?? "—"}</td>
+                  <td>{m.started_on ?? "—"}</td>
+                  <td>{m.ended_on ?? "—"}</td>
+                  <td>{MED_STATUS_LABELS[m.status] ?? m.status}</td>
+                  <td style={{ whiteSpace: "pre-wrap" }}>{m.notes ?? "—"}</td>
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    {m.editable ? (
+                      <>
+                        {m.status !== "stopped" && (
+                          <button className="link" style={{ fontSize: 12 }} onClick={() => stop(m.id)}>
+                            Остановить
+                          </button>
+                        )}
+                        <button
+                          className="link"
+                          style={{ color: "#c62828", fontSize: 12, marginLeft: 8 }}
+                          onClick={() => remove(m.id)}
+                        >Удалить</button>
+                      </>
+                    ) : (
+                      <span style={{ color: "#5a6478", fontSize: 12 }}>только чтение</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p style={{ color: "#5a6478", fontSize: 13 }}>Назначений пока нет.</p>
+      )}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", maxWidth: 760 }}>
+        <input placeholder="Препарат" value={title} onChange={(e) => setTitle(e.target.value)} style={{ maxWidth: 200 }} />
+        <input placeholder="Дозировка" value={dosage} onChange={(e) => setDosage(e.target.value)} style={{ maxWidth: 150 }} />
+        <input type="date" aria-label="Дата начала" value={startedOn} onChange={(e) => setStartedOn(e.target.value)} />
+        <input placeholder="Заметка" value={notes} onChange={(e) => setNotes(e.target.value)} style={{ maxWidth: 240 }} />
+        <button onClick={add} disabled={busy || !title.trim()}>Назначить</button>
+      </div>
+      {err && <p className="error">{err}</p>}
+    </div>
+  );
+}
+
+const HISTORY_CHIPS: { value: HistoryType; label: string }[] = [
+  { value: "visit", label: "Приёмы" },
+  { value: "medication", label: "Назначения" },
+  { value: "screening", label: "Скрининги" },
+  { value: "adverse", label: "Нежелательные явления" },
+];
+
+const HISTORY_LABELS: Record<HistoryType, string> = {
+  visit: "приём",
+  medication: "назначение",
+  screening: "скрининг",
+  adverse: "НЯ",
+};
+
+const HISTORY_SOURCE_LABELS: Record<string, string> = {
+  clinician: "врач",
+  emias: "ЕМИАС",
+  patient: "пациент",
+};
+
+// FR-23: единая хронология карточки. Фильтр по типам — чипы, подгрузка курсором.
+function HistoryBlock({ patientId }: { patientId: string }) {
+  const [types, setTypes] = useState<HistoryType[]>(HISTORY_CHIPS.map((c) => c.value));
+  const [items, setItems] = useState<PatientHistoryItem[]>([]);
+  const [next, setNext] = useState<string | null>(null);
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+  const key = types.join(",");
+  // Смена пациента или фильтра инвалидирует старые ответы и курсор.
+  const reqRef = useRef(0);
+
+  const load = async (before?: string) => {
+    const token = ++reqRef.current;
+    if (types.length === 0) {
+      setItems([]);
+      setNext(null);
+      return;
+    }
+    setLoading(true);
+    setErr("");
+    try {
+      const r = await api.clinicianHistory(patientId, { types: key, limit: 50, before });
+      if (token !== reqRef.current) return;
+      setItems((prev) => (before ? [...prev, ...r.items] : r.items));
+      setNext(r.next_before);
+    } catch (e) {
+      if (token !== reqRef.current) return;
+      setErr(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      if (token === reqRef.current) setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    reqRef.current += 1;
+    setItems([]);
+    setNext(null);
+    setErr("");
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [patientId, key]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <h3>История пациента (FR-23)</h3>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+        {HISTORY_CHIPS.map((chip) => {
+          const on = types.includes(chip.value);
+          return (
+            <button
+              key={chip.value}
+              onClick={() => setTypes((prev) => (
+                prev.includes(chip.value) ? prev.filter((x) => x !== chip.value) : [...prev, chip.value]
+              ))}
+              aria-pressed={on}
+              style={{
+                fontSize: 13, padding: "2px 10px", borderRadius: 12,
+                border: "1px solid #cfd6e4", cursor: "pointer",
+                background: on ? "#e8eefc" : "transparent",
+                color: on ? "#1b3a8a" : "#5a6478",
+              }}
+            >{chip.label}</button>
+          );
+        })}
+        <button className="link" style={{ fontSize: 13 }} onClick={() => load()} disabled={loading}>
+          Обновить
+        </button>
+      </div>
+      {items.length > 0 ? (
+        <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+          {items.map((it) => (
+            <li key={`${it.type}:${it.ref_id}`} style={{ borderLeft: "3px solid #cfd6e4", paddingLeft: 10 }}>
+              <div style={{ fontSize: 12, color: "#5a6478" }}>
+                {it.at.slice(0, 16).replace("T", " ")} · {HISTORY_LABELS[it.type]} ·{" "}
+                {HISTORY_SOURCE_LABELS[it.source] ?? it.source}
+              </div>
+              <div style={{ fontWeight: 600 }}>{it.title}</div>
+              <div style={{ fontSize: 13, whiteSpace: "pre-wrap" }}>{it.summary}</div>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p style={{ color: "#5a6478", fontSize: 13 }}>
+          {types.length === 0
+            ? "Выберите хотя бы один тип событий."
+            : loading ? "Загрузка…" : "Событий нет."}
+        </p>
+      )}
+      {next && (
+        <div>
+          <button onClick={() => load(next)} disabled={loading}>Показать ещё</button>
         </div>
       )}
       {err && <p className="error">{err}</p>}

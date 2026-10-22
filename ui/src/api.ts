@@ -308,6 +308,45 @@ export const api = {
     }),
   deleteVisit: (patientId: string, visitId: string) =>
     req<void>(`/api/v1/clinician/patients/${patientId}/visits/${visitId}`, { method: "DELETE" }),
+
+  clinicianMedications: (patientId: string, params: { status?: string; active_only?: boolean } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.status) qs.set("status", params.status);
+    if (params.active_only) qs.set("active_only", "true");
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return req<{ items: PatientMedication[] }>(
+      `/api/v1/clinician/patients/${patientId}/medications${suffix}`);
+  },
+  createMedication: (patientId: string, body: {
+    title: string; dosage?: string; started_on?: string; ended_on?: string;
+    status?: string; notes?: string;
+  }) =>
+    req<PatientMedication>(`/api/v1/clinician/patients/${patientId}/medications`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateMedication: (patientId: string, medId: string, body: {
+    dosage?: string | null; status?: string; ended_on?: string | null; notes?: string | null;
+  }) =>
+    req<PatientMedication>(`/api/v1/clinician/patients/${patientId}/medications/${medId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  stopMedication: (patientId: string, medId: string, endedOn?: string) =>
+    req<PatientMedication>(`/api/v1/clinician/patients/${patientId}/medications/${medId}/stop`, {
+      method: "POST",
+      body: JSON.stringify({ ended_on: endedOn ?? null }),
+    }),
+  deleteMedication: (patientId: string, medId: string) =>
+    req<void>(`/api/v1/clinician/patients/${patientId}/medications/${medId}`, { method: "DELETE" }),
+  clinicianHistory: (patientId: string, params: { types?: string; limit?: number; before?: string } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.types) qs.set("types", params.types);
+    if (params.limit) qs.set("limit", String(params.limit));
+    if (params.before) qs.set("before", params.before);
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return req<PatientHistory>(`/api/v1/clinician/patients/${patientId}/history${suffix}`);
+  },
   vapidPublicKey: () => req<{ public_key: string }>("/api/v1/push/vapid-public-key"),
   subscribePush: (endpoint: string, keys: { p256dh: string; auth: string }) =>
     req<{ subscribed: boolean }>("/api/v1/push/subscribe", {
@@ -436,6 +475,39 @@ export interface Visit {
   duration_min: number | null;
   notes: string;
   created_at: string;
+}
+
+export type MedicationSource = "emias" | "clinician";
+
+export interface PatientMedication {
+  id: string;
+  title: string;
+  dosage: string | null;
+  started_on: string | null;
+  ended_on: string | null;
+  status: string;
+  notes: string | null;
+  source: MedicationSource;
+  clinician_id: string | null;
+  editable: boolean;
+  created_at: string;
+}
+
+export type HistoryType = "visit" | "medication" | "screening" | "adverse";
+
+export interface PatientHistoryItem {
+  type: HistoryType;
+  at: string;
+  title: string;
+  summary: string;
+  ref_id: string;
+  source: MedicationSource | "patient";
+}
+
+export interface PatientHistory {
+  items: PatientHistoryItem[];
+  next_before: string | null;
+  types: HistoryType[];
 }
 
 export interface EmiasMedication {

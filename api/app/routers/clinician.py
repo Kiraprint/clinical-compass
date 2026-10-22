@@ -5,7 +5,7 @@ import uuid
 from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app import services
@@ -160,6 +160,98 @@ def delete_visit(
     """Удаление ошибочной записи приёма (исправление опечаток). Roster + аудит VISIT_DELETE."""
     ip = request.client.host if request.client else None
     services.clinician.delete_visit(db, user.id, patient_id, visit_id, ip=ip)
+
+class MedicationBody(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    dosage: str | None = Field(default=None, max_length=200)
+    started_on: date | None = None
+    ended_on: date | None = None
+    status: str = "active"
+    notes: str | None = Field(default=None, max_length=2000)
+
+class MedicationPatchBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dosage: str | None = Field(default=None, max_length=200)
+    status: str | None = None
+    ended_on: date | None = None
+    notes: str | None = Field(default=None, max_length=2000)
+
+class StopMedicationBody(BaseModel):
+    ended_on: date | None = None
+
+@router.get("/clinician/patients/{patient_id}/medications")
+def list_medications(
+    patient_id: uuid.UUID,
+    status: str | None = Query(default=None, pattern="^(active|completed|stopped|unknown)$"),
+    active_only: bool = Query(default=False),
+    user: User = Depends(require_clinician), db: Session = Depends(get_db),
+):
+    """Назначения пациента: импорт ЕМИАС + назначения врача (FR-23). Roster + consent."""
+    return {
+        "items": services.medications.list_medications(
+            db, user.id, patient_id, status=status, active_only=active_only,
+        )
+    }
+
+@router.post("/clinician/patients/{patient_id}/medications", status_code=201)
+def create_medication(
+    patient_id: uuid.UUID, body: MedicationBody, request: Request,
+    user: User = Depends(require_clinician), db: Session = Depends(get_db),
+):
+    """Назначение препарата врачом. Roster + consent + аудит PRESCRIBE_MEDICATION."""
+    ip = request.client.host if request.client else None
+    return services.medications.create_medication(
+        db, user.id, patient_id,
+        title=body.title, dosage=body.dosage, started_on=body.started_on,
+        ended_on=body.ended_on, status=body.status, notes=body.notes, ip=ip,
+    )
+
+@router.patch("/clinician/patients/{patient_id}/medications/{med_id}")
+def update_medication(
+    patient_id: uuid.UUID, med_id: uuid.UUID, body: MedicationPatchBody, request: Request,
+    user: User = Depends(require_clinician), db: Session = Depends(get_db),
+):
+    """Правка дозировки/статуса/даты окончания/заметки. Аудит UPDATE_MEDICATION."""
+    ip = request.client.host if request.client else None
+    return services.medications.update_medication(
+        db, user.id, patient_id, med_id, body.model_dump(exclude_unset=True), ip=ip,
+    )
+
+@router.post("/clinician/patients/{patient_id}/medications/{med_id}/stop")
+def stop_medication(
+    patient_id: uuid.UUID, med_id: uuid.UUID, request: Request,
+    body: StopMedicationBody | None = None,
+    user: User = Depends(require_clinician), db: Session = Depends(get_db),
+):
+    """Остановка приёма (status='stopped', ended_on — сегодня по умолчанию)."""
+    ip = request.client.host if request.client else None
+    return services.medications.stop_medication(
+        db, user.id, patient_id, med_id, ended_on=body.ended_on if body else None, ip=ip,
+    )
+
+@router.delete("/clinician/patients/{patient_id}/medications/{med_id}", status_code=204)
+def delete_medication(
+    patient_id: uuid.UUID, med_id: uuid.UUID, request: Request,
+    user: User = Depends(require_clinician), db: Session = Depends(get_db),
+):
+    """Удаление ошибочного назначения (только своя локальная строка). Аудит DELETE_MEDICATION."""
+    ip = request.client.host if request.client else None
+    services.medications.delete_medication(db, user.id, patient_id, med_id, ip=ip)
+
+@router.get("/clinician/patients/{patient_id}/history")
+def patient_history(
+    patient_id: uuid.UUID, request: Request,
+    types: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    before: str | None = Query(default=None),
+    user: User = Depends(require_clinician), db: Session = Depends(get_db),
+):
+    """Лента карточки: приёмы, назначения, скрининги, НЯ (FR-23). Аудит READ_PATIENT_HISTORY."""
+    ip = request.client.host if request.client else None
+    return services.patient_history.patient_history(
+        db, user.id, patient_id, types=types, limit=limit, before=before, ip=ip,
+    )
 
 class ClinicianChatBody(BaseModel):
     content: str = Field(min_length=1)

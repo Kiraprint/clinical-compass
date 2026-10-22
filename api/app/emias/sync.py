@@ -267,7 +267,7 @@ def patient_summary(db: Session, patient_id) -> dict:
     link = db.scalar(select(EmiasLink).where(EmiasLink.patient_id == patient_id))
     meds = db.scalars(
         select(PatientMedication)
-        .where(PatientMedication.patient_id == patient_id)
+        .where(PatientMedication.patient_id == patient_id, PatientMedication.source == "emias")
         .order_by(PatientMedication.started_on.desc().nullslast(), PatientMedication.created_at.desc())
     ).all()
     encounters = db.scalar(

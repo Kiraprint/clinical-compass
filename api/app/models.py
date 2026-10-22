@@ -534,24 +534,44 @@ class EmiasLink(Base):
 
 
 class PatientMedication(Base):
-    """Назначение препарата из ЕМИАС (FR-25, «история назначений»).
+    """Назначение препарата (FR-23, FR-25).
 
-    Название и дозировка — спецкатегория ПДн (косвенно указывают диагноз) →
-    EncryptedText (pgcrypto, CC_DATA_KEY). emias_id unique — идемпотентный upsert.
+    Два источника: 'emias' — импорт из ЕМИАС (idempotent upsert по emias_id,
+    clinician_id NULL, строка read-only для врача) и 'clinician' — назначение
+    врача в карточке (clinician_id, правится/останавливается/удаляется автором).
+    Название, дозировка и заметка — спецкатегория ПДн (косвенно указывают
+    диагноз) → EncryptedText (pgcrypto, CC_DATA_KEY).
     """
 
     __tablename__ = "patient_medications"
     __table_args__ = (
         CheckConstraint("status in ('active','completed','stopped','unknown')", name="patient_medications_status"),
+        CheckConstraint("source in ('emias','clinician')", name="patient_medications_source"),
+        CheckConstraint(
+            "ended_on is null or started_on is null or ended_on >= started_on",
+            name="patient_medications_dates",
+        ),
+        # emias_id уникален только среди импортированных строк: у локальных
+        # назначений его нет, NULL не должен блокировать вставку.
+        Index(
+            "uq_patient_medications_emias_id",
+            "emias_id",
+            unique=True,
+            postgresql_where=text("emias_id is not null"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    clinician_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     title: Mapped[str] = mapped_column(EncryptedText())
     dosage: Mapped[str | None] = mapped_column(EncryptedText(), nullable=True)
     started_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    ended_on: Mapped[date | None] = mapped_column(Date, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="unknown")
-    emias_id: Mapped[str] = mapped_column(String(64), unique=True)
+    notes: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
+    source: Mapped[str] = mapped_column(String(16), default="clinician", server_default=text("'clinician'"))
+    emias_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
 
 

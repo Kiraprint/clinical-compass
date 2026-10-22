@@ -45,6 +45,16 @@ def require_roster(db: Session, clinician_id, patient_id) -> None:
     _require_roster(db, clinician_id, patient_id)
 
 
+def require_patient_consent(db: Session, patient_id) -> None:
+    """Публичный consent-гейт для клиницистских разделов карты (FR-23 назначения,
+    история пациента). Без активного согласия спецкатегория ПДн недоступна."""
+    active = db.scalar(
+        select(Consent.id).where(Consent.user_id == patient_id, Consent.revoked_at.is_(None))
+    )
+    if active is None:
+        raise Problem(403, "CONSENT_REQUIRED", "Нет активного согласия пациента — данные недоступны (152-ФЗ)")
+
+
 def _prescribed_scales_of(db: Session, patient_id) -> list[str]:
     """Коды назначенных пациенту шкал (упорядочены по времени назначения)."""
     rows = db.scalars(
