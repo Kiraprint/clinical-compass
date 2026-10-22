@@ -109,8 +109,9 @@ def route_topic(query: str) -> str | None:
         data = json.dumps(payload).encode("utf-8")
         url = settings.assistant_llm_url.rstrip("/") + "/chat/completions"
         headers = {"Content-Type": "application/json"}
-        if settings.assistant_llm_api_key:
-            headers["Authorization"] = f"Bearer {settings.assistant_llm_api_key}"
+        api_key = settings.assistant_llm_api_key.strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         req = urllib.request.Request(url, data=data, headers=headers)
         with urllib.request.urlopen(req, timeout=settings.assistant_llm_timeout) as resp:
             body = json.loads(resp.read().decode("utf-8"))

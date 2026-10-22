@@ -213,17 +213,21 @@ cd android && ./gradlew assembleDebug           # APK: app/build/outputs/apk/deb
 #    CC_ASSISTANT_LLM_MODEL=local
 #    затем: docker compose -f infra/docker-compose.yml up -d api
 #
-# Вариант с omniroute (шлюз с аутентификацией, комбо home-stable):
-#    шлюз слушает loopback хоста, поэтому в сеть контейнеров его пробрасывает
-#    relay (socat) на docker-шлюзе:
+# Вариант с omniroute (OpenAI-совместимый шлюз с ключом):
+#    шлюз слушает loopback хоста, контейнер его не видит; пробрасываем relay
+#    (socat) в сеть шлюза и публикуем на docker-шлюзе. <сеть> — сеть, в которой
+#    живёт контейнер omniroute (docker inspect <контейнер> → NetworkSettings.Networks),
+#    у hermes-стека это hermes-docker_default; <контейнер> — его имя.
 #    docker run -d --restart unless-stopped --name omniroute-relay \
-#      --network hermes-docker_default -p 172.17.0.1:20133:20128 \
-#      alpine/socat TCP-LISTEN:20128,fork,reuseaddr TCP:<omniroute-контейнер>:20128
-#    # и в infra/.env
+#      --network <сеть> -p 172.17.0.1:20133:20128 \
+#      alpine/socat:1.8.0.0 TCP-LISTEN:20128,fork,reuseaddr TCP:<контейнер>:20128
+#    # и в infra/.env (compose прокидывает эти переменные в api)
 #    CC_ASSISTANT_LLM_URL=http://172.17.0.1:20133/v1
-#    CC_ASSISTANT_LLM_MODEL=home-stable
+#    CC_ASSISTANT_LLM_MODEL=<id модели, напр. opencode-go/deepseek-v4.1-flash>
 #    CC_ASSISTANT_LLM_API_KEY=<персональный ключ omniroute>
-#    CC_ASSISTANT_LLM_TIMEOUT=30   # reasoning-модели отвечают 10-18 c
+#    CC_ASSISTANT_LLM_TIMEOUT=30   # модели с reasoning отвечают 4-20 c
+#    Порог 172.17.0.1 виден и другим контейнерам хоста, поэтому ключ omniroute
+#    должен быть ограничен по моделям; публикуйте порт только на docker-шлюзе.
 ```
 
 Без `CC_ASSISTANT_LLM_URL` роутер выключен (эквивалент «Все разделы») — весь стек и e2e работают без LLM.
