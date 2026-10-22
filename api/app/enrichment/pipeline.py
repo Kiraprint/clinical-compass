@@ -287,6 +287,10 @@ def execute(
         documents, fetched_plan, fetch_errors = collect_documents(cfg, today)
         query_plan = query_plan or fetched_plan
         errors.extend(fetch_errors)
+        if run is not None:
+            # план должен попасть в журнал: он коммитится до сбора документов.
+            run.query_plan = query_plan
+            db.commit()
 
     stats: dict[str, int] = {
         "fetched": len(documents),

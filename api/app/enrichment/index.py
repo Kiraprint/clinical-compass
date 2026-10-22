@@ -245,6 +245,12 @@ def index_work(
     try:
         client.upsert(collection_name=kb_store.COLLECTION, points=points, wait=True)
     except Exception:  # noqa: BLE001 — восстанавливаем действующую версию
+        # Упавший upsert мог записать часть новых точек: сначала снимаем всё по
+        # work_id, иначе индекс останется со смесью двух редакций.
+        try:
+            remove_work(client, work)
+        except Exception:  # noqa: BLE001 — не маскируем исходную ошибку
+            pass
         if previous:
             client.upsert(collection_name=kb_store.COLLECTION, points=previous, wait=True)
         raise

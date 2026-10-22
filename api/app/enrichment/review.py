@@ -28,7 +28,12 @@ class ReviewError(ValueError):
 def get_work(db: Session, work_id: uuid.UUID, *, for_update: bool = False) -> KBWork | None:
     # for_update: два админа (или админ + прогон) не должны решать судьбу одной
     # записи параллельно — иначе approve и reject перетирают друг друга.
-    return db.get(KBWork, work_id, with_for_update=for_update)
+    stmt = select(KBWork).where(KBWork.id == work_id)
+    if for_update:
+        # Явный FOR UPDATE: db.get() отдаёт объект из identity map, и блокировка
+        # строки может не примениться, если объект уже загружен в сессию.
+        stmt = stmt.with_for_update().execution_options(populate_existing=True)
+    return db.scalar(stmt)
 
 
 def get_work_by_guideline(db: Session, guideline_id: str) -> KBWork | None:
@@ -82,26 +87,39 @@ def approve(
         )
         raise ReviewError(f"Жёсткие критерии не выполнены, approve запрещён. {labels}")
     embedder = embedder or build_embedder()
+    now = dt.datetime.now(dt.timezone.utc)
+    # Статус фиксируется ДО индексации: точка в Qdrant не может существовать
+    # для работы, которая в реестре всё ещё candidate (сбой финального commit
+    # в вызывающем коде иначе оставлял бы неодобренный контент в выдаче).
+    work.status = "approved"
+    work.chunk_count = 0
+    work.indexed_hash = None
+    work.published_at = None
+    work.approved_by = actor_id
+    work.approved_at = now
+    work.reject_reason = None
+    db.commit()
     try:
         chunks = index_mod.index_work(
             client, embedder, work, chunk_chars=cfg.chunk_chars, chunk_overlap=cfg.chunk_overlap
         )
     except Exception:
-        # Частично записанные точки не должны остаться без approved-записи.
+        # Индексация не удалась — возвращаем работу в очередь ревью, точки
+        # (если успели записаться) снимаем: approved без чанков бессмыслен.
+        work.status = "candidate"
+        work.approved_by = None
+        work.approved_at = None
         try:
             index_mod.remove_work(client, work)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 — уборка не должна маскировать исходную ошибку
             pass
+        db.commit()
         raise
-    work.status = "approved"
     work.chunk_count = chunks
-    work.published_at = dt.datetime.now(dt.timezone.utc)
     work.indexed_hash = work.content_hash
-    work.approved_by = actor_id
-    work.approved_at = dt.datetime.now(dt.timezone.utc)
-    work.reject_reason = None
+    work.published_at = now
     audit.record(db, actor_id, "KB_SOURCE_APPROVE", "kb_work", str(work.id))
-    db.flush()
+    db.commit()
     return work
 
 

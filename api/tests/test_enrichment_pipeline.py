@@ -460,3 +460,26 @@ def test_excluded_work_cannot_be_approved(db_session, qdrant, cfg):
     assert work.status == "excluded"
     with pytest.raises(review.ReviewError):
         review.approve(db_session, qdrant, work.id, None, cfg)
+
+
+def test_failed_indexing_returns_work_to_review_queue(db_session, qdrant, cfg, monkeypatch):
+    """Approved-статус фиксируется до индексации: сбой индексации возвращает candidate."""
+    doc = make_guideline(
+        license="",
+        text=make_guideline().text.replace("Creative Commons", "Proprietary"),
+    )
+    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
+    assert work.status == "candidate"
+
+    def broken_index(*args, **kwargs):
+        raise RuntimeError("qdrant down")
+
+    monkeypatch.setattr(review.index_mod, "index_work", broken_index)
+    with pytest.raises(RuntimeError):
+        review.approve(db_session, qdrant, work.id, None, cfg)
+
+    assert work.status == "candidate"
+    assert work.approved_at is None
+    assert work.indexed_hash is None
+    assert _points(qdrant, work) == 0
