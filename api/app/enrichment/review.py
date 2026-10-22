@@ -104,23 +104,50 @@ def approve(
             client, embedder, work, chunk_chars=cfg.chunk_chars, chunk_overlap=cfg.chunk_overlap
         )
     except Exception:
-        # Индексация не удалась — возвращаем работу в очередь ревью, точки
-        # (если успели записаться) снимаем: approved без чанков бессмыслен.
-        work.status = "candidate"
-        work.approved_by = None
-        work.approved_at = None
+        # Индексация не удалась: точки (если успели записаться) снимаем, работу
+        # возвращаем в очередь — но только если параллельное решение её не
+        # успело изменить (иначе затрём reject/новую версию).
         try:
             index_mod.remove_work(client, work)
         except Exception:  # noqa: BLE001 — уборка не должна маскировать исходную ошибку
             pass
-        db.commit()
+        current = get_work(db, work.id, for_update=True)
+        if (
+            current is not None
+            and current.status == "approved"
+            and current.content_hash == work.content_hash
+        ):
+            current.status = "candidate"
+            current.approved_by = None
+            current.approved_at = None
+            current.published_at = None
+            current.chunk_count = 0
+            current.indexed_hash = None
+            db.commit()
+        else:
+            db.rollback()
         raise
-    work.chunk_count = chunks
-    work.indexed_hash = work.content_hash
-    work.published_at = now
-    audit.record(db, actor_id, "KB_SOURCE_APPROVE", "kb_work", str(work.id))
+    # Индексация шла без блокировки строки: подтверждаем под блокировкой, что
+    # работа всё ещё approved и той же версии, иначе точки принадлежат уже
+    # отклонённой/замещённой версии и индекс надо очистить.
+    current = get_work(db, work.id, for_update=True)
+    if (
+        current is None
+        or current.status != "approved"
+        or current.content_hash != work.content_hash
+    ):
+        try:
+            index_mod.remove_work_id(client, work.id)
+        except Exception:  # noqa: BLE001
+            pass
+        db.rollback()
+        raise ReviewError("Работа изменена параллельным решением; индексация отменена.")
+    current.chunk_count = chunks
+    current.indexed_hash = current.content_hash
+    current.published_at = now
+    audit.record(db, actor_id, "KB_SOURCE_APPROVE", "kb_work", str(current.id))
     db.commit()
-    return work
+    return current
 
 
 def reject(

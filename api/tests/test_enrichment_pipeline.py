@@ -473,6 +473,14 @@ def test_failed_indexing_returns_work_to_review_queue(db_session, qdrant, cfg, m
     assert work.status == "candidate"
 
     def broken_index(*args, **kwargs):
+        # К моменту индексации approved уже обязан быть в БД: иначе сбой
+        # финального коммита оставил бы точки без одобренной записи.
+        from app import db as db_module
+
+        with db_module.SessionLocal() as other:
+            durable = other.scalar(select(KBWork).where(KBWork.id == work.id))
+            assert durable is not None and durable.status == "approved"
+            assert durable.chunk_count == 0
         raise RuntimeError("qdrant down")
 
     monkeypatch.setattr(review.index_mod, "index_work", broken_index)

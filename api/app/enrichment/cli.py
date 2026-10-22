@@ -18,7 +18,7 @@ from sqlalchemy import text
 
 from app import db as db_module
 from app.config import settings
-from app.enrichment import index as index_mod, pipeline, review
+from app.enrichment import pipeline, review
 from app.enrichment.config import EnrichmentConfig
 from app.models import KBRun, KBWork
 
@@ -118,18 +118,9 @@ def _cmd_review(args) -> int:
             payload = review.serialize(work)
         elif args.action == "approve":
             work_id = _uuid(args.id)
+            # review.approve сам коммитит статус до индексации и откатывает его
+            # при сбое публикации — компенсация в CLI больше не нужна.
             work = review.approve(session, _client(), work_id, None, cfg)
-            try:
-                session.commit()
-            except Exception:
-                # Индекс уже записан, БД откатилась — снимаем точки, иначе
-                # неодобренный источник останется доступен агенту.
-                session.rollback()
-                try:
-                    index_mod.remove_work_id(_client(), work_id)
-                except Exception:  # noqa: BLE001
-                    pass
-                raise
             payload = review.serialize(work)
         elif args.action == "reject":
             work = review.reject(

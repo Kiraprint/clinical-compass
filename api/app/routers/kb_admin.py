@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db import get_db
 from app.deps import require_admin
-from app.enrichment import index as kb_index, pipeline, review
+from app.enrichment import pipeline, review
 from app.enrichment.config import EnrichmentConfig
 from app.errors import Problem
 from app.models import KBRun, KBWork, User
@@ -105,12 +105,8 @@ def approve(work_id: uuid.UUID, user: User = Depends(require_admin), db: Session
     except review.ReviewError as exc:
         db.rollback()
         raise Problem(409, "REVIEW_CONFLICT", str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001 — индекс уже записан, БД откатилась
+    except Exception as exc:  # noqa: BLE001 — review.approve сам откатывает статус
         db.rollback()
-        try:
-            kb_index.remove_work_id(_client(), work_id)
-        except Exception:  # noqa: BLE001 — уборка best effort
-            pass
         raise Problem(503, "INDEX_FAILED", f"Индексация не завершена: {exc}") from exc
     return review.serialize(work)
 
