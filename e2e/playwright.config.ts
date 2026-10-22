@@ -11,5 +11,8 @@ export default defineConfig({
     // (12ч cookie после клика). Заголовок снимает её для e2e; на localhost он безвреден.
     extraHTTPHeaders: { "X-FxTunnel-Skip-Warning": "true" },
   },
+  // Один демо-стек и одна БД на весь прогон: тесты меняют её состояние
+  // (эскалации, напоминания, ротстер), поэтому параллельные воркеры ловят гонки.
+  workers: 1,
   reporter: [["list"]],
 });
