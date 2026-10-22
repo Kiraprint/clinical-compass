@@ -1,7 +1,7 @@
 """patient contacts: users.phone (encrypted) + users.birth_date
 
 Revision ID: e3f4a5b6c7d8
-Revises: d2e3f4a5b6c7
+Revises: a2b3c4d5e6f7
 Create Date: 2026-10-22
 
 FR-22: контакты пациента в карточке врача. phone — ПДн, хранится как bytea

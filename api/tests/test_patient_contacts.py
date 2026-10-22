@@ -6,6 +6,7 @@ import uuid
 from datetime import date, timedelta
 
 import pytest
+from sqlalchemy import text
 
 from app.models import AuditLog, User
 
@@ -57,7 +58,25 @@ def test_phone_normalization(client, raw):
     assert resp.json()["phone"] == "+79261234567"
 
 
-@pytest.mark.parametrize("raw", ["12345", "+14155552671", "не телефон", "899912345678", "+7 926 123-45-6a"])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "12345",
+        "+14155552671",
+        "не телефон",
+        "899912345678",
+        "+7 926 123-45-6a",
+        # Явный `+` допускает только полный +7XXXXXXXXXX: усечённый ввод
+        # не должен молча превращаться в другой номер (+77926123456).
+        "+7926123456",
+        "+792612345678",
+        "+",
+        # Не-ASCII цифры: str.isdigit() их принимает, но номер недозваниваемый.
+        "٩٢٦١٢٣٤٥٦٧",
+        "+7٩٢٦١٢٣٤٥٦٧",
+        "7⁹²⁶¹²³⁴⁵⁶⁷",
+    ],
+)
 def test_phone_invalid(client, raw):
     _, pid, c, _ = _pair(client, "b" + uuid.uuid4().hex[:8])
     resp = client.patch(
@@ -191,10 +210,11 @@ def test_patient_self_update_only_own(client, db_session):
     mine = db_session.get(User, uuid.UUID(pid1))
     assert mine.phone == "+79261112233"
 
-    # Self-service не имеет маршрута с чужим patient_id: обновить другого нельзя.
+    # Self-service не имеет маршрута с чужим patient_id: обновить другого нельзя
+    # (относящегося к /profile/contacts/{id} маршрута нет → 404).
     assert client.patch(
         f"/api/v1/profile/contacts/{pid2}", json={"phone": "89261112233"}, headers=h1
-    ).status_code in (404, 405)
+    ).status_code == 404
 
 
 def test_consent_revocation_clears_contacts(client, db_session):
@@ -216,3 +236,23 @@ def test_consent_revocation_clears_contacts(client, db_session):
     assert client.get(
         f"/api/v1/clinician/patients/{pid}/contacts", headers=c
     ).json()["code"] == "CONSENT_REQUIRED"
+
+
+def test_phone_encrypted_at_rest(client, db_session):
+    """F1: телефон — ПДн, на диске лежит pgp-блок, plaintext отсутствует."""
+    _, pid, c, _ = _pair(client, "enc")
+    assert client.patch(
+        f"/api/v1/clinician/patients/{pid}/contacts",
+        json={"phone": "89261234567", "birth_date": "1990-05-17"},
+        headers=c,
+    ).status_code == 200
+
+    db_session.expire_all()
+    # Сырой SQL в обход ORM: колонка bytea, номера в открытом виде нет.
+    raw = db_session.execute(
+        text("SELECT phone::text AS p FROM users WHERE id = CAST(:p AS uuid)").bindparams(p=pid)
+    ).one()
+    assert "9261234567" not in raw.p
+    assert raw.p.startswith("\\xc3")  # OpenPGP-пакет pgp_sym_encrypt, не текст
+    # ORM (EncryptedText) расшифровывает обратно.
+    assert db_session.get(User, uuid.UUID(pid)).phone == "+79261234567"

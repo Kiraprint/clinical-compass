@@ -35,13 +35,21 @@ def normalize_phone(raw: object) -> str | None:
         return None
     if not isinstance(raw, str):
         raise Problem(422, "PHONE_INVALID", "Телефон должен быть строкой")
-    digits = _PHONE_SEPARATORS.sub("", raw)
-    if digits.startswith("+"):
-        digits = digits[1:]
-    if digits == "":
+    compact = _PHONE_SEPARATORS.sub("", raw)
+    if compact == "":
         return None
-    if not digits.isdigit():
+    # Только ASCII-цифры: str.isdigit() принимает арабо-индийские и надстрочные
+    # цифры, из которых получается недозваниваемый «номер».
+    explicit_plus = compact.startswith("+")
+    digits = compact[1:] if explicit_plus else compact
+    if not (digits.isascii() and digits.isdigit()):
         raise Problem(422, "PHONE_INVALID", "Телефон содержит недопустимые символы")
+    if explicit_plus:
+        # Явный `+` — только полный международный РФ-формат +7XXXXXXXXXX;
+        # иначе усечённый ввод вида +7926123456 молча стал бы другим номером.
+        if len(digits) == 11 and digits[0] == "7":
+            return "+" + digits
+        raise Problem(422, "PHONE_INVALID", "Ожидается российский номер: +7XXXXXXXXXX, 8XXXXXXXXXX или 10 цифр")
     if len(digits) == 10:  # 9XXXXXXXXX без кода страны
         return "+7" + digits
     if len(digits) == 11 and digits[0] in ("7", "8"):  # 7XXXXXXXXXX / 8XXXXXXXXXX
