@@ -116,6 +116,7 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | E6 | UI: patient app, clinician dashboard, admin; simulator seed | FR-14 + всё | e2e-сценарий питча (04 §6) проходит на docker compose |
 | E7 | ИИ-агент: KB (Qdrant) + гибридный поиск + LangGraph + UI-вкладка | FR-17 | тесты агента (red line, цитаты, offtopic) + e2e вкладки «Ассистент» |
 | E8 | `kb-enrichment`: источники PubMed/ВОЗ, критерии, ревью, производный индекс | FR-20 | оффлайн-тесты коннекторов/критериев/пайплайна + прогон, воспроизводимый по `kb_runs` |
+| E9 | Сессии клинического ассистента: треды, история как контекст retrieval, мультипациентская область, UI-колонка диалогов | FR-21 | `test_assistant_threads.py` (изоляция врачей, roster-гейт, история/обрезка, аудит, каскад) + `npm run build` |
 
 ## 5. DoD (Definition of Done) эпика
 
@@ -150,6 +151,7 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | FR-18 | E4 | `test_clinician.py` (CLINICIAN-шкалы) |
 | FR-19 | E5 | `test_patient_flows.py` (чек-ин + дневник + приём) |
 | FR-20 | E8 | `test_enrichment_domain.py`, `test_enrichment_pubmed.py`, `test_enrichment_who.py`, `test_enrichment_pipeline.py`, `test_kb_admin_api.py` |
+| FR-21 | E9 | `test_assistant_threads.py` (изоляция, roster-гейт, история, аудит, каскад) |
 
 ## 7. Границы инкремента
 
