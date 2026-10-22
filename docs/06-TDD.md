@@ -118,12 +118,11 @@
 | `test_foreign_thread_is_404` | чужой тред: GET/PATCH/POST/DELETE | 404 `THREAD_NOT_FOUND`, чужой тред не виден в списке |
 | `test_patient_ids_roster_gate` | пациент вне roster в `patient_ids` | 403 `PATIENT_NOT_IN_ROSTER` (создание и сообщение) |
 | `test_patient_limit` | >10 `patient_ids` | 422 `TOO_MANY_PATIENTS` |
-| `test_history_window_trims_old_messages` | 15 сообщений; длинные сообщения | контекст = 10 последних, суммарно ≤6000 символов, новые важнее |
 | `test_read_thread_with_patients_is_audited` | чтение треда с пациентами | запись `READ_ASSISTANT_THREAD` в audit_log |
 | `test_delete_thread_cascades` | DELETE треда | 404 после удаления, сообщения и привязки удалены каскадом |
 | `test_redline_in_history_does_not_poison_next_turn` | ход 1 — redline (диагноз), ход 2 — обычный вопрос по КБ | ход 2 не refused и возвращает KB-цитаты (red line только по текущему вопросу) |
 | `test_revoked_consent_skips_patient_card` | отзыв согласия после создания треда | `skipped_patient_ids == [p1]`, карты p1 нет в цитатах, запись `READ_ASSISTANT_THREAD` |
-| `test_history_is_scrubbed_before_retrieval` | ФИО в прошлой реплике | в retrieval-строке `[ФИО]`, исходное ФИО отсутствует |
+| `test_retrieval_uses_only_current_question` | ФИО в прошлой реплике | агент получает только текущий вопрос, `retrieval_query` не передаётся |
 | `test_emias_mock_*` (token/bad creds/rate limit/scopes/pagination/bundle/404) | контракт мока ЕМИАС | 401 `invalid_client`, 429 + `Retry-After`, 403 `insufficient_scope`, Bundle(searchset) с total/link[next] |
 | `test_create_list_and_audit`, `test_update_fields_and_audit`, `test_stop_sets_today_and_status`, `test_delete_local_row` (FR-23) | назначение → список → правка → остановка → удаление | 201/200/204, `status='stopped'` + `ended_on` сегодня, аудит `PRESCRIBE/UPDATE/STOP/DELETE_MEDICATION` |
 | `test_validation_rejects_bad_status_and_dates` | статус `unknown`, пустой title, старт в будущем, конец раньше старта | 422 `VALIDATION` |

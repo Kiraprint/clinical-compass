@@ -29,15 +29,6 @@ from app.services import audit, clinician
 from app.services.agent import scrub_for_llm, shared_factory
 
 MAX_THREAD_PATIENTS = 10
-HISTORY_MESSAGES = 10
-HISTORY_CHARS = 6000
-
-# Преамбула для LLM-слоя (docs/12): та же граница, что у /assistant/ask.
-SYSTEM_PREAMBLE = (
-    "Ты справочный ИИ-ассистент врача. Не ставишь диагноз и не назначаешь терапию. "
-    "Отвечай по базе клинических рекомендаций и шкал, опирайся на карты пациентов "
-    "из области треда, указывай источники."
-)
 
 def _not_found() -> Problem:
     return Problem(404, "THREAD_NOT_FOUND", "Диалог не найден")
@@ -206,40 +197,6 @@ def delete_thread(db: Session, clinician_id, thread_id) -> None:
     db.delete(thread)
     db.commit()
 
-def _history(db: Session, thread_id) -> list[AssistantMessage]:
-    """Последние HISTORY_MESSAGES сообщений, суммарно не длиннее HISTORY_CHARS.
-
-    Обрезаем от новых к старым: свежий ход диалога важнее начала.
-    """
-    recent = db.scalars(
-        select(AssistantMessage)
-        .where(AssistantMessage.thread_id == thread_id)
-        .order_by(AssistantMessage.created_at.desc(), AssistantMessage.id.desc())
-        .limit(HISTORY_MESSAGES)
-    ).all()
-    kept: list[AssistantMessage] = []
-    budget = HISTORY_CHARS
-    for message in recent:
-        text = message.content or ""
-        if len(text) > budget:
-            if not kept:
-                kept.append(message)
-            break
-        budget -= len(text)
-        kept.append(message)
-    return list(reversed(kept))
-
-def _history_block(messages: list[AssistantMessage], names: list[str]) -> str:
-    """История для retrieval-запроса. Текст сообщений маскируется как текущий
-    вопрос: в retrieval не должно уходить ФИО/ПДн из прошлых реплик."""
-    if not messages:
-        return ""
-    lines = [
-        f"{'ВРАЧ' if m.role == 'CLINICIAN' else 'АССИСТЕНТ'}: "
-        f"{scrub_for_llm(m.content, None, names)[0]}"
-        for m in messages
-    ]
-    return "История диалога:\n" + "\n".join(lines)
 
 def answer_query(
     db: Session,
@@ -289,7 +246,9 @@ def post_message(
         thread.updated_at = func.now()
     ids = _patient_ids(db, thread.id)
 
-    history = _history(db, thread.id)
+    # История треда хранится и показывается врачу, но в retrieval не идёт:
+    # конкатенация прошлых реплик сдвигала эмбеддинг (ФИО/redline-реплики из
+    # истории вытесняли релевантные чанки). Поиск — строго по текущему вопросу.
     question = AssistantMessage(
         thread_id=thread.id, role="CLINICIAN", content=content, citations=[]
     )
@@ -310,17 +269,12 @@ def post_message(
 
     scrubbed_query, _, _ = scrub_for_llm(content, None, names)
     scrubbed_contexts = [scrub_for_llm(content, ctx, names)[1] for ctx in contexts]
-    history_text = _history_block(history, names)
-    retrieval_query = scrubbed_query
-    if history_text:
-        retrieval_query = f"{SYSTEM_PREAMBLE}\n{history_text}\n\nВопрос врача: {scrubbed_query}"
 
     result = shared_factory().invoke(
         scrubbed_query,
         limit=5,
         patient_contexts=scrubbed_contexts or None,
         exclude_ids=kb_review.excluded_ids(db, clinician_id),
-        retrieval_query=retrieval_query,
     )
 
     answer = AssistantMessage(
