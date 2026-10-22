@@ -1,3 +1,8 @@
+# F3/FR-24: демо VAPID-ключ один на api и reminders-worker, иначе push,
+# подписанный воркером, не проверяется браузером (ключи генерируются заново).
+x-vapid: &vapid
+  CC_VAPID_PRIVATE_KEY: "${CC_VAPID_PRIVATE_KEY:-LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JR0hBZ0VBTUJNR0J5cUdTTTQ5QWdFR0NDcUdTTTQ5QXdFSEJHMHdhd0lCQVFRZ3dVN2MwMkZiYXBVVndxVmUKWkJFcUMrRTJGZ2NScm9SeDNiZkFmSlVEOHN5aFJBTkNBQVJUaTg4TlpBK3hxaUxVM1c4RGxwNUxrL25WejBSNwptZDZEZnp6aUc2YWZ2a3ZsankwQVlSWFRzVmp3Y2l4SzdSQTAzWlBNbjA5UEg1Smkrbi9SeStkLwotLS0tLUVORCBQUklWQVRFIEtFWS0tLS0tCg==}"
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -55,7 +60,7 @@ services:
       CC_ASSISTANT_LLM_MODEL: "${CC_ASSISTANT_LLM_MODEL:-local}"
       CC_ASSISTANT_LLM_API_KEY: "${CC_ASSISTANT_LLM_API_KEY:-}"
       CC_ASSISTANT_LLM_TIMEOUT: "${CC_ASSISTANT_LLM_TIMEOUT:-10}"
-      CC_VAPID_PRIVATE_KEY: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JR0hBZ0VBTUJNR0J5cUdTTTQ5QWdFR0NDcUdTTTQ5QXdFSEJHMHdhd0lCQVFRZ3dVN2MwMkZiYXBVVndxVmUKWkJFcUMrRTJGZ2NScm9SeDNiZkFmSlVEOHN5aFJBTkNBQVJUaTg4TlpBK3hxaUxVM1c4RGxwNUxrL25WejBSNwptZDZEZnp6aUc2YWZ2a3ZsankwQVlSWFRzVmp3Y2l4SzdSQTAzWlBNbjA5UEg1Smkrbi9SeStkLwotLS0tLUVORCBQUklWQVRFIEtFWS0tLS0tCg==
+      <<: *vapid
       CC_QDRANT_URL: http://qdrant:6333
       # FR-25: ЕМИАС. Egress по умолчанию ВЫКЛЮЧЕН (docs/10 R17); включается
       # CC_EMIAS_ENABLED=true. CC_EMIAS_ALLOW_INSECURE=true — только для мока по http.
@@ -137,7 +142,7 @@ services:
       CC_ALLOW_DEMO_SECRETS: "${CC_ALLOW_DEMO_SECRETS:-false}"
       CC_DATA_KEY: ${CC_DATA_KEY:-compass-demo-data-key-do-not-use-in-prod-0123456789}
       CC_PUSH_ENABLED: "${CC_PUSH_ENABLED:-true}"
-      CC_VAPID_PRIVATE_KEY: "${CC_VAPID_PRIVATE_KEY:-}"
+      <<: *vapid
       CC_REMINDER_TICK_SECONDS: "${CC_REMINDER_TICK_SECONDS:-60}"
     depends_on:
       # Схему создаёт api (alembic upgrade head в lifespan) — воркер ждёт health.
