@@ -117,6 +117,15 @@ def list_visits(
     """История приёмов пациента (задача кейса 6, п. «приём»). Roster-гейт."""
     return {"items": services.clinician.list_visits(db, user.id, patient_id)}
 
+@router.get("/clinician/patients/{patient_id}/emias")
+def emias_summary(
+    patient_id: uuid.UUID, request: Request,
+    user: User = Depends(require_clinician), db: Session = Depends(get_db),
+):
+    """Блок «ЕМИАС» (FR-25): связка, история назначений, число приёмов. Roster-гейт."""
+    ip = request.client.host if request.client else None
+    return services.clinician.emias_summary(db, user.id, patient_id, ip=ip)
+
 @router.delete("/clinician/patients/{patient_id}/visits/{visit_id}", status_code=204)
 def delete_visit(
     patient_id: uuid.UUID, visit_id: uuid.UUID, request: Request,

@@ -542,3 +542,17 @@ def import_history(db: Session, clinician_id, patient_id, text: str, template_na
         "scale_scores": list(ext.scale_scores),
         "requires_confirmation": True,
     }
+
+
+def emias_summary(db: Session, clinician_id, patient_id, ip: str | None = None) -> dict:
+    """Блок «ЕМИАС» в карточке врача (FR-25): связка, назначения, число приёмов.
+
+    Roster-гейт + аудит READ_EMIAS: история назначений — спецкатегория ПДн.
+    """
+    from app.emias.sync import patient_summary
+
+    _require_roster(db, clinician_id, patient_id)
+    data = patient_summary(db, patient_id)
+    audit_record(db, clinician_id, "READ_EMIAS", "patient", str(patient_id), ip=ip)
+    db.commit()
+    return data

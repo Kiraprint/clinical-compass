@@ -51,6 +51,18 @@ class Settings(BaseSettings):
     # проверку (демо/локально), totp_secret всё равно хранится в БД — развернуть
     # версию с OTP можно одним флагом. prod_mode требует require_otp=true.
     require_otp: bool = True
+    # --- FR-25: интеграция с ЕМИАС (docs/04 §3.1, docs/09, docs/10 R17-R19) -----
+    # Egress по умолчанию ВЫКЛЮЧЕН: без CC_EMIAS_ENABLED=true ни один запрос во
+    # внешний контур не уходит. Белый список хостов — netloc из CC_EMIAS_BASE_URL.
+    emias_enabled: bool = False
+    emias_base_url: str = "http://127.0.0.1:8090"  # локальный мок; прод — https ЕМИАС
+    emias_client_id: str = "compass"  # client_credentials, секрет — вне git
+    emias_client_secret: str = "compass-secret"
+    emias_allow_insecure: bool = False  # http разрешён только для мока/локальной сети
+    emias_timeout: float = 10.0  # сек на HTTP-запрос
+    emias_max_attempts: int = 3  # 429/5xx/таймаут: до 3 попыток с backoff
+    emias_max_response_bytes: int = 4 * 1024 * 1024  # жёсткий кап тела ответа
+    emias_snils_pepper: str = ""  # соль sha256(СНИЛС); пусто → CC_DATA_KEY
     model_config = {"env_prefix": "CC_"}
 
     @model_validator(mode="after")

@@ -285,6 +285,8 @@ export const api = {
     }),
   clinicianVisits: (patientId: string) =>
     req<{ items: Visit[] }>(`/api/v1/clinician/patients/${patientId}/visits`),
+  clinicianEmias: (patientId: string) =>
+    req<EmiasSummary>(`/api/v1/clinician/patients/${patientId}/emias`),
   createVisit: (patientId: string, body: {
     visited_at: string; visit_type: "in_person" | "online" | "phone";
     duration_min?: number; notes: string;
@@ -409,6 +411,23 @@ export interface Visit {
   duration_min: number | null;
   notes: string;
   created_at: string;
+}
+
+export interface EmiasMedication {
+  id: string;
+  title: string;
+  dosage: string | null;
+  started_on: string | null;
+  status: string;
+  emias_id: string;
+}
+
+export interface EmiasSummary {
+  linked: boolean;
+  emias_patient_id: string | null;
+  last_sync: string | null;
+  encounters: number;
+  medications: EmiasMedication[];
 }
 
 export interface Report {
