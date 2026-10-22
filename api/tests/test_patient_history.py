@@ -111,3 +111,56 @@ def test_history_audit_and_gating(client, db_session):
     assert client.post("/api/v1/consent/revoke", headers=ph).status_code == 204
     revoked = client.get(f"/api/v1/clinician/patients/{pid}/history", headers=c)
     assert revoked.status_code == 403 and revoked.json()["code"] == "CONSENT_REQUIRED"
+
+def test_history_cursor_handles_identical_timestamps(client):
+    """P2-регрессия: строгий предикат (at, id) в SQL — строки с одинаковым at не теряются."""
+    c, _cid, pid, _ph = _setup(client)
+    for _ in range(3):
+        r = client.post(
+            f"/api/v1/clinician/patients/{pid}/visits",
+            json={
+                "visited_at": "2026-03-01T09:00:00+03:00",
+                "visit_type": "in_person",
+                "duration_min": 20,
+                "notes": "Повторный приём",
+            },
+            headers=c,
+        )
+        assert r.status_code == 201, r.text
+
+    seen: list[str] = []
+    before = None
+    for _ in range(10):
+        params = {"types": "visit", "limit": 1}
+        if before:
+            params["before"] = before
+        body = client.get(f"/api/v1/clinician/patients/{pid}/history", params=params, headers=c).json()
+        assert len(body["items"]) <= 1
+        seen += [i["ref_id"] for i in body["items"]]
+        before = body["next_before"]
+        if not before:
+            break
+    assert len(seen) == 3
+    assert len(set(seen)) == 3
+
+def test_history_types_deduped(client):
+    """P3: повтор типа в ?types= не дублирует элементы; неизвестный тип — 422."""
+    c, _cid, pid, ph = _setup(client)
+    _seed_events(client, c, pid, ph)
+
+    body = client.get(
+        f"/api/v1/clinician/patients/{pid}/history",
+        params={"types": "medication,medication"},
+        headers=c,
+    ).json()
+    assert body["types"] == ["medication"]
+    refs = [i["ref_id"] for i in body["items"]]
+    assert len(refs) == len(set(refs)) == 1
+    assert {i["type"] for i in body["items"]} == {"medication"}
+
+    bad = client.get(
+        f"/api/v1/clinician/patients/{pid}/history",
+        params={"types": "visit,visit,lab"},
+        headers=c,
+    )
+    assert bad.status_code == 422

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, ApiError, Assessment, EmiasSummary, HistoryType, ImportHistoryResult, PatientCard, PatientContacts, PatientHistoryItem, PatientMedication, Report, Visit } from "../api";
 import TrendChart from "../TrendChart";
 import AssistantTab from "./AssistantTab";
@@ -827,13 +827,17 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
   const [notes, setNotes] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  // Защита от гонки: ответ устаревшего запроса не перезаписывает свежий список.
+  const reqRef = useRef(0);
 
   const load = () => {
+    const token = ++reqRef.current;
     api.clinicianMedications(patientId)
-      .then((r) => setItems(r.items))
-      .catch((e) => setErr(e instanceof ApiError ? e.detail : String(e)));
+      .then((r) => { if (token === reqRef.current) setItems(r.items); })
+      .catch((e) => { if (token === reqRef.current) setErr(e instanceof ApiError ? e.detail : String(e)); });
   };
   useEffect(() => {
+    reqRef.current += 1;
     setItems([]);
     setErr("");
     load();
@@ -974,8 +978,11 @@ function HistoryBlock({ patientId }: { patientId: string }) {
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
   const key = types.join(",");
+  // Смена пациента или фильтра инвалидирует старые ответы и курсор.
+  const reqRef = useRef(0);
 
   const load = async (before?: string) => {
+    const token = ++reqRef.current;
     if (types.length === 0) {
       setItems([]);
       setNext(null);
@@ -985,18 +992,22 @@ function HistoryBlock({ patientId }: { patientId: string }) {
     setErr("");
     try {
       const r = await api.clinicianHistory(patientId, { types: key, limit: 50, before });
+      if (token !== reqRef.current) return;
       setItems((prev) => (before ? [...prev, ...r.items] : r.items));
       setNext(r.next_before);
     } catch (e) {
+      if (token !== reqRef.current) return;
       setErr(e instanceof ApiError ? e.detail : String(e));
     } finally {
-      setLoading(false);
+      if (token === reqRef.current) setLoading(false);
     }
   };
 
   useEffect(() => {
+    reqRef.current += 1;
     setItems([]);
     setNext(null);
+    setErr("");
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [patientId, key]);

@@ -133,6 +133,9 @@
 | `test_consent_revocation_clears_medications` | отзыв согласия пациентом | строки `patient_medications` удалены, врач получает 403 `CONSENT_REQUIRED` |
 | `test_history_merges_all_types_newest_first`, `test_history_types_filter` | приём + назначение + скрининг + НЯ; `types=medication` | лента по убыванию `at`, все 4 типа и `source`, фильтр оставляет один тип, неизвестный тип → 422 |
 | `test_history_limit_and_cursor` | `limit=2`, затем `before=next_before` | вторая страница без пересечения, курсор сортирует по (at, id) |
+| `test_history_cursor_handles_identical_timestamps` | 3 приёма с одинаковым `visited_at`, `limit=1` | три страницы отдают все 3 строки ровно по одному разу |
+| `test_history_types_deduped` | `types=medication,medication`; `types=visit,visit,lab` | дубликаты типов схлопываются (элементы не дублируются), неизвестный тип → 422 |
+| `test_patient_summary_excludes_local_medications` | локальное назначение врача рядом с импортом ЕМИАС | витрина «ЕМИАС» отдаёт только `source='emias'` |
 | `test_history_audit_and_gating` | чтение ленты; врач вне roster; отзыв согласия | `READ_PATIENT_HISTORY` в audit_log; 403 `NO_ROSTER`; 403 `CONSENT_REQUIRED` |
 | `test_simulate_error_injection` | `?simulate=500\|429\|timeout` | 500/429(+Retry-After)/504 — клиент обязан ретраить |
 | `test_emias_client_*` | кэш токена (80% TTL), 429/500, max attempts, кап 4 MiB, redirect/host allowlist, невалидный Bundle | один token-запрос на TTL; backoff/Retry-After; `response_too_large`/`host_not_allowed`/`invalid_bundle` |

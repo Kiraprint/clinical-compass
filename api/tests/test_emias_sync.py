@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import date
 
 import pytest
 from sqlalchemy import select
@@ -227,6 +228,28 @@ def test_link_patient_by_snils_and_summary(client, db_session):
     assert summary["encounters"] == 2
     assert len(summary["medications"]) == 2
     assert summary["last_sync"] is not None
+
+def test_patient_summary_excludes_local_medications(client, db_session):
+    """P2: витрина «ЕМИАС» не показывает назначения врача из той же таблицы."""
+    _headers, user_id = patient_ctx(client, "p-emias-local-med@test.ru")
+    pid = uuid.UUID(user_id)
+    emias_sync.link_patient(db_session, pid, SNILS, client=_client_data())
+    emias_sync.sync_patient(db_session, pid, client=_client_data())
+
+    local = PatientMedication(
+        patient_id=pid, title="Лоратадин", dosage="10 мг", started_on=date(2026, 10, 1),
+        status="active", source="clinician",
+    )
+    db_session.add(local)
+    db_session.commit()
+
+    summary = emias_sync.patient_summary(db_session, pid)
+    assert len(summary["medications"]) == 2
+    assert str(local.id) not in {m["id"] for m in summary["medications"]}
+    emias_ids = {m.id for m in db_session.scalars(
+        select(PatientMedication).where(PatientMedication.patient_id == pid,
+                                        PatientMedication.source == "emias")).all()}
+    assert {m["id"] for m in summary["medications"]} <= {str(i) for i in emias_ids}
 
 def test_consent_revocation_destroys_emias_pdn(client, db_session):
     """F2/P1: отзыв согласия уничтожает производные ЕМИАС (ПДн спецкатегории)."""

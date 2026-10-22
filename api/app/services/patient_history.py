@@ -17,7 +17,7 @@ import binascii
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.errors import Problem
@@ -106,11 +106,17 @@ def _parse_cursor(raw: str) -> tuple[datetime, uuid.UUID]:
 def _parse_types(raw: str | None) -> tuple[str, ...]:
     if not raw:
         return HISTORY_TYPES
-    requested = tuple(t.strip() for t in raw.split(",") if t.strip())
+    requested = tuple(dict.fromkeys(t.strip() for t in raw.split(",") if t.strip()))
     unknown = [t for t in requested if t not in HISTORY_TYPES]
     if unknown:
         raise Problem(422, "VALIDATION", f"Неизвестный тип: {', '.join(unknown)}")
     return requested
+
+def _older_than(at_col, id_col, cursor: tuple[datetime, uuid.UUID]):
+    """Строго старше курсора по паре (at, id) — предикат уходит в SQL, поэтому
+    LIMIT считает только непросмотренные строки (в т.ч. при совпадающих at)."""
+    at, ref_id = cursor
+    return or_(at_col < at, and_(at_col == at, id_col < ref_id))
 
 def patient_history(
     db: Session, clinician_id, patient_id, *,
@@ -129,14 +135,14 @@ def patient_history(
     if "visit" in wanted:
         q = select(Visit).where(Visit.patient_id == patient_id)
         if cursor is not None:
-            q = q.where(Visit.visited_at <= cursor[0])
+            q = q.where(_older_than(Visit.visited_at, Visit.id, cursor))
         q = q.order_by(Visit.visited_at.desc(), Visit.id.desc()).limit(fetch)
         merged += [(v.visited_at, v.id, _visit_item(v)) for v in db.scalars(q)]
 
     if "medication" in wanted:
         q = select(PatientMedication).where(PatientMedication.patient_id == patient_id)
         if cursor is not None:
-            q = q.where(PatientMedication.created_at <= cursor[0])
+            q = q.where(_older_than(PatientMedication.created_at, PatientMedication.id, cursor))
         q = q.order_by(PatientMedication.created_at.desc(), PatientMedication.id.desc()).limit(fetch)
         merged += [(m.created_at, m.id, _medication_item(m)) for m in db.scalars(q)]
 
@@ -147,20 +153,18 @@ def patient_history(
             .where(Assessment.patient_id == patient_id)
         )
         if cursor is not None:
-            q = q.where(Assessment.computed_at <= cursor[0])
+            q = q.where(_older_than(Assessment.computed_at, Assessment.id, cursor))
         q = q.order_by(Assessment.computed_at.desc(), Assessment.id.desc()).limit(fetch)
         merged += [(a.computed_at, a.id, _screening_item(a, code)) for a, code in db.execute(q)]
 
     if "adverse" in wanted:
         q = select(AdverseEvent).where(AdverseEvent.patient_id == patient_id)
         if cursor is not None:
-            q = q.where(AdverseEvent.created_at <= cursor[0])
+            q = q.where(_older_than(AdverseEvent.created_at, AdverseEvent.id, cursor))
         q = q.order_by(AdverseEvent.created_at.desc(), AdverseEvent.id.desc()).limit(fetch)
         merged += [(e.created_at, e.id, _adverse_item(e)) for e in db.scalars(q)]
 
     merged.sort(key=lambda row: (row[0], row[1]), reverse=True)
-    if cursor is not None:
-        merged = [row for row in merged if (row[0], row[1]) < cursor]
 
     page = merged[:limit]
     next_before = None
