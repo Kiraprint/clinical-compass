@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     # проверку (демо/локально), totp_secret всё равно хранится в БД — развернуть
     # версию с OTP можно одним флагом. prod_mode требует require_otp=true.
     require_otp: bool = True
+    # FR-24: период тика воркера напоминаний (сек). Отдельного шедулера в MVP нет:
+    # `python -m app.reminders_worker` — отдельный процесс, как kb-enrichment.
+    reminder_tick_seconds: int = 60  # CC_REMINDER_TICK_SECONDS
     # --- FR-25: интеграция с ЕМИАС (docs/04 §3.1, docs/09, docs/10 R17-R19) -----
     # Egress по умолчанию ВЫКЛЮЧЕН: без CC_EMIAS_ENABLED=true ни один запрос во
     # внешний контур не уходит. Белый список хостов — netloc из CC_EMIAS_BASE_URL.

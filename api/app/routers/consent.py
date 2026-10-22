@@ -87,6 +87,7 @@ def _destroy_patient_pdn(db: Session, patient_id) -> None:
         DiaryEntry,
         EmiasLink,
         Escalation,
+        ClinicianReminder,
         Notification,
         PatientMedication,
         PushSubscription,
@@ -97,6 +98,10 @@ def _destroy_patient_pdn(db: Session, patient_id) -> None:
 
     # дети → родители. Answer не имеет patient_id — удаляем через подзапрос по runs.
     db.execute(sa_delete(Notification).where(Notification.patient_id == patient_id))
+    # FR-24: напоминания врача по пациенту (note — свободный текст, может содержать
+    # ФИО/состояние). Удаляются после notifications (FK notifications.reminder_id)
+    # и до остальных сущностей: после отзыва согласия врач не вправе их читать.
+    db.execute(sa_delete(ClinicianReminder).where(ClinicianReminder.patient_id == patient_id))
     db.execute(sa_delete(Escalation).where(Escalation.patient_id == patient_id))
     run_ids = sa_select(Run.id).where(Run.patient_id == patient_id)
     db.execute(sa_delete(Answer).where(Answer.run_id.in_(run_ids)))

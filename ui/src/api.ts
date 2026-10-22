@@ -347,6 +347,34 @@ export const api = {
     const suffix = qs.toString() ? `?${qs}` : "";
     return req<PatientHistory>(`/api/v1/clinician/patients/${patientId}/history${suffix}`);
   },
+  // FR-24: напоминания врача. Список — свои (roster/IDOR-гейт на сервере).
+  clinicianReminders: (due?: "overdue" | "today" | "week") =>
+    req<RemindersResponse>(
+      `/api/v1/clinician/reminders?status=open${due ? `&due=${due}` : ""}`,
+    ),
+  clinicianPatientReminders: (patientId: string, status = "open") =>
+    req<RemindersResponse>(
+      `/api/v1/clinician/patients/${patientId}/reminders?status=${status}`,
+    ),
+  createReminder: (body: {
+    patient_id: string;
+    kind: ClinicianReminder["kind"];
+    note?: string | null;
+    due_at: string;
+  }) =>
+    req<ClinicianReminder>("/api/v1/clinician/reminders", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  patchReminder: (id: string, body: ReminderPatch) =>
+    req<ClinicianReminder>(`/api/v1/clinician/reminders/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  doneReminder: (id: string) =>
+    req<ClinicianReminder>(`/api/v1/clinician/reminders/${id}/done`, { method: "POST" }),
+  cancelReminder: (id: string) =>
+    req<ClinicianReminder>(`/api/v1/clinician/reminders/${id}/cancel`, { method: "POST" }),
   vapidPublicKey: () => req<{ public_key: string }>("/api/v1/push/vapid-public-key"),
   subscribePush: (endpoint: string, keys: { p256dh: string; auth: string }) =>
     req<{ subscribed: boolean }>("/api/v1/push/subscribe", {
@@ -456,6 +484,32 @@ export interface PatientContacts {
 export interface ContactPatch {
   phone?: string | null;
   birth_date?: string | null;
+}
+// FR-24: личное напоминание врача по пациенту. note — свободный текст (может
+// содержать ПДн), в списке приходит расшифрованным (доступ только владельцу).
+export interface ClinicianReminder {
+  id: string;
+  patient_id: string;
+  patient_fio: string;
+  kind: "call" | "write" | "appointment" | "custom";
+  kind_label: string;
+  note: string | null;
+  due_at: string;
+  status: "open" | "done" | "cancelled";
+  due_state: "overdue" | "today" | "soon" | "later" | null;
+  overdue_minutes: number;
+  done_at: string | null;
+  notified_at: string | null;
+  created_at: string;
+}
+export interface RemindersResponse {
+  items: ClinicianReminder[];
+  overdue: number;
+}
+export interface ReminderPatch {
+  note?: string | null;
+  due_at?: string;
+  kind?: ClinicianReminder["kind"];
 }
 export interface ImportHistoryResult {
   template: string;
