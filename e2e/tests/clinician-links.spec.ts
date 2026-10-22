@@ -34,7 +34,7 @@ test("клик по уведомлению об эскалации открыв�
   await expect(page.getByRole("button", { name: "Все" })).toBeVisible();
 
   await page.getByRole("button", { name: "Уведомления" }).click();
-  const item = page.locator(".bell-item").first();
+  const item = page.locator(".bell-item").filter({ hasText: "RED-эскалация" }).first();
   const text = (await item.innerText()).replace(/\s+/g, " ");
   const patientName = text.split(":")[0].replace(/^RED-эскалация\s*/, "").replace(/-?\s*RED-эскалация$/, "").trim();
   await item.click();
