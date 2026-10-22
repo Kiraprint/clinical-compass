@@ -75,7 +75,7 @@ def _destroy_patient_pdn(db: Session, patient_id) -> None:
     операционные связи, остаются (врач может повторно назначить при ре-консенте).
     Реальная деструкция 30 дней выполняется шедулером в проде; в MVP — немедленно.
     """
-    from sqlalchemy import delete as sa_delete, select as sa_select
+    from sqlalchemy import delete as sa_delete, select as sa_select, update as sa_update
 
     from app.models import (
         AdherenceRecord,
@@ -91,6 +91,7 @@ def _destroy_patient_pdn(db: Session, patient_id) -> None:
         PatientMedication,
         PushSubscription,
         Run,
+        User,
         Visit,
     )
 
@@ -117,4 +118,7 @@ def _destroy_patient_pdn(db: Session, patient_id) -> None:
     db.execute(sa_delete(EmiasLink).where(EmiasLink.patient_id == patient_id))
     # Visit: зашифрованные заметки беседы врача — та же спецкатегория ПДн (F2).
     db.execute(sa_delete(Visit).where(Visit.patient_id == patient_id))
+    # FR-22: контакты пациента (телефон — ПДн, дата рождения) уничтожаются вместе
+    # с остальной спецкатегорией. Учётную запись удалять нельзя (аудит) → обнуляем.
+    db.execute(sa_update(User).where(User.id == patient_id).values(phone=None, birth_date=None))
     db.flush()

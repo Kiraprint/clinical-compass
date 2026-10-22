@@ -134,6 +134,14 @@
 | `test_duplicate_emias_id_updates_instead_of_creating` | два entry с одним emias_id | одна строка visits, второе — update |
 | `test_emias_admin_*` | RBAC/503 без флага/журнал/аудит | 403 для не-ADMIN; `503 EMIAS_DISABLED`; `EMIA_SYNC` в audit_log |
 | `test_clinician_emias_summary_requires_roster` | чтение блока «ЕМИАС» без roster | 403 NO_ROSTER; с roster → 200 и аудит `READ_EMIAS` |
+| `test_clinician_sets_and_reads_contacts` | врач PATCH/GET контактов roster-пациента | `phone` нормализован в `+7XXXXXXXXXX`, `birth_date`/`age`/`adult` в ответе |
+| `test_phone_normalization` / `test_phone_invalid` | `+7…`/`8…`/`7…`/10 цифр; 5 цифр, `+1…`, буквы | все варианты → `+79261234567`; невалидные → 422 `PHONE_INVALID` |
+| `test_birth_date_bounds_and_minor_flag` | будущая дата, 1899, `DD.MM.YYYY`; дата 10 лет назад | 422 `BIRTH_DATE_INVALID`; несовершеннолетний сохранён с `adult:false` |
+| `test_patient_list_and_card_mask_phone` | контакты заданы; GET списка и report | в строке и карте телефон маской `+7•••123-45-67`, прежние ключи не сломаны |
+| `test_rbac_contacts` | пациент → clinician-endpoint; врач вне roster; врач → `/profile/contacts` | 403; 403 `NO_ROSTER`; 403 |
+| `test_audit_rows_written` | чтение/правка контактов врачом и пациентом | `READ_*`/`UPDATE_*_CONTACTS` в audit_log без ПДн в payload |
+| `test_patient_self_update_only_own` | два пациента, PATCH своего профиля | чужой `users`-ряд не изменён; маршрута с чужим id нет |
+| `test_consent_revocation_clears_contacts` | контакты заданы → POST /consent/revoke | `users.phone`/`birth_date` = NULL; контакты недоступны (403 `CONSENT_REQUIRED`) |
 
 ## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/`)
 

@@ -83,6 +83,32 @@ def list_adverse_events(
 ):
     return {"items": services.clinician.list_adverse_events(db, user.id, patient_id)}
 
+
+class ContactsBody(BaseModel):
+    # Строки, а не date/строгие типы: нормализация и границы — в services.contacts
+    # (422 PHONE_INVALID / BIRTH_DATE_INVALID вместо общего VALIDATION).
+    phone: str | None = None
+    birth_date: str | None = None
+
+@router.get("/clinician/patients/{patient_id}/contacts")
+def get_patient_contacts(
+    patient_id: uuid.UUID, request: Request,
+    user: User = Depends(require_clinician), db: Session = Depends(get_db),
+):
+    """FR-22: контакты закреплённого пациента. Roster + consent + аудит READ_PATIENT_CONTACTS."""
+    ip = request.client.host if request.client else None
+    return services.contacts.clinician_read(db, user.id, patient_id, ip=ip)
+
+@router.patch("/clinician/patients/{patient_id}/contacts")
+def update_patient_contacts(
+    patient_id: uuid.UUID, body: ContactsBody, request: Request,
+    user: User = Depends(require_clinician), db: Session = Depends(get_db),
+):
+    """FR-22: врач правит контакты. Roster + consent + аудит UPDATE_PATIENT_CONTACTS (без ПДн)."""
+    ip = request.client.host if request.client else None
+    return services.contacts.clinician_update(db, user.id, patient_id, body.model_dump(exclude_unset=True), ip=ip)
+
+
 @router.get("/clinician/patients/{patient_id}/adherence")
 def adherence_summary(
     patient_id: uuid.UUID, days: int = Query(default=14, ge=1, le=90),

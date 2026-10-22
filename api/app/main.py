@@ -28,7 +28,7 @@ def create_app() -> FastAPI:
 
     register_handlers(app)
 
-    from .routers import admin, assistant, auth, chat, checkins, clinician, consent, diary, drugs, emias_admin, kb_admin, notifications, push, screenings
+    from .routers import admin, assistant, auth, chat, checkins, clinician, consent, diary, drugs, emias_admin, kb_admin, notifications, profile, push, screenings
 
     app.include_router(auth.router, prefix="/api/v1")
     app.include_router(assistant.router, prefix="/api/v1")
@@ -45,6 +45,7 @@ def create_app() -> FastAPI:
     app.include_router(clinician.me_router, prefix="/api/v1")
     app.include_router(push.router, prefix="/api/v1")
     app.include_router(notifications.router, prefix="/api/v1")
+    app.include_router(profile.router, prefix="/api/v1")
 
     @app.get("/health")
     def health() -> dict:
