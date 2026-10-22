@@ -12,12 +12,13 @@ Egress по умолчанию выключен (CC_EMIAS_ENABLED=false, docs/10
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 from app.config import settings
 
 SCOPES = ("patient.read", "encounter.read", "medication.read")
+DEMO_SECRETS = frozenset({"compass-secret"})  # креды emias-mock из compose
 
 class EmiasConfigError(ValueError):
     """Некорректная конфигурация: интеграция не должна стартовать."""
@@ -27,7 +28,8 @@ class EmiasConfig:
     enabled: bool
     base_url: str
     client_id: str
-    client_secret: str
+    # repr=False: секрет не должен попадать в трейсбеки/data-class repr (P3 ревью).
+    client_secret: str = field(repr=False)
     allow_insecure: bool = False
     timeout: float = 10.0
     max_attempts: int = 3
@@ -71,6 +73,12 @@ class EmiasConfig:
             )
         if self.enabled and (not self.client_id or not self.client_secret):
             raise EmiasConfigError("CC_EMIAS_CLIENT_ID/CC_EMIAS_CLIENT_SECRET не заданы")
+        # Демо-секрет мока (compose emias-mock) допустим только в контуре мока:
+        # с allow_insecure=false он означал бы известный из git секрет в живом контуре.
+        if self.enabled and self.client_secret in DEMO_SECRETS and not self.allow_insecure:
+            raise EmiasConfigError(
+                "CC_EMIAS_CLIENT_SECRET: демо-значение допустимо только с CC_EMIAS_ALLOW_INSECURE=true"
+            )
         if self.max_attempts < 1:
             raise EmiasConfigError("CC_EMIAS_MAX_ATTEMPTS должен быть >= 1")
         if self.max_response_bytes <= 0:

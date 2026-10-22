@@ -419,12 +419,11 @@ export interface EmiasMedication {
   dosage: string | null;
   started_on: string | null;
   status: string;
-  emias_id: string;
 }
 
 export interface EmiasSummary {
   linked: boolean;
-  emias_patient_id: string | null;
+  enabled: boolean;
   last_sync: string | null;
   encounters: number;
   medications: EmiasMedication[];

@@ -227,3 +227,38 @@ def test_link_patient_by_snils_and_summary(client, db_session):
     assert summary["encounters"] == 2
     assert len(summary["medications"]) == 2
     assert summary["last_sync"] is not None
+
+def test_consent_revocation_destroys_emias_pdn(client, db_session):
+    """F2/P1: отзыв согласия уничтожает производные ЕМИАС (ПДн спецкатегории)."""
+    headers, user_id = patient_ctx(client, "p-emias-revoke@test.ru")
+    pid = uuid.UUID(user_id)
+    user = db_session.get(User, pid)
+    user.fio = "Иванова Мария Петровна"
+    db_session.commit()
+
+    emias_sync.sync_patients(db_session, client=_client_data())
+    assert db_session.scalar(select(EmiasLink).where(EmiasLink.patient_id == pid)) is not None
+    assert db_session.scalars(select(PatientMedication).where(PatientMedication.patient_id == pid)).all()
+    assert db_session.scalars(
+        select(Visit).where(Visit.patient_id == pid, Visit.source == "emias")
+    ).all()
+
+    assert client.post("/api/v1/consent/revoke", headers=headers).status_code == 204
+    db_session.expire_all()
+
+    assert db_session.scalar(select(EmiasLink).where(EmiasLink.patient_id == pid)) is None
+    assert db_session.scalars(select(PatientMedication).where(PatientMedication.patient_id == pid)).all() == []
+    assert db_session.scalars(
+        select(Visit).where(Visit.patient_id == pid, Visit.source == "emias")
+    ).all() == []
+
+def test_link_patient_rejects_foreign_snils(client, db_session):
+    """P3: связка проверяет СНИЛС в ответе — чужой пациент не привязывается."""
+    _headers, user_id = patient_ctx(client, "p-emias-mismatch@test.ru")
+    other = _patient_resource(snils="112-233-446 96")
+    fake = _client_data()
+    fake.search_patients = lambda snils: [other]  # сервер игнорирует фильтр
+    with pytest.raises(Problem) as exc:
+        emias_sync.link_patient(db_session, uuid.UUID(user_id), SNILS, client=fake)
+    assert exc.value.code == "EMIAS_SNILS_MISMATCH"
+    assert db_session.scalar(select(EmiasLink).where(EmiasLink.patient_id == uuid.UUID(user_id))) is None

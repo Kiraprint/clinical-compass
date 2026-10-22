@@ -45,9 +45,8 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["patient_id"], ["users.id"]),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("patient_id"),
+        sa.UniqueConstraint("emias_patient_id"),
     )
-    op.create_index(op.f("ix_emias_links_patient_id"), "emias_links", ["patient_id"], unique=True)
-    op.create_index(op.f("ix_emias_links_emias_patient_id"), "emias_links", ["emias_patient_id"])
     op.create_index(op.f("ix_emias_links_snils_hash"), "emias_links", ["snils_hash"])
 
     op.create_table(
@@ -91,9 +90,11 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_patient_medications_patient_id"), table_name="patient_medications")
     op.drop_table("patient_medications")
     op.drop_index(op.f("ix_emias_links_snils_hash"), table_name="emias_links")
-    op.drop_index(op.f("ix_emias_links_emias_patient_id"), table_name="emias_links")
-    op.drop_index(op.f("ix_emias_links_patient_id"), table_name="emias_links")
     op.drop_table("emias_links")
+    # Импортированные из ЕМИАС визиты без source/emias_id не представимы и имеют
+    # clinician_id = NULL: удаляем их ДО ужесточения NOT NULL, иначе downgrade
+    # падает на первой же синхронизированной записи (P2-1 ревью).
+    op.execute("DELETE FROM visits WHERE source = 'emias'")
     op.drop_constraint("visits_source", "visits", type_="check")
     op.drop_constraint("visits_emias_id_key", "visits", type_="unique")
     op.alter_column("visits", "clinician_id", existing_type=sa.Uuid(), nullable=False)

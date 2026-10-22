@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.errors import Problem
@@ -229,7 +230,18 @@ def link_patient(db: Session, patient_id, snils: str, *, client: EmiasClient | N
         raise Problem(404, "EMIAS_PATIENT_NOT_FOUND", "Пациент с таким СНИЛС не найден в ЕМИАС")
     if len(found) > 1:
         raise Problem(409, "EMIAS_AMBIGUOUS_PATIENT", "ЕМИАС вернул более одного пациента")
+    # Не доверяем фильтру ЕМИАС: связка должна указывать на пациента с тем же
+    # СНИЛС, иначе один СНИЛС уводил бы карту чужого пациента (P3 ревью).
+    matched_snils = mapping.extract_snils(found[0]) or ""
+    try:
+        matched_norm = mapping.normalize_snils(matched_snils)
+    except ValueError:
+        matched_norm = ""
+    if matched_norm != mapping.normalize_snils(snils):
+        raise Problem(409, "EMIAS_SNILS_MISMATCH", "ЕМИАС вернул пациента с другим СНИЛС")
     emias_id = str(found[0].get("id") or "")
+    if not emias_id:
+        raise Problem(502, "EMIAS_UPSTREAM", "ЕМИАС вернул пациента без идентификатора")
     link = db.scalar(select(EmiasLink).where(EmiasLink.patient_id == patient.id))
     now = datetime.now(timezone.utc)
     if link is None:
@@ -241,7 +253,13 @@ def link_patient(db: Session, patient_id, snils: str, *, client: EmiasClient | N
         link.snils_hash = shash
         link.synced_at = now
         created = False
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # emias_patient_id unique: одна карта ЕМИАС не может быть привязана к двум
+        # локальным пациентам (иначе двойные визиты и путаница карт).
+        db.rollback()
+        raise Problem(409, "EMIAS_ALREADY_LINKED", "Этот пациент ЕМИАС уже связан с другой картой") from None
     return {"patient_id": str(patient.id), "emias_patient_id": emias_id, "created": created}
 
 def patient_summary(db: Session, patient_id) -> dict:
@@ -259,7 +277,6 @@ def patient_summary(db: Session, patient_id) -> dict:
     )
     return {
         "linked": link is not None,
-        "emias_patient_id": link.emias_patient_id if link else None,
         "last_sync": link.synced_at.isoformat() if link and link.synced_at else None,
         "encounters": int(encounters or 0),
         "medications": [mapping.medication_dict(m) for m in meds],

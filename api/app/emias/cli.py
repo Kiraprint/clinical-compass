@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from sqlalchemy import select
@@ -77,9 +78,16 @@ def _cmd_link(args) -> int:
     from app.emias.sync import link_patient
     from app.errors import Problem
 
+    # СНИЛС — спецкатегория ПДн: в argv он остаётся в истории shell, поэтому
+    # предпочтительны CC_EMIAS_SNILS или stdin (P3 ревью), argv — для совместимости.
+    snils = (args.snils or os.environ.get("CC_EMIAS_SNILS") or sys.stdin.readline()).strip()
+    if not snils:
+        _print({"error": "emias_bad_snils", "detail": "СНИЛС не передан (аргумент/CC_EMIAS_SNILS/stdin)"})
+        return 2
+
     try:
         with _session() as session:
-            result = link_patient(session, args.patient_id, args.snils)
+            result = link_patient(session, args.patient_id, snils)
     except Problem as exc:
         _print({"error": exc.code, "detail": exc.detail})
         return 1
@@ -109,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     one.add_argument("patient_id")
     link = sub.add_parser("link")
     link.add_argument("patient_id")
-    link.add_argument("snils")
+    link.add_argument("snils", nargs="?", help="СНИЛС; предпочтительно CC_EMIAS_SNILS или stdin")
     sub.add_parser("health")
     runs = sub.add_parser("runs")
     runs.add_argument("--limit", type=int, default=10)

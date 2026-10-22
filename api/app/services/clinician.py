@@ -547,12 +547,25 @@ def import_history(db: Session, clinician_id, patient_id, text: str, template_na
 def emias_summary(db: Session, clinician_id, patient_id, ip: str | None = None) -> dict:
     """Блок «ЕМИАС» в карточке врача (FR-25): связка, назначения, число приёмов.
 
-    Roster-гейт + аудит READ_EMIAS: история назначений — спецкатегория ПДн.
+    Roster-гейт + активное согласие пациента + аудит READ_EMIAS: история
+    назначений — спецкатегория ПДн (152-ФЗ ст.9 ч.2-3). Отзыв согласия
+    уничтожает данные (routers/consent._destroy_patient_pdn), поэтому до
+    проверки согласия читать нечего и нельзя.
+
+    Политика при CC_EMIAS_ENABLED=false: отдаём кэш (уже импортированные данные
+    читаются локально), но с ``enabled=false`` — флаг управляет egress, а не
+    чтением карты (P2-3 ревью; docs/04 §3.1, docs/09 P15).
     """
+    from app.emias.config import current_config
     from app.emias.sync import patient_summary
 
     _require_roster(db, clinician_id, patient_id)
+    active = db.scalar(
+        select(Consent).where(Consent.user_id == patient_id, Consent.revoked_at.is_(None))
+    )
+    if active is None:
+        raise Problem(403, "CONSENT_REQUIRED", "Нет активного согласия пациента — карта недоступна (152-ФЗ)")
     data = patient_summary(db, patient_id)
     audit_record(db, clinician_id, "READ_EMIAS", "patient", str(patient_id), ip=ip)
     db.commit()
-    return data
+    return {"enabled": current_config().enabled, **data}

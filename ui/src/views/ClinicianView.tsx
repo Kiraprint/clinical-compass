@@ -715,8 +715,9 @@ function EmiasBlock({ patientId }: { patientId: string }) {
     <div>
       <h3>ЕМИАС</h3>
       <p style={{ color: "#5a6478", fontSize: 13 }}>
-        EMIS ID: {data.emias_patient_id ?? "—"} · приёмов: {data.encounters} ·
+        приёмов: {data.encounters} ·
         последняя синхронизация: {data.last_sync ? data.last_sync.slice(0, 16).replace("T", " ") : "—"}
+        {data.enabled ? "" : " · интеграция отключена (показаны сохранённые данные)"}
       </p>
       {data.medications.length > 0 ? (
         <div className="table-wrap">

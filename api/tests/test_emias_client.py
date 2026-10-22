@@ -259,3 +259,34 @@ def test_no_phi_or_token_in_logs(stub_server):
     assert "secret-token-value" not in text
     assert "identifier=" not in text  # query (со СНИЛС) не логируется
     assert "/fhir/Patient" in text
+
+def test_resource_ids_are_validated():
+    """P3: id ЕМИАС — только [A-Za-z0-9._-], иначе path traversal в путь запроса."""
+    from app.emias.client import EmiasError, EmiasClient
+
+    assert EmiasClient._safe_id("emias-1001") == "emias-1001"
+    for bad in ("../admin", "a/b", "a b", "x" * 65, "", "a?b=1"):
+        with pytest.raises(EmiasError) as exc:
+            EmiasClient._safe_id(bad)
+        assert exc.value.code == "invalid_id"
+
+def test_demo_secret_rejected_outside_mock():
+    """P2-2: демо-секрет мока допустим только с allow_insecure (контур мока)."""
+    from app.emias.config import EmiasConfig, EmiasConfigError
+
+    with pytest.raises(EmiasConfigError):
+        EmiasConfig(
+            enabled=True, base_url="https://emias.example", client_id="compass",
+            client_secret="compass-secret",
+        ).validate()
+    # внутри мока (http + allow_insecure) — допустимо
+    EmiasConfig(
+        enabled=True, base_url="http://emias-mock:8090", client_id="compass",
+        client_secret="compass-secret", allow_insecure=True,
+    ).validate()
+
+def test_client_secret_not_in_repr():
+    from app.emias.config import EmiasConfig
+
+    cfg = EmiasConfig(enabled=True, base_url="https://e.example", client_id="c", client_secret="top-secret")
+    assert "top-secret" not in repr(cfg)

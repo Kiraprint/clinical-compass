@@ -126,7 +126,7 @@ def test_clinician_emias_summary_requires_roster(client, db_session):
     assert resp.status_code == 200
     body = resp.json()
     assert body["linked"] is False
-    assert body["emias_patient_id"] is None
+    assert body["enabled"] is False
     assert body["medications"] == []
     assert body["encounters"] == 0
 
@@ -137,3 +137,29 @@ def test_clinician_emias_summary_requires_roster(client, db_session):
 
     # пациент не имеет доступа к карточке врача
     assert client.get(path, headers=patient_headers).status_code == 403
+
+def test_clinician_emias_blocked_after_consent_revocation(client, db_session):
+    """P2-3: без активного согласия врач не читает историю ЕМИАС (152-ФЗ)."""
+    clinician, clinician_id = clinician_ctx(client, "c-emias-revoke@test.ru")
+    patient_headers, patient_id = patient_ctx(client, "p-emias-revoke2@test.ru")
+    db_session.add(
+        ClinicianRoster(clinician_id=uuid.UUID(clinician_id), patient_id=uuid.UUID(patient_id))
+    )
+    db_session.commit()
+    path = f"/api/v1/clinician/patients/{patient_id}/emias"
+
+    assert client.get(path, headers=clinician).status_code == 200
+    assert client.post("/api/v1/consent/revoke", headers=patient_headers).status_code == 204
+
+    resp = client.get(path, headers=clinician)
+    assert resp.status_code == 403
+    assert resp.json()["code"] == "CONSENT_REQUIRED"
+    # второй попытки чтения в аудите нет — только успешная до отзыва
+    reads = db_session.scalars(
+        select(AuditLog).where(
+            AuditLog.action == "READ_EMIAS",
+            AuditLog.actor_id == uuid.UUID(clinician_id),
+            AuditLog.object_id == patient_id,
+        )
+    ).all()
+    assert len(reads) == 1

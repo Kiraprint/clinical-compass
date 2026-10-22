@@ -222,5 +222,5 @@ def medication_dict(med) -> dict:
         "dosage": med.dosage,
         "started_on": med.started_on.isoformat() if med.started_on else None,
         "status": med.status,
-        "emias_id": med.emias_id,
+        # emias_id — внутренний идентификатор контура: врачу не нужен (P3 ревью).
     }

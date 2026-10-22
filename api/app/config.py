@@ -10,6 +10,8 @@ _DEMO_KEYS = {
     "compass-demo-data-key-do-not-use-in-prod-0123456789",
     "test-data-key-0123456789abcdef0123456789abcdef",
 }
+_DEMO_EMIAS_CLIENTS = {"compass"}
+_DEMO_EMIAS_SECRETS = {"compass-secret"}
 
 
 class Settings(BaseSettings):
@@ -89,6 +91,18 @@ class Settings(BaseSettings):
                 "CC_DATA_KEY — демо-значение из git; сгенерируйте свой ключ "
                 "(tools/gen-secrets.sh) или поставьте CC_ALLOW_DEMO_SECRETS=true для демо"
             )
+        # FR-25: демо-креды мока (compose emias-mock) недопустимы в проде —
+        # иначе интеграция уходила бы в чужой/мок-контур с известным секретом.
+        if self.prod_mode and self.emias_enabled:
+            if (
+                self.emias_client_secret in _DEMO_EMIAS_SECRETS
+                or self.emias_client_id in _DEMO_EMIAS_CLIENTS
+            ):
+                raise ValueError(
+                    "CC_PROD_MODE: демо-креды ЕМИАС (CC_EMIAS_CLIENT_ID/SECRET) запрещены"
+                )
+            if self.emias_allow_insecure:
+                raise ValueError("CC_PROD_MODE требует CC_EMIAS_ALLOW_INSECURE=false")
         if self.prod_mode:
             if self.allow_demo_secrets:
                 raise ValueError("CC_PROD_MODE несовместим с CC_ALLOW_DEMO_SECRETS")

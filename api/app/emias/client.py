@@ -20,6 +20,7 @@ import base64
 import json
 import logging
 import random
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -32,6 +33,7 @@ log = logging.getLogger(__name__)
 
 MAX_BUNDLE_ENTRIES = 1000
 MAX_PAGES = 10
+_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _BACKOFF_BASE = 0.5
 _BACKOFF_CAP = 8.0
 
@@ -257,20 +259,30 @@ class EmiasClient:
     def search_patients(self, snils: str) -> list[dict]:
         return self._collect("/fhir/Patient", {"identifier": snils}, "Patient", 100)
 
+    @staticmethod
+    def _safe_id(value: str) -> str:
+        """Идентификатор ЕМИАС — только [A-Za-z0-9._-]: защита от path traversal
+        и подмешивания query/fragment в путь (P3 ревью)."""
+        if not _ID_RE.fullmatch(value or ""):
+            raise EmiasError("invalid_id", "некорректный идентификатор ресурса ЕМИАС")
+        return urllib.parse.quote(value, safe="")
+
     def get_patient(self, emias_patient_id: str) -> dict:
-        payload = self._request_json("GET", f"/fhir/Patient/{urllib.parse.quote(emias_patient_id)}")
+        payload = self._request_json("GET", f"/fhir/Patient/{self._safe_id(emias_patient_id)}")
         if payload.get("resourceType") != "Patient":
             raise EmiasError("invalid_resource", "ожидался Patient")
         return payload
 
     def encounters(self, emias_patient_id: str, *, since: str | None = None) -> list[dict]:
-        params = {"patient": emias_patient_id}
+        params = {"patient": self._safe_id(emias_patient_id)}
         if since:
             params["date"] = f"ge{since}"
         return self._collect("/fhir/Encounter", params, "Encounter", 100)
 
     def medications(self, emias_patient_id: str) -> list[dict]:
-        return self._collect("/fhir/MedicationRequest", {"patient": emias_patient_id}, "MedicationRequest", 100)
+        return self._collect(
+            "/fhir/MedicationRequest", {"patient": self._safe_id(emias_patient_id)}, "MedicationRequest", 100
+        )
 
     def _collect(self, path: str, params: dict, resource_type: str, count: int) -> list[dict]:
         collected: list[dict] = []

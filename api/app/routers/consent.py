@@ -85,8 +85,10 @@ def _destroy_patient_pdn(db: Session, patient_id) -> None:
         ChatMessage,
         DeviceToken,
         DiaryEntry,
+        EmiasLink,
         Escalation,
         Notification,
+        PatientMedication,
         PushSubscription,
         Run,
         Visit,
@@ -108,6 +110,11 @@ def _destroy_patient_pdn(db: Session, patient_id) -> None:
     # продолжает получать уведомления (утечка канала, 152-ФЗ ст.9 ч.2-3).
     db.execute(sa_delete(PushSubscription).where(PushSubscription.user_id == patient_id))
     db.execute(sa_delete(DeviceToken).where(DeviceToken.user_id == patient_id))
+    # FR-25: история назначений ЕМИАС (title/dosage косвенно указывают на диагноз)
+    # и связка (snils_hash) — спецкатегория ПДн; без явного удаления переживали
+    # отзыв согласия (F2, 152-ФЗ ст.9 ч.2-3).
+    db.execute(sa_delete(PatientMedication).where(PatientMedication.patient_id == patient_id))
+    db.execute(sa_delete(EmiasLink).where(EmiasLink.patient_id == patient_id))
     # Visit: зашифрованные заметки беседы врача — та же спецкатегория ПДн (F2).
     db.execute(sa_delete(Visit).where(Visit.patient_id == patient_id))
     db.flush()
