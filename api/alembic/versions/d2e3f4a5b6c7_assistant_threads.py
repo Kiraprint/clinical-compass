@@ -25,7 +25,8 @@ def upgrade() -> None:
         "assistant_threads",
         sa.Column("id", sa.Uuid(), primary_key=True),
         sa.Column("clinician_id", sa.Uuid(), sa.ForeignKey("users.id"), nullable=False),
-        sa.Column("title", sa.String(200), nullable=False, server_default="Новый диалог"),
+        # Заголовок — свободный текст врача (может содержать ФИО) → pgcrypto.
+        sa.Column("title", sa.LargeBinary(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
     )

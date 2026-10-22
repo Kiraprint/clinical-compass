@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   api,
   AssistantThread,
@@ -38,6 +38,10 @@ export default function AssistantTab() {
   const [sourcesError, setSourcesError] = useState("");
   const [savingSource, setSavingSource] = useState<string | null>(null);
 
+  // Номер последнего запроса детали треда: ответ старого запроса не должен
+  // перезаписать открытый сейчас диалог.
+  const selectSeq = useRef(0);
+
   const patientLabels = useMemo(() => {
     const map: Record<string, string> = {};
     for (const p of patients) map[p.patient_id] = p.fio || p.email;
@@ -71,13 +75,17 @@ export default function AssistantTab() {
   };
 
   async function selectThread(id: string) {
+    const seq = ++selectSeq.current;
     setActiveId(id);
+    setDetail(null);
     setError("");
     setNotice("");
     try {
-      setDetail(await api.assistantThread(id));
+      const loaded = await api.assistantThread(id);
+      if (selectSeq.current !== seq) return; // ответ устаревшего запроса
+      setDetail(loaded);
     } catch (e: unknown) {
-      setDetail(null);
+      if (selectSeq.current !== seq) return;
       setError(e instanceof Error ? e.message : String(e));
     }
   }
@@ -106,7 +114,9 @@ export default function AssistantTab() {
     setBusy(true);
     try {
       const updated = await api.assistantUpdateThread(detail.id, { title });
-      setDetail({ ...detail, ...updated, messages: detail.messages });
+      setDetail((cur) =>
+        cur && cur.id === detail.id ? { ...cur, ...updated } : cur,
+      );
       await refreshThreads();
       setRenaming("");
     } catch (e: unknown) {
@@ -144,7 +154,7 @@ export default function AssistantTab() {
     setError("");
     try {
       const updated = await api.assistantUpdateThread(detail.id, { patient_ids: ids });
-      setDetail({ ...detail, ...updated });
+      setDetail((cur) => (cur && cur.id === detail.id ? { ...cur, ...updated } : cur));
       await refreshThreads();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
@@ -155,12 +165,14 @@ export default function AssistantTab() {
 
   const send = async () => {
     if (!detail || !input.trim()) return;
+    const targetId = detail.id;
+    const seq = ++selectSeq.current;
     setBusy(true);
     setError("");
     setNotice("");
     const text = input.trim();
     try {
-      const result = await api.assistantPostMessage(detail.id, text);
+      const result = await api.assistantPostMessage(targetId, text);
       setInput("");
       if (result.skipped_patient_ids.length > 0) {
         setNotice(
@@ -169,7 +181,8 @@ export default function AssistantTab() {
             .join(", ")}`,
         );
       }
-      setDetail(await api.assistantThread(detail.id));
+      const fresh = await api.assistantThread(targetId);
+      if (selectSeq.current === seq) setDetail(fresh); // врач не переключил тред
       await refreshThreads();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));

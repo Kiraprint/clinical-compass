@@ -296,3 +296,73 @@ def test_thread_without_patients_answers_from_kb(client, kb_collection):
     assert body["answer"]
     assert body["skipped_patient_ids"] == []
     assert all(c["topic"] != "ПАЦИЕНТ" for c in body["citations"])
+
+def test_redline_in_history_does_not_poison_next_turn(client, kb_collection):
+    """Red line проверяется по текущему вопросу: redline-реплика в истории не
+    должна глушить retrieval следующих ходов треда."""
+    ch, (p1, _) = _setup(client, "th-redline@test.ru")
+    tid = client.post(
+        "/api/v1/assistant/threads", json={"patient_ids": [p1]}, headers=ch
+    ).json()["id"]
+    url = f"/api/v1/assistant/threads/{tid}/messages"
+
+    first = client.post(url, json={"content": "Поставь диагноз депрессии"}, headers=ch)
+    assert first.status_code == 200, first.text
+    assert first.json()["refused"] is True
+    assert first.json()["refusal_code"] == "DIAGNOSIS_REDLINE"
+
+    second = client.post(url, json={"content": "Какой порог тяжести у шкалы PHQ-9?"}, headers=ch)
+    assert second.status_code == 200, second.text
+    body = second.json()
+    assert body["refused"] is False and body["grounded"] is True
+    assert any("PHQ-9" in c["source_title"] for c in body["citations"]), body["citations"]
+
+def test_revoked_consent_skips_patient_card(client, db_session, kb_collection):
+    """Потеря согласия после создания треда: пациент попадает в skipped, его
+    карта не цитируется, а PHI-доступ к истории всё равно аудируется."""
+    from sqlalchemy import select
+
+    from app.models import AuditLog
+
+    ch, cid = clinician_ctx(client, "th-skip@test.ru")
+    ah, _ = admin_ctx(client, "adm-th-skip@test.ru")
+    ph1, p1 = patient_ctx(client, "skip-p1@test.ru")
+    _, p2 = patient_ctx(client, "skip-p2@test.ru")
+    _grant(client, ah, p1, cid)
+    _grant(client, ah, p2, cid)
+    tid = client.post(
+        "/api/v1/assistant/threads", json={"patient_ids": [p1, p2]}, headers=ch
+    ).json()["id"]
+
+    assert client.post("/api/v1/consent/revoke", headers=ph1).status_code == 204
+    resp = client.post(
+        f"/api/v1/assistant/threads/{tid}/messages",
+        json={"content": "Какой порог тяжести у шкалы PHQ-9?"},
+        headers=ch,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["skipped_patient_ids"] == [p1]
+    cited = {c["guideline_id"] for c in body["citations"]}
+    assert f"patient:{p1}" not in cited
+    assert f"patient:{p2}" in cited
+
+    rows = db_session.scalars(
+        select(AuditLog).where(
+            AuditLog.action == "READ_ASSISTANT_THREAD", AuditLog.object_id == tid
+        )
+    ).all()
+    assert len(rows) == 1
+
+def test_history_is_scrubbed_before_retrieval():
+    """ФИО из прошлых реплик маскируются в retrieval-строке (как текущий вопрос)."""
+    from app.models import AssistantMessage
+    from app.services import assistant_chat
+
+    msgs = [
+        AssistantMessage(role="CLINICIAN", content="Иванов Иван Иванович, 44 года"),
+        AssistantMessage(role="ASSISTANT", content="Уточните, пожалуйста"),
+    ]
+    block = assistant_chat._history_block(msgs, ["Иванов Иван Иванович"])
+    assert "Иванов" not in block
+    assert "[ФИО]" in block

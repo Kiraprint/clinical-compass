@@ -229,11 +229,14 @@ def _history(db: Session, thread_id) -> list[AssistantMessage]:
         kept.append(message)
     return list(reversed(kept))
 
-def _history_block(messages: list[AssistantMessage]) -> str:
+def _history_block(messages: list[AssistantMessage], names: list[str]) -> str:
+    """История для retrieval-запроса. Текст сообщений маскируется как текущий
+    вопрос: в retrieval не должно уходить ФИО/ПДн из прошлых реплик."""
     if not messages:
         return ""
     lines = [
-        f"{'ВРАЧ' if m.role == 'CLINICIAN' else 'АССИСТЕНТ'}: {m.content}"
+        f"{'ВРАЧ' if m.role == 'CLINICIAN' else 'АССИСТЕНТ'}: "
+        f"{scrub_for_llm(m.content, None, names)[0]}"
         for m in messages
     ]
     return "История диалога:\n" + "\n".join(lines)
@@ -307,7 +310,7 @@ def post_message(
 
     scrubbed_query, _, _ = scrub_for_llm(content, None, names)
     scrubbed_contexts = [scrub_for_llm(content, ctx, names)[1] for ctx in contexts]
-    history_text = _history_block(history)
+    history_text = _history_block(history, names)
     retrieval_query = scrubbed_query
     if history_text:
         retrieval_query = f"{SYSTEM_PREAMBLE}\n{history_text}\n\nВопрос врача: {scrubbed_query}"
@@ -331,6 +334,17 @@ def post_message(
     if not ids:
         audit.record(
             db, uuid.UUID(str(clinician_id)), "ASK_ASSISTANT", "kb", None, ip=ip
+        )
+    elif skipped:
+        # Часть карт недоступна (roster/согласие), но расшифрованная история
+        # треда всё равно читается → фиксируем PHI-доступ.
+        audit.record(
+            db,
+            uuid.UUID(str(clinician_id)),
+            "READ_ASSISTANT_THREAD",
+            "assistant_thread",
+            str(thread.id),
+            ip=ip,
         )
     thread.updated_at = func.now()
     db.commit()

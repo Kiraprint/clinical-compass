@@ -463,7 +463,7 @@ class AssistantThread(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     clinician_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
-    title: Mapped[str] = mapped_column(String(200), default="Новый диалог")
+    title: Mapped[str] = mapped_column(EncryptedText, default="Новый диалог")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), onupdate=text("now()"), index=True

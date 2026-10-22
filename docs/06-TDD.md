@@ -121,6 +121,9 @@
 | `test_history_window_trims_old_messages` | 15 сообщений; длинные сообщения | контекст = 10 последних, суммарно ≤6000 символов, новые важнее |
 | `test_read_thread_with_patients_is_audited` | чтение треда с пациентами | запись `READ_ASSISTANT_THREAD` в audit_log |
 | `test_delete_thread_cascades` | DELETE треда | 404 после удаления, сообщения и привязки удалены каскадом |
+| `test_redline_in_history_does_not_poison_next_turn` | ход 1 — redline (диагноз), ход 2 — обычный вопрос по КБ | ход 2 не refused и возвращает KB-цитаты (red line только по текущему вопросу) |
+| `test_revoked_consent_skips_patient_card` | отзыв согласия после создания треда | `skipped_patient_ids == [p1]`, карты p1 нет в цитатах, запись `READ_ASSISTANT_THREAD` |
+| `test_history_is_scrubbed_before_retrieval` | ФИО в прошлой реплике | в retrieval-строке `[ФИО]`, исходное ФИО отсутствует |
 
 ## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/`)
 

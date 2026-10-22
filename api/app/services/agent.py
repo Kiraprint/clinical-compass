@@ -86,13 +86,16 @@ class AgentFactory:
         topic: str | None = None,
         limit: int = 5,
         exclude_ids: set[str] | None = None,
+        redline_query: str | None = None,
     ) -> list[RAGChunk]:
         """Инструмент doctor-search: гибридный поиск по Qdrant (docs/07 §7).
 
         Отдельный переиспользуемый tool — ядро RAG-модуля. Redline-запрос
         (диагноз/терапия) поиска не делает; отказ формируется в _answer.
+        ``redline_query`` — текст, по которому проверяется red line (по умолчанию
+        сам ``query``); в треде это текущий вопрос без истории (FR-21).
         """
-        if detect_redline(query) is not None:
+        if detect_redline(redline_query if redline_query is not None else query) is not None:
             return []
         hits = kb_store.hybrid_search(
             self._client,
@@ -135,12 +138,17 @@ class AgentFactory:
         ]
 
     def _retrieve(self, state: AgentState) -> AgentState:
+        # Red line — по текущему вопросу врача; история треда её не расширяет,
+        # иначе redline-реплика в истории глушит retrieval всех следующих ходов.
+        if detect_redline(state["query"]) is not None:
+            return {"chunks": []}
         return {
             "chunks": self.search_kb(
                 state.get("retrieval_query") or state["query"],
                 topic=state.get("topic"),
                 limit=state.get("limit", 5),
                 exclude_ids=state.get("exclude_ids"),
+                redline_query=state["query"],
             )
         }
 
