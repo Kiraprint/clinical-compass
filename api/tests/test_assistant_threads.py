@@ -195,53 +195,6 @@ def test_read_thread_with_patients_is_audited(client, db_session, kb_collection)
     ).all()
     assert len(rows) == 1
 
-def test_history_window_trims_old_messages(client, db_session, kb_collection):
-    """Контекст треда: ≤10 последних сообщений и ≤6000 символов, новые важнее."""
-    from app.models import AssistantMessage
-    from app.services import assistant_chat
-
-    ch, _ = _setup(client, "th-hist@test.ru")
-    tid = client.post("/api/v1/assistant/threads", json={}, headers=ch).json()["id"]
-    thread_uuid = uuid.UUID(tid)
-    for i in range(15):
-        db_session.add(
-            AssistantMessage(
-                thread_id=thread_uuid,
-                role="CLINICIAN" if i % 2 == 0 else "ASSISTANT",
-                content=f"сообщение-{i:02d} " + "x" * 100,
-                citations=[],
-                created_at=_TS + timedelta(seconds=i),
-            )
-        )
-    db_session.commit()
-
-    history = assistant_chat._history(db_session, thread_uuid)
-    assert len(history) == 10, "в контекст идут только 10 последних сообщений"
-    assert history[-1].content.startswith("сообщение-14")
-    assert history[0].content.startswith("сообщение-05")
-
-    # Бюджет символов: длинные сообщения (по ~700) режутся до 6000 суммарно.
-    db_session.query(AssistantMessage).filter(
-        AssistantMessage.thread_id == thread_uuid
-    ).delete()
-    db_session.commit()
-
-    for i in range(12):
-        db_session.add(
-            AssistantMessage(
-                thread_id=thread_uuid,
-                role="CLINICIAN",
-                content=f"длинное-{i:02d} " + "y" * 700,
-                citations=[],
-                created_at=_TS + timedelta(seconds=i),
-            )
-        )
-    db_session.commit()
-    history = assistant_chat._history(db_session, thread_uuid)
-    assert sum(len(m.content) for m in history) <= assistant_chat.HISTORY_CHARS
-    assert len(history) < 12
-    assert history[-1].content.startswith("длинное-11")
-
 def test_delete_thread_cascades(client, db_session, kb_collection):
     """DELETE треда → сообщения и patient-привязки удалены каскадом."""
     from sqlalchemy import func, select
@@ -354,15 +307,30 @@ def test_revoked_consent_skips_patient_card(client, db_session, kb_collection):
     ).all()
     assert len(rows) == 1
 
-def test_history_is_scrubbed_before_retrieval():
-    """ФИО из прошлых реплик маскируются в retrieval-строке (как текущий вопрос)."""
-    from app.models import AssistantMessage
+def test_retrieval_uses_only_current_question(client, monkeypatch):
+    """История треда не участвует в retrieval: в агент уходит только текущий
+    вопрос (маскированный), иначе ФИО/redline-реплики из истории сдвигают поиск."""
     from app.services import assistant_chat
 
-    msgs = [
-        AssistantMessage(role="CLINICIAN", content="Иванов Иван Иванович, 44 года"),
-        AssistantMessage(role="ASSISTANT", content="Уточните, пожалуйста"),
-    ]
-    block = assistant_chat._history_block(msgs, ["Иванов Иван Иванович"])
-    assert "Иванов" not in block
-    assert "[ФИО]" in block
+    ch, (p1, _) = _setup(client, "th-retrieval@test.ru")
+    tid = client.post(
+        "/api/v1/assistant/threads", json={"patient_ids": [p1]}, headers=ch
+    ).json()["id"]
+    url = f"/api/v1/assistant/threads/{tid}/messages"
+
+    captured: dict = {}
+
+    class _FakeAgent:
+        def invoke(self, query, **kwargs):
+            captured["query"] = query
+            captured["kwargs"] = kwargs
+            return {"answer": "ответ", "citations": [], "topic": "ШКАЛЫ"}
+
+    monkeypatch.setattr(assistant_chat, "shared_factory", lambda: _FakeAgent())
+    assert client.post(url, json={"content": "Иванов Иван Иванович, 44 года"}, headers=ch).status_code == 200
+    captured.clear()
+    assert client.post(url, json={"content": "Какой порог у PHQ-9?"}, headers=ch).status_code == 200
+
+    assert captured["query"] == "Какой порог у PHQ-9?"
+    assert "Иванов" not in str(captured)
+    assert "retrieval_query" not in captured["kwargs"]

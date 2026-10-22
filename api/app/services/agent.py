@@ -69,9 +69,6 @@ class AgentState(TypedDict, total=False):
     exclude_ids: set[str]
     patient_context: dict | None
     patient_contexts: list[dict] | None
-    # Поисковый запрос с контекстом треда (FR-21): retrieval идёт по расширенному
-    # тексту, red line и ответ — по текущему вопросу врача.
-    retrieval_query: str | None
     answer: dict
 
 class AgentFactory:
@@ -86,16 +83,13 @@ class AgentFactory:
         topic: str | None = None,
         limit: int = 5,
         exclude_ids: set[str] | None = None,
-        redline_query: str | None = None,
     ) -> list[RAGChunk]:
         """Инструмент doctor-search: гибридный поиск по Qdrant (docs/07 §7).
 
         Отдельный переиспользуемый tool — ядро RAG-модуля. Redline-запрос
         (диагноз/терапия) поиска не делает; отказ формируется в _answer.
-        ``redline_query`` — текст, по которому проверяется red line (по умолчанию
-        сам ``query``); в треде это текущий вопрос без истории (FR-21).
         """
-        if detect_redline(redline_query if redline_query is not None else query) is not None:
+        if detect_redline(query) is not None:
             return []
         hits = kb_store.hybrid_search(
             self._client,
@@ -138,17 +132,16 @@ class AgentFactory:
         ]
 
     def _retrieve(self, state: AgentState) -> AgentState:
-        # Red line — по текущему вопросу врача; история треда её не расширяет,
-        # иначе redline-реплика в истории глушит retrieval всех следующих ходов.
+        # Retrieval и red line — строго по текущему вопросу врача (FR-21):
+        # история треда хранится для врача, но поиск не расширяет.
         if detect_redline(state["query"]) is not None:
             return {"chunks": []}
         return {
             "chunks": self.search_kb(
-                state.get("retrieval_query") or state["query"],
+                state["query"],
                 topic=state.get("topic"),
                 limit=state.get("limit", 5),
                 exclude_ids=state.get("exclude_ids"),
-                redline_query=state["query"],
             )
         }
 
@@ -198,7 +191,6 @@ class AgentFactory:
         patient_context: dict | None = None,
         patient_contexts: list[dict] | None = None,
         exclude_ids: set[str] | None = None,
-        retrieval_query: str | None = None,
     ) -> dict:
         # LLM-роутинг раздела (docs/04 FR-14): если клиент явно не задал topic и
         # LLM-роутер включён — топик выбирает LLM (тулза search_<раздел>).
@@ -214,7 +206,6 @@ class AgentFactory:
                 "limit": limit,
                 "patient_context": patient_context,
                 "patient_contexts": patient_contexts,
-                "retrieval_query": retrieval_query,
                 "exclude_ids": exclude_ids or set(),
             }
         )["answer"]
