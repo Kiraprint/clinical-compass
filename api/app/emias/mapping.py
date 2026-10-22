@@ -212,6 +212,9 @@ def medication_fields(request: dict) -> dict:
         "dosage": dosage or None,
         "started_on": _parse_date(request.get("authoredOn")),
         "status": MEDICATION_STATUS.get((request.get("status") or "").lower(), "unknown"),
+        # FR-23: в одной таблице живут импорт ЕМИАС и локальные назначения —
+        # импорт всегда помечается, иначе строка выглядит как назначение врача.
+        "source": "emias",
     }
 
 def medication_dict(med) -> dict:

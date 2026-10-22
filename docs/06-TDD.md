@@ -125,6 +125,15 @@
 | `test_revoked_consent_skips_patient_card` | отзыв согласия после создания треда | `skipped_patient_ids == [p1]`, карты p1 нет в цитатах, запись `READ_ASSISTANT_THREAD` |
 | `test_history_is_scrubbed_before_retrieval` | ФИО в прошлой реплике | в retrieval-строке `[ФИО]`, исходное ФИО отсутствует |
 | `test_emias_mock_*` (token/bad creds/rate limit/scopes/pagination/bundle/404) | контракт мока ЕМИАС | 401 `invalid_client`, 429 + `Retry-After`, 403 `insufficient_scope`, Bundle(searchset) с total/link[next] |
+| `test_create_list_and_audit`, `test_update_fields_and_audit`, `test_stop_sets_today_and_status`, `test_delete_local_row` (FR-23) | назначение → список → правка → остановка → удаление | 201/200/204, `status='stopped'` + `ended_on` сегодня, аудит `PRESCRIBE/UPDATE/STOP/DELETE_MEDICATION` |
+| `test_validation_rejects_bad_status_and_dates` | статус `unknown`, пустой title, старт в будущем, конец раньше старта | 422 `VALIDATION` |
+| `test_emias_rows_read_only` | строка `source='emias'` в `patient_medications` | PATCH/stop/DELETE → 409 `MEDICATION_IMPORTED`, строка не изменилась |
+| `test_roster_idor_and_other_clinician` | врач вне roster, чужой patient_id, второй врач в roster | 403 `NO_ROSTER`, 404 `NOT_FOUND`, 403 `NOT_OWNER` |
+| `test_medication_encrypted_at_rest` | raw SELECT title/notes | bytea без открытого текста, ORM расшифровывает |
+| `test_consent_revocation_clears_medications` | отзыв согласия пациентом | строки `patient_medications` удалены, врач получает 403 `CONSENT_REQUIRED` |
+| `test_history_merges_all_types_newest_first`, `test_history_types_filter` | приём + назначение + скрининг + НЯ; `types=medication` | лента по убыванию `at`, все 4 типа и `source`, фильтр оставляет один тип, неизвестный тип → 422 |
+| `test_history_limit_and_cursor` | `limit=2`, затем `before=next_before` | вторая страница без пересечения, курсор сортирует по (at, id) |
+| `test_history_audit_and_gating` | чтение ленты; врач вне roster; отзыв согласия | `READ_PATIENT_HISTORY` в audit_log; 403 `NO_ROSTER`; 403 `CONSENT_REQUIRED` |
 | `test_simulate_error_injection` | `?simulate=500\|429\|timeout` | 500/429(+Retry-After)/504 — клиент обязан ретраить |
 | `test_emias_client_*` | кэш токена (80% TTL), 429/500, max attempts, кап 4 MiB, redirect/host allowlist, невалидный Bundle | один token-запрос на TTL; backoff/Retry-After; `response_too_large`/`host_not_allowed`/`invalid_bundle` |
 | `test_no_phi_or_token_in_logs` | ретрай с СНИЛС в query | в логах только путь без query; токен и СНИЛС отсутствуют |
