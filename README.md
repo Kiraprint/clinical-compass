@@ -212,6 +212,18 @@ cd android && ./gradlew assembleDebug           # APK: app/build/outputs/apk/deb
 #    CC_ASSISTANT_LLM_URL=http://host.docker.internal:18080/v1
 #    CC_ASSISTANT_LLM_MODEL=local
 #    затем: docker compose -f infra/docker-compose.yml up -d api
+#
+# Вариант с omniroute (шлюз с аутентификацией, комбо home-stable):
+#    шлюз слушает loopback хоста, поэтому в сеть контейнеров его пробрасывает
+#    relay (socat) на docker-шлюзе:
+#    docker run -d --restart unless-stopped --name omniroute-relay \
+#      --network hermes-docker_default -p 172.17.0.1:20133:20128 \
+#      alpine/socat TCP-LISTEN:20128,fork,reuseaddr TCP:<omniroute-контейнер>:20128
+#    # и в infra/.env
+#    CC_ASSISTANT_LLM_URL=http://172.17.0.1:20133/v1
+#    CC_ASSISTANT_LLM_MODEL=home-stable
+#    CC_ASSISTANT_LLM_API_KEY=<персональный ключ omniroute>
+#    CC_ASSISTANT_LLM_TIMEOUT=30   # reasoning-модели отвечают 10-18 c
 ```
 
 Без `CC_ASSISTANT_LLM_URL` роутер выключен (эквивалент «Все разделы») — весь стек и e2e работают без LLM.

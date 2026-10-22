@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     assistant_llm_url: str = ""
     assistant_llm_model: str = "local"  # CC_ASSISTANT_LLM_MODEL: имя модели на сервере
     assistant_llm_timeout: float = 10.0  # CC_ASSISTANT_LLM_TIMEOUT: сек на выбор тулзы
+    # CC_ASSISTANT_LLM_API_KEY: Bearer-токен OpenAI-совместимого шлюза (omniroute).
+    # Пусто → заголовок Authorization не отправляется (llama-server без ключа).
+    assistant_llm_api_key: str = ""
     # CC_DEPERSONALIZE_NER: off | natasha | rubert (docs/12). true/1 = natasha
     # (обратная совместимость). rubert — redmadrobot-rnd/rubert-base-pii-ner:
     # Apache-2.0, FIO F1 0.933 на redmadrobot-rnd/pii_benchmark (bench/ner).

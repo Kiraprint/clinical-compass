@@ -14,6 +14,7 @@ from app.config import settings
 def _llm_url(monkeypatch):
     """Каждый тест стартует с выключенным роутером (CC_ASSISTANT_LLM_URL='')."""
     monkeypatch.setattr(settings, "assistant_llm_url", "")
+    monkeypatch.setattr(settings, "assistant_llm_api_key", "")
     yield
 
 
@@ -31,6 +32,7 @@ def _fake_chat(monkeypatch, tool_name: str | None, *, raise_exc: Exception | Non
         captured["url"] = req.full_url
         captured["body"] = json.loads(req.data)
         captured["timeout"] = timeout
+        captured["headers"] = dict(req.headers)
         if raise_exc is not None:
             raise raise_exc
         if tool_name is None:
@@ -149,3 +151,24 @@ def test_router_falls_back_on_unknown_tool(monkeypatch):
     monkeypatch.setattr(settings, "assistant_llm_url", "http://llm:18080/v1")
     _fake_chat(monkeypatch, "search_magic")
     assert llm_router.route_topic("вопрос") is None
+
+
+def test_router_sends_bearer_token_when_key_set(monkeypatch):
+    """Шлюз с ключом (omniroute): Authorization: Bearer из CC_ASSISTANT_LLM_API_KEY."""
+    from app.services import llm_router
+
+    monkeypatch.setattr(settings, "assistant_llm_url", "http://omniroute:20128/v1")
+    monkeypatch.setattr(settings, "assistant_llm_api_key", "sk-test")
+    captured = _fake_chat(monkeypatch, "search_skaly")
+    assert llm_router.route_topic("шкала PHQ-9") == "ШКАЛЫ"
+    assert captured["headers"]["Authorization"] == "Bearer sk-test"
+
+
+def test_router_omits_auth_header_without_key(monkeypatch):
+    """llama-server без ключа: заголовок не отправляется вовсе."""
+    from app.services import llm_router
+
+    monkeypatch.setattr(settings, "assistant_llm_url", "http://llm:18080/v1")
+    captured = _fake_chat(monkeypatch, "search_skaly")
+    assert llm_router.route_topic("шкала PHQ-9") == "ШКАЛЫ"
+    assert "Authorization" not in captured["headers"]
