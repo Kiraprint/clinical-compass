@@ -1,8 +1,14 @@
 import { useEffect, useState } from "react";
-import { api, Assessment, ImportHistoryResult, PatientCard, Report, Visit } from "../api";
+import { api, Assessment, EmiasSummary, ImportHistoryResult, PatientCard, Report, Visit } from "../api";
 import TrendChart from "../TrendChart";
 import AssistantTab from "./AssistantTab";
 import DrugLibraryTab from "./DrugLibraryTab";
+
+const MED_STATUS_LABELS: Record<string, string> = {
+  active: "активно",
+  completed: "завершено",
+  stopped: "отменено",
+};
 
 const TRIAGE_FILTERS = ["", "GREEN", "YELLOW", "RED"] as const;
 
@@ -608,6 +614,7 @@ function ReportView({ report, error, onBack, onRefresh }: {
       ) : (
         <p style={{ color: "#5a6478", fontSize: 13 }}>Записей о приёмах пока нет.</p>
       )}
+      <EmiasBlock patientId={report.patient_id} />
 
       <h3>Импорт истории болезни (метрика кейса 2)</h3>
       <p style={{ color: "#5a6478", fontSize: 13 }}>
@@ -669,6 +676,68 @@ function ReportView({ report, error, onBack, onRefresh }: {
           {d.mood ? ` (настроение ${d.mood}/10)` : ""}
         </div>
       ))}
+    </div>
+  );
+}
+
+// FR-25: блок «ЕМИАС» в карточке врача — только чтение (связка, назначения, приёмы).
+function EmiasBlock({ patientId }: { patientId: string }) {
+  const [data, setData] = useState<EmiasSummary | null>(null);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    setErr("");
+    setData(null);
+    api.clinicianEmias(patientId)
+      .then((r) => { if (!cancelled) setData(r); })
+      .catch((e) => { if (!cancelled) setErr(e instanceof Error ? e.message : "нет данных"); });
+    return () => { cancelled = true; };
+  }, [patientId]);
+
+  if (err) {
+    return (
+      <div>
+        <h3>ЕМИАС</h3>
+        <p style={{ color: "#5a6478", fontSize: 13 }}>Данные недоступны: {err}</p>
+      </div>
+    );
+  }
+  if (!data) return null;
+  if (!data.linked) {
+    return (
+      <div>
+        <h3>ЕМИАС</h3>
+        <p style={{ color: "#5a6478", fontSize: 13 }}>Пациент не связан с ЕМИАС.</p>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <h3>ЕМИАС</h3>
+      <p style={{ color: "#5a6478", fontSize: 13 }}>
+        приёмов: {data.encounters} ·
+        последняя синхронизация: {data.last_sync ? data.last_sync.slice(0, 16).replace("T", " ") : "—"}
+        {data.enabled ? "" : " · интеграция отключена (показаны сохранённые данные)"}
+      </p>
+      {data.medications.length > 0 ? (
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Назначение</th><th>Дозировка</th><th>С</th><th>Статус</th></tr></thead>
+            <tbody>
+              {data.medications.map((m) => (
+                <tr key={m.id}>
+                  <td>{m.title}</td>
+                  <td>{m.dosage ?? "—"}</td>
+                  <td>{m.started_on ?? "—"}</td>
+                  <td>{MED_STATUS_LABELS[m.status] ?? m.status}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p style={{ color: "#5a6478", fontSize: 13 }}>Назначений из ЕМИАС нет.</p>
+      )}
     </div>
   );
 }

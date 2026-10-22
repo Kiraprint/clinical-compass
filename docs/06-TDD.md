@@ -124,6 +124,16 @@
 | `test_redline_in_history_does_not_poison_next_turn` | ход 1 — redline (диагноз), ход 2 — обычный вопрос по КБ | ход 2 не refused и возвращает KB-цитаты (red line только по текущему вопросу) |
 | `test_revoked_consent_skips_patient_card` | отзыв согласия после создания треда | `skipped_patient_ids == [p1]`, карты p1 нет в цитатах, запись `READ_ASSISTANT_THREAD` |
 | `test_history_is_scrubbed_before_retrieval` | ФИО в прошлой реплике | в retrieval-строке `[ФИО]`, исходное ФИО отсутствует |
+| `test_emias_mock_*` (token/bad creds/rate limit/scopes/pagination/bundle/404) | контракт мока ЕМИАС | 401 `invalid_client`, 429 + `Retry-After`, 403 `insufficient_scope`, Bundle(searchset) с total/link[next] |
+| `test_simulate_error_injection` | `?simulate=500\|429\|timeout` | 500/429(+Retry-After)/504 — клиент обязан ретраить |
+| `test_emias_client_*` | кэш токена (80% TTL), 429/500, max attempts, кап 4 MiB, redirect/host allowlist, невалидный Bundle | один token-запрос на TTL; backoff/Retry-After; `response_too_large`/`host_not_allowed`/`invalid_bundle` |
+| `test_no_phi_or_token_in_logs` | ретрай с СНИЛС в query | в логах только путь без query; токен и СНИЛС отсутствуют |
+| `test_emias_mapping_*` | чистый маппинг Encounter/MedicationRequest/СНИЛС | типы/длительность/статусы; `sha256(СНИЛС+перец)` детерминирован |
+| `test_sync_patients_creates_then_is_idempotent` | два прогона подряд | 1-й: created=5; 2-й: created=0, skipped≥5, дублей нет |
+| `test_savepoint_isolation_keeps_good_entities` | битый Encounter среди валидных | errors=1, `partial`, остальные сущности сохранены |
+| `test_duplicate_emias_id_updates_instead_of_creating` | два entry с одним emias_id | одна строка visits, второе — update |
+| `test_emias_admin_*` | RBAC/503 без флага/журнал/аудит | 403 для не-ADMIN; `503 EMIAS_DISABLED`; `EMIA_SYNC` в audit_log |
+| `test_clinician_emias_summary_requires_roster` | чтение блока «ЕМИАС» без roster | 403 NO_ROSTER; с roster → 200 и аудит `READ_EMIAS` |
 
 ## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/`)
 

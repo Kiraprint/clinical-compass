@@ -57,6 +57,13 @@ services:
       CC_ASSISTANT_LLM_TIMEOUT: "${CC_ASSISTANT_LLM_TIMEOUT:-10}"
       CC_VAPID_PRIVATE_KEY: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JR0hBZ0VBTUJNR0J5cUdTTTQ5QWdFR0NDcUdTTTQ5QXdFSEJHMHdhd0lCQVFRZ3dVN2MwMkZiYXBVVndxVmUKWkJFcUMrRTJGZ2NScm9SeDNiZkFmSlVEOHN5aFJBTkNBQVJUaTg4TlpBK3hxaUxVM1c4RGxwNUxrL25WejBSNwptZDZEZnp6aUc2YWZ2a3ZsankwQVlSWFRzVmp3Y2l4SzdSQTAzWlBNbjA5UEg1Smkrbi9SeStkLwotLS0tLUVORCBQUklWQVRFIEtFWS0tLS0tCg==
       CC_QDRANT_URL: http://qdrant:6333
+      # FR-25: ЕМИАС. Egress по умолчанию ВЫКЛЮЧЕН (docs/10 R17); включается
+      # CC_EMIAS_ENABLED=true. CC_EMIAS_ALLOW_INSECURE=true — только для мока по http.
+      CC_EMIAS_ENABLED: "${CC_EMIAS_ENABLED:-false}"
+      CC_EMIAS_BASE_URL: "${CC_EMIAS_BASE_URL:-http://emias-mock:8090}"
+      CC_EMIAS_CLIENT_ID: "${CC_EMIAS_CLIENT_ID:-compass}"
+      CC_EMIAS_CLIENT_SECRET: "${CC_EMIAS_CLIENT_SECRET:-compass-secret}"
+      CC_EMIAS_ALLOW_INSECURE: "${CC_EMIAS_ALLOW_INSECURE:-false}"
     # LLM-роутер раздела БЗ (docs/04 FR-17): хост с tools/llm.sh доступен из контейнера.
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -147,6 +154,26 @@ services:
       api:
         condition: service_healthy
     restart: "no"
+
+  # FR-25: мок ЕМИАС (REST+FHIR-гибрид, см. api/app/emias/mock.py). В обычный
+  # `up` не входит — только профиль emias:
+  #   docker compose -f infra/docker-compose.yml --profile emias up -d emias-mock
+  # Данные — детерминированные вымышленные фикстуры; ПДн нет.
+  emias-mock:
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+    command: ["/app/.venv/bin/uvicorn", "app.emias.mock:app", "--host", "0.0.0.0", "--port", "8090"]
+    profiles: ["emias"]
+    environment:
+      CC_EMIAS_CLIENT_ID: "${CC_EMIAS_CLIENT_ID:-compass}"
+      CC_EMIAS_CLIENT_SECRET: "${CC_EMIAS_CLIENT_SECRET:-compass-secret}"
+      CC_EMIAS_MOCK_LATENCY_MS: "${CC_EMIAS_MOCK_LATENCY_MS:-0}"
+      CC_EMIAS_MOCK_TIMEOUT_S: "${CC_EMIAS_MOCK_TIMEOUT_S:-2}"
+      CC_EMIAS_MOCK_RATE_LIMIT: "${CC_EMIAS_MOCK_RATE_LIMIT:-60}"
+    expose:
+      - "8090"
+    restart: unless-stopped
 
 volumes:
   pgdata:

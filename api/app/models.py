@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import BigInteger, CheckConstraint, Date, DateTime, ForeignKey, Identity, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -301,22 +301,27 @@ class Visit(Base):
     Вносит врач (clinician_id): дата приёма, формат (in_person/online/phone),
     длительность в минутах и свободная заметка. История приёмов видна в карточке —
     врач отслеживает динамику общения между скринингами.
+    FR-25: приёмы, импортированные из ЕМИАС, живут в этой же таблице
+    (source='emias', clinician_id = NULL, emias_id — для идемпотентного upsert).
     """
 
     __tablename__ = "visits"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
-    clinician_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    clinician_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     visited_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     visit_type: Mapped[str] = mapped_column(String(16))  # in_person | online | phone
     duration_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
     notes: Mapped[str] = mapped_column(EncryptedText())  # F1: запись беседы
+    source: Mapped[str] = mapped_column(String(8), server_default=text("'local'"))  # local | emias
+    emias_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
 
     __table_args__ = (
         CheckConstraint("visit_type in ('in_person','online','phone')", name="visits_type"),
         CheckConstraint("duration_min is null or (duration_min between 1 and 480)", name="visits_duration"),
+        CheckConstraint("source in ('local','emias')", name="visits_source"),
     )
 
 
@@ -502,3 +507,66 @@ class AssistantMessage(Base):
     citations: Mapped[list] = mapped_column(JSONB, default=list)
     topic: Mapped[str | None] = mapped_column(String(40), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)
+class EmiasLink(Base):
+    """Связка локального пациента с пациентом ЕМИАС (FR-25).
+
+    Один пациент — одна связка (patient_id unique). СНИЛС НЕ хранится в открытом
+    виде: только sha256(СНИЛС + перец) — хватает для идемпотентного поиска,
+    недостаточно для восстановления идентификатора (152-ФЗ ст.10).
+    """
+
+    __tablename__ = "emias_links"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    # unique уже создаёт индекс: отдельный index=True давал дублирующий индекс.
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), unique=True)
+    # один пациент ЕМИАС — одна карта локально (иначе двойная связка и дубли визитов).
+    emias_patient_id: Mapped[str] = mapped_column(String(64), unique=True)
+    snils_hash: Mapped[str] = mapped_column(String(64), index=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
+
+class PatientMedication(Base):
+    """Назначение препарата из ЕМИАС (FR-25, «история назначений»).
+
+    Название и дозировка — спецкатегория ПДн (косвенно указывают диагноз) →
+    EncryptedText (pgcrypto, CC_DATA_KEY). emias_id unique — идемпотентный upsert.
+    """
+
+    __tablename__ = "patient_medications"
+    __table_args__ = (
+        CheckConstraint("status in ('active','completed','stopped','unknown')", name="patient_medications_status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    title: Mapped[str] = mapped_column(EncryptedText())
+    dosage: Mapped[str | None] = mapped_column(EncryptedText(), nullable=True)
+    started_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="unknown")
+    emias_id: Mapped[str] = mapped_column(String(64), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
+
+class EmiasSyncRun(Base):
+    """Прогон синхронизации с ЕМИАС (по образцу KBRun, docs/15 §4).
+
+    stats — счётчики fetched/created/updated/skipped/errors и список ошибок
+    по сущностям; тела ответов ЕМИАС и ПДн сюда не попадают.
+    """
+
+    __tablename__ = "emias_sync_runs"
+    __table_args__ = (
+        CheckConstraint("status in ('running','ok','partial','failed')", name="emias_sync_runs_status"),
+        CheckConstraint("mode in ('patients','one')", name="emias_sync_runs_mode"),
+        Index("ix_emias_sync_runs_started_at", "started_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    trigger: Mapped[str] = mapped_column(String(16))  # manual | cli
+    mode: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16), default="running")
+    stats: Mapped[dict] = mapped_column(JSONB, default=dict)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

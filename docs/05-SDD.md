@@ -117,6 +117,7 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | E7 | ИИ-агент: KB (Qdrant) + гибридный поиск + LangGraph + UI-вкладка | FR-17 | тесты агента (red line, цитаты, offtopic) + e2e вкладки «Ассистент» |
 | E8 | `kb-enrichment`: источники PubMed/ВОЗ, критерии, ревью, производный индекс | FR-20 | оффлайн-тесты коннекторов/критериев/пайплайна + прогон, воспроизводимый по `kb_runs` |
 | E9 | Сессии клинического ассистента: треды, история как контекст retrieval, мультипациентская область, UI-колонка диалогов | FR-21 | `test_assistant_threads.py` (изоляция врачей, roster-гейт, история/обрезка, аудит, каскад) + `npm run build` |
+| E10 | Интеграция с ЕМИАС: host-side клиент (OAuth/FHIR, ретраи, allowlist), идемпотентный sync в `emias_links/patient_medications/visits`, админ-API + CLI, мок-сервис `emias-mock`, блок «ЕМИАС» в карточке врача | FR-25 | оффлайн-тесты мока/клиента/маппинга/sync/API на реальном Postgres; повторный прогон без дублей; `docker compose config` валиден |
 
 ## 5. DoD (Definition of Done) эпика
 
@@ -152,6 +153,7 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | FR-19 | E5 | `test_patient_flows.py` (чек-ин + дневник + приём) |
 | FR-20 | E8 | `test_enrichment_domain.py`, `test_enrichment_pubmed.py`, `test_enrichment_who.py`, `test_enrichment_pipeline.py`, `test_kb_admin_api.py` |
 | FR-21 | E9 | `test_assistant_threads.py` (изоляция, roster-гейт, история, аудит, каскад) |
+| FR-25 | E10 | `test_emias_mock.py`, `test_emias_client.py`, `test_emias_mapping.py`, `test_emias_sync.py`, `test_emias_api.py` |
 
 ## 7. Границы инкремента
 
