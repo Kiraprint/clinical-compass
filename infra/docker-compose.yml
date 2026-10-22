@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: compass
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-compass}
@@ -20,6 +21,7 @@ services:
 
   qdrant:
     image: qdrant/qdrant:v1.19.2
+    restart: unless-stopped
     # NEW-4: Qdrant доступен только api/kb-seed внутри compose-сети.
     expose:
       - "6333"
@@ -36,6 +38,7 @@ services:
     build:
       context: ..
       dockerfile: api/Dockerfile
+    restart: unless-stopped
     environment:
       # F3: секреты читаются из .env (docker compose подхватывает автоматически).
       # Демо-значения — только дефолты, если .env отсутствует. Прод: `tools/gen-secrets.sh`
@@ -124,6 +127,7 @@ services:
         condition: service_completed_successfully
       kb-seed:
         condition: service_completed_successfully
+    restart: unless-stopped
     ports:
       - "8090:80"
 
