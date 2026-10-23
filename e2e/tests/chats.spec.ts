@@ -1,5 +1,5 @@
 // e2e экрана «Чаты» врача (FR-29): ассистент по базе знаний и переписка с пациентами
-// в одном разделе; навигация «Пациенты · Чаты · Библиотека · Все напоминания».
+// в одном разделе; навигация «Пациенты · Чаты · Библиотека · Напоминания».
 import { expect, test, type APIResponse } from "@playwright/test";
 import { DEMO_PASSWORD, DEMO_TOTP, freshPatientEmail, login, totp } from "./helpers";
 
@@ -14,7 +14,7 @@ test.describe("Экран чатов врача", () => {
     await page.getByRole("tab", { name: "Ассистент" }).click();
     await expect(page.getByRole("heading", { name: "Ассистент врача" })).toBeVisible();
 
-    await page.getByRole("button", { name: "Новый диалог" }).click();
+    await page.locator('.icon-btn[title="Новый диалог"]').click();
     await page.getByLabel("Вопрос").fill("Какой порог тяжести у шкалы PHQ-9?");
     await page.getByRole("button", { name: "Спросить" }).click();
 
@@ -93,7 +93,7 @@ test.describe("Экран чатов врача", () => {
     await page.getByRole("button", { name: "Пациенты", exact: true }).click();
     await expect(page.getByRole("heading", { name: /Мои пациенты/ })).toBeVisible();
 
-    await page.getByRole("button", { name: /Все напоминания/ }).click();
+    await page.getByRole("button", { name: /^Напоминания/ }).click();
     await expect(page.getByRole("heading", { name: /Напоминания/ })).toBeVisible();
   });
 });

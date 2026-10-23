@@ -9,7 +9,7 @@ async function openNewThread(page: Page) {
   await page.getByRole("button", { name: "Чаты" }).click();
   await page.getByRole("tab", { name: "Ассистент" }).click();
   await expect(page.getByRole("heading", { name: "Ассистент врача" })).toBeVisible();
-  await page.getByRole("button", { name: "Новый диалог" }).click();
+  await page.locator('.icon-btn[title="Новый диалог"]').click();
   await expect(page.getByLabel("Вопрос")).toBeVisible();
 }
 

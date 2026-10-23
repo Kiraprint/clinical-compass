@@ -276,7 +276,7 @@ export default function ClinicianView() {
     };
   }, [selected, reportVersion]);
 
-  // FR-29: навигация врача — Пациенты · Чаты · Библиотека · Все напоминания.
+  // FR-29: навигация врача — Пациенты · Чаты · Библиотека · Напоминания.
   const nav = (
     <div className="tabs top-tabs">
       <button
@@ -304,7 +304,7 @@ export default function ClinicianView() {
           setShowReminders((v) => !v);
         }}
       >
-        Все напоминания
+        Напоминания
         {overdueCount > 0 && <span className="count-badge">{overdueCount}</span>}
       </button>
     </div>
@@ -1144,7 +1144,7 @@ function VerifyAdverseEvent({ event, medications, drugs, onOpenLibrary, onVerifi
         >
           Отклонить
         </button>
-        <select aria-label="Тяжесть НЯ" value={severity} onChange={(e) => setSeverity(e.target.value as AdverseSeverity)}>
+        <select aria-label="Тяжесть при проверке" value={severity} onChange={(e) => setSeverity(e.target.value as AdverseSeverity)}>
           <option value="mild">лёгкое</option>
           <option value="moderate">умеренное</option>
           <option value="severe">тяжёлое</option>
@@ -1161,7 +1161,7 @@ function VerifyAdverseEvent({ event, medications, drugs, onOpenLibrary, onVerifi
             <option key={d.drug_id} value={d.drug_id}>{d.trade_name}</option>
           ))}
         </select>
-        <select aria-label="Действие при НЯ" value={action} onChange={(e) => setAction(e.target.value)}>
+        <select aria-label="Действие при проверке" value={action} onChange={(e) => setAction(e.target.value)}>
           <option value="none">действий не требуется</option>
           <option value="monitoring">наблюдение</option>
           <option value="dose_reduced">доза снижена</option>
