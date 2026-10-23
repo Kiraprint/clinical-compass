@@ -2,7 +2,10 @@ import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
   testDir: "tests",
-  timeout: 60_000,
+  timeout: 90_000,
+  // Ответ ассистента включает вызов LLM (шлюз, свободные дорожки): 10–20 с —
+  // норма, дефолтные 5 с на assertion давали ложные падения e2e.
+  expect: { timeout: 30_000 },
   retries: 0,
   use: {
     baseURL: process.env.CC_E2E_URL ?? "http://127.0.0.1:8090",
