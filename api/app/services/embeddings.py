@@ -129,6 +129,15 @@ class BgeM3Embedder:
         batch_size: int = 8,
         max_length: int = 2048,
     ) -> None:
+        if batch_size < 1:
+            raise EmbedderConfigError(
+                f"CC_EMBEDDER_BATCH_SIZE={batch_size}: ожидается целое >= 1."
+            )
+        if max_length < 16:
+            raise EmbedderConfigError(
+                f"CC_EMBEDDER_MAX_LENGTH={max_length}: ожидается >= 16."
+            )
+        resolved_device = _resolve_device(device)
         try:
             from FlagEmbedding import BGEM3FlagModel
         except ImportError as exc:  # нет ни FlagEmbedding, ни torch
@@ -138,16 +147,8 @@ class BgeM3Embedder:
                 "Docker: `uv sync --frozen --extra embeddings`), либо верните CC_EMBEDDER=hash. "
                 "Базовый образ API намеренно без torch (docs/08 §4)."
             ) from exc
-        if batch_size < 1:
-            raise EmbedderConfigError(
-                f"CC_EMBEDDER_BATCH_SIZE={batch_size}: ожидается целое >= 1."
-            )
-        if max_length < 16:
-            raise EmbedderConfigError(
-                f"CC_EMBEDDER_MAX_LENGTH={max_length}: ожидается >= 16."
-            )
         self.model_id = model_id
-        self.device = _resolve_device(device)
+        self.device = resolved_device
         self._batch_size = batch_size
         self._max_length = max_length
         try:
