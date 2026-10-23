@@ -205,6 +205,29 @@ def notify_escalation_clinicians(
     return list(rows)
 
 
+def notify_adverse_event_clinicians(db: Session, patient_id: uuid.UUID) -> list[uuid.UUID]:
+    """FR-28: серьёзное НЯ, о котором сообщил пациент. Один Notification на врача ростера.
+
+    Текст без ПДн: ни имени пациента, ни описания события (152-ФЗ, спецкатегория).
+    Коммитит внешний код.
+    """
+    rows = db.scalars(
+        select(ClinicianRoster.clinician_id).where(ClinicianRoster.patient_id == patient_id)
+    ).all()
+    for clinician_id in rows:
+        db.add(
+            Notification(
+                user_id=clinician_id,
+                kind="ADVERSE_EVENT",
+                title="Серьёзное нежелательное явление",
+                body="Пациент сообщил о серьёзном нежелательном явлении",
+                patient_id=patient_id,
+            )
+        )
+    return list(rows)
+
+
+
 def list_notifications(db: Session, user_id: uuid.UUID, limit: int = 50) -> dict:
     rows = db.scalars(
         select(Notification)

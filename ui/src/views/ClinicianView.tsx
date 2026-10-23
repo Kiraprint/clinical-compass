@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { api, ApiError, Assessment, ClinicianReminder, EmiasSummary, Escalation, HistoryType, ImportHistoryResult, PatientCard, PatientContacts, PatientHistoryItem, PatientMedication, RemindersResponse, Report, Visit } from "../api";
+import { api, AdverseSeverity, ApiError, Assessment, ClinicianAdverseEvent, ClinicianReminder, Drug, EmiasSummary, Escalation, HistoryType, ImportHistoryResult, PatientCard, PatientContacts, PatientHistoryItem, PatientMedication, RemindersResponse, Report, Visit } from "../api";
 import TrendChart from "../TrendChart";
 import AssistantTab from "./AssistantTab";
 import DrugLibraryTab from "./DrugLibraryTab";
@@ -177,6 +177,8 @@ export default function ClinicianView() {
   const [reminderVersion, setReminderVersion] = useState(0);
   // Общая очередь эскалаций — не только свои пациенты (docs/16 §3).
   const [escalations, setEscalations] = useState<Escalation[]>([]);
+  // FR-28: НЯ, сообщённые пациентами и ждущие проверки врача.
+  const [pendingAe, setPendingAe] = useState<ClinicianAdverseEvent[]>([]);
   useEffect(() => {
     api
       .clinicianReminders()
@@ -194,6 +196,23 @@ export default function ClinicianView() {
       })
       .catch(() => {
         if (!cancelled) setEscalations([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected, reportVersion]);
+
+
+  useEffect(() => {
+    if (selected) return;
+    let cancelled = false;
+    api
+      .adverseQueue("pending")
+      .then((r) => {
+        if (!cancelled) setPendingAe(r.items);
+      })
+      .catch(() => {
+        if (!cancelled) setPendingAe([]);
       });
     return () => {
       cancelled = true;
@@ -317,6 +336,15 @@ export default function ClinicianView() {
       {showReminders && (
         <RemindersPanel cards={cards} onChanged={() => setReminderVersion((v) => v + 1)} />
       )}
+      {!selected && pendingAe.length > 0 && (
+        <div className="alert-warn" style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+          <strong>НЯ на проверке: {pendingAe.length}</strong>
+          <span style={{ fontSize: 13 }}>
+            {pendingAe.slice(0, 3).map((e) => e.patient_fio ?? "Пациент").join(", ")}
+            {pendingAe.length > 3 ? " …" : ""} — откройте карточку пациента.
+          </span>
+        </div>
+      )}
       {!selected && (
         <EscalationsQueue
           items={escalations}
@@ -382,14 +410,16 @@ export default function ClinicianView() {
           error={reportError}
           onBack={() => { window.location.hash = ""; }}
           onRefresh={() => setReportVersion((v) => v + 1)}
+          onOpenLibrary={() => { setSelected(null); setSection("library"); }}
         />
       )}
     </>
   );
 }
 
-function ReportView({ report, error, onBack, onRefresh }: {
+function ReportView({ report, error, onBack, onRefresh, onOpenLibrary }: {
   report: Report | null; error: string; onBack: () => void; onRefresh: () => void;
+  onOpenLibrary: () => void;
 }) {
   const [picked, setPicked] = useState<string[]>([]);
   const [scaleSaved, setScaleSaved] = useState<number | null>(null);
@@ -402,6 +432,8 @@ function ReportView({ report, error, onBack, onRefresh }: {
   const [aeSaved, setAeSaved] = useState<number | null>(null);
   const [aeError, setAeError] = useState("");
   const [aeList, setAeList] = useState<Report["adverse_events"]>([]);
+  // FR-28: справочник ГРЛС для связи НЯ с препаратом (доступ врачу).
+  const [drugs, setDrugs] = useState<Drug[]>([]);
   const [chatMsgs, setChatMsgs] = useState<{ id: string; sender: string; content: string; created_at: string }[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [chatErr, setChatErr] = useState("");
@@ -435,6 +467,14 @@ function ReportView({ report, error, onBack, onRefresh }: {
       .catch(() => { if (!cancelled) setChatMsgs([]); });
     return () => { cancelled = true; };
   }, [report]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.drugs()
+      .then((r) => { if (!cancelled) setDrugs(r.items); })
+      .catch(() => { if (!cancelled) setDrugs([]); });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (!report) return;
@@ -812,12 +852,34 @@ function ReportView({ report, error, onBack, onRefresh }: {
         </p>
       )}
 
-      <h3>Нежелательные явления (задача кейса 3)</h3>
+      <h3>Нежелательные явления</h3>
+      {aeList.filter((e) => e.status === "pending").length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 12 }}>
+          <strong style={{ fontSize: 14 }}>
+            На проверке: {aeList.filter((e) => e.status === "pending").length}
+          </strong>
+          {aeList
+            .filter((e) => e.status === "pending")
+            .map((e) => (
+              <VerifyAdverseEvent
+                key={e.id}
+                event={e}
+                medications={report.adherence.medications}
+                drugs={drugs}
+                onOpenLibrary={onOpenLibrary}
+                onVerified={(updated) => {
+                  setAeList((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
+                  onRefresh();
+                }}
+              />
+            ))}
+        </div>
+      )}
       {aeList.length > 0 ? (
         <div className="table-wrap">
           <table>
             <thead>
-              <tr><th>Дата</th><th>Событие</th><th>Тяжесть</th><th>Препарат</th><th>Действие</th></tr>
+              <tr><th>Дата</th><th>Событие</th><th>Тяжесть</th><th>Статус</th><th>Препарат</th><th>Действие</th></tr>
             </thead>
             <tbody>
               {aeList.map((e) => (
@@ -825,7 +887,23 @@ function ReportView({ report, error, onBack, onRefresh }: {
                   <td>{e.onset_date}</td>
                   <td>{e.event_text}</td>
                   <td><span className={`badge ${e.severity === "severe" ? "RED" : e.severity === "moderate" ? "YELLOW" : "GREEN"}`}>{e.severity}</span></td>
-                  <td>{e.suspected_drug ?? "—"}</td>
+                  <td>
+                    <span className={`badge ${e.status === "confirmed" ? "GREEN" : e.status === "pending" ? "YELLOW" : ""}`}>
+                      {e.status === "confirmed" ? "подтверждено" : e.status === "pending" ? "на проверке" : "отклонено"}
+                    </span>
+                    {e.reported_by === "patient" && (
+                      <div style={{ color: "#5a6478", fontSize: 12 }}>сообщил пациент</div>
+                    )}
+                  </td>
+                  <td>
+                    {e.suspected_drug ?? e.drug_trade_name ?? "—"}
+                    {e.reference && (
+                      <div style={{ color: "#5a6478", fontSize: 12 }} title={e.reference.adverse_events}>
+                        ГРЛС: {e.reference.adverse_events.slice(0, 80)}
+                        {e.reference.adverse_events.length > 80 ? "…" : ""}
+                      </div>
+                    )}
+                  </td>
                   <td>{e.action_taken ?? "—"}</td>
                 </tr>
               ))}
@@ -992,6 +1070,116 @@ function ReportView({ report, error, onBack, onRefresh }: {
             : ""}
         </div>
       ))}
+    </div>
+  );
+}
+
+// FR-28: проверка сообщения пациента. Решение выбирается кнопкой, поля
+// (тяжесть, назначение, препарат ГРЛС, действие, заметка) применяются при
+// сохранении. После сохранения строка уходит из очереди «на проверке».
+function VerifyAdverseEvent({ event, medications, drugs, onOpenLibrary, onVerified }: {
+  event: ClinicianAdverseEvent;
+  medications: Report["adherence"]["medications"];
+  drugs: Drug[];
+  onOpenLibrary: () => void;
+  onVerified: (updated: ClinicianAdverseEvent) => void;
+}) {
+  const [decision, setDecision] = useState<"confirmed" | "rejected">("confirmed");
+  const [severity, setSeverity] = useState(event.severity);
+  const [medId, setMedId] = useState(event.medication_id ?? "");
+  const [drugId, setDrugId] = useState(event.drug_id ?? "");
+  const [action, setAction] = useState(event.action_taken ?? "monitoring");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const drug = drugs.find((d) => d.drug_id === drugId);
+
+  const save = async () => {
+    setErr("");
+    setBusy(true);
+    try {
+      onVerified(await api.verifyAdverseEvent(event.patient_id, event.id, {
+        status: decision,
+        severity,
+        medication_id: medId || undefined,
+        drug_id: drugId || undefined,
+        action_taken: action,
+        verification_note: note.trim() || undefined,
+      }));
+    } catch (e: unknown) {
+      setErr(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className="msg"
+      style={{ borderLeft: `3px solid ${event.severity === "severe" ? "#d64545" : "#c9a227"}`, paddingLeft: 10 }}
+    >
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", fontSize: 13 }}>
+        <b>{event.onset_date}</b>
+        <span className={`badge ${event.severity === "severe" ? "RED" : event.severity === "moderate" ? "YELLOW" : "GREEN"}`}>
+          {event.severity}
+        </span>
+        <span>{event.event_text}</span>
+        {event.medication_title && (
+          <span style={{ color: "#5a6478" }}>· назначение: {event.medication_title}</span>
+        )}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginTop: 8 }}>
+        <button
+          className={decision === "confirmed" ? "active" : ""}
+          onClick={() => setDecision("confirmed")}
+        >
+          Подтвердить
+        </button>
+        <button
+          className={decision === "rejected" ? "active" : ""}
+          onClick={() => setDecision("rejected")}
+        >
+          Отклонить
+        </button>
+        <select aria-label="Тяжесть НЯ" value={severity} onChange={(e) => setSeverity(e.target.value as AdverseSeverity)}>
+          <option value="mild">лёгкое</option>
+          <option value="moderate">умеренное</option>
+          <option value="severe">тяжёлое</option>
+        </select>
+        <select aria-label="Связь с назначением" value={medId} onChange={(e) => setMedId(e.target.value)}>
+          <option value="">назначение не выбрано</option>
+          {medications.map((m) => (
+            <option key={m.id} value={m.id}>{m.title}</option>
+          ))}
+        </select>
+        <select aria-label="Препарат из справочника" value={drugId} onChange={(e) => setDrugId(e.target.value)}>
+          <option value="">справочник ГРЛС</option>
+          {drugs.map((d) => (
+            <option key={d.drug_id} value={d.drug_id}>{d.trade_name}</option>
+          ))}
+        </select>
+        <select aria-label="Действие при НЯ" value={action} onChange={(e) => setAction(e.target.value)}>
+          <option value="none">действий не требуется</option>
+          <option value="monitoring">наблюдение</option>
+          <option value="dose_reduced">доза снижена</option>
+          <option value="stopped">препарат отменён</option>
+          <option value="referred">направлен к врачу</option>
+        </select>
+        <input placeholder="Заметка врача" value={note} onChange={(e) => setNote(e.target.value)} style={{ maxWidth: 260 }} />
+        <button onClick={save} disabled={busy}>
+          {busy ? "Сохранение…" : "Сохранить проверку"}
+        </button>
+      </div>
+      {drug && (
+        <p style={{ fontSize: 12, color: "#5a6478", marginBottom: 0 }}>
+          В справочнике ГРЛС: {drug.adverse_events.slice(0, 240)}
+          {drug.adverse_events.length > 240 ? "…" : ""}{" "}
+          <a href="#library" onClick={onOpenLibrary} style={{ color: "#2f6fed" }}>
+            открыть справочник
+          </a>
+        </p>
+      )}
+      {err && <p className="error">{err}</p>}
     </div>
   );
 }

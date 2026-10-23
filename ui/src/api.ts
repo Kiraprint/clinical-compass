@@ -177,6 +177,32 @@ export const api = {
   getDiary: () => req<{ items: DiaryEntry[] }>("/api/v1/diary"),
   getMyAdherence: (days = 14) =>
     req<AdherenceSummary>(`/api/v1/me/adherence?days=${days}`),
+  // FR-28: нежелательные явления. Пациент сообщает, врач проверяет.
+  myAdverseEvents: () => req<{ items: MyAdverseEvent[] }>("/api/v1/me/adverse-events"),
+  reportAdverseEvent: (body: {
+    event_text: string; severity: AdverseSeverity; onset_date: string; medication_id?: string;
+  }) =>
+    req<MyAdverseEvent>("/api/v1/me/adverse-events", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  adverseQueue: (status?: AdverseStatus) =>
+    req<{ items: ClinicianAdverseEvent[] }>(
+      `/api/v1/clinician/adverse-events${status ? `?status=${status}` : ""}`,
+    ),
+  verifyAdverseEvent: (patientId: string, eventId: string, body: {
+    status: "confirmed" | "rejected";
+    severity?: AdverseSeverity;
+    suspected_drug?: string;
+    medication_id?: string;
+    drug_id?: string;
+    action_taken?: string;
+    verification_note?: string;
+  }) =>
+    req<ClinicianAdverseEvent>(
+      `/api/v1/clinician/patients/${patientId}/adverse-events/${eventId}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    ),
   postChat: (content: string) =>
     req<ChatReply>("/api/v1/chat/thread", { method: "POST", body: JSON.stringify({ content }) }),
   getChat: () => req<{ items: ChatMessage[] }>("/api/v1/chat/thread"),
@@ -694,10 +720,7 @@ export interface Report {
     excluded_count: number;
     records: AdherenceRecord[];
   };
-  adverse_events: {
-    id: string; event_text: string; severity: string; onset_date: string;
-    suspected_drug: string | null; action_taken: string | null; created_at: string;
-  }[];
+  adverse_events: ClinicianAdverseEvent[];
   diary: { id: string; content: string; mood: number | null; mood_scale: MoodScale; created_at: string }[];
   available_scales: {
     code: string; title: string; audience: "PATIENT" | "CLINICIAN";
@@ -817,6 +840,51 @@ export interface Drug {
   contraindications: string;
   adverse_events: string;
   special_notes: string;
+}
+
+// --- FR-28: нежелательные явления ---
+export type AdverseSeverity = "mild" | "moderate" | "severe";
+export type AdverseStatus = "pending" | "confirmed" | "rejected";
+/** Фрагмент справочника ГРЛС, привязанный врачом к событию. */
+export interface DrugReference {
+  drug_id: string;
+  trade_name: string;
+  adverse_events: string;
+}
+/** Событие глазами пациента: без врачебных заметок. */
+export interface MyAdverseEvent {
+  id: string;
+  event_text: string;
+  severity: AdverseSeverity;
+  onset_date: string;
+  status: AdverseStatus;
+  status_label: string;
+  medication_id: string | null;
+  medication_title: string | null;
+  verified_at: string | null;
+  created_at: string;
+}
+/** Событие для врача: проверка, назначение и ссылка на справочник. */
+export interface ClinicianAdverseEvent {
+  id: string;
+  patient_id: string;
+  patient_fio: string | null;
+  event_text: string;
+  severity: AdverseSeverity;
+  onset_date: string;
+  status: AdverseStatus;
+  reported_by: "clinician" | "patient";
+  suspected_drug: string | null;
+  action_taken: string | null;
+  medication_id: string | null;
+  medication_title: string | null;
+  drug_id: string | null;
+  drug_trade_name: string | null;
+  reference: DrugReference | null;
+  verification_note: string | null;
+  verified_by: string | null;
+  verified_at: string | null;
+  created_at: string;
 }
 
 // --- Обогащение КБ (docs/15): прогоны, источники, вердикты ---

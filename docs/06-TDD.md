@@ -216,6 +216,20 @@
 | `test_times_per_day_validation` | создание/правка `times_per_day` = 0 и 7; затем 4 | 422 `TIMES_PER_DAY_INVALID`; 4 сохраняется |
 | `test_consent_revoke_deletes_linked_records_and_medications` | отметка по назначению → POST /consent/revoke | `adherence_records` и `patient_medications` пациента пусты |
 | `test_adherence_patient_records_and_doctor_aggregate` (`test_clinician.py`, обновлён) | taken + partial по назначению 2×день + legacy-отметка | `pct=75`, `expected=2`, `excluded_count=1`, агрегат в `report.adherence` |
+| `test_patient_reports_pending_event` | пациент отправляет НЯ с назначением | `201`, `status=pending`, `status_label=на проверке`, `reported_by=patient`, `clinician_id`/`verified_by` пусты; событие видно в `GET /me/adverse-events` |
+| `test_patient_report_requires_consent` | без активного согласия | 403 `CONSENT_REQUIRED` |
+| `test_patient_foreign_medication_rejected` | `medication_id` чужого пациента, затем своё | 422 `MEDICATION_NOT_FOUND`; своё — 201 с `medication_title` |
+| `test_severe_report_notifies_roster_without_pdn` | `severity=severe` при roster-враче | один `Notification` с `kind=ADVERSE_EVENT`, текст «Пациент сообщил о серьёзном нежелательном явлении», без имени и описания |
+| `test_mild_report_does_not_notify` | `severity=mild` | уведомлений нет |
+| `test_clinician_queue_contains_pending` | `GET /clinician/adverse-events?status=pending` | событие с полями пациента/статусом, `reference=null` без препарата |
+| `test_verify_confirm_sets_verifier_and_drug_reference` | PATCH confirm с `drug_id` и заметкой | `verified_by/at`, `reference.trade_name`, пациент видит «проверено врачом» без заметки; очередь pending пустеет; повтор того же статуса — 200 без изменения `verified_at`; смена на rejected — 409 `ADVERSE_ALREADY_VERIFIED` |
+| `test_verify_reject` | PATCH rejected | статус `rejected`, пациент видит «отклонено» |
+| `test_verify_foreign_patient_and_event_404` | врач вне ростера / чужой `event_id` | 404 `ADVERSE_NOT_FOUND` в обоих случаях |
+| `test_verify_unknown_drug_404` | `drug_id` вне справочника | 404 `DRUG_NOT_FOUND` |
+| `test_legacy_clinician_event_is_confirmed` | легаси POST врача | сразу `confirmed`/`clinician`, список отдаёт `status` и `reference` |
+| `test_patient_report_audit_has_no_content` | создание НЯ пациентом | в `audit_log` только `ADVERSE_REPORT` и id объекта, без текста |
+| `test_consent_revoke_deletes_patient_events` | НЯ → отзыв согласия | строки пациента в `adverse_events` удалены |
+| `test_adverse_text_encrypted_at_rest` | после проверки врача | `event_text`/`verification_note` — `bytea`, plaintext на диске отсутствует, ORM расшифровывает |
 
 
 ## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/`)
