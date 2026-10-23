@@ -182,3 +182,125 @@ def test_router_does_not_cap_output_tokens(monkeypatch):
     captured = _fake_chat(monkeypatch, "search_skaly")
     assert llm_router.route_topic("шкала PHQ-9") == "ШКАЛЫ"
     assert "max_tokens" not in captured["body"]
+
+
+# --- Переформулировка уточняющего вопроса (FR-21) -----------------------------
+
+def _fake_rewrite(monkeypatch, reply: str | None, *, raise_exc: Exception | None = None):
+    """Фейковый /chat/completions для rewrite_followup: только content, без тулз."""
+    import urllib.request
+
+    monkeypatch.setattr(settings, "assistant_llm_url", "http://llm.test/v1")
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data)
+        if raise_exc is not None:
+            raise raise_exc
+        return _FakeResp({"choices": [{"message": {"role": "assistant", "content": reply}}]})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    return captured
+
+_HISTORY = [
+    {"role": "CLINICIAN", "content": "Сертралин при депрессии — что известно?"},
+    {"role": "ASSISTANT", "content": "В базе есть инструкция по сертралину."},
+]
+
+def test_rewrite_returns_standalone_question(monkeypatch):
+    from app.services import llm_router
+
+    captured = _fake_rewrite(monkeypatch, "Какие дозы сертралина при депрессии?")
+    assert llm_router.rewrite_followup(_HISTORY, "а в каких дозах?") == (
+        "Какие дозы сертралина при депрессии?"
+    )
+    body = captured["body"]
+    assert body["temperature"] == 0.0
+    assert "tools" not in body
+    prompt = body["messages"][1]["content"]
+    assert "Сертралин при депрессии" in prompt and "а в каких дозах?" in prompt
+
+def test_rewrite_cleans_quotes_and_multiline_reply(monkeypatch):
+    """Модель ответила абзацем в кавычках → берём первую строку без обёрток."""
+    from app.services import llm_router
+
+    _fake_rewrite(monkeypatch, '  «Вопрос: какие дозы сертралина?»\nПояснение: ...\n')
+    assert llm_router.rewrite_followup(_HISTORY, "а в каких дозах?") == (
+        "какие дозы сертралина?"
+    )
+
+def test_rewrite_off_when_no_url(monkeypatch):
+    """LLM выключен → None без сетевого вызова."""
+    import urllib.request
+
+    from app.services import llm_router
+
+    def _no_network(*args, **kwargs):
+        raise AssertionError("LLM выключен — вызова быть не должно")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _no_network)
+    assert llm_router.rewrite_followup(_HISTORY, "а в каких дозах?") is None
+
+def test_rewrite_skipped_without_history(monkeypatch):
+    """Одиночный вопрос не тратит LLM-вызов: переформулировать нечего."""
+    import urllib.request
+
+    from app.services import llm_router
+
+    def _no_network(*args, **kwargs):
+        raise AssertionError("нет истории — вызова быть не должно")
+
+    monkeypatch.setattr(settings, "assistant_llm_url", "http://llm.test/v1")
+    monkeypatch.setattr(urllib.request, "urlopen", _no_network)
+    assert llm_router.rewrite_followup([], "а в каких дозах?") is None
+    assert llm_router.rewrite_followup([{"role": "CLINICIAN", "content": "  "}], "вопрос") is None
+
+@pytest.mark.parametrize(
+    "reply,raise_exc",
+    [
+        ("", None),
+        ("   \n\t ", None),
+        (None, "URLError"),
+        (None, "TimeoutError"),
+        (None, "KeyError"),
+    ],
+)
+def test_rewrite_falls_back_on_empty_or_error(monkeypatch, reply, raise_exc):
+    import urllib.error
+
+    from app.services import llm_router
+
+    exc = None
+    if raise_exc == "URLError":
+        exc = urllib.error.URLError("down")
+    elif raise_exc == "TimeoutError":
+        exc = TimeoutError("timeout")
+    elif raise_exc == "KeyError":
+        exc = KeyError("choices")
+    _fake_rewrite(monkeypatch, reply, raise_exc=exc)
+    assert llm_router.rewrite_followup(_HISTORY, "а в каких дозах?") is None
+
+def test_rewrite_clips_long_history_from_the_end(monkeypatch):
+    """Бюджет: 8 последних реплик, по 800 символов, всего 3000 (свежее важнее)."""
+    from app.services import llm_router
+
+    history = [
+        {"role": "CLINICIAN", "content": f"msg{i:02d} " + "я" * 1000} for i in range(20)
+    ]
+    captured = _fake_rewrite(monkeypatch, "вопрос")
+    assert llm_router.rewrite_followup(history, "а в каких дозах?") == "вопрос"
+    prompt = captured["body"]["messages"][1]["content"]
+    lines = [ln for ln in prompt.splitlines() if ln.startswith(("Врач:", "Ассистент:"))]
+    assert len(lines) <= llm_router.REWRITE_HISTORY_MESSAGES
+    assert all(len(ln) <= llm_router.REWRITE_MESSAGE_CHARS + len("Врач: ") for ln in lines)
+    body_block = "\n".join(lines)
+    assert len(body_block) <= llm_router.REWRITE_HISTORY_CHARS
+    assert "msg19" in body_block  # свежая реплика
+    assert "msg00" not in body_block  # старая отброшена
+
+def test_rewrite_clips_long_answer(monkeypatch):
+    from app.services import llm_router
+
+    _fake_rewrite(monkeypatch, "вопрос " + "я" * 5000)
+    out = llm_router.rewrite_followup(_HISTORY, "а в каких дозах?")
+    assert out is not None and len(out) == llm_router.REWRITE_QUERY_CHARS

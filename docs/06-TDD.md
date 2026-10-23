@@ -84,6 +84,7 @@
 | auth_otp_optional_flag | CC_REQUIRE_OTP=false → login CLINICIAN без otp → 200; секрет остаётся в БД; prod_mode+false → fail-fast |
 | auth_config_public | публичный GET /auth/config → {require_otp} по CC_REQUIRE_OTP (UI скрывает поле 2FA) |
 | llm_router_* | LLM-роутер раздела: tool_call search_<раздел> → topic, off→None, ошибка/таймаут/неизвестная тулза/без тулзы → None (fallback все разделы) |
+| `rewrite_followup_*` (FR-21) | LLM-переформулировка уточняющего вопроса треда: первая строка ответа без кавычек/префикса, no URL → None без вызова, пустая история → None без вызова, ошибка/таймаут/пустой ответ → None, обрезка истории 8×800≤3000 с конца | самодостаточный запрос либо None (= поиск по исходному вопросу), ответ не ломается |
 | consent_gating | PATIENT без согласия → POST /screenings | 403 CONSENT_REQUIRED; после /consent → 201 |
 | screening_closes_run | finish → повторные answers | 409 RUN_CLOSED |
 | screening_one_open_only | 2-й screenings при открытом | 409 CONFLICT |
@@ -160,7 +161,11 @@
 | `test_delete_thread_cascades` | DELETE треда | 404 после удаления, сообщения и привязки удалены каскадом |
 | `test_redline_in_history_does_not_poison_next_turn` | ход 1 — redline (диагноз), ход 2 — обычный вопрос по КБ | ход 2 не refused и возвращает KB-цитаты (red line только по текущему вопросу) |
 | `test_revoked_consent_skips_patient_card` | отзыв согласия после создания треда | `skipped_patient_ids == [p1]`, карты p1 нет в цитатах, запись `READ_ASSISTANT_THREAD` |
-| `test_retrieval_uses_only_current_question` | ФИО в прошлой реплике | агент получает только текущий вопрос, `retrieval_query` не передаётся |
+| `test_followup_question_rewritten_for_retrieval` | тред: «что известно про Авиандр?» → «а в каких дозах?» | LLM-переформулировка уходит в агент как `retrieval_query`, исходный вопрос — как `query` (red line/ответ); первый ход LLM не вызывает; `rewritten=true` |
+| `test_followup_without_llm_uses_current_question`, `test_followup_llm_failure_falls_back_to_original` (пустой ответ/URLError/таймаут) | LLM выключен или недоступен | поиск по исходному вопросу, `rewritten=false`, ответ не ломается |
+| `test_followup_rewrite_prompt_has_no_pii` | ФИО/телефон/дата рождения в прошлой реплике | в промпте переформулировки только `[ФИО]/[ТЕЛЕФОН]/[ДАТА РОЖДЕНИЯ]`, секретов нет |
+| `test_followup_redline_uses_only_current_question` | redline в истории + обычный вопрос / обычная история + redline-вопрос | red line только по текущему вопросу: поиск не глушится, отказ сохраняется |
+| `test_followup_question_retrieves_drug_chunk` | «а в каких дозах?» после вопроса про препарат | чанк ЛЕКАРСТВА (`drug-aviandr`), `grounded=true` — не NO_KB_DATA |
 | `test_emias_mock_*` (token/bad creds/rate limit/scopes/pagination/bundle/404) | контракт мока ЕМИАС | 401 `invalid_client`, 429 + `Retry-After`, 403 `insufficient_scope`, Bundle(searchset) с total/link[next] |
 | `test_create_list_and_audit`, `test_update_fields_and_audit`, `test_stop_sets_today_and_status`, `test_delete_local_row` (FR-23) | назначение → список → правка → остановка → удаление | 201/200/204, `status='stopped'` + `ended_on` сегодня, аудит `PRESCRIBE/UPDATE/STOP/DELETE_MEDICATION` |
 | `test_validation_rejects_bad_status_and_dates` | статус `unknown`, пустой title, старт в будущем, конец раньше старта | 422 `VALIDATION` |
