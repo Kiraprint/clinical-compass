@@ -70,3 +70,5 @@ mobile/android/keystore.properties
 e2e/test-results/
 tools/backups/
 infra/.env
+# Локальная LLM (docs/17): GGUF-веса — гигабайты, не в git
+infra/models/

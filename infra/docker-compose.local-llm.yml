@@ -1,0 +1,85 @@
+# Локальная OpenAI-совместимая модель для LLM-роутера ассистента (docs/17).
+#
+# Оверлей к основному стеку: llama.cpp server в сети `infra_default`, доступен
+# api как http://local-llm:8080/v1. Прод-дефолт НЕ меняется: без этого файла
+# api работает как раньше (CC_ASSISTANT_LLM_URL пуст → поиск по всем разделам).
+#
+# Запуск (из каталога infra/, чтобы compose-проект назывался `infra` и сеть
+# совпадала с уже поднятым стеком):
+#   cd infra
+#   docker compose -f docker-compose.yml up -d          # сначала основной стек
+#   docker compose -f docker-compose.local-llm.yml up -d  # затем модель
+#   docker compose -f docker-compose.yml -f docker-compose.local-llm.yml config -q
+#
+# Модель кладётся GGUF-файлом в ${CC_LOCAL_LLM_MODELS_DIR:-./models} (по умолчанию
+# infra/models — каталог в .gitignore) и указывается путём ОТНОСИТЕЛЬНО него в
+# CC_LOCAL_LLM_MODEL_PATH (по умолчанию model.gguf).
+#
+# Модель подключается к api только через .env (infra/.env):
+#   CC_ASSISTANT_LLM_URL=http://local-llm:8080/v1
+#   CC_ASSISTANT_LLM_MODEL=<alias модели, см. CC_ASSISTANT_LLM_MODEL ниже>
+#   CC_ASSISTANT_LLM_API_KEY=            # llama-server без ключа
+# и перезапуска api: docker compose -f docker-compose.yml up -d api
+#
+# Ресурсы (ориентиры для GGUF, не жёсткие лимиты):
+#   - 7–8B, Q4_K_M ≈ 4.5–5 ГБ файл, RAM/VRAM ≈ 6–7 ГБ при ctx 8192;
+#     CPU (8 ядер) — единицы токенов/с, tool_call на короткий запрос ~2–5 с;
+#   - 27–32B, Q4_K_M ≈ 16–19 ГБ, без GPU на CPU непрактично (секунды на токен);
+#   - чем меньше quant, тем выше шанс, что модель «сломает» JSON tool_call:
+#     для роутера лучше Q5_K_M/Q6_K или Q4_K_M у моделей с крепким json-режимом;
+#   - ctx 8192 достаточно: в LLM уходит только очищенный запрос (docs/12), без
+#     контекста пациентов и без корпуса БЗ.
+#
+# GPU (опционально): с nvidia-container-toolkit раскомментируйте `gpus: all`
+# ниже и поставьте CC_LOCAL_LLM_N_GPU_LAYERS=99. Без GPU оставьте 0 — тогда
+# сервер считает на CPU, модели до ~8B Q4 остаются работоспособны.
+
+services:
+  local-llm:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    restart: unless-stopped
+    # gpus: all  # только при наличии NVIDIA GPU + nvidia-container-toolkit
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - -m
+      - /models/${CC_LOCAL_LLM_MODEL_PATH:-model.gguf}
+      - -c
+      - "${CC_LOCAL_LLM_CTX:-8192}"
+      - -ngl
+      - "${CC_LOCAL_LLM_N_GPU_LAYERS:-0}"
+      # --alias = имя модели в /v1/models; должно совпадать с
+      # CC_ASSISTANT_LLM_MODEL, иначе llama-server ответит 404 model not found.
+      - --alias
+      - "${CC_ASSISTANT_LLM_MODEL:-local}"
+      # --jinja нужен для чат-шаблона и разбора tool_calls: api присылает tools
+      # (search_skaly/…); без jinja tool_call не распарсится и роутер уйдёт в
+      # fallback «поиск по всем разделам».
+      - --jinja
+    volumes:
+      # GGUF-файлы только на чтение: контейнер не должен править модели.
+      - ${CC_LOCAL_LLM_MODELS_DIR:-./models}:/models:ro
+    ports:
+      # Только loopback: удобно для curl/отладки с хоста; в проде не публикуем.
+      - "127.0.0.1:${CC_LOCAL_LLM_PORT:-8080}:8080"
+    healthcheck:
+      # /v1/models отвечает 200 только после загрузки весов (start_period —
+      # запас на чтение GGUF с диска).
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/v1/models"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 120s
+    networks:
+      - infra
+
+networks:
+  # Та же bridge-сеть, в которой живёт api (`infra_default`): так api видит
+  # http://local-llm:8080/v1 и никакого внешнего egress нет (docs/10 R11, 152-ФЗ).
+  # Сеть создаёт основной стек; для запуска оверлея без него —
+  # `docker network create infra_default`.
+  infra:
+    name: infra_default
+    external: true
