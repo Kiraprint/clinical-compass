@@ -120,7 +120,7 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | E6 | UI: patient app, clinician dashboard, admin; simulator seed | FR-14 + всё | e2e-сценарий питча (04 §6) проходит на docker compose |
 | E7 | ИИ-агент: KB (Qdrant) + гибридный поиск + LangGraph + UI-вкладка | FR-17 | тесты агента (red line, цитаты, offtopic) + e2e вкладки «Ассистент» |
 | E8 | `kb-enrichment`: источники PubMed/ВОЗ, критерии, ревью, производный индекс | FR-20 | оффлайн-тесты коннекторов/критериев/пайплайна + прогон, воспроизводимый по `kb_runs` |
-| E9 | Сессии клинического ассистента: треды, история как контекст retrieval, мультипациентская область, UI-колонка диалогов | FR-21 | `test_assistant_threads.py` (изоляция врачей, roster-гейт, история/обрезка, аудит, каскад) + `npm run build` |
+| E9 | Сессии клинического ассистента: треды, LLM-переформулировка уточняющих вопросов (retrieval/раздел), мультипациентская область, UI-колонка диалогов | FR-21 | `test_assistant_threads.py` (изоляция врачей, roster-гейт, переформулировка/fallback/ПДн, red line по текущему вопросу, аудит, каскад) + `test_llm_router.py` + `npm run build` |
 | E10 | Интеграция с ЕМИАС: host-side клиент (OAuth/FHIR, ретраи, allowlist), идемпотентный sync в `emias_links/patient_medications/visits`, админ-API + CLI, мок-сервис `emias-mock`, блок «ЕМИАС» в карточке врача | FR-25 | оффлайн-тесты мока/клиента/маппинга/sync/API на реальном Postgres; повторный прогон без дублей; `docker compose config` валиден |
 | E11 | Контакты пациента в карточке: `users.phone` (шифруется) + `users.birth_date`, нормализация РФ-номера, маскирование в витринах, self-service пациента, уничтожение при отзыве согласия | FR-22 | `test_patient_contacts.py` (RBAC/roster, нормализация и границы даты, маска в списке, аудит, отзыв согласия) + `npm run build` |
 | E12 | История приёма и назначений: `patient_medications` для назначений врача (`source`, `clinician_id`, `ended_on`, `notes`; импорт ЕМИАС read-only), CRUD назначений и остановка приёма, единая лента карточки (приёмы/назначения/скрининги/НЯ) с курсором и фильтром типов, блоки «Назначения» и «История пациента» в UI | FR-23 | `test_patient_medications.py`, `test_patient_history.py` (roster/IDOR, шифрование, EMIAS read-only, валидация, курсор, аудит, отзыв согласия) + `npm run build` |
@@ -159,7 +159,7 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | FR-18 | E4 | `test_clinician.py` (CLINICIAN-шкалы) |
 | FR-19 | E5 | `test_patient_flows.py` (чек-ин + дневник + приём) |
 | FR-20 | E8 | `test_enrichment_domain.py`, `test_enrichment_pubmed.py`, `test_enrichment_who.py`, `test_enrichment_pipeline.py`, `test_kb_admin_api.py` |
-| FR-21 | E9 | `test_assistant_threads.py` (изоляция, roster-гейт, история, аудит, каскад) |
+| FR-21 | E9 | `test_assistant_threads.py` (изоляция, roster-гейт, переформулировка уточняющих вопросов и fallback, red line по текущему вопросу, аудит, каскад) |
 | FR-22 | E11 | `test_patient_contacts.py` (RBAC, нормализация телефона, границы даты рождения, маска, аудит, отзыв согласия) |
 | FR-23 | E12 | `test_patient_medications.py`, `test_patient_history.py` (roster/IDOR, шифрование в покое, EMIAS read-only, валидация дат, курсор/фильтр ленты, аудит, отзыв согласия) |
 | FR-24 | E13 | `test_reminders.py` (RBAC/IDOR, фильтры overdue/today/week, done/cancel, шифрование note, тик воркера и идемпотентность, advisory-lock, отзыв согласия) |

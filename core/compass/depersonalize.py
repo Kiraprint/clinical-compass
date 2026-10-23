@@ -32,6 +32,7 @@ from typing import Sequence
 FIO = "FIO"
 ADDRESS = "ADDRESS"
 DOC = "DOC"
+DOB = "DOB"
 PHONE = "PHONE"
 EMAIL = "EMAIL"
 
@@ -39,6 +40,7 @@ _PLACEHOLDER: dict[str, str] = {
     FIO: "[ФИО]",
     ADDRESS: "[АДРЕС]",
     DOC: "[ДОКУМЕНТ]",
+    DOB: "[ДАТА РОЖДЕНИЯ]",
     PHONE: "[ТЕЛЕФОН]",
     EMAIL: "[EMAIL]",
 }
@@ -47,7 +49,7 @@ _PLACEHOLDER: dict[str, str] = {
 # адреса «ул. Иванова», адрес «д. 5» важнее телефоноподобного «5» и т.п.
 # Но при равном старте длиннее совпадение побеждает (email «иванов@mail.ru»
 # целиком, а не локальная часть «иванов» как ФИО).
-_PRIORITY = {FIO: 0, ADDRESS: 1, DOC: 2, PHONE: 3, EMAIL: 4}
+_PRIORITY = {FIO: 0, ADDRESS: 1, DOB: 2, DOC: 3, PHONE: 4, EMAIL: 5}
 
 _PHONE = re.compile(
     r"(?:\+7|8)\s?[-\s(]?\d{3}[-\s)]?\s?\d{3}[-\s]?\d{2}[-\s]?\d{2}"
@@ -60,6 +62,14 @@ _EMAIL = re.compile(r"[^\s@]+@[^\s@]+\.[A-Za-zА-Яа-яЁё0-9-]{2,}")
 _SNILS = re.compile(r"\b\d{3}-\d{3}-\d{3}\s\d{2}\b")
 _LONG_DIGITS = re.compile(r"\b\d{16}\b|\b\d{12}\b|\b\d{10}\b")
 _PASSPORT = re.compile(r"\b\d{4}\s\d{6}\b")
+
+# Дата рождения — только с явным маркером: самостоятельная дата в клиническом
+# тексте (дата приёма, начало симптомов) ПДн не является и не маскируется.
+_DOB = re.compile(
+    r"(?:дата\s+рождения|д\.\s?р\.?|род\.)\s*:?\s*"
+    r"\d{1,2}\s?[.\-/]\s?\d{1,2}\s?[.\-/]\s?\d{2,4}",
+    re.IGNORECASE,
+)
 
 # Адрес. Опорное слово + название (одно/два слова с заглавной) + опциональный
 # хвост «, д. 5, кв. 10» / « 5» / «, 23»/«д. 5 кв. 10».
@@ -81,6 +91,7 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     (DOC, _SNILS),
     (DOC, _LONG_DIGITS),
     (DOC, _PASSPORT),
+    (DOB, _DOB),
     (ADDRESS, _ADDRESS),
 ]
 

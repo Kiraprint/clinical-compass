@@ -307,30 +307,220 @@ def test_revoked_consent_skips_patient_card(client, db_session, kb_collection):
     ).all()
     assert len(rows) == 1
 
-def test_retrieval_uses_only_current_question(client, monkeypatch):
-    """История треда не участвует в retrieval: в агент уходит только текущий
-    вопрос (маскированный), иначе ФИО/redline-реплики из истории сдвигают поиск."""
+class _LLMResp:
+    """Фейковый ответ /chat/completions (urllib-совместимый)."""
+
+    def __init__(self, body: dict):
+        self._body = body
+
+    def read(self) -> bytes:
+        import json
+
+        return json.dumps(self._body).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+def _fake_llm(monkeypatch, reply: str, *, raise_exc: Exception | None = None) -> list[dict]:
+    """Включает LLM-шлюз и подменяет сеть. Возвращает тела ушедших запросов."""
+    import json
+    import urllib.request
+
+    monkeypatch.setattr(settings, "assistant_llm_url", "http://llm.test/v1")
+    bodies: list[dict] = []
+
+    def fake_urlopen(req, timeout=None):
+        bodies.append(json.loads(req.data))
+        if raise_exc is not None:
+            raise raise_exc
+        return _LLMResp({"choices": [{"message": {"role": "assistant", "content": reply}}]})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    return bodies
+
+class _SpyAgent:
+    """Агент-заглушка: запоминает, что реально ушло в RAG."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def invoke(self, query, **kwargs):
+        self.calls.append((query, kwargs))
+        return {"answer": "ответ", "citations": [], "topic": "ЛЕКАРСТВА"}
+
+def _new_thread(client, email: str) -> tuple[dict, str]:
+    """Врач + тред с 2 roster-пациентами; возвращает (headers, url сообщений)."""
+    ch, ids = _setup(client, email)
+    tid = client.post(
+        "/api/v1/assistant/threads", json={"patient_ids": ids}, headers=ch
+    ).json()["id"]
+    return ch, f"/api/v1/assistant/threads/{tid}/messages"
+
+def test_followup_question_rewritten_for_retrieval(client, monkeypatch):
+    """Уточняющий вопрос ищется по LLM-переформулировке; в агент уходят оба
+    текста: исходный (red line/ответ) и retrieval_query (поиск и раздел)."""
     from app.services import assistant_chat
 
-    ch, (p1, _) = _setup(client, "th-retrieval@test.ru")
+    ch, url = _new_thread(client, "th-followup@test.ru")
+    llm = _fake_llm(monkeypatch, "Какие дозы препарата Авиандр (маритупирдин)?")
+    spy = _SpyAgent()
+    monkeypatch.setattr(assistant_chat, "shared_factory", lambda: spy)
+
+    first = client.post(url, json={"content": "Что известно про Авиандр при депрессии?"}, headers=ch).json()
+    assert first["rewritten"] is False
+    assert first["retrieval_query"] == "Что известно про Авиандр при депрессии?"
+    assert llm == [], "одиночный вопрос не тратит LLM-вызов"
+
+    second = client.post(url, json={"content": "а в каких дозах?"}, headers=ch).json()
+    assert second["rewritten"] is True
+    assert second["retrieval_query"] == "Какие дозы препарата Авиандр (маритупирдин)?"
+    query, kwargs = spy.calls[-1]
+    assert query == "а в каких дозах?"  # ответ/red line — по оригиналу
+    assert kwargs["retrieval_query"] == second["retrieval_query"]
+    # Переформулировка идёт по истории треда, а не по конкатенации в embedding.
+    assert "Что известно про Авиандр" in llm[0]["messages"][1]["content"]
+    assert llm[0]["temperature"] == 0.0
+
+def test_followup_without_llm_uses_current_question(client, monkeypatch):
+    """LLM выключен → поиск по текущему вопросу, rewritten=False, сеть не трогаем."""
+    import urllib.request
+
+    from app.services import assistant_chat
+
+    monkeypatch.setattr(settings, "assistant_llm_url", "")
+    monkeypatch.setattr(settings, "assistant_llm_api_key", "")
+
+    def _no_network(*args, **kwargs):
+        raise AssertionError("LLM выключен — сетевых вызовов быть не должно")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _no_network)
+    ch, url = _new_thread(client, "th-followup-off@test.ru")
+    spy = _SpyAgent()
+    monkeypatch.setattr(assistant_chat, "shared_factory", lambda: spy)
+
+    client.post(url, json={"content": "Что известно про Авиандр при депрессии?"}, headers=ch)
+    body = client.post(url, json={"content": "а в каких дозах?"}, headers=ch).json()
+
+    assert body["rewritten"] is False
+    assert body["retrieval_query"] == "а в каких дозах?"
+    assert spy.calls[-1][1]["retrieval_query"] is None
+    assert spy.calls[-1][0] == "а в каких дозах?"
+
+@pytest.mark.parametrize(
+    "reply,raise_exc",
+    [
+        ("", None),  # пустой ответ модели
+        ("   \n  ", None),  # мусор из пробелов
+        (None, "URLError"),  # шлюз недоступен
+        (None, "TimeoutError"),  # таймаут
+    ],
+)
+def test_followup_llm_failure_falls_back_to_original(client, monkeypatch, reply, raise_exc):
+    """Ошибка/пустой ответ LLM → исходный вопрос, ответ не ломается."""
+    import urllib.error
+
+    from app.services import assistant_chat
+
+    exc = None
+    if raise_exc == "URLError":
+        exc = urllib.error.URLError("down")
+    elif raise_exc == "TimeoutError":
+        exc = TimeoutError("timeout")
+    llm = _fake_llm(monkeypatch, reply or "", raise_exc=exc)
+    ch, url = _new_thread(client, f"th-followup-fail-{raise_exc}-{bool(reply)}@test.ru")
+    spy = _SpyAgent()
+    monkeypatch.setattr(assistant_chat, "shared_factory", lambda: spy)
+
+    client.post(url, json={"content": "Что известно про Авиандр при депрессии?"}, headers=ch)
+    body = client.post(url, json={"content": "а в каких дозах?"}, headers=ch).json()
+
+    assert len(llm) == 1, "переформулировка пыталась вызвать LLM"
+    assert body["rewritten"] is False
+    assert body["retrieval_query"] == "а в каких дозах?"
+    assert spy.calls[-1][1]["retrieval_query"] is None
+
+def test_followup_rewrite_prompt_has_no_pii(client, db_session, monkeypatch):
+    """В LLM уходит только деперсонализированная история: ФИО/телефон/ДР
+    маскируются scrub_for_llm до вызова модели."""
+    from app.models import User
+    from app.services import assistant_chat
+
+    ch, (p1, _) = _setup(client, "th-followup-pii@test.ru")
+    user = db_session.get(User, uuid.UUID(p1))
+    user.fio = "Иванов Иван Иванович"  # roster-пациент → deny-list деперсонализации
+    db_session.commit()
+
     tid = client.post(
         "/api/v1/assistant/threads", json={"patient_ids": [p1]}, headers=ch
     ).json()["id"]
     url = f"/api/v1/assistant/threads/{tid}/messages"
+    llm = _fake_llm(monkeypatch, "Какие дозы препарата Авиандр?")
+    monkeypatch.setattr(assistant_chat, "shared_factory", lambda: _SpyAgent())
 
-    captured: dict = {}
+    client.post(
+        url,
+        json={
+            "content": (
+                "Пациент Иванов Иван Иванович, тел. +7 999 123-45-67, "
+                "д.р. 12.03.1954 — что известно про Авиандр?"
+            )
+        },
+        headers=ch,
+    )
+    assert client.post(url, json={"content": "а в каких дозах?"}, headers=ch).status_code == 200
 
-    class _FakeAgent:
-        def invoke(self, query, **kwargs):
-            captured["query"] = query
-            captured["kwargs"] = kwargs
-            return {"answer": "ответ", "citations": [], "topic": "ШКАЛЫ"}
+    assert len(llm) == 1
+    sent = str(llm)
+    for secret in ("Иванов", "123-45-67", "12.03.1954"):
+        assert secret not in sent, f"ПДн утекли в LLM: {secret}"
+    prompt = llm[0]["messages"][1]["content"]
+    assert "[ФИО]" in prompt and "[ТЕЛЕФОН]" in prompt and "[ДАТА РОЖДЕНИЯ]" in prompt
 
-    monkeypatch.setattr(assistant_chat, "shared_factory", lambda: _FakeAgent())
-    assert client.post(url, json={"content": "Иванов Иван Иванович, 44 года"}, headers=ch).status_code == 200
-    captured.clear()
-    assert client.post(url, json={"content": "Какой порог у PHQ-9?"}, headers=ch).status_code == 200
+def test_followup_redline_uses_only_current_question(client, kb_collection, monkeypatch):
+    """Red line — по текущему вопросу: redline-реплика в истории не глушит
+    поиск, а redline-вопрос отказывается даже при «безобидной» переформулировке."""
+    ch, url = _new_thread(client, "th-followup-redline@test.ru")
 
-    assert captured["query"] == "Какой порог у PHQ-9?"
-    assert "Иванов" not in str(captured)
-    assert "retrieval_query" not in captured["kwargs"]
+    # История содержит лечение; переформулировка тоже «назначает» — но текущий
+    # вопрос про шкалу, значит поиск должен состояться (redline_query = оригинал).
+    _fake_llm(monkeypatch, "Назначь препарат от тревоги, какой порог PHQ-9?")
+    assert client.post(url, json={"content": "Назначь препарат от тревоги"}, headers=ch).status_code == 200
+    body = client.post(url, json={"content": "Какой порог тяжести у шкалы PHQ-9?"}, headers=ch).json()
+    assert body["refused"] is False
+    assert body["grounded"] is True
+    assert body["citations"]
+    # Обратный случай: текущий вопрос — redline. Переформулировки нет вовсе
+    # (redline-текст в LLM не уходит), отказ — по текущему вопросу.
+    llm = _fake_llm(monkeypatch, "Какой порог тяжести у шкалы PHQ-9?")
+    body = client.post(url, json={"content": "Поставь диагноз депрессии"}, headers=ch).json()
+    assert body["refused"] is True
+    assert body["refusal_code"] == "DIAGNOSIS_REDLINE"
+    assert body["citations"] == []
+    assert body["retrieval_query"] == "Поставь диагноз депрессии"
+    assert body["rewritten"] is False
+    assert llm == []
+
+def test_followup_question_retrieves_drug_chunk(client, kb_collection, monkeypatch):
+    """Приёмка: «а в каких дозах?» после вопроса про препарат достаёт чанк
+    ЛЕКАРСТВА (дозирование), а не NO_KB_DATA."""
+    ch, _cid = clinician_ctx(client, "th-followup-kb@test.ru")
+    tid = client.post("/api/v1/assistant/threads", json={"patient_ids": []}, headers=ch).json()["id"]
+    url = f"/api/v1/assistant/threads/{tid}/messages"
+
+    _fake_llm(monkeypatch, "Препарат Авиандр режим дозирования инструкция")
+    assert client.post(
+        url, json={"content": "Что известно про препарат Авиандр при депрессии?"}, headers=ch
+    ).status_code == 200
+    body = client.post(url, json={"content": "а в каких дозах?"}, headers=ch).json()
+
+    assert body["rewritten"] is True
+    assert body["refused"] is False
+    assert body["grounded"] is True, body
+    gids = {c["guideline_id"] for c in body["citations"]}
+    assert "drug-aviandr" in gids, gids
+    assert next(c for c in body["citations"] if c["guideline_id"] == "drug-aviandr")[
+        "topic"
+    ] == "ЛЕКАРСТВА"

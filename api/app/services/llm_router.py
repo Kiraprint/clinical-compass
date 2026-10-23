@@ -6,24 +6,36 @@ search_<ТОПИК>, модель обязана вернуть ровно од�
 выводится topic. Ответ по-прежнему строит детерминированный build_rag_answer —
 LLM только роутит поиск, не отвечает клинически (красные линии docs/01).
 
-Границы (docs/12): на вход LLM подаётся только очищенный от ПДн запрос
-(scrub_for_llm вызывается в routers/assistant.py до invoke). Контекст пациента
-в LLM НЕ уходит.
+Два вызова LLM, оба — только маршрутизация поиска, не клинический ответ:
+route_topic (FR-14) выбирает раздел БЗ, rewrite_followup (FR-21) разворачивает
+уточняющий вопрос треда («а в каких дозах?») в самодостаточный поисковый запрос.
 
-Отказоустойчивость: URL не задан / таймаут / ошибка HTTP / пустой tool_call →
-возвращаем None = поиск по всем разделам (текущее поведение без LLM).
+Границы (docs/12): на вход LLM подаётся только очищенный от ПДн текст
+(scrub_for_llm вызывается в routers/assistant.py и assistant_chat.py до вызова).
+Контекст пациента в LLM НЕ уходит.
+
+Отказоустойчивость: URL не задан / таймаут / ошибка HTTP / пустой ответ →
+route_topic возвращает None (= поиск по всем разделам), rewrite_followup —
+None (= поиск по исходному вопросу). Ответ не ломается.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import urllib.error
 import urllib.request
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Переформулировка уточняющего вопроса (FR-21): границы истории, уходящей в LLM.
+REWRITE_HISTORY_MESSAGES = 8      # последних сообщений треда
+REWRITE_MESSAGE_CHARS = 800       # обрезка одного сообщения
+REWRITE_HISTORY_CHARS = 3000      # обрезка всей истории (с конца, свежее важнее)
+REWRITE_QUERY_CHARS = 800         # обрезка текущего вопроса и переформулировки
 
 # Топики корпуса БЗ (docs/08): ключ = имя тулзы, значение = topic в Qdrant.
 # Тулза search_all специально не нужна: model может не вызывать тулзу вовсе
@@ -80,12 +92,32 @@ _SYSTEM_PROMPT = (
 )
 
 
+def _enabled() -> bool:
+    return bool(settings.assistant_llm_url.strip())
+
+
+def _request(payload: dict) -> dict:
+    """POST /chat/completions к OpenAI-совместимому шлюзу.
+
+    Исключения urllib/json не ловим — их обрабатывает вызывающий (fallback без LLM).
+    """
+    data = json.dumps(payload).encode("utf-8")
+    url = settings.assistant_llm_url.rstrip("/") + "/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    api_key = settings.assistant_llm_api_key.strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(url, data=data, headers=headers)
+    with urllib.request.urlopen(req, timeout=settings.assistant_llm_timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
 def route_topic(query: str) -> str | None:
     """Выбирает topic (ШКАЛЫ/ТРИАЖ/РЕКОМЕНДАЦИИ/ЛЕКАРСТВА) через LLM.
 
     None = поиск по всем разделам (LLM выключен/ошибка/вопрос вне разделов).
     """
-    if not settings.assistant_llm_url:
+    if not _enabled():
         return None
     if not query.strip():
         return None
@@ -105,15 +137,7 @@ def route_topic(query: str) -> str | None:
             # chat_template_kwargs: llama.cpp понимает флаг, прочие шлюзы игнорируют.
             "chat_template_kwargs": {"enable_thinking": False},
         }
-        data = json.dumps(payload).encode("utf-8")
-        url = settings.assistant_llm_url.rstrip("/") + "/chat/completions"
-        headers = {"Content-Type": "application/json"}
-        api_key = settings.assistant_llm_api_key.strip()
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        req = urllib.request.Request(url, data=data, headers=headers)
-        with urllib.request.urlopen(req, timeout=settings.assistant_llm_timeout) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
+        body = _request(payload)
         msg = body["choices"][0]["message"]
         tool_calls = msg.get("tool_calls") or []
         if not tool_calls:
@@ -126,4 +150,104 @@ def route_topic(query: str) -> str | None:
         return topic
     except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError, ValueError) as exc:
         logger.warning("assistant LLM-роутинг недоступен (%s: %s) — поиск по всем", type(exc).__name__, exc)
+        return None
+
+
+_REWRITE_SYSTEM_PROMPT = (
+    "Ты помогаешь врачу искать по базе знаний. Тебе дают предыдущие реплики "
+    "диалога и последний вопрос. Переформулируй последний вопрос так, чтобы он "
+    "был понятен без истории: подставь из предыдущих реплик предмет обсуждения "
+    "(например, препарат, шкалу, состояние). Верни ТОЛЬКО самодостаточный вопрос "
+    "одной строкой — без пояснений, без кавычек, без нумерации. Если последний "
+    "вопрос уже самодостаточен, верни его без изменений."
+)
+
+_ROLE_LABELS = {"CLINICIAN": "Врач", "ASSISTANT": "Ассистент"}
+# Модель иногда всё же префиксует ответ («Вопрос: …») — снимаем.
+_REWRITE_PREFIX = re.compile(r"^(?:переформулированн\w+ вопрос|вопрос|запрос|ответ)\s*:\s*", re.I)
+
+
+def _clip(text: str, limit: int) -> str:
+    text = text.strip()
+    return text if len(text) <= limit else text[:limit].rstrip()
+
+
+def _format_history(history: list[dict]) -> str:
+    """Последние REWRITE_HISTORY_MESSAGES реплик в пределах бюджета символов.
+
+    Свежие реплики важнее старых: при переполнении бюджета отбрасываем начало.
+    """
+    lines: list[str] = []
+    used = 0
+    for m in reversed(history[-REWRITE_HISTORY_MESSAGES:]):
+        content = _clip(str(m.get("content") or ""), REWRITE_MESSAGE_CHARS)
+        if not content:
+            continue
+        label = _ROLE_LABELS.get(str(m.get("role")), "Врач")
+        line = f"{label}: {content}"
+        if used + len(line) > REWRITE_HISTORY_CHARS:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return "\n".join(reversed(lines))
+
+
+def _clean_rewrite(text: str) -> str | None:
+    """Ответ модели → одна строка без markdown/кавычек/префикса. None = мусор.
+
+    Многострочный ответ режем до первой непустой строки: пояснения модели не
+    должны попадать в embedding (они уводят поиск от вопроса врача).
+    """
+    line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    line = line.strip("`*_ \t«»\"'“”„")
+    line = _REWRITE_PREFIX.sub("", line)
+    line = _clip(line, REWRITE_QUERY_CHARS).strip(" `*_«»\"'“”„")
+    return line or None
+
+
+def rewrite_followup(history: list[dict], query: str) -> str | None:
+    """Разворачивает уточняющий вопрос треда в самодостаточный (FR-21).
+
+    history — предыдущие реплики треда [{"role": "CLINICIAN"|"ASSISTANT",
+    "content": str}], уже деперсонализированные (scrub_for_llm); query —
+    текущий вопрос, тоже деперсонализированный. Пустая история → None без
+    сетевого вызова: одиночный вопрос переформулировать не нужно.
+
+    None = переформулировка не нужна/недоступна → поиск по исходному вопросу.
+    Результат используется только для retrieval и выбора раздела, не для
+    ответа, цитат и red line (те считаются по исходному вопросу).
+    """
+    if not _enabled() or not history or not query.strip():
+        return None
+    formatted = _format_history(history)
+    if not formatted:
+        return None
+    try:
+        body = _request(
+            {
+                "model": settings.assistant_llm_model,
+                "messages": [
+                    {"role": "system", "content": _REWRITE_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"История диалога:\n{formatted}\n\n"
+                            f"Последний вопрос: {_clip(query, REWRITE_QUERY_CHARS)}"
+                        ),
+                    },
+                ],
+                "temperature": 0.0,
+                "chat_template_kwargs": {"enable_thinking": False},
+            }
+        )
+        rewritten = _clean_rewrite(body["choices"][0]["message"].get("content") or "")
+        if rewritten is None:
+            logger.warning("assistant LLM вернул пустую переформулировку — исходный вопрос")
+        return rewritten
+    except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError, ValueError, TypeError) as exc:
+        logger.warning(
+            "assistant LLM-переформулировка недоступна (%s: %s) — исходный вопрос",
+            type(exc).__name__,
+            exc,
+        )
         return None
