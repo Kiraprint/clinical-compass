@@ -24,7 +24,7 @@ clinical-compass/
 │   │   ├── scales.py          # PHQ-9, GAD-7, HADS-A, HADS-D (данные + пороги)
 │   │   ├── scoring.py         # score(), risk_flags()
 │   │   ├── triage.py          # triage()
-│   │   ├── checkin.py         # generate_checkin()
+│   │   ├── checkin.py         # банк пунктов + plan()/safety_level()
 │   │   └── trend.py           # trends()
 │   └── tests/                 # юнит-тесты ядра
 ├── api/                       # FastAPI
@@ -93,10 +93,14 @@ def triage(result: ScaleResult, flags: Sequence[RiskFlag]) -> Triage  # GREEN|YE
     # порог «item 9 PHQ-9 >= 1 → SUICIDAL_IDEATION» — тоже клиническое число [TBD]
 
 # checkin.py
-def generate_checkin(scale: Scale, last: ScaleResult | None) -> Checkin
-    # 2–5 вопросов: фокус на worst-пунктах последнего прохождения +
-    # текущее состояние (общий балл-прокси: 'за последнюю неделю…')
-    # invariant: 2 <= len(items) <= 5; повторные чек-ины в тот же день — CONFLICT на API
+def plan(answers: Mapping[str, int]) -> CheckinPlan
+    # фаза core|safety|modules|done: ядро 7 пунктов, затем модули по 9 правилам
+    # приоритета целиком, риск-гейт HR4 → модуль безопасности RS1–RS3
+    # invariant: len(planned_items(answers)) <= 12; одинаковые ответы → одинаковый шаг
+    # повторный чек-ин в тот же день — CONFLICT на API (checkin_sessions)
+
+def safety_level(answers: Mapping[str, int]) -> str
+    # none|review|signal|unassessed; risk не суммируется с симптомами
 
 # trend.py
 def trends(runs: Sequence[ScaleResult]) -> Trend

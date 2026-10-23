@@ -164,9 +164,14 @@ export const api = {
     req<Assessment>(`/api/v1/runs/${runId}/finish`, { method: "POST" }),
   abandonScreening: () =>
     req<{ abandoned: boolean }>("/api/v1/screenings/abandon", { method: "POST" }),
-  getTodayCheckin: () => req<CheckinToday>("/api/v1/checkins/today"),
-  completeCheckin: (answers: Record<string, number>) =>
-    req<{ run_id: string }>("/api/v1/checkins", { method: "POST", body: JSON.stringify({ answers }) }),
+  todayCheckin: () => req<CheckinState>("/api/v1/checkins/today"),
+  // Идемпотентно: если сеанс на сегодня уже есть, сервер вернёт его (docs/16 §4).
+  startCheckin: () => req<CheckinState>("/api/v1/checkins", { method: "POST", body: JSON.stringify({}) }),
+  submitCheckin: (sessionId: string, answers: Record<string, number>) =>
+    req<CheckinState>(`/api/v1/checkins/${encodeURIComponent(sessionId)}/answers`, {
+      method: "POST",
+      body: JSON.stringify({ answers }),
+    }),
   getTimeline: (days = 90) => req<Timeline>(`/api/v1/me/timeline?days=${days}`),
   postDiary: verb<DiaryEntry>("POST")("/api/v1/diary"),
   getDiary: () => req<{ items: DiaryEntry[] }>("/api/v1/diary"),
@@ -347,6 +352,14 @@ export const api = {
     const suffix = qs.toString() ? `?${qs}` : "";
     return req<PatientHistory>(`/api/v1/clinician/patients/${patientId}/history${suffix}`);
   },
+  // Общая очередь открытых эскалаций (docs/16 §3): врач или администратор.
+  openEscalations: () => req<{ items: Escalation[] }>("/api/v1/escalations"),
+  // Закрытие сигнала вручную (аудит на сервере). Повтор → 409 ESCALATION_ALREADY_RESOLVED,
+  // чужая/отсутствующая эскалация → 404; в обоих случаях строку из очереди убираем.
+  resolveEscalation: (id: string, resolution: string | null = null) =>
+    verb<EscalationResolved>("POST")(`/api/v1/escalations/${encodeURIComponent(id)}/resolve`)({
+      resolution,
+    }),
   // FR-24: напоминания врача. Список — свои (roster/IDOR-гейт на сервере).
   clinicianReminders: (due?: "overdue" | "today" | "week") =>
     req<RemindersResponse>(
@@ -427,18 +440,49 @@ export interface Assessment {
     help_resources: { title: string; phone: string }[];
   };
 }
-export interface CheckinToday {
-  items: { key: string; text: string; max_value: number }[];
-  done: boolean;
+// Адаптивный чек-ин, docs/16 §4. Шаг — это один экран: ядро, безопасность или модули.
+export interface CheckinStepItem {
+  id: string;
+  domain: string;
+  text: string;
+  kind: string; // scale | binary | gate
+  anchors: string[];
+  emoji: string[];
+  max_value: number;
+}
+export interface CheckinModule {
+  code: string;
+  title: string;
+  included: boolean;
+  reason: string;
+}
+// phase: core | safety | modules | done; step.kind повторяет phase.
+export interface CheckinState {
+  date: string;
+  rules_version: string;
+  status: string; // not_started | in_progress | completed
+  session_id: string | null;
+  phase: string | null;
+  step: { kind: string | null; items: CheckinStepItem[] };
+  answers: Record<string, number>;
+  progress: { answered: number; planned: number };
+  safety: string; // none | review | signal | unassessed
+  modules: CheckinModule[];
+  completed_at: string | null;
+  // true — сигнал ушёл закреплённому врачу; false — врача нет (docs/16 §3).
+  clinician_notified: boolean;
 }
 export interface Timeline {
   runs: { total_score: number; severity: string; triage: string; computed_at: string }[];
   trend: { moving_avg: number[]; delta_7: number | null; delta_30: number | null; slope: number | null };
 }
+
+export type MoodScale = "0-4" | "1-10" | null;
 export interface DiaryEntry {
   id: string;
   content: string;
-  mood: number | null;
+  mood_scale: MoodScale;
+  mood: number | null; // 0..4 при mood_scale="0-4"; историчные записи — 1..10
   sleep_h: number | null;
   tags: string[];
   created_at: string;
@@ -608,14 +652,45 @@ export interface Report {
     id: string; event_text: string; severity: string; onset_date: string;
     suspected_drug: string | null; action_taken: string | null; created_at: string;
   }[];
-  diary: { id: string; content: string; mood: number | null; created_at: string }[];
+  diary: { id: string; content: string; mood: number | null; mood_scale: MoodScale; created_at: string }[];
   available_scales: {
     code: string; title: string; audience: "PATIENT" | "CLINICIAN";
     items: { key: string; text: string; max_value: number }[];
   }[];
-  open_escalations: { id: string; kind: string; notified_at: string | null }[];
+  open_escalations: { id: string; kind: string; notified_at: string | null; checkin_session_id?: string | null }[];
+  // docs/16 §3: ответы чек-ина, состояние риска и основания включённых модулей.
+  checkin: {
+    rules_version: string | null;
+    recent: {
+      session_id: string; date: string; status: string; phase: string | null;
+      safety: "none" | "review" | "signal" | "unassessed"; rules_version: string;
+      answers: Record<string, number>;
+      modules: { code: string; included: boolean; reason: string }[];
+      completed_at: string | null;
+    }[];
+  };
   // FR-22: null, если у пациента нет активного согласия (152-ФЗ).
   contacts: { phone: string | null; birth_date: string | null; age: number | null; adult: boolean | null } | null;
+}
+export interface Escalation {
+  id: string;
+  patient_id: string;
+  patient_fio: string | null;
+  kind: "CHECKIN_RISK" | "CHECKIN_RISK_URGENT" | "SUICIDAL" | "SEVERE" | string;
+  safety: "none" | "review" | "signal" | "unassessed" | null;
+  checkin_session_id: string | null;
+  notified_at: string | null;
+  /** Пациент закреплён за врачом: только тогда карточка открывается (иначе 403). */
+  in_roster: boolean;
+  /** Ответы риска из чек-ина: {"HR4":1,"RS1":0,...}; на которые не ответили — ключа нет. */
+  risk_answers: Record<string, number> | null;
+  created_at: string | null;
+}
+/** Ответ POST /escalations/{id}/resolve. */
+export interface EscalationResolved {
+  id: string;
+  resolved_at: string;
+  resolution: string | null;
 }
 export interface AuditEvent {
   id: number;

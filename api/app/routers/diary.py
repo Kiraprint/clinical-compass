@@ -15,7 +15,7 @@ router = APIRouter(tags=["diary"])
 
 class DiaryBody(BaseModel):
     content: str = Field(min_length=1, max_length=4000)
-    mood: int | None = Field(default=None, ge=1, le=10)
+    mood: int | None = Field(default=None, ge=0, le=4)  # 5-точечная шкала с эмодзи (docs/16 §1)
     sleep_h: float | None = Field(default=None, ge=0, le=12)
     tags: list[str] = Field(default_factory=list)
 

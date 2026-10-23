@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, ApiError, Assessment, ClinicianReminder, EmiasSummary, HistoryType, ImportHistoryResult, PatientCard, PatientContacts, PatientHistoryItem, PatientMedication, RemindersResponse, Report, Visit } from "../api";
+import { api, ApiError, Assessment, ClinicianReminder, EmiasSummary, Escalation, HistoryType, ImportHistoryResult, PatientCard, PatientContacts, PatientHistoryItem, PatientMedication, RemindersResponse, Report, Visit } from "../api";
 import TrendChart from "../TrendChart";
 import AssistantTab from "./AssistantTab";
 import DrugLibraryTab from "./DrugLibraryTab";
@@ -11,6 +11,114 @@ const MED_STATUS_LABELS: Record<string, string> = {
 };
 
 const TRIAGE_FILTERS = ["", "GREEN", "YELLOW", "RED"] as const;
+
+const ESCALATION_KINDS: Record<string, string> = {
+  CHECKIN_RISK: "чек-ин: риск",
+  CHECKIN_RISK_URGENT: "чек-ин: срочный сигнал",
+  SUICIDAL: "скрининг: суицидальный риск",
+  SEVERE: "скрининг: тяжёлое состояние",
+};
+
+// Пункты риска, которые сервер кладёт в risk_answers (только отвеченные, 0/1).
+const RISK_ITEM_IDS = ["HR4", "RS1", "RS2", "RS3"] as const;
+
+// Общая очередь открытых эскалаций (docs/16 §3): сигнал виден даже без roster-врача.
+// Карточку открываем только для своего пациента (in_roster): иначе сервер отдаст 403.
+function EscalationsQueue({
+  items,
+  onResolved,
+}: {
+  items: Escalation[];
+  onResolved: (id: string) => void;
+}) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const closeSignal = async (id: string) => {
+    setBusyId(id);
+    setError("");
+    try {
+      await api.resolveEscalation(id);
+      onResolved(id);
+    } catch (err) {
+      // Уже закрыт другим врачом или строки больше нет — из очереди её всё равно убираем.
+      if (err instanceof ApiError && (err.code === "ESCALATION_ALREADY_RESOLVED" || err.status === 404)) {
+        onResolved(id);
+      } else {
+        setError(err instanceof ApiError ? err.message : "Не удалось закрыть сигнал");
+      }
+    } finally {
+      setBusyId(null);
+    }
+  };
+  if (items.length === 0) return null;
+  return (
+    <div className="card">
+      <h2>Очередь эскалаций ({items.length})</h2>
+      <p style={{ color: "#5a6478", fontSize: 13 }}>
+        Открытые сигналы чек-инов и скринингов, включая пациентов без закреплённого врача.
+      </p>
+      {error && <p style={{ color: "#b3261e", fontSize: 13 }}>{error}</p>}
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Дата</th>
+              <th>Пациент</th>
+              <th>Тип</th>
+              <th>Риск</th>
+              <th>Ответы риска</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((e) => (
+              <tr key={e.id} data-escalation={e.id}>
+                <td>{e.created_at ? new Date(e.created_at).toLocaleString("ru-RU") : "—"}</td>
+                <td>
+                  {e.in_roster ? (
+                    <a
+                      href={"#patient=" + e.patient_id}
+                      style={{ color: "#2f6fed", textDecoration: "none", fontWeight: 600 }}
+                    >
+                      {e.patient_fio ?? "Пациент"}
+                    </a>
+                  ) : (
+                    <span style={{ fontWeight: 600 }}>{e.patient_fio ?? "Пациент"}</span>
+                  )}
+                </td>
+                <td>
+                  <span
+                    className={`badge ${
+                      e.kind === "CHECKIN_RISK_URGENT" || e.kind === "SUICIDAL" ? "RED" : "YELLOW"
+                    }`}
+                  >
+                    {ESCALATION_KINDS[e.kind] ?? e.kind}
+                  </span>
+                </td>
+                <td>{e.safety ?? "—"}</td>
+                <td style={{ fontSize: 13 }}>
+                  {RISK_ITEM_IDS.filter((id) => e.risk_answers?.[id] != null)
+                    .map((id) => `${id} ${e.risk_answers?.[id] ? "Да" : "Нет"}`)
+                    .join(" · ") || "—"}
+                </td>
+                <td>
+                  <button
+                    onClick={() => closeSignal(e.id)}
+                    disabled={busyId === e.id}
+                    aria-label={`Закрыть сигнал ${e.patient_fio ?? e.patient_id}`}
+                  >
+                    {busyId === e.id ? "Закрываем…" : "Закрыть сигнал"}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 
 export default function ClinicianView() {
   const [section, setSection] = useState<"patients" | "assistant" | "library">("patients");
@@ -26,13 +134,30 @@ export default function ClinicianView() {
   const [showReminders, setShowReminders] = useState(false);
   const [overdueCount, setOverdueCount] = useState(0);
   const [reminderVersion, setReminderVersion] = useState(0);
-
+  // Общая очередь эскалаций — не только свои пациенты (docs/16 §3).
+  const [escalations, setEscalations] = useState<Escalation[]>([]);
   useEffect(() => {
     api
       .clinicianReminders()
       .then((r) => setOverdueCount(r.overdue))
       .catch(() => setOverdueCount(0));
   }, [reminderVersion, reportVersion]);
+
+  useEffect(() => {
+    if (selected) return;
+    let cancelled = false;
+    api
+      .openEscalations()
+      .then((r) => {
+        if (!cancelled) setEscalations(r.items);
+      })
+      .catch(() => {
+        if (!cancelled) setEscalations([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected, reportVersion]);
 
   const load = async (f: string) => {
     const data = await api.clinicianPatients(f || undefined);
@@ -151,12 +276,18 @@ export default function ClinicianView() {
       {showReminders && (
         <RemindersPanel cards={cards} onChanged={() => setReminderVersion((v) => v + 1)} />
       )}
+      {!selected && (
+        <EscalationsQueue
+          items={escalations}
+          onResolved={(id) => setEscalations((prev) => prev.filter((e) => e.id !== id))}
+        />
+      )}
       {!selected ? (
         <div className="card">
           <h2>Мои пациенты ({cards.length})</h2>
           {cards.length === 0 && <p style={{ color: "#5a6478" }}>Нет пациентов в выбранном фильтре.</p>}
           <div className="table-wrap">
-            <table>
+            <table className="patients">
               <thead>
                 <tr>
                   <th>Пациент</th>
@@ -480,6 +611,49 @@ function ReportView({ report, error, onBack, onRefresh }: {
         </div>
       )}
 
+
+      {report.checkin.recent.length > 0 && (
+        <div className="card">
+          <b>Чек-ины</b>{" "}
+          <span style={{ color: "#5a6478", fontSize: 12 }}>
+            правила {report.checkin.rules_version ?? "—"}
+          </span>
+          {report.checkin.recent.map((c) => {
+            const safety =
+              c.safety === "signal"
+                ? "срочный сигнал"
+                : c.safety === "review"
+                  ? "требует рассмотрения"
+                  : c.safety === "unassessed"
+                    ? "риск не оценён"
+                    : "нет";
+            const answers = Object.entries(c.answers)
+              .map(([k, v]) => `${k} ${v}`)
+              .join(" · ");
+            const included = c.modules.filter((m) => m.included);
+            return (
+              <div key={c.session_id} style={{ marginTop: 10, fontSize: 13 }}>
+                <div>
+                  <b>{c.date}</b> · {c.status === "completed" ? "завершён" : "в процессе"} · риск:{" "}
+                  <span style={{ color: c.safety === "none" ? "#2f7a4b" : "#a3282d", fontWeight: 600 }}>
+                    {safety}
+                  </span>
+                </div>
+                {answers && <div style={{ color: "#3d4657" }}>{answers}</div>}
+                {included.length > 0 && (
+                  <div style={{ color: "#5a6478" }}>
+                    Модули: {included.map((m) => m.code).join(", ")} —{" "}
+                    {included.map((m) => m.reason).join("; ")}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <div style={{ color: "#5a6478", fontSize: 12, marginTop: 8 }}>
+            Ответы не суммируются и не являются диагнозом: это черновик для пилота.
+          </div>
+        </div>
+      )}
       {report.open_escalations.length > 0 && (
         <div className="alert-danger">
           <b>Открытые эскалации:</b>{" "}
@@ -718,7 +892,9 @@ function ReportView({ report, error, onBack, onRefresh }: {
         <div key={d.id} className="msg">
           <b>{d.created_at.slice(0, 10)}: </b>
           {d.content}
-          {d.mood ? ` (настроение ${d.mood}/10)` : ""}
+          {d.mood != null
+            ? ` (настроение ${d.mood}/${d.mood_scale === "0-4" ? 4 : 10})`
+            : ""}
         </div>
       ))}
     </div>

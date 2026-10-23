@@ -43,7 +43,7 @@ test.describe("Питч-сценарий", () => {
     await expect(page.getByRole("button", { name: "Все" })).toBeVisible();
 
     await page.getByRole("button", { name: "RED", exact: true }).click();
-    const cards = page.locator("tbody tr");
+    const cards = page.locator(".patients tbody tr");
     await expect(cards.first()).toBeVisible();
     await expect(cards.first().locator(".badge.RED")).toBeVisible();
 

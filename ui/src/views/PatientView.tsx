@@ -4,10 +4,11 @@ import {
   api,
   ApiError,
   Assessment,
-  CheckinToday,
+  CheckinState,
   ChatMessage,
   Consent,
   DiaryEntry,
+  MoodScale,
   Questionnaire,
   Timeline,
 } from "../api";
@@ -240,12 +241,203 @@ const ADH_LABELS: Record<string, string> = { taken: "Принял", partial: "Ч
 
 const sameDay = (iso: string, ref: Date) => new Date(iso).toDateString() === ref.toDateString();
 
+// Настроение в дневнике — 5-точечная шкала с эмодзи (docs/16 §6), 0 — очень плохо.
+const MOOD_OPTIONS = [
+  { emoji: "😣", label: "Очень плохо" },
+  { emoji: "😟", label: "Плохо" },
+  { emoji: "😐", label: "Так себе" },
+  { emoji: "🙂", label: "Хорошо" },
+  { emoji: "😄", label: "Отлично" },
+];
+
+// mood_scale = "1-10" у историчных записей: показываем значение как есть, без эмодзи.
+const moodText = (mood: number | null, scale: MoodScale) => {
+  if (mood == null) return "";
+  if (scale !== "0-4") return `настроение ${mood}/10`;
+  const option = MOOD_OPTIONS[mood];
+  return option ? `${option.emoji} ${option.label}` : `настроение ${mood}`;
+};
+
+// Спокойный текст без обвинения и без обещания мгновенного контакта (docs/16 §3).
+// Последняя строка зависит только от того, что сервер подтвердил: дошёл ли сигнал врачу
+// (clinician_notified). Без врача обещать «вас видит врач» нельзя.
+const SAFETY_BLOCKS: Record<
+  string,
+  { title: string; paragraphs: string[]; last: { notified: string; notNotified: string } }
+> = {
+  signal: {
+    title: "Ваша безопасность важнее всего",
+    paragraphs: [
+      "Спасибо, что ответили честно. Пожалуйста, постарайтесь оставаться в безопасности и, если есть возможность, будьте рядом с кем-то, кому вы доверяете.",
+      "Если у вас есть намерение действовать или вам трудно оставаться в безопасности, обратитесь за экстренной помощью по местному номеру — 112 (единый номер экстренных служб) или в ближайшее отделение скорой помощи.",
+    ],
+    last: {
+      notified:
+        "Ваш ответ видит врач, но просмотр сообщений командой может быть не мгновенным: этот экран не линия экстренной помощи и не заменяет обращение к врачу.",
+      notNotified:
+        "Ответ сохранён. Закреплённого врача у вас нет — если помощь нужна сейчас, обратитесь за экстренной помощью (112) или к близким.",
+    },
+  },
+  review: {
+    title: "Спасибо за ваш ответ",
+    paragraphs: [
+      "Спасибо, что ответили. Пожалуйста, оставайтесь в безопасности и позаботьтесь о себе сегодня.",
+      "Если станет тяжелее или появятся мысли о том, чтобы причинить себе вред, обратитесь за экстренной помощью по местному номеру — 112.",
+    ],
+    last: {
+      notified:
+        "Ответы видит ваш врач в карте. Просмотр сообщений командой может быть не мгновенным — это не обещание срочного контакта.",
+      notNotified:
+        "Ответ сохранён. Закреплённого врача у вас нет — если станет тяжелее, обратитесь за экстренной помощью (112) или к близким.",
+    },
+  },
+  unassessed: {
+    title: "Риск не оценён",
+    paragraphs: [
+      "Вы не ответили на вопрос о мыслях о самоубийстве, поэтому риск сегодня не оценён. Пропуск не означает «нет».",
+      "Если есть мысли о том, чтобы причинить себе вред, обратитесь за экстренной помощью по местному номеру — 112.",
+    ],
+    last: {
+      notified:
+        "Ответ видит ваш врач в карте — обсудите с ним состояние. Просмотр может быть не мгновенным: это не линия экстренной помощи.",
+      notNotified:
+        "Ответ сохранён. Закреплённого врача у вас нет — пожалуйста, обсудите состояние с близкими или обратитесь к специалисту.",
+    },
+  },
+};
+
+function SafetyBlock({ safety, notified }: { safety: string; notified: boolean }) {
+  const info = SAFETY_BLOCKS[safety];
+  if (!info) return null;
+  const last = notified ? info.last.notified : info.last.notNotified;
+  return (
+    <div className="safety" role="status">
+      <h3>{info.title}</h3>
+      {[...info.paragraphs, last].map((p) => (
+        <p key={p}>{p}</p>
+      ))}
+    </div>
+  );
+}
+
+// Адаптивный чек-ин: один шаг за раз, ответы уходят только за текущий шаг (docs/16 §4).
+function CheckinCard() {
+  const [state, setState] = useState<CheckinState | null>(null);
+  const [stepAnswers, setStepAnswers] = useState<Record<string, number>>({});
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const apply = (next: CheckinState) => {
+    setState(next);
+    setStepAnswers({});
+  };
+
+  useEffect(() => {
+    api
+      .todayCheckin()
+      .then(apply)
+      .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)));
+  }, []);
+
+  const run = async (action: () => Promise<CheckinState>) => {
+    setErr("");
+    setBusy(true);
+    try {
+      apply(await action());
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e));
+      // Сеанс уже завершён (409 CHECKIN_ALREADY_DONE) — подтягиваем итоговое состояние.
+      if (e instanceof ApiError && e.code === "CHECKIN_ALREADY_DONE") {
+        api.todayCheckin().then(apply).catch(() => {});
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!state) return <p style={{ color: "#5a6478" }}>{err || "Загрузка чек-ина…"}</p>;
+
+  const items = state.step.items;
+  const answeredInStep = items.filter((i) => stepAnswers[i.id] !== undefined).length;
+  const allAnswered = items.length > 0 && answeredInStep === items.length;
+  // «Отправить» — на последнем шаге: безопасность или модули закрывают сеанс.
+  const lastStep =
+    (state.phase === "safety" || state.phase === "modules") &&
+    state.progress.answered + items.length >= state.progress.planned;
+
+  const submit = () => {
+    const sessionId = state.session_id;
+    if (!sessionId) return;
+    run(() => api.submitCheckin(sessionId, stepAnswers));
+  };
+
+  return (
+    <>
+      {state.status === "completed" ? (
+        <>
+          <p style={{ color: "#2e7d32", fontWeight: 600 }}>Чек-ин за сегодня выполнен</p>
+          <p style={{ color: "#5a6478", fontSize: 13 }}>
+            {state.safety === "none"
+              ? "Ответы сохранены. Если за вами закреплён врач, он увидит их в карте. Это наблюдения и их динамика, а не диагноз."
+              : state.clinician_notified
+                ? "Ваши ответы за сегодня видит врач в карте. Это отдельные наблюдения и их динамика, а не диагноз."
+                : "Ответ сохранён. Закреплённого врача у вас нет — при необходимости обратитесь к специалисту или по номеру 112."}
+          </p>
+        </>
+      ) : state.status !== "in_progress" ? (
+        <>
+          <p style={{ color: "#5a6478", fontSize: 14 }}>
+            Несколько коротких вопросов о том, как вы чувствовали себя сегодня. Занимает около минуты.
+          </p>
+          <button onClick={() => run(api.startCheckin)} disabled={busy}>
+            {busy ? "Открываем…" : "Начать чек-ин"}
+          </button>
+        </>
+      ) : (
+        <>
+          <p style={{ color: "#5a6478", fontSize: 13 }}>
+            Прогресс: {state.progress.answered} из {state.progress.planned} · на этом шаге{" "}
+            {items.length} {items.length === 1 ? "пункт" : "пункта"}
+          </p>
+          {items.map((item) => (
+            <div key={item.id} className="qa" data-item={item.id}>
+              <p>{item.text}</p>
+              <div className="row">
+                {Array.from({ length: item.max_value + 1 }, (_, v) => v).map((v) => (
+                  <button
+                    key={v}
+                    className={stepAnswers[item.id] === v ? "on" : ""}
+                    aria-pressed={stepAnswers[item.id] === v}
+                    onClick={() => setStepAnswers((a) => ({ ...a, [item.id]: v }))}
+                  >
+                    {item.emoji[v] ? `${item.emoji[v]} ` : ""}
+                    {item.anchors[v] ?? String(v)}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+          <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+            <button onClick={submit} disabled={busy || !allAnswered}>
+              {busy ? "Сохраняем…" : lastStep ? "Отправить" : "Далее"}
+            </button>
+            {!allAnswered && (
+              <span style={{ color: "#5a6478", fontSize: 13 }}>
+                Ответьте на пункты шага ({answeredInStep} из {items.length})
+              </span>
+            )}
+          </div>
+        </>
+      )}
+      {err && <p className="error">{err}</p>}
+      <SafetyBlock safety={state.safety} notified={state.clinician_notified} />
+    </>
+  );
+}
+
 function TodayTab() {
-  const [today, setToday] = useState<CheckinToday | null>(null);
-  const [answers, setAnswers] = useState<Record<string, number>>({});
-  const [done, setDone] = useState(false);
   const [content, setContent] = useState("");
-  const [mood, setMood] = useState(5);
+  const [mood, setMood] = useState<number | null>(null);
   const [sleep, setSleep] = useState(7);
   const [entriesToday, setEntriesToday] = useState<DiaryEntry[]>([]);
   const [status, setStatus] = useState<"taken" | "partial" | "missed" | null>(null);
@@ -257,9 +449,7 @@ function TodayTab() {
   const [err, setErr] = useState("");
 
   const load = async () => {
-    const [t, d, a] = await Promise.all([api.getTodayCheckin(), api.getDiary(), api.getMyAdherence()]);
-    setToday(t);
-    setDone(t.done);
+    const [d, a] = await Promise.all([api.getDiary(), api.getMyAdherence()]);
     const ref = new Date();
     setEntriesToday(d.items.filter((e) => sameDay(e.created_at, ref)));
     setAdhToday(a.today);
@@ -272,18 +462,13 @@ function TodayTab() {
   const save = async () => {
     setErr("");
     setSaved("");
-    const items = today?.items ?? [];
-    const missing = done ? [] : items.filter((i) => answers[i.key] === undefined);
     setBusy(true);
     const parts: string[] = [];
     try {
-      if (!done && items.length > 0 && missing.length === 0) {
-        await api.completeCheckin(answers);
-        parts.push("чек-ин");
-      }
       if (content.trim()) {
-        await api.postDiary({ content, mood, sleep_h: sleep, tags: [] });
+        await api.postDiary({ content, mood: mood ?? undefined, sleep_h: sleep, tags: [] });
         setContent("");
+        setMood(null);
         parts.push("дневник");
       }
       if (!adhToday && status) {
@@ -298,18 +483,12 @@ function TodayTab() {
       }
       await load();
       setSaved(parts.length > 0 ? `Сохранено: ${parts.join(" · ")}` : "Всё уже отмечено за сегодня");
-      // Неполный чек-ин не блокирует дневник и отметку о приёме — говорим, чего не хватает.
-      if (missing.length > 0 && missing.length < items.length) {
-        setErr(`Чек-ин не сохранён: ответьте ещё на ${missing.length}`);
-      }
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
   };
-
-  if (!today) return <div className="card">Загрузка…</div>;
 
   return (
     <div className="card">
@@ -320,36 +499,26 @@ function TodayTab() {
       </p>
 
       <h3>Чек-ин</h3>
-      {done ? (
-        <p style={{ color: "#2e7d32", fontWeight: 600 }}>Чек-ин за сегодня выполнен</p>
-      ) : today.items.length === 0 ? (
-        <p style={{ color: "#5a6478" }}>Вопросы появятся после первого скрининга.</p>
-      ) : (
-        today.items.map((item) => (
-          <div key={item.key} className="qa">
-            <p>{item.text}</p>
-            <div className="row">
-              {Array.from({ length: item.max_value + 1 }, (_, v) => v).map((v) => (
-                <button
-                  key={v}
-                  className={answers[item.key] === v ? "on" : ""}
-                  onClick={() => setAnswers((a) => ({ ...a, [item.key]: v }))}
-                >
-                  {v}
-                </button>
-              ))}
-            </div>
-          </div>
-        ))
-      )}
+      <CheckinCard />
 
       <h3>Дневник</h3>
       <label htmlFor="today-diary">Как прошёл день?</label>
       <textarea id="today-diary" rows={3} value={content} onChange={(e) => setContent(e.target.value)} />
       <div className="two">
         <div>
-          <label>Настроение (1–10): {mood}</label>
-          <input type="range" min={1} max={10} value={mood} onChange={(e) => setMood(Number(e.target.value))} />
+          <label>Настроение</label>
+          <div className="row mood">
+            {MOOD_OPTIONS.map((option, v) => (
+              <button
+                key={v}
+                className={mood === v ? "on" : ""}
+                aria-pressed={mood === v}
+                onClick={() => setMood(v)}
+              >
+                {option.emoji} {option.label}
+              </button>
+            ))}
+          </div>
         </div>
         <div>
           <label>Сон, часов: {sleep}</label>
@@ -360,7 +529,7 @@ function TodayTab() {
         <div style={{ marginTop: 8 }}>
           {entriesToday.map((e) => (
             <div key={e.id} className="msg">
-              <b>{e.mood ? `Настроение: ${e.mood}/10` : ""}</b> {e.content}
+              <b>{moodText(e.mood, e.mood_scale)}</b> {e.content}
             </div>
           ))}
         </div>
@@ -419,7 +588,7 @@ function DiaryTab() {
       {items.length === 0 && <p style={{ color: "#5a6478" }}>Пока пусто.</p>}
       {items.map((entry) => (
         <div key={entry.id} className="msg">
-          <b>{entry.mood ? `Настроение: ${entry.mood}/10` : ""}</b> {entry.content}
+          <b>{moodText(entry.mood, entry.mood_scale)}</b> {entry.content}
           <div style={{ color: "#5a6478", fontSize: 12 }}>
             {new Date(entry.created_at).toLocaleString("ru-RU")}
             {entry.sleep_h != null ? ` · сон ${entry.sleep_h} ч` : ""}

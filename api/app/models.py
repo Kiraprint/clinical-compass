@@ -84,13 +84,8 @@ class Run(Base):
             unique=True,
             postgresql_where=text("mode = 'SCREENING' AND finished_at IS NULL"),
         ),
-        Index(
-            "runs_checkin_daily",
-            "patient_id",
-            text("((started_at AT TIME ZONE 'Europe/Moscow')::date)"),
-            unique=True,
-            postgresql_where=text("mode = 'CHECKIN'"),
-        ),
+        # runs_checkin_daily удалён (миграция c6d7e8f9a0b1): уникальность дня
+        # обеспечивает checkin_sessions(patient_id, checkin_date).
     )
 
 
@@ -118,15 +113,78 @@ class Assessment(Base):
     __table_args__ = (Index("assessments_patient_time", "patient_id", "computed_at"),)
 
 
-class Escalation(Base):
-    __tablename__ = "escalations"
-    __table_args__ = (Index("escalations_patient", "patient_id", "resolved_at"),)
+class CheckinSession(Base):
+    """Ежедневный адаптивный чек-ин (docs/16 §5). Ответы — спецкатегория ПДн."""
+
+    __tablename__ = "checkin_sessions"
+    __table_args__ = (UniqueConstraint("patient_id", "checkin_date", name="checkin_sessions_daily"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    assessment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("assessments.id"))
     patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
-    kind: Mapped[str] = mapped_column(String)  # SUICIDAL | SEVERE
+    checkin_date: Mapped[date] = mapped_column(Date)  # день по Москве
+    rules_version: Mapped[str] = mapped_column(String(16))
+    # F1: ответы и предъявленные пункты — медицинские данные; в БД только
+    # зашифрованная JSON-строка (как DiaryEntry.tags_json), наружу — dict.
+    answers_json: Mapped[str] = mapped_column("answers", EncryptedText, default="{}")
+    presented_json: Mapped[str] = mapped_column("presented", EncryptedText, default="{}")
+    phase: Mapped[str] = mapped_column(String(16))  # core | safety | modules | done
+    status: Mapped[str] = mapped_column(String(16))  # in_progress | completed
+    safety: Mapped[str] = mapped_column(String(16))  # none | signal | review | unassessed
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    @property
+    def answers(self) -> dict[str, int]:
+        return json.loads(self.answers_json or "{}")
+
+    @answers.setter
+    def answers(self, value: dict[str, int]) -> None:
+        self.answers_json = json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+    @property
+    def presented(self) -> dict:
+        return json.loads(self.presented_json or "{}")
+
+    @presented.setter
+    def presented(self, value: dict) -> None:
+        self.presented_json = json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+class Escalation(Base):
+    __tablename__ = "escalations"
+    __table_args__ = (
+        Index("escalations_patient", "patient_id", "resolved_at"),
+        # Одна эскалация на сеанс чек-ина: partial unique (docs/16 §3).
+        Index(
+            "escalations_checkin_session",
+            "checkin_session_id",
+            unique=True,
+            postgresql_where=text("checkin_session_id IS NOT NULL"),
+        ),
+        # Очередь открытых сигналов: выборка по (resolved_at is null, created_at).
+        Index(
+            "escalations_open_queue",
+            "resolved_at",
+            "created_at",
+            postgresql_where=text("resolved_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    # Либо скрининг, либо чек-ин: источник эскалации (CHECKIN_RISK идёт без assessment).
+    assessment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("assessments.id"), nullable=True
+    )
+    checkin_session_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("checkin_sessions.id"), nullable=True
+    )
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    kind: Mapped[str] = mapped_column(String)  # SUICIDAL | SEVERE | CHECKIN_RISK | CHECKIN_RISK_URGENT
     notified_clinician_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # server_default now() заполняет и старые строки временем миграции — NULL не остаётся.
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), nullable=True
+    )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolution: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
 
@@ -137,7 +195,9 @@ class DiaryEntry(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
     content: Mapped[str] = mapped_column(EncryptedText())
-    mood: Mapped[int | None] = mapped_column(nullable=True)  # 1..10
+    mood: Mapped[int | None] = mapped_column(nullable=True)  # 0..4 при mood_scale='0-4'; legacy NULL = 1..10
+    # Шкала настроения записи: '0-4' для новых, NULL — историчные 1..10 (не переинтерпретируем).
+    mood_scale: Mapped[str | None] = mapped_column(String(8), nullable=True)
     sleep_h: Mapped[float | None] = mapped_column(nullable=True)
     # NEW-2: теги — свободный текст пациента (ПДн). В БД лежит зашифрованная
     # JSON-строка; наружу отдаётся list[str] через property ниже.

@@ -27,19 +27,27 @@ def test_questionnaire_catalog_serves_scales(client):
 def test_diary_create_and_list(client):
     h, _ = patient_ctx(client, "d@test.ru")
     resp = client.post(
-        "/api/v1/diary", json={"content": "Сегодня получше", "mood": 7, "sleep_h": 6.5, "tags": ["сон"]}, headers=h
+        "/api/v1/diary", json={"content": "Сегодня получше", "mood": 3, "sleep_h": 6.5, "tags": ["сон"]}, headers=h
     )
     assert resp.status_code == 201
     items = client.get("/api/v1/diary", headers=h).json()["items"]
     assert items[0]["content"] == "Сегодня получше"
-    assert items[0]["mood"] == 7
+    assert items[0]["mood"] == 3
+
+
+def test_diary_mood_zero_allowed(client):
+    # 5-точечная шкала 0..4 (docs/16 §1): «совсем нет» — валидное значение
+    h, _ = patient_ctx(client, "dm0@test.ru")
+    resp = client.post("/api/v1/diary", json={"content": "x", "mood": 0}, headers=h)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["mood"] == 0
 
 
 def test_diary_mood_out_of_range_422(client):
     h, _ = patient_ctx(client, "dm@test.ru")
-    resp = client.post("/api/v1/diary", json={"content": "x", "mood": 11}, headers=h)
-    assert resp.status_code == 422
-
+    for bad in (5, -1, 11):
+        resp = client.post("/api/v1/diary", json={"content": "x", "mood": bad}, headers=h)
+        assert resp.status_code == 422, bad
 
 def test_chat_hotline_on_red(client):
     h, _ = patient_ctx(client, "ch@test.ru")

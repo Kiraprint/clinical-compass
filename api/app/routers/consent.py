@@ -82,6 +82,7 @@ def _destroy_patient_pdn(db: Session, patient_id) -> None:
         AdverseEvent,
         Answer,
         Assessment,
+        CheckinSession,
         ChatMessage,
         DeviceToken,
         DiaryEntry,
@@ -103,6 +104,9 @@ def _destroy_patient_pdn(db: Session, patient_id) -> None:
     # и до остальных сущностей: после отзыва согласия врач не вправе их читать.
     db.execute(sa_delete(ClinicianReminder).where(ClinicianReminder.patient_id == patient_id))
     db.execute(sa_delete(Escalation).where(Escalation.patient_id == patient_id))
+    # docs/16 §5: ответы чек-ина — спецкатегория ПДн; после эскалаций (FK
+    # escalations.checkin_session_id) и до удаления пользователя.
+    db.execute(sa_delete(CheckinSession).where(CheckinSession.patient_id == patient_id))
     run_ids = sa_select(Run.id).where(Run.patient_id == patient_id)
     db.execute(sa_delete(Answer).where(Answer.run_id.in_(run_ids)))
     db.execute(sa_delete(Assessment).where(Assessment.patient_id == patient_id))

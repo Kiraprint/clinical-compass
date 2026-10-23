@@ -26,18 +26,31 @@ test.describe("Пациент: первый запуск и ежедневные
     await expect(page.getByRole("button", { name: "Начать скрининг" })).toBeVisible();
   });
 
-  test("ежедневный чек-ин: вопросы → ответы → выполнено за сегодня", async ({ page }) => {
+  test("ежедневный чек-ин: шаги → ответы → выполнено за сегодня", async ({ page }) => {
     const email = freshPatientEmail();
     await registerPatient(page, email);
     await page.getByRole("button", { name: "Даю согласие" }).click();
 
     await page.getByRole("button", { name: "Сегодня", exact: true }).click();
-    const questions = page.locator(".qa");
-    await expect(questions).toHaveCount(3); // нет истории → первые 3 пункта шкалы
-    for (let i = 0; i < 3; i++) {
-      await questions.nth(i).getByRole("button", { name: "0" }).click();
+    await page.getByRole("button", { name: "Начать чек-ин" }).click();
+
+    // Первый шаг — 7 пунктов ядра (docs/16 §1); отвечаем первым вариантом.
+    await expect(page.locator(".qa")).toHaveCount(7);
+    for (let step = 0; step < 5; step++) {
+      const questions = page.locator(".qa");
+      const count = await questions.count();
+      for (let i = 0; i < count; i++) {
+        await questions.nth(i).getByRole("button").first().click();
+      }
+      const [resp] = await Promise.all([
+        page.waitForResponse((r) => r.url().includes("/answers") && r.request().method() === "POST"),
+        page.getByRole("button", { name: /^(Далее|Отправить)$/ }).click(),
+      ]);
+      expect(resp.ok()).toBeTruthy();
+      const body = (await resp.json()) as { status: string };
+      if (body.status === "completed") break;
+      await expect(page.locator(".qa").first()).toBeVisible();
     }
-    await page.getByRole("button", { name: "Сохранить за сегодня" }).click();
 
     await expect(page.getByText("Чек-ин за сегодня выполнен")).toBeVisible();
   });

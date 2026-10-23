@@ -163,10 +163,11 @@ def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: bool = 
                     )
             # Дневник: 3 записи по настроению из траектории (created_at — в прошлые дни)
             for day in (3, 8, days - 1):
-                mood = max(1, min(10, round(5 + (totals[-1] - totals[0]) / 4 + rng.uniform(-1.5, 1.5))))
+                # 5-точечная шкала 0..4 с эмодзи (docs/16 §1): 2 — середина.
+                mood = max(0, min(4, round(2 + (totals[-1] - totals[0]) / 8 + rng.uniform(-0.75, 0.75))))
                 s.add(DiaryEntry(
                     patient_id=pid,
-                    content=f"День {day} демо-записи{' — стало сложнее' if mood < 4 else ('' if mood < 7 else ' — заметно лучше')}",
+                    content=f"День {day} демо-записи{' — стало сложнее' if mood < 2 else ('' if mood < 3 else ' — заметно лучше')}",
                     mood=mood, sleep_h=round(rng.uniform(5, 8), 1), tags=["демо"],
                     created_at=datetime.now(timezone.utc) - timedelta(days=days - day),
                 ))
