@@ -1,12 +1,22 @@
 """Тесты SPI эмбеддингов (docs/08 §4) и фабрики build_embedder.
 
 Не требуют модели: используется HashEmbedder (детерминирован, офлайн).
+Загрузка bge-m3 в тестах не выполняется — проверяются только конфигурационные
+ветки (профили, ошибки зависимостей/устройства) и флаги стратегии поиска.
 """
 
 import pytest
 
-from app.services.embeddings import HashEmbedder, build_embedder
-
+from app.config import settings
+from app.services.embeddings import (
+    PROFILES,
+    BgeM3Embedder,
+    EmbedderConfigError,
+    HashEmbedder,
+    build_embedder,
+    get_embedder,
+    reset_embedder,
+)
 
 class TestHashEmbedder:
     def test_dense_deterministic_and_normalized(self):
@@ -39,18 +49,61 @@ class TestHashEmbedder:
         dot = sum(x * y for x, y in zip(a, b))
         assert dot > 0.0
 
-
 class TestBuildEmbedder:
     def test_default_is_hash(self, monkeypatch):
         # CC_EMBEDDER = hash (дефолт) → офлайн-эмбеддер для демо/тестов.
-        from app.config import settings
-
         monkeypatch.setattr(settings, "embedder", "hash")
         assert isinstance(build_embedder(), HashEmbedder)
 
     def test_unknown_falls_back_to_hash(self, monkeypatch):
         # Любое другое значение конфига → hash (безопасный фолбэк).
-        from app.config import settings
-
         monkeypatch.setattr(settings, "embedder", "no-such-model")
         assert isinstance(build_embedder(), HashEmbedder)
+
+    def test_explicit_profile_overrides_settings(self, monkeypatch):
+        monkeypatch.setattr(settings, "embedder", "no-such-model")
+        assert isinstance(build_embedder(kind="hash"), HashEmbedder)
+
+    def test_get_embedder_is_process_singleton(self, monkeypatch):
+        monkeypatch.setattr(settings, "embedder", "hash")
+        reset_embedder()
+        try:
+            first = get_embedder()
+            assert first is get_embedder()
+        finally:
+            reset_embedder()
+
+class TestProfiles:
+    def test_profiles_match_expected_dense_sizes(self):
+        # Размерность профиля = размерность коллекции Qdrant (docs/08 §3).
+        assert PROFILES["hash"].dense_size == 512
+        assert PROFILES["bge-m3"].dense_size == 1024
+        assert PROFILES["bge-m3"].model_id == "BAAI/bge-m3"
+
+    def test_search_strategy_flags(self):
+        # hash: sparse — единственный точный сигнал; bge-m3: dense-only (RU-качество).
+        assert HashEmbedder.use_sparse is True
+        assert BgeM3Embedder.use_sparse is False
+
+class TestBgeM3Config:
+    def test_missing_optional_deps_raises_actionable_error(self, monkeypatch):
+        # Нет FlagEmbedding → EmbedderConfigError с инструкцией, а не ImportError
+        # в середине запроса (docs/08 §4).
+        import sys
+
+        monkeypatch.setitem(sys.modules, "FlagEmbedding", None)
+        with pytest.raises(EmbedderConfigError) as exc:
+            BgeM3Embedder()
+        msg = str(exc.value)
+        assert "embeddings" in msg
+        assert "CC_EMBEDDER=hash" in msg
+
+    def test_rejects_bad_device(self):
+        with pytest.raises(EmbedderConfigError) as exc:
+            BgeM3Embedder(device="tpu")
+        assert "CC_EMBEDDER_DEVICE" in str(exc.value)
+
+    def test_rejects_bad_batch_size(self):
+        with pytest.raises(EmbedderConfigError) as exc:
+            BgeM3Embedder(batch_size=0)
+        assert "CC_EMBEDDER_BATCH_SIZE" in str(exc.value)

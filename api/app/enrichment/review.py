@@ -18,7 +18,7 @@ from app.enrichment import index as index_mod
 from app.enrichment.config import EnrichmentConfig
 from app.models import KBExclusion, KBWork
 from app.services import audit
-from app.services.embeddings import build_embedder
+from app.services.embeddings import get_embedder
 
 
 class ReviewError(ValueError):
@@ -86,7 +86,7 @@ def approve(
             f"{item.get('label')}: {item.get('explanation')}" for item in blocking
         )
         raise ReviewError(f"Жёсткие критерии не выполнены, approve запрещён. {labels}")
-    embedder = embedder or build_embedder()
+    embedder = embedder or get_embedder()
     now = dt.datetime.now(dt.timezone.utc)
     # Хэш версии снимается в значение: после индексации объект перечитывается
     # под блокировкой (populate_existing обновляет тот же instance), и сравнение
