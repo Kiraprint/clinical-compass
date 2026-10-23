@@ -22,7 +22,7 @@ from app.config import settings
 from app.models import PushSubscription
 from app.services import push
 
-from .conftest import clinician_ctx
+from .conftest import clinician_ctx, run_async
 
 COMPOSE = Path(__file__).resolve().parents[2] / "infra" / "docker-compose.yml"
 _KEY_RE = re.compile(r'CC_VAPID_PRIVATE_KEY: "\$\{CC_VAPID_PRIVATE_KEY:-([^}]+)\}"')
@@ -118,7 +118,8 @@ def test_push_to_clinicians_signs_request(client, db_session, monkeypatch):
 
         monkeypatch.setattr(settings, "push_enabled", True)
         monkeypatch.setattr(push, "_vapid_cache", None)
-        push.push_to_clinicians(db_session, [uuid.UUID(clinician_id)], "тест", "тело")
+        run_async(push.push_to_clinicians, [uuid.UUID(clinician_id)], "тест", "тело")
+        db_session.expire_all()
     finally:
         srv.shutdown()
         push._vapid_cache = None

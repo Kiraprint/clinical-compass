@@ -16,13 +16,16 @@ from __future__ import annotations
 
 import uuid
 
+import anyio
+
 from sqlalchemy import delete, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from compass.agent import detect_redline
 
 from app.enrichment import review as kb_review
 from app.errors import Problem
+from app.kb_seed import load_drug_docs
 from app.models import (
     AssistantMessage,
     AssistantThread,
@@ -37,7 +40,16 @@ MAX_THREAD_PATIENTS = 10
 def _not_found() -> Problem:
     return Problem(404, "THREAD_NOT_FOUND", "Диалог не найден")
 
-def normalize_patient_ids(db: Session, clinician_id, patient_ids) -> list[uuid.UUID]:
+async def _invoke_agent(query: str, **kwargs) -> dict:
+    """RAG-граф (Qdrant + эмбеддинги + LLM-роутинг) — в поток: вызов блокирующий.
+
+    Сессия БД к этому моменту закоммичена, поэтому соединение не удерживается,
+    пока агент ходит во внешние сервисы.
+    """
+    factory = shared_factory()
+    return await anyio.to_thread.run_sync(lambda: factory.invoke(query, **kwargs))
+
+async def normalize_patient_ids(db: AsyncSession, clinician_id, patient_ids) -> list[uuid.UUID]:
     """Дедуп + лимит + roster-гейт. Возвращает id в порядке перечисления."""
     uniq: list[uuid.UUID] = []
     for pid in patient_ids or []:
@@ -52,7 +64,7 @@ def normalize_patient_ids(db: Session, clinician_id, patient_ids) -> list[uuid.U
         )
     if uniq:
         roster = set(
-            db.scalars(
+            await db.scalars(
                 select(ClinicianRoster.patient_id).where(
                     ClinicianRoster.clinician_id == clinician_id,
                     ClinicianRoster.patient_id.in_(uniq),
@@ -66,24 +78,24 @@ def normalize_patient_ids(db: Session, clinician_id, patient_ids) -> list[uuid.U
             )
     return uniq
 
-def get_thread(db: Session, clinician_id, thread_id) -> AssistantThread:
+async def get_thread(db: AsyncSession, clinician_id, thread_id) -> AssistantThread:
     """Только свой тред: чужой/несуществующий неотличимы (404, R5 IDOR)."""
-    thread = db.get(AssistantThread, uuid.UUID(str(thread_id)))
+    thread = await db.get(AssistantThread, uuid.UUID(str(thread_id)))
     if thread is None or thread.clinician_id != uuid.UUID(str(clinician_id)):
         raise _not_found()
     return thread
 
-def _patient_ids(db: Session, thread_id) -> list[uuid.UUID]:
+async def _patient_ids(db: AsyncSession, thread_id) -> list[uuid.UUID]:
     return list(
-        db.scalars(
+        await db.scalars(
             select(AssistantThreadPatient.patient_id).where(
                 AssistantThreadPatient.thread_id == thread_id
             )
         )
     )
 
-def _set_patients(db: Session, thread_id, patient_ids: list[uuid.UUID]) -> None:
-    db.execute(
+async def _set_patients(db: AsyncSession, thread_id, patient_ids: list[uuid.UUID]) -> None:
+    await db.execute(
         delete(AssistantThreadPatient).where(AssistantThreadPatient.thread_id == thread_id)
     )
     for pid in patient_ids:
@@ -113,54 +125,54 @@ def _serialize_message(m: AssistantMessage) -> dict:
         "created_at": m.created_at.isoformat() if m.created_at else None,
     }
 
-def create_thread(db: Session, clinician_id, title: str | None, patient_ids) -> dict:
-    ids = normalize_patient_ids(db, clinician_id, patient_ids)
+async def create_thread(db: AsyncSession, clinician_id, title: str | None, patient_ids) -> dict:
+    ids = await normalize_patient_ids(db, clinician_id, patient_ids)
     thread = AssistantThread(clinician_id=uuid.UUID(str(clinician_id)), title=_title(title))
     db.add(thread)
-    db.flush()
-    _set_patients(db, thread.id, ids)
-    db.commit()
-    db.refresh(thread)
+    await db.flush()
+    await _set_patients(db, thread.id, ids)
+    await db.commit()
+    await db.refresh(thread)
     return _serialize(thread, ids)
 
-def list_threads(db: Session, clinician_id) -> list[dict]:
-    threads = db.scalars(
+async def list_threads(db: AsyncSession, clinician_id) -> list[dict]:
+    threads = (await db.scalars(
         select(AssistantThread)
         .where(AssistantThread.clinician_id == uuid.UUID(str(clinician_id)))
         .order_by(AssistantThread.updated_at.desc(), AssistantThread.id)
-    ).all()
+    )).all()
     if not threads:
         return []
     ids = [t.id for t in threads]
     counts = dict(
-        db.execute(
+        (await db.execute(
             select(AssistantMessage.thread_id, func.count())
             .where(AssistantMessage.thread_id.in_(ids))
             .group_by(AssistantMessage.thread_id)
-        ).all()
+        )).all()
     )
     patients: dict[uuid.UUID, list[uuid.UUID]] = {i: [] for i in ids}
-    for thread_id, patient_id in db.execute(
+    for thread_id, patient_id in (await db.execute(
         select(AssistantThreadPatient.thread_id, AssistantThreadPatient.patient_id).where(
             AssistantThreadPatient.thread_id.in_(ids)
         )
-    ).all():
+    )).all():
         patients[thread_id].append(patient_id)
     return [_serialize(t, patients[t.id], int(counts.get(t.id, 0))) for t in threads]
 
-def get_thread_detail(db: Session, clinician_id, thread_id, ip: str | None = None) -> dict:
-    thread = get_thread(db, clinician_id, thread_id)
-    ids = _patient_ids(db, thread.id)
-    messages = db.scalars(
+async def get_thread_detail(db: AsyncSession, clinician_id, thread_id, ip: str | None = None) -> dict:
+    thread = await get_thread(db, clinician_id, thread_id)
+    ids = await _patient_ids(db, thread.id)
+    messages = (await db.scalars(
         select(AssistantMessage)
         .where(AssistantMessage.thread_id == thread.id)
         .order_by(AssistantMessage.created_at, AssistantMessage.id)
-    ).all()
+    )).all()
     data = _serialize(thread, ids, len(messages))
     data["messages"] = [_serialize_message(m) for m in messages]
     if ids:
         # PHI-чтение: тред ссылается на пациентов → фиксируем доступ врача.
-        audit.record(
+        await audit.record(
             db,
             uuid.UUID(str(clinician_id)),
             "READ_ASSISTANT_THREAD",
@@ -168,60 +180,60 @@ def get_thread_detail(db: Session, clinician_id, thread_id, ip: str | None = Non
             str(thread.id),
             ip=ip,
         )
-        db.commit()
+        await db.commit()
     return data
 
-def update_thread(
-    db: Session,
+async def update_thread(
+    db: AsyncSession,
     clinician_id,
     thread_id,
     *,
     title: str | None = None,
     patient_ids=None,
 ) -> dict:
-    thread = get_thread(db, clinician_id, thread_id)
+    thread = await get_thread(db, clinician_id, thread_id)
     if title is not None:
         thread.title = _title(title)
-    ids = _patient_ids(db, thread.id)
+    ids = await _patient_ids(db, thread.id)
     if patient_ids is not None:
-        ids = normalize_patient_ids(db, clinician_id, patient_ids)
-        _set_patients(db, thread.id, ids)
+        ids = await normalize_patient_ids(db, clinician_id, patient_ids)
+        await _set_patients(db, thread.id, ids)
     thread.updated_at = func.now()
-    db.commit()
-    db.refresh(thread)
-    count = db.scalar(
+    await db.commit()
+    await db.refresh(thread)
+    count = await db.scalar(
         select(func.count())
         .select_from(AssistantMessage)
         .where(AssistantMessage.thread_id == thread.id)
     )
     return _serialize(thread, ids, int(count or 0))
 
-def delete_thread(db: Session, clinician_id, thread_id) -> None:
-    thread = get_thread(db, clinician_id, thread_id)
-    db.delete(thread)
-    db.commit()
+async def delete_thread(db: AsyncSession, clinician_id, thread_id) -> None:
+    thread = await get_thread(db, clinician_id, thread_id)
+    await db.delete(thread)
+    await db.commit()
 
 
-def _history_for_llm(db: Session, thread_id, names: list[str]) -> list[dict]:
+async def _history_for_llm(db: AsyncSession, thread_id, names: list[str]) -> list[dict]:
     """Последние реплики треда, деперсонализированные, oldest → newest.
 
     Для LLM-переформулировки уточняющего вопроса (FR-21): в промпт не должны
     попасть ФИО пациента/врача и прочие ПДн, поэтому каждая реплика проходит
     scrub_for_llm. Обрезку по количеству/длине делает llm_router.
     """
-    rows = db.scalars(
+    rows = (await db.scalars(
         select(AssistantMessage)
         .where(AssistantMessage.thread_id == thread_id)
         .order_by(AssistantMessage.created_at.desc(), AssistantMessage.id.desc())
         .limit(llm_router.REWRITE_HISTORY_MESSAGES)
-    ).all()
+    )).all()
     return [
         {"role": m.role, "content": scrub_for_llm(m.content, None, names)[0]}
         for m in reversed(rows)
     ]
 
-def answer_query(
-    db: Session,
+async def answer_query(
+    db: AsyncSession,
     clinician_id,
     query: str,
     *,
@@ -232,28 +244,31 @@ def answer_query(
 ) -> dict:
     """Одиночный запрос к ассистенту (POST /assistant/ask): карты пациентов +
     деперсонализация + RAG. Общий путь с тредом (FR-21), без истории."""
-    names = clinician.roster_names(db, clinician_id)
+    names = await clinician.roster_names(db, clinician_id)
     patient_contexts = [
-        clinician.patient_context(db, clinician_id, pid, ip=ip) for pid in patient_ids or []
+        await clinician.patient_context(db, clinician_id, pid, ip=ip) for pid in patient_ids or []
     ]
-    db.commit()  # PDn-access audit персистируется до вызова агента (152-ФЗ)
+    exclude_ids = await kb_review.excluded_ids(db, clinician_id)
+    corpus_drugs = await load_drug_docs(db)
+    await db.commit()  # PDn-access audit персистируется до вызова агента (152-ФЗ)
 
     scrubbed_query, _, report = scrub_for_llm(
         query, patient_contexts[0] if patient_contexts else None, names
     )
     scrubbed_contexts = [scrub_for_llm(query, ctx, names)[1] for ctx in patient_contexts]
-    result = shared_factory().invoke(
+    result = await _invoke_agent(
         scrubbed_query,
         topic=topic,
         limit=limit,
         patient_contexts=scrubbed_contexts or None,
-        exclude_ids=kb_review.excluded_ids(db, clinician_id),
+        exclude_ids=exclude_ids,
+        corpus_drugs=corpus_drugs,
     )
     result["depersonalization"] = report
     return result
 
-def post_message(
-    db: Session,
+async def post_message(
+    db: AsyncSession,
     clinician_id,
     thread_id,
     content: str,
@@ -262,35 +277,37 @@ def post_message(
     ip: str | None = None,
 ) -> dict:
     """Вопрос врача → ответ RAG с учётом истории треда и карт пациентов."""
-    thread = get_thread(db, clinician_id, thread_id)
+    thread = await get_thread(db, clinician_id, thread_id)
     if patient_ids is not None:
-        _set_patients(db, thread.id, normalize_patient_ids(db, clinician_id, patient_ids))
+        await _set_patients(db, thread.id, await normalize_patient_ids(db, clinician_id, patient_ids))
         thread.updated_at = func.now()
-    ids = _patient_ids(db, thread.id)
+    ids = await _patient_ids(db, thread.id)
 
     # Уточняющий вопрос («а в каких дозах?») сам по себе не ищется: retrieval и
     # роутинг идут по LLM-переформулировке последних реплик треда. История в
     # embedding НЕ конкатенируется (ФИО/redline-реплики сдвигали поиск), а в LLM
     # уходит только после scrub_for_llm. Читаем её до вставки текущего вопроса —
     # это прошлые реплики, не он сам.
-    names = clinician.roster_names(db, clinician_id)
-    history = _history_for_llm(db, thread.id, names)
+    names = await clinician.roster_names(db, clinician_id)
+    history = await _history_for_llm(db, thread.id, names)
 
     question = AssistantMessage(
         thread_id=thread.id, role="CLINICIAN", content=content, citations=[]
     )
     db.add(question)
-    db.flush()
+    await db.flush()
     contexts: list[dict] = []
     skipped: list[str] = []
     for pid in ids:
         try:
             # roster-gate + согласие + audit ASK_ASSISTANT_WITH_PATIENT
-            contexts.append(clinician.patient_context(db, clinician_id, pid, ip=ip))
+            contexts.append(await clinician.patient_context(db, clinician_id, pid, ip=ip))
         except Problem:
             # Врач потерял доступ (roster/согласие) — тред не ломаем, сообщаем.
             skipped.append(str(pid))
-    db.commit()  # PDn-access audit + вопрос персистируются до вызова агента
+    exclude_ids = await kb_review.excluded_ids(db, clinician_id)
+    corpus_drugs = await load_drug_docs(db)
+    await db.commit()  # PDn-access audit + вопрос персистируются до вызова агента
 
     scrubbed_query, _, _ = scrub_for_llm(content, None, names)
     scrubbed_contexts = [scrub_for_llm(content, ctx, names)[1] for ctx in contexts]
@@ -301,16 +318,19 @@ def post_message(
     # Redline-вопрос не ищется вовсе (детерминированный отказ) — не тратим LLM
     # и не отправляем такой текст в модель; red line считается по оригиналу.
     if history and detect_redline(content) is None:
-        candidate = llm_router.rewrite_followup(history, scrubbed_query)
+        candidate = await anyio.to_thread.run_sync(
+            llm_router.rewrite_followup, history, scrubbed_query
+        )
         if candidate:
             search_query, rewritten = candidate, True
 
-    result = shared_factory().invoke(
+    result = await _invoke_agent(
         scrubbed_query,
         retrieval_query=search_query if rewritten else None,
         limit=5,
         patient_contexts=scrubbed_contexts or None,
-        exclude_ids=kb_review.excluded_ids(db, clinician_id),
+        exclude_ids=exclude_ids,
+        corpus_drugs=corpus_drugs,
     )
 
     answer = AssistantMessage(
@@ -322,13 +342,13 @@ def post_message(
     )
     db.add(answer)
     if not ids:
-        audit.record(
+        await audit.record(
             db, uuid.UUID(str(clinician_id)), "ASK_ASSISTANT", "kb", None, ip=ip
         )
     elif skipped:
         # Часть карт недоступна (roster/согласие), но расшифрованная история
         # треда всё равно читается → фиксируем PHI-доступ.
-        audit.record(
+        await audit.record(
             db,
             uuid.UUID(str(clinician_id)),
             "READ_ASSISTANT_THREAD",
@@ -337,9 +357,9 @@ def post_message(
             ip=ip,
         )
     thread.updated_at = func.now()
-    db.commit()
-    db.refresh(question)
-    db.refresh(answer)
+    await db.commit()
+    await db.refresh(question)
+    await db.refresh(answer)
     return {
         "answer": answer.content,
         "citations": list(answer.citations or []),

@@ -14,8 +14,8 @@ notifications.reminder_id; параллельные инстансы — advisor
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
-import time
 
 from app import db
 from app.config import settings
@@ -23,27 +23,28 @@ from app.services import reminders
 
 log = logging.getLogger("app.reminders_worker")
 
-def tick() -> int:
+async def tick() -> int:
     """Один тик доставки. Возвращает число доставленных напоминаний."""
-    session = db.SessionLocal()
-    try:
-        return reminders.deliver_due(session)
-    finally:
-        session.close()
+    async with db.AsyncSessionLocal() as session:
+        try:
+            return await reminders.deliver_due(session)
+        except Exception:
+            await session.rollback()
+            raise
 
-def run(*, once: bool = False, max_runs: int | None = None) -> int:
+async def run(*, once: bool = False, max_runs: int | None = None) -> int:
     interval = max(1, int(settings.reminder_tick_seconds))
     runs = 0
     while True:
         try:
-            count = tick()
+            count = await tick()
             log.info("reminders: тик %s, доставлено %s", runs + 1, count)
         except Exception:  # noqa: BLE001 — воркер не должен падать на одном тике
             log.exception("reminders: тик упал")
         runs += 1
         if once or (max_runs is not None and runs >= max_runs):
             return 0
-        time.sleep(interval)
+        await asyncio.sleep(interval)
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Доставка напоминаний врача (FR-24)")
@@ -54,9 +55,9 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     db.setup()
     try:
-        return run(once=args.once, max_runs=args.max_runs)
+        return asyncio.run(run(once=args.once, max_runs=args.max_runs))
     finally:
-        db.engine.dispose()
+        db.sync_engine.dispose()
 
 if __name__ == "__main__":
     raise SystemExit(main())

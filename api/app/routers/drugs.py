@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import get_db, require_clinician
 from app.models import Drug, User
@@ -35,9 +35,9 @@ def _drug_dict(d: Drug) -> dict:
 
 
 @router.get("/drugs")
-def list_drugs(
+async def list_drugs(
     q: str | None = None,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     _user: User = Depends(require_clinician),
 ) -> dict:
     """Список препаратов. Опциональный фильтр q — ILIKE по trade_name/inn/inn_en."""
@@ -49,17 +49,17 @@ def list_drugs(
             | (Drug.inn.ilike(like))
             | (Drug.inn_en.ilike(like))
         ).order_by(Drug.trade_name)
-    rows = db.execute(stmt).scalars().all()
+    rows = (await db.execute(stmt)).scalars().all()
     return {"items": [_drug_dict(d) for d in rows]}
 
 
 @router.get("/drugs/{drug_id}")
-def get_drug(
+async def get_drug(
     drug_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     _user: User = Depends(require_clinician),
 ) -> dict:
-    d = db.execute(select(Drug).where(Drug.drug_id == drug_id)).scalar_one_or_none()
+    d = (await db.execute(select(Drug).where(Drug.drug_id == drug_id))).scalar_one_or_none()
     if d is None:
         raise HTTPException(status_code=404, detail={"code": "NOT_FOUND", "detail": "Препарат не найден"})
     return _drug_dict(d)

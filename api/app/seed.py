@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import random
@@ -63,21 +64,17 @@ def _answers_for(profile, rng: random.Random, total: int, day: int, max_value: i
     return answers
 
 
-def _seed_drugs(s) -> None:
-    """Загружает api/app/data/drugs.json в таблицу drugs (источник — ГРЛС).
-
-    Idempotent: удаляет старые строки и вставляет заново (на drugs нет FK, ссылающихся
-    INTO таблицу — AdverseEvent.suspected_drug свободный текст). Таблица — источник
-    правды для чанков ИИ-агента (kb_seed._drug_docs) и для API /drugs.
-    """
+def _drug_payload() -> list[dict] | None:
     p = Path(__file__).parent / "data" / "drugs.json"
     if not p.exists():
         print("[seed] drugs.json не найден, пропуск справочника препаратов")
-        return
-    data = json.loads(p.read_text(encoding="utf-8"))
-    s.execute(delete(Drug))
-    for d in data.get("drugs", []):
-        s.add(Drug(
+        return None
+    return json.loads(p.read_text(encoding="utf-8")).get("drugs", [])
+
+
+def _drug_rows(payload: list[dict]) -> list[Drug]:
+    return [
+        Drug(
             drug_id=d["drug_id"], trade_name=d["trade_name"], inn=d["inn"],
             inn_en=d.get("inn_en"), form=d["form"], reg_certificate=d["reg_certificate"],
             reg_date=datetime.strptime(d["reg_date"], "%Y-%m-%d").date(),
@@ -85,12 +82,39 @@ def _seed_drugs(s) -> None:
             pharmacology=d["pharmacology"], indications=d["indications"], dosage=d["dosage"],
             contraindications=d["contraindications"], adverse_events=d["adverse_events"],
             special_notes=d["special_notes"],
-        ))
+        )
+        for d in payload
+    ]
+
+
+def _seed_drugs(s) -> None:
+    """Загружает api/app/data/drugs.json в drugs (sync: тесты/схема, не request-path).
+
+    Idempotent: удаляет старые строки и вставляет заново (на drugs нет FK, ссылающихся
+    INTO таблицу — AdverseEvent.suspected_drug свободный текст). Таблица — источник
+    правды для чанков ИИ-агента (kb_seed._drug_docs) и для API /drugs.
+    """
+    payload = _drug_payload()
+    if payload is None:
+        return
+    s.execute(delete(Drug))
+    s.add_all(_drug_rows(payload))
     s.flush()
-    print(f"[seed] drugs: {len(data.get('drugs', []))} в таблице (источник для KB-чанков и /drugs)")
+    print(f"[seed] drugs: {len(payload)} в таблице (источник для KB-чанков и /drugs)")
 
 
-def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: bool = False, seed_value: int = 42) -> None:
+async def _seed_drugs_async(s) -> None:
+    """То же, что _seed_drugs, но через async-сессию (seed.py)."""
+    payload = _drug_payload()
+    if payload is None:
+        return
+    await s.execute(delete(Drug))
+    s.add_all(_drug_rows(payload))
+    await s.flush()
+    print(f"[seed] drugs: {len(payload)} в таблице (источник для KB-чанков и /drugs)")
+
+
+async def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: bool = False, seed_value: int = 42) -> None:
     db.setup(database_url)
     db.init_db()
     if reset:
@@ -98,7 +122,7 @@ def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: bool = 
         print("[seed] tables truncated")
 
     rng = random.Random(seed_value)
-    s = db.SessionLocal()
+    s = db.AsyncSessionLocal()
     try:
         admin = User(
             email="admin@compass.demo", fio="Администратор системы",
@@ -111,12 +135,12 @@ def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: bool = 
             totp_secret=DEMO_TOTP or security.generate_totp_secret(),
         )
         s.add_all([admin, doc])
-        s.flush()
+        await s.flush()
         doc_id = doc.id
-        s.commit()
+        await s.commit()
         print(f"[seed] admin={admin.email} clinician={doc.email} (TOTP: {doc.totp_secret})")
 
-        _seed_drugs(s)
+        await _seed_drugs_async(s)
 
         profiles = (PATIENT_PROFILES * ((n_patients // len(PATIENT_PROFILES)) + 1))[:n_patients]
         for idx, profile in enumerate(profiles, start=1):
@@ -127,37 +151,37 @@ def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: bool = 
                 role="PATIENT",
             )
             s.add(patient)
-            s.flush()
+            await s.flush()
             pid = patient.id
             s.add(Consent(user_id=pid, version=1, text_hash="consent-v1",
                          signed_at=datetime.now(timezone.utc) - timedelta(days=days)))
             s.add(Prescription(patient_id=pid, scale_code=code))
-            s.execute(
+            await s.execute(
                 text("INSERT INTO clinician_roster(clinician_id, patient_id) VALUES (:cid, :pid) ON CONFLICT DO NOTHING"),
                 {"cid": doc_id, "pid": pid},
             )
-            s.flush()  # чтобы prescribed_scales() видел назначение в цикле скринингов ниже
+            await s.flush()  # чтобы prescribed_scales() видел назначение в цикле скринингов ниже
 
             totals: list[int] = []
             for day in range(1, days + 1):
                 total = base + slope * day + rng.gauss(0, noise)
                 total = int(max(1, min(27, round(total))))
                 totals.append(total)
-                run = screening_service.start_screening(s, pid)
+                run = await screening_service.start_screening(s, pid)
                 answers = _answers_for(profile, rng, total, day)
-                screening_service.add_answers(s, run.id, pid, answers)
-                assessment = screening_service.finish_screening(s, run.id, pid)
+                await screening_service.add_answers(s, run.id, pid, answers)
+                assessment = await screening_service.finish_screening(s, run.id, pid)
                 # backdate на (days - day) дней назад: согласованные time-метки всей цепочки
                 offset = days - day
                 if offset:
                     # F10: параметризованный SQL (без f-string интерполяции значений).
                     delta = timedelta(days=offset)
                     for table, col in (("runs", "started_at"), ("runs", "finished_at"), ("assessments", "computed_at")):
-                        s.execute(
+                        await s.execute(
                             text(f"UPDATE {table} SET {col} = {col} - :delta WHERE id = :rid"),
                             {"delta": delta, "rid": run.id},
                         )
-                    s.execute(
+                    await s.execute(
                         text("UPDATE answers SET answered_at = answered_at - :delta WHERE run_id = :rid"),
                         {"delta": delta, "rid": run.id},
                     )
@@ -172,9 +196,10 @@ def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: bool = 
                     created_at=datetime.now(timezone.utc) - timedelta(days=days - day),
                 ))
             print(f"[seed] patient {email} ({fio}) scale={code} 1..{days}d: {totals[0]}→{totals[-1]} triage-last={assessment['triage']}")
-        s.commit()
+        await s.commit()
     finally:
-        s.close()
+        await s.close()
+    await db.engine.dispose()
 
     print("[seed] done. Учётные данные демо:")
     print("  admin: admin@compass.demo / Demo-Pass-1 (2FA: см. выше)")
@@ -191,7 +216,7 @@ def main() -> None:
     parser.add_argument("--days", type=int, default=14)
     parser.add_argument("--reset", action="store_true")
     args = parser.parse_args()
-    seed(args.url, args.patients, args.days, args.reset)
+    asyncio.run(seed(args.url, args.patients, args.days, args.reset))
 
 
 if __name__ == "__main__":

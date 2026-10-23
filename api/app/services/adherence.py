@@ -20,7 +20,7 @@ from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import Problem
 from app.models import AdherenceRecord, PatientMedication
@@ -60,19 +60,19 @@ def _expected_days(med: PatientMedication, start: date, end: date) -> int:
 def _pct(score: float, expected: int) -> int | None:
     return round(score / expected * 100) if expected > 0 else None
 
-def compute(db: Session, patient_id, days: int = 14) -> dict:
+async def compute(db: AsyncSession, patient_id, days: int = 14) -> dict:
     """Единый агрегат для витрины пациента и карточки врача (roster/consent — у вызывающих)."""
     start, end = _window(days)
     since = _window_start_dt(start)
-    rows = db.scalars(
+    rows = (await db.scalars(
         select(AdherenceRecord)
         .where(AdherenceRecord.patient_id == patient_id, AdherenceRecord.created_at >= since)
         .order_by(AdherenceRecord.created_at.desc())
-    ).all()
+    )).all()
 
-    meds = db.scalars(
+    meds = (await db.scalars(
         select(PatientMedication).where(PatientMedication.patient_id == patient_id)
-    ).all()
+    )).all()
 
     # В знаменатель — назначения с режимом, действовавшие хотя бы день в окне.
     # Статус не фильтруем: остановленное назначение даёт ожидаемые приёмы только
@@ -117,11 +117,11 @@ def compute(db: Session, patient_id, days: int = 14) -> dict:
     taken = sum(1 for r in rows if r.status == "taken")
     partial = sum(1 for r in rows if r.status == "partial")
 
-    active_meds = db.scalars(
+    active_meds = (await db.scalars(
         select(PatientMedication)
         .where(PatientMedication.patient_id == patient_id, PatientMedication.status == "active")
         .order_by(PatientMedication.created_at.desc())
-    ).all()
+    )).all()
 
     return {
         "days": days,
@@ -164,14 +164,14 @@ def summary_payload(data: dict) -> dict:
         "records": data["items"][:10],
     }
 
-def create_record(
-    db: Session, patient_id, medication_id=None, medication: str | None = None,
+async def create_record(
+    db: AsyncSession, patient_id, medication_id=None, medication: str | None = None,
     status: str = "taken", note: str | None = None,
 ) -> dict:
     """Отметка пациента. consent-гейт у роутера, владение назначением — здесь."""
     med = None
     if medication_id is not None:
-        med = db.get(PatientMedication, medication_id)
+        med = await db.get(PatientMedication, medication_id)
         if med is None or med.patient_id != patient_id or med.status != "active":
             raise Problem(
                 422, "MEDICATION_NOT_ACTIVE",
@@ -187,7 +187,7 @@ def create_record(
         note=note,
     )
     db.add(rec)
-    db.commit()
+    await db.commit()
     return adherence_dict(rec)
 
 def today_record(rows: list[AdherenceRecord]) -> dict | None:

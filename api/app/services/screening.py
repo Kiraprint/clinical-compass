@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Mapping
 from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from compass.models import AUDIENCE_PATIENT
 from compass.scales import ALL_SCALES, PHQ9
@@ -37,8 +37,8 @@ def _scale(code: str):
 
 
 
-def _own_run(db: Session, run_id, patient_id) -> Run:
-    run = db.get(Run, run_id)
+async def _own_run(db: AsyncSession, run_id, patient_id) -> Run:
+    run = await db.get(Run, run_id)
     if run is None or run.patient_id != patient_id:
         raise Problem(404, "NOT_FOUND", "Прогон не найден")
     return run
@@ -47,22 +47,22 @@ def _own_run(db: Session, run_id, patient_id) -> Run:
 # Шкала первой линии при отсутствии предписания врача (item 1: пациент не выбирает шкалу).
 DEFAULT_SCALE = PHQ9.code
 
-def prescribed_scales(db: Session, patient_id) -> list[str]:
+async def prescribed_scales(db: AsyncSession, patient_id) -> list[str]:
     """Шкалы, назначенные пациенту врачом (упорядочены по времени назначения).
     Пусто → дефолт первой линии [PHQ-9] (пациент без назначения всё равно может скриниться)."""
-    rows = db.scalars(
+    rows = (await db.scalars(
         select(Prescription).where(Prescription.patient_id == patient_id).order_by(Prescription.created_at)
-    ).all()
+    )).all()
     codes = [r.scale_code for r in rows]
     if not codes:
         return [DEFAULT_SCALE]
     return codes
 
-def prescribed_scale(db: Session, patient_id) -> str:
+async def prescribed_scale(db: AsyncSession, patient_id) -> str:
     """Первичная (первая назначенная) шкала — для чек-инов и дефолта старта. Без назначения — PHQ-9."""
-    return prescribed_scales(db, patient_id)[0]
+    return (await prescribed_scales(db, patient_id))[0]
 
-def start_screening(db: Session, patient_id, questionnaire_code: str | None = None) -> Run:
+async def start_screening(db: AsyncSession, patient_id, questionnaire_code: str | None = None) -> Run:
     """Старт скрининга. Шкала: явно указанная пациентом (если она в назначенном множестве),
     иначе первичная. Пациент не может выбрать произвольную шкалу — 403 SCALE_NOT_PRESCRIBED.
     Клиницистские шкалы (HDRS-17) пациент не заполняет — 403 SCALE_NOT_PATIENT_ADMINISTERED."""
@@ -71,7 +71,7 @@ def start_screening(db: Session, patient_id, questionnaire_code: str | None = No
         if requested.audience != AUDIENCE_PATIENT:
             raise Problem(403, "SCALE_NOT_PATIENT_ADMINISTERED",
                           f"Шкала {questionnaire_code} заполняется только врачом")
-    assigned = prescribed_scales(db, patient_id)
+    assigned = await prescribed_scales(db, patient_id)
     if questionnaire_code is None:
         code = assigned[0]
     elif questionnaire_code in assigned:
@@ -84,19 +84,19 @@ def start_screening(db: Session, patient_id, questionnaire_code: str | None = No
         # Защита от легаси-назначений клиницистской шкалы.
         raise Problem(403, "SCALE_NOT_PATIENT_ADMINISTERED",
                       f"Шкала {code} заполняется только врачом")
-    open_run = db.scalar(
+    open_run = await db.scalar(
         select(Run).where(Run.patient_id == patient_id, Run.mode == "SCREENING", Run.finished_at.is_(None))
     )
     if open_run is not None:
         raise Problem(409, "CONFLICT", "Уже есть незавершённый скрининг")
     run = Run(patient_id=patient_id, questionnaire_code=scale.code, mode="SCREENING")
     db.add(run)
-    db.commit()
-    db.refresh(run)
+    await db.commit()
+    await db.refresh(run)
     return run
 
 
-def _validate_answers(db: Session, run: Run, answers: Mapping[str, int]) -> None:
+async def _validate_answers(db: AsyncSession, run: Run, answers: Mapping[str, int]) -> None:
     scale = _scale(run.questionnaire_code)
     for key, value in answers.items():
         if key not in scale.item_keys():
@@ -105,27 +105,27 @@ def _validate_answers(db: Session, run: Run, answers: Mapping[str, int]) -> None
             raise Problem(422, "VALIDATION", f"Значение {value} вне диапазона для пункта {key}")
 
 
-def add_answers(db: Session, run_id, patient_id, answers: Mapping[str, int]) -> None:
-    run = _own_run(db, run_id, patient_id)
+async def add_answers(db: AsyncSession, run_id, patient_id, answers: Mapping[str, int]) -> None:
+    run = await _own_run(db, run_id, patient_id)
     if run.finished_at is not None:
         raise Problem(409, "RUN_CLOSED", "Прогон уже завершён")
-    _validate_answers(db, run, answers)
-    existing = set(db.scalars(select(Answer.item_key).where(Answer.run_id == run_id)))
+    await _validate_answers(db, run, answers)
+    existing = set(await db.scalars(select(Answer.item_key).where(Answer.run_id == run_id)))
     overlap = set(answers) & existing
     if overlap:
-        db.execute(delete(Answer).where(Answer.run_id == run_id, Answer.item_key.in_(overlap)))
+        await db.execute(delete(Answer).where(Answer.run_id == run_id, Answer.item_key.in_(overlap)))
     for key, value in answers.items():
         db.add(Answer(run_id=run_id, item_key=key, value=value))
-    db.commit()
+    await db.commit()
 
 
-def finish_screening(db: Session, run_id, patient_id, *, audit_action: str = "SCREENING_FINISH",
+async def finish_screening(db: AsyncSession, run_id, patient_id, *, audit_action: str = "SCREENING_FINISH",
                      ip: str | None = None) -> dict:
-    run = _own_run(db, run_id, patient_id)
+    run = await _own_run(db, run_id, patient_id)
     if run.finished_at is not None:
         raise Problem(409, "RUN_CLOSED", "Прогон уже завершён")
     scale = _scale(run.questionnaire_code)
-    rows = db.scalars(select(Answer).where(Answer.run_id == run_id)).all()
+    rows = (await db.scalars(select(Answer).where(Answer.run_id == run_id))).all()
     answers = {a.item_key: a.value for a in rows}
     try:
         result = score(scale, answers)
@@ -143,7 +143,7 @@ def finish_screening(db: Session, run_id, patient_id, *, audit_action: str = "SC
         risk_flags=[{"kind": f.kind, "item_key": f.item_key} for f in flags],
     )
     db.add(assessment)
-    db.flush()  # назначает assessment.id до создания escalation
+    await db.flush()  # назначает assessment.id до создания escalation
     run.finished_at = datetime.now(timezone.utc)
 
     escalation = None
@@ -152,15 +152,15 @@ def finish_screening(db: Session, run_id, patient_id, *, audit_action: str = "SC
         kind = "SUICIDAL" if any(f.kind == "SUICIDAL_IDEATION" for f in flags) else "SEVERE"
         escalation = Escalation(assessment_id=assessment.id, patient_id=patient_id, kind=kind)
         db.add(escalation)
-        db.flush()  # escalation.id до создания Notification
-        recipient_ids = push_service.notify_escalation_clinicians(db, patient_id, escalation)
-    audit_record(db, patient_id, audit_action, "assessment", str(run_id), ip=ip)
-    db.commit()
-    db.refresh(assessment)
+        await db.flush()  # escalation.id до создания Notification
+        recipient_ids = await push_service.notify_escalation_clinicians(db, patient_id, escalation)
+    await audit_record(db, patient_id, audit_action, "assessment", str(run_id), ip=ip)
+    await db.commit()
+    await db.refresh(assessment)
 
     # Web Push — после коммита (сбои не пробрасываются).
     if escalation is not None and recipient_ids:
-        push_service.push_to_clinicians(
+        await push_service.push_to_clinicians(
             db,
             recipient_ids,
             "RED-эскалация",
@@ -177,7 +177,7 @@ def finish_screening(db: Session, run_id, patient_id, *, audit_action: str = "SC
         "computed_at": assessment.computed_at.isoformat(),
     }
     if escalation is not None:
-        db.refresh(escalation)
+        await db.refresh(escalation)
         resp["escalation"] = {
             "id": str(escalation.id),
             "kind": escalation.kind,
@@ -185,20 +185,20 @@ def finish_screening(db: Session, run_id, patient_id, *, audit_action: str = "SC
         }
     return resp
 
-def abandon_open(db: Session, patient_id) -> dict:
+async def abandon_open(db: AsyncSession, patient_id) -> dict:
     """Закрывает открытый (незавершённый) скрининг пациента без assessment.
 
     Нужно пациенту, который бросил скрининг на полпути: иначе повторный
     /screenings вернёт 409 CONFLICT (runs_screening_open) навсегда.
     """
-    run = db.scalar(
+    run = await db.scalar(
         select(Run).where(Run.patient_id == patient_id, Run.mode == "SCREENING", Run.finished_at.is_(None))
     )
     if run is None:
         return {"abandoned": False}
     run.finished_at = datetime.now(timezone.utc)
-    audit_record(db, patient_id, "SCREENING_ABANDON", "run", str(run.id))
-    db.commit()
+    await audit_record(db, patient_id, "SCREENING_ABANDON", "run", str(run.id))
+    await db.commit()
     return {"abandoned": True, "run_id": str(run.id)}
 
 

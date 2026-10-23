@@ -16,6 +16,14 @@ _DEMO_EMIAS_SECRETS = {"compass-secret"}
 
 class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://compass:compass@127.0.0.1:5432/compass"
+    # Пул async-соединений на процесс API (см. app.db.validate_pool_budget).
+    # Спрос процесса = pool_size + max_overflow; бюджет всей инсталляции —
+    # CC_DB_MAX_CONNECTIONS (max_connections Postgres делят все воркеры, CLI и psql).
+    # Дефолты 20+20 рассчитаны максимум на 2 воркера в бюджете 100.
+    db_pool_size: int = 20  # CC_DB_POOL_SIZE: постоянных соединений на процесс
+    db_max_overflow: int = 20  # CC_DB_MAX_OVERFLOW: пиковых сверх pool_size
+    db_pool_timeout: int = 30  # CC_DB_POOL_TIMEOUT: сек ожидания свободного соединения
+    db_max_connections: int = 100  # CC_DB_MAX_CONNECTIONS: потолок Postgres для инсталляции
     jwt_secret: str = "dev-secret-change-me-0123456789abcdef"  # >= 32 байт (RFC 7518)
     access_ttl_minutes: int = 15
     refresh_ttl_days: int = 7

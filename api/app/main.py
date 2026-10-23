@@ -16,6 +16,8 @@ async def lifespan(app: FastAPI):
     if db.engine is None:  # dev-запуск: uvicorn app.main:app
         db.setup(settings.database_url)
         db.init_db()
+    # Fail-fast: суммарный пул всех воркеров должен влезать в max_connections.
+    db.validate_pool_budget()
     yield
 
 

@@ -15,6 +15,13 @@ COPY api/ /app/api/
 RUN uv sync --frozen --no-dev --all-packages
 WORKDIR /app/api
 EXPOSE 8000
+# WEB_CONCURRENCY — число ПРОЦЕССОВ uvicorn (не потоков): каждый держит свой
+# пул БД (CC_DB_POOL_SIZE + CC_DB_MAX_OVERFLOW) и свой in-process rate limiter
+# логина. При дефолтах 20+20 бюджет max_connections=100 выдерживает 2 воркера;
+# app.db.validate_pool_budget() падает на старте, если суммарный пул не влезает.
+# Rate limit логина становится per-worker: при N воркерах окно CC_RATE_WINDOW
+# допускает до N×CC_RATE_MAX попыток на процесс-аггрегат (см. README).
 # F6: --proxy-headers → uvicorn читает X-Forwarded-For/X-Real-IP от nginx,
 # request.client.host = реальный IP клиента (для audit_log.ip).
-CMD ["/app/.venv/bin/uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+ENV WEB_CONCURRENCY=1
+CMD ["/bin/sh", "-c", "exec /app/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --workers ${WEB_CONCURRENCY:-1}"]

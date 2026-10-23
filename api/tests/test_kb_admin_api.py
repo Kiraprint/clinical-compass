@@ -12,7 +12,7 @@ qdrant = pytest.importorskip("qdrant_client")
 
 from qdrant_client import QdrantClient
 
-from .conftest import admin_ctx, clinician_ctx, patient_ctx
+from .conftest import admin_ctx, clinician_ctx, patient_ctx, run_async
 from .enrichment_fixtures import make_doc
 
 
@@ -40,7 +40,8 @@ def seeded(client, db_session, monkeypatch):
     cfg = EnrichmentConfig(offline=True)
     doc = make_doc()
 
-    pipeline.execute(db_session, qdrant_client, cfg, documents=[doc])
+    run_async(pipeline.execute, qdrant_client, cfg, documents=[doc])
+    db_session.expire_all()
     from sqlalchemy import select
 
     from app.models import KBWork
@@ -121,7 +122,8 @@ def test_clinician_can_hide_and_restore_source(client, db_session, seeded):
 
     clinician, _ = clinician_ctx(client, "c-excl@test.ru")
     work = seeded["work"]
-    review.approve(db_session, seeded["client"], work.id, None, seeded["cfg"])
+    run_async(review.approve, seeded["client"], work.id, None, seeded["cfg"])
+    db_session.expire_all()
     db_session.commit()
 
     sources = client.get("/api/v1/assistant/sources", headers=clinician)
@@ -165,7 +167,8 @@ def test_assistant_retrieval_respects_personal_exclusion(client, db_session, see
 
     clinician, _ = clinician_ctx(client, "c-ask@test.ru")
     work = seeded["work"]
-    review.approve(db_session, seeded["client"], work.id, None, seeded["cfg"])
+    run_async(review.approve, seeded["client"], work.id, None, seeded["cfg"])
+    db_session.expire_all()
     db_session.commit()
 
     body = {"query": "cognitive behavioural therapy generalised anxiety", "limit": 5}

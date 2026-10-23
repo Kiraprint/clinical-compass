@@ -12,7 +12,7 @@ import re
 from datetime import date
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import Problem
 from app.models import Consent, User
@@ -119,54 +119,54 @@ def apply_contacts(user: User, changes: dict) -> None:
         user.birth_date = parse_birth_date(changes["birth_date"])
 
 
-def _patient_or_404(db: Session, patient_id) -> User:
-    patient = db.get(User, patient_id)
+async def _patient_or_404(db: AsyncSession, patient_id) -> User:
+    patient = await db.get(User, patient_id)
     if patient is None or patient.role != "PATIENT":
         raise Problem(404, "NOT_FOUND", "Пациент не найден")
     return patient
 
 
-def _require_patient_consent(db: Session, patient_id) -> None:
-    active = db.scalar(select(Consent).where(Consent.user_id == patient_id, Consent.revoked_at.is_(None)))
+async def _require_patient_consent(db: AsyncSession, patient_id) -> None:
+    active = await db.scalar(select(Consent).where(Consent.user_id == patient_id, Consent.revoked_at.is_(None)))
     if active is None:
         raise Problem(403, "CONSENT_REQUIRED", "Нет активного согласия пациента — контакты недоступны (152-ФЗ)")
 
 
-def clinician_read(db: Session, clinician_id, patient_id, ip: str | None = None) -> dict:
+async def clinician_read(db: AsyncSession, clinician_id, patient_id, ip: str | None = None) -> dict:
     """Врач читает контакты закреплённого пациента: roster + consent + аудит."""
     from .clinician import require_roster
 
-    require_roster(db, clinician_id, patient_id)
-    _require_patient_consent(db, patient_id)
-    patient = _patient_or_404(db, patient_id)
-    audit_record(db, clinician_id, "READ_PATIENT_CONTACTS", "patient", str(patient_id), ip=ip)
-    db.commit()
+    await require_roster(db, clinician_id, patient_id)
+    await _require_patient_consent(db, patient_id)
+    patient = await _patient_or_404(db, patient_id)
+    await audit_record(db, clinician_id, "READ_PATIENT_CONTACTS", "patient", str(patient_id), ip=ip)
+    await db.commit()
     return contacts_payload(patient)
 
 
-def clinician_update(db: Session, clinician_id, patient_id, changes: dict, ip: str | None = None) -> dict:
+async def clinician_update(db: AsyncSession, clinician_id, patient_id, changes: dict, ip: str | None = None) -> dict:
     """Врач правит контакты закреплённого пациента. Аудит без ПДн в payload."""
     from .clinician import require_roster
 
-    require_roster(db, clinician_id, patient_id)
-    _require_patient_consent(db, patient_id)
-    patient = _patient_or_404(db, patient_id)
+    await require_roster(db, clinician_id, patient_id)
+    await _require_patient_consent(db, patient_id)
+    patient = await _patient_or_404(db, patient_id)
     apply_contacts(patient, changes)
-    audit_record(db, clinician_id, "UPDATE_PATIENT_CONTACTS", "patient", str(patient_id), ip=ip)
-    db.commit()
+    await audit_record(db, clinician_id, "UPDATE_PATIENT_CONTACTS", "patient", str(patient_id), ip=ip)
+    await db.commit()
     return contacts_payload(patient)
 
 
-def own_read(db: Session, user: User, ip: str | None = None) -> dict:
+async def own_read(db: AsyncSession, user: User, ip: str | None = None) -> dict:
     """Пациент читает собственные контакты (require_consent — на роутере)."""
-    audit_record(db, user.id, "READ_OWN_CONTACTS", "user", str(user.id), ip=ip)
-    db.commit()
+    await audit_record(db, user.id, "READ_OWN_CONTACTS", "user", str(user.id), ip=ip)
+    await db.commit()
     return contacts_payload(user)
 
 
-def own_update(db: Session, user: User, changes: dict, ip: str | None = None) -> dict:
+async def own_update(db: AsyncSession, user: User, changes: dict, ip: str | None = None) -> dict:
     """Пациент правит только собственные контакты."""
     apply_contacts(user, changes)
-    audit_record(db, user.id, "UPDATE_OWN_CONTACTS", "user", str(user.id), ip=ip)
-    db.commit()
+    await audit_record(db, user.id, "UPDATE_OWN_CONTACTS", "user", str(user.id), ip=ip)
+    await db.commit()
     return contacts_payload(user)

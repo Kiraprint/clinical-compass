@@ -43,7 +43,7 @@ def test_legacy_mood_without_scale_is_not_reinterpreted(client, db_session):
     assert item["mood_scale"] == "1-10"
 
     ch, cid = clinician_ctx(client, "dscale_doc@test.ru")
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         s.add(ClinicianRoster(patient_id=uuid.UUID(pid), clinician_id=uuid.UUID(cid)))
         s.commit()
     report = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=ch)
@@ -54,7 +54,7 @@ def test_legacy_mood_without_scale_is_not_reinterpreted(client, db_session):
 
     # Новые записи рядом со старыми пишутся со своей шкалой.
     assert client.post("/api/v1/diary", json={"content": "новая", "mood": 3}, headers=h).status_code == 201
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         rows = {
             e.content: e.mood_scale
             for e in s.scalars(

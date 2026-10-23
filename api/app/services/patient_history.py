@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import and_, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import Problem
 from app.models import AdverseEvent, Assessment, PatientMedication, Run, Visit
@@ -118,14 +118,14 @@ def _older_than(at_col, id_col, cursor: tuple[datetime, uuid.UUID]):
     at, ref_id = cursor
     return or_(at_col < at, and_(at_col == at, id_col < ref_id))
 
-def patient_history(
-    db: Session, clinician_id, patient_id, *,
+async def patient_history(
+    db: AsyncSession, clinician_id, patient_id, *,
     types: str | None = None, limit: int = 50, before: str | None = None,
     ip: str | None = None,
 ) -> dict:
     """Слитая лента событий карточки, новые первыми. Roster + consent + аудит."""
-    require_roster(db, clinician_id, patient_id)
-    require_patient_consent(db, patient_id)
+    await require_roster(db, clinician_id, patient_id)
+    await require_patient_consent(db, patient_id)
     wanted = _parse_types(types)
     cursor = _parse_cursor(before) if before else None
     fetch = limit + 1  # +1 — чтобы понять, есть ли следующая страница
@@ -137,14 +137,14 @@ def patient_history(
         if cursor is not None:
             q = q.where(_older_than(Visit.visited_at, Visit.id, cursor))
         q = q.order_by(Visit.visited_at.desc(), Visit.id.desc()).limit(fetch)
-        merged += [(v.visited_at, v.id, _visit_item(v)) for v in db.scalars(q)]
+        merged += [(v.visited_at, v.id, _visit_item(v)) for v in await db.scalars(q)]
 
     if "medication" in wanted:
         q = select(PatientMedication).where(PatientMedication.patient_id == patient_id)
         if cursor is not None:
             q = q.where(_older_than(PatientMedication.created_at, PatientMedication.id, cursor))
         q = q.order_by(PatientMedication.created_at.desc(), PatientMedication.id.desc()).limit(fetch)
-        merged += [(m.created_at, m.id, _medication_item(m)) for m in db.scalars(q)]
+        merged += [(m.created_at, m.id, _medication_item(m)) for m in await db.scalars(q)]
 
     if "screening" in wanted:
         q = (
@@ -155,14 +155,14 @@ def patient_history(
         if cursor is not None:
             q = q.where(_older_than(Assessment.computed_at, Assessment.id, cursor))
         q = q.order_by(Assessment.computed_at.desc(), Assessment.id.desc()).limit(fetch)
-        merged += [(a.computed_at, a.id, _screening_item(a, code)) for a, code in db.execute(q)]
+        merged += [(a.computed_at, a.id, _screening_item(a, code)) for a, code in await db.execute(q)]
 
     if "adverse" in wanted:
         q = select(AdverseEvent).where(AdverseEvent.patient_id == patient_id)
         if cursor is not None:
             q = q.where(_older_than(AdverseEvent.created_at, AdverseEvent.id, cursor))
         q = q.order_by(AdverseEvent.created_at.desc(), AdverseEvent.id.desc()).limit(fetch)
-        merged += [(e.created_at, e.id, _adverse_item(e)) for e in db.scalars(q)]
+        merged += [(e.created_at, e.id, _adverse_item(e)) for e in await db.scalars(q)]
 
     merged.sort(key=lambda row: (row[0], row[1]), reverse=True)
 
@@ -177,6 +177,6 @@ def patient_history(
         item["at"] = at.isoformat()
         items.append(item)
 
-    audit_record(db, clinician_id, "READ_PATIENT_HISTORY", "patient", str(patient_id), ip=ip)
-    db.commit()
+    await audit_record(db, clinician_id, "READ_PATIENT_HISTORY", "patient", str(patient_id), ip=ip)
+    await db.commit()
     return {"items": items, "next_before": next_before, "types": list(wanted)}

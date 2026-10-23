@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from compass.models import AUDIENCE_CLINICIAN, AUDIENCE_PATIENT, RiskFlag, ScaleResult
 from compass.routing import routing_for
@@ -23,48 +23,48 @@ from .contacts import contacts_payload
 from .history_extract import extract_history
 
 
-def roster_names(db: Session, clinician_id) -> list[str]:
+async def roster_names(db: AsyncSession, clinician_id) -> list[str]:
     """ФИО пациентов врача — deny-list для деперсонализации (docs/12).
 
     Только непустые fio; пустой список → маскируются лишь структурные сущности.
     """
-    rows = db.execute(
+    rows = (await db.execute(
         select(User.fio)
         .join(ClinicianRoster, ClinicianRoster.patient_id == User.id)
         .where(ClinicianRoster.clinician_id == clinician_id, User.fio.is_not(None))
-    ).all()
+    )).all()
     return [r[0] for r in rows if r[0].strip()]
 
 
-def _require_roster(db: Session, clinician_id, patient_id) -> None:
-    row = db.get(ClinicianRoster, (clinician_id, patient_id))
+async def _require_roster(db: AsyncSession, clinician_id, patient_id) -> None:
+    row = await db.get(ClinicianRoster, (clinician_id, patient_id))
     if row is None:
         raise Problem(403, "NO_ROSTER", "Пациент не закреплён за этим врачом")
 
 
-def require_roster(db: Session, clinician_id, patient_id) -> None:
+async def require_roster(db: AsyncSession, clinician_id, patient_id) -> None:
     """Публичный roster-гейт для других сервисов (FR-22 контакты)."""
-    _require_roster(db, clinician_id, patient_id)
+    await _require_roster(db, clinician_id, patient_id)
 
 
-def require_patient_consent(db: Session, patient_id) -> None:
+async def require_patient_consent(db: AsyncSession, patient_id) -> None:
     """Публичный consent-гейт для клиницистских разделов карты (FR-23 назначения,
     история пациента). Без активного согласия спецкатегория ПДн недоступна."""
-    active = db.scalar(
+    active = await db.scalar(
         select(Consent.id).where(Consent.user_id == patient_id, Consent.revoked_at.is_(None))
     )
     if active is None:
         raise Problem(403, "CONSENT_REQUIRED", "Нет активного согласия пациента — данные недоступны (152-ФЗ)")
 
 
-def _prescribed_scales_of(db: Session, patient_id) -> list[str]:
+async def _prescribed_scales_of(db: AsyncSession, patient_id) -> list[str]:
     """Коды назначенных пациенту шкал (упорядочены по времени назначения)."""
-    rows = db.scalars(
+    rows = (await db.scalars(
         select(Prescription).where(Prescription.patient_id == patient_id).order_by(Prescription.created_at)
-    ).all()
+    )).all()
     return [r.scale_code for r in rows]
 
-def prescribe_scales(db: Session, clinician_id, patient_id, scale_codes: list[str], ip: str | None = None) -> dict:
+async def prescribe_scales(db: AsyncSession, clinician_id, patient_id, scale_codes: list[str], ip: str | None = None) -> dict:
     """Врач назначает пациенту множество шкал скрининга (item 1, multi-scale).
 
     Заменяет весь набор: отсутствующие в scale_codes удаляются, новые добавляются,
@@ -85,22 +85,22 @@ def prescribe_scales(db: Session, clinician_id, patient_id, scale_codes: list[st
             uniq.append(c)
     if not uniq:
         raise Problem(422, "VALIDATION", "Нужна хотя бы одна шкала")
-    _require_roster(db, clinician_id, patient_id)
-    existing = {r.scale_code: r for r in db.scalars(
+    await _require_roster(db, clinician_id, patient_id)
+    existing = {r.scale_code: r for r in (await db.scalars(
         select(Prescription).where(Prescription.patient_id == patient_id)
-    ).all()}
+    )).all()}
     for code in list(existing):
         if code not in uniq:
-            db.delete(existing[code])
+            await db.delete(existing[code])
     for code in uniq:
         if code not in existing:
             db.add(Prescription(patient_id=patient_id, scale_code=code))
-    audit_record(db, clinician_id, "PRESCRIBE_SCALE", "user", str(patient_id), ip=ip)
-    db.commit()
+    await audit_record(db, clinician_id, "PRESCRIBE_SCALE", "user", str(patient_id), ip=ip)
+    await db.commit()
     return {"patient_id": str(patient_id), "scales": uniq}
 
-def create_clinician_assessment(
-    db: Session, clinician_id, patient_id, questionnaire_code: str,
+async def create_clinician_assessment(
+    db: AsyncSession, clinician_id, patient_id, questionnaire_code: str,
     answers: dict[str, int], ip: str | None = None,
 ) -> dict:
     """Врач заполняет клиницистскую шкалу (HDRS-17) за пациента.
@@ -111,29 +111,29 @@ def create_clinician_assessment(
     """
     from app.services.screening import _scale, _validate_answers, finish_screening
 
-    _require_roster(db, clinician_id, patient_id)
+    await _require_roster(db, clinician_id, patient_id)
     scale = _scale(questionnaire_code)
     if scale.audience != AUDIENCE_CLINICIAN:
         raise Problem(422, "SCALE_NOT_CLINICIAN_ADMINISTERED",
                       f"Шкала {scale.code} заполняется пациентом, а не врачом")
     run = Run(patient_id=patient_id, questionnaire_code=scale.code, mode="CLINICIAN")
-    _validate_answers(db, run, answers)  # до вставки Run — при ошибке ничего не остаётся
+    await _validate_answers(db, run, answers)  # до вставки Run — при ошибке ничего не остаётся
     db.add(run)
-    db.flush()
+    await db.flush()
     for key, value in answers.items():
         db.add(Answer(run_id=run.id, item_key=key, value=value))
-    db.flush()
-    return finish_screening(db, run.id, patient_id, audit_action="CLINICIAN_ASSESSMENT", ip=ip)
+    await db.flush()
+    return await finish_screening(db, run.id, patient_id, audit_action="CLINICIAN_ASSESSMENT", ip=ip)
 
 
-def list_patients(db: Session, clinician_id, triage: str | None = None) -> list[dict]:
-    rows = db.scalars(select(ClinicianRoster).where(ClinicianRoster.clinician_id == clinician_id)).all()
+async def list_patients(db: AsyncSession, clinician_id, triage: str | None = None) -> list[dict]:
+    rows = (await db.scalars(select(ClinicianRoster).where(ClinicianRoster.clinician_id == clinician_id))).all()
     cards = []
     for row in rows:
-        patient = db.get(User, row.patient_id)
+        patient = await db.get(User, row.patient_id)
         if patient is None:
             continue
-        last = db.scalar(
+        last = await db.scalar(
             select(Assessment)
             .where(Assessment.patient_id == row.patient_id)
             .order_by(Assessment.computed_at.desc())
@@ -143,7 +143,7 @@ def list_patients(db: Session, clinician_id, triage: str | None = None) -> list[
         if triage is not None and last_triage != triage:
             continue  # игнорируем, если фильтр не совпадает
 
-        open_esc = db.scalar(
+        open_esc = await db.scalar(
             select(func.count())
             .select_from(Escalation)
             .where(Escalation.patient_id == row.patient_id, Escalation.resolved_at.is_(None))
@@ -165,13 +165,13 @@ def list_patients(db: Session, clinician_id, triage: str | None = None) -> list[
     return cards
 
 
-def patient_timeline(db: Session, patient_id, days: int) -> dict:
+async def patient_timeline(db: AsyncSession, patient_id, days: int) -> dict:
     since = datetime.now(timezone.utc) - timedelta(days=days)
-    rows = db.scalars(
+    rows = (await db.scalars(
         select(Assessment)
         .where(Assessment.patient_id == patient_id, Assessment.computed_at >= since)
         .order_by(Assessment.computed_at.asc())
-    ).all()
+    )).all()
     runs = [
         {
             "assessment_id": str(a.id),
@@ -197,43 +197,43 @@ def patient_timeline(db: Session, patient_id, days: int) -> dict:
     }
 
 
-def _patient_card(db: Session, patient_id) -> dict:
+async def _patient_card(db: AsyncSession, patient_id) -> dict:
     """Сборка карты пациента (только данные; roster/consent/audit — у вызывающих).
 
     Повторно используется report() и patient_context() ассистента (docs/07 §7).
     """
-    patient = db.get(User, patient_id)
+    patient = await db.get(User, patient_id)
     if patient is None or patient.role != "PATIENT":
         raise Problem(404, "NOT_FOUND", "Пациент не найден")
 
-    last = db.scalar(
+    last = await db.scalar(
         select(Assessment).where(Assessment.patient_id == patient_id).order_by(Assessment.computed_at.desc())
     )
-    history = db.scalars(
+    history = (await db.scalars(
         select(Assessment)
         .where(Assessment.patient_id == patient_id)
         .order_by(Assessment.computed_at.desc())
         .limit(10)
-    ).all()
-    diary = db.scalars(
+    )).all()
+    diary = (await db.scalars(
         select(DiaryEntry).where(DiaryEntry.patient_id == patient_id).order_by(DiaryEntry.created_at.desc()).limit(20)
-    ).all()
-    escalations = db.scalars(
+    )).all()
+    escalations = (await db.scalars(
         select(Escalation)
         .where(Escalation.patient_id == patient_id, Escalation.resolved_at.is_(None))
         .order_by(Escalation.notified_clinician_at.desc().nulls_last())
-    ).all()
-    timeline = patient_timeline(db, patient_id, 90)
-    checkins = db.scalars(
+    )).all()
+    timeline = await patient_timeline(db, patient_id, 90)
+    checkins = (await db.scalars(
         select(CheckinSession)
         .where(CheckinSession.patient_id == patient_id)
         .order_by(CheckinSession.checkin_date.desc())
         .limit(7)
-    ).all()
+    )).all()
 
     # Приверженность за 14 дней (FR-27): weighted-процент от ожидаемых приёмов по
     # режиму назначения. Roster/consent проверяют вызывающие report()/patient_context().
-    adherence = adherence_service.summary_payload(adherence_service.compute(db, patient_id, 14))
+    adherence = adherence_service.summary_payload(await adherence_service.compute(db, patient_id, 14))
 
     # Маршрутизация к психиатру (задача кейса 8, усл.6): детерминированная
     # рекомендация из последнего assessment + тренда. Категории обязат/желательно.
@@ -251,14 +251,14 @@ def _patient_card(db: Session, patient_id) -> dict:
 
     # FR-22: контакты отдаются только при активном согласии пациента (152-ФЗ);
     # roster-гейт проверяют вызывающие (report/patient_context).
-    has_consent = db.scalar(
+    has_consent = await db.scalar(
         select(Consent.id).where(Consent.user_id == patient_id, Consent.revoked_at.is_(None))
     ) is not None
     return {
         "patient_id": str(patient_id),
         "email": patient.email,
         "fio": patient.fio,
-        "prescribed_scales": _prescribed_scales_of(db, patient_id),
+        "prescribed_scales": await _prescribed_scales_of(db, patient_id),
         "last_assessment": (
             {
                 "assessment_id": str(last.id),
@@ -278,12 +278,12 @@ def _patient_card(db: Session, patient_id) -> dict:
         "routing": routing,
         "adherence": adherence,
         "adverse_events": [
-            _adverse_event_dict(e) for e in db.scalars(
+            _adverse_event_dict(e) for e in (await db.scalars(
                 select(AdverseEvent)
                 .where(AdverseEvent.patient_id == patient_id)
                 .order_by(AdverseEvent.onset_date.desc(), AdverseEvent.created_at.desc())
                 .limit(20)
-            ).all()
+            )).all()
         ],
         "diary": [
             {
@@ -321,30 +321,30 @@ def _patient_card(db: Session, patient_id) -> dict:
     }
 
 
-def report(db: Session, clinician_id, patient_id, ip: str | None = None) -> dict:
+async def report(db: AsyncSession, clinician_id, patient_id, ip: str | None = None) -> dict:
     """Полная карта пациента для панели врача (FR-8). Roster + READ_REPORT audit."""
-    _require_roster(db, clinician_id, patient_id)
-    card = _patient_card(db, patient_id)
-    audit_record(db, clinician_id, "READ_REPORT", "patient", str(patient_id), ip=ip)
-    db.commit()
+    await _require_roster(db, clinician_id, patient_id)
+    card = await _patient_card(db, patient_id)
+    await audit_record(db, clinician_id, "READ_REPORT", "patient", str(patient_id), ip=ip)
+    await db.commit()
     return card
 
 
-def patient_context(db: Session, clinician_id, patient_id, ip: str | None = None) -> dict:
+async def patient_context(db: AsyncSession, clinician_id, patient_id, ip: str | None = None) -> dict:
     """Компактный контекст пациента для ИИ-ассистента врача (docs/07 §7).
 
     Спецкатегория ПДн (152-ФЗ): roster-gate + активное согласие пациента +
     append-only audit ASK_ASSISTANT_WITH_PATIENT. Транзакцию коммитит вызывающий
     роутер /assistant/ask. В Qdrant НЕ попадает — только grounding ответа.
     """
-    _require_roster(db, clinician_id, patient_id)
-    active = db.scalar(
+    await _require_roster(db, clinician_id, patient_id)
+    active = await db.scalar(
         select(Consent).where(Consent.user_id == patient_id, Consent.revoked_at.is_(None))
     )
     if active is None:
         raise Problem(403, "CONSENT_REQUIRED", "Нет активного согласия пациента — карта недоступна (152-ФЗ)")
-    card = _patient_card(db, patient_id)
-    audit_record(db, clinician_id, "ASK_ASSISTANT_WITH_PATIENT", "patient", str(patient_id), ip=ip)
+    card = await _patient_card(db, patient_id)
+    await audit_record(db, clinician_id, "ASK_ASSISTANT_WITH_PATIENT", "patient", str(patient_id), ip=ip)
     return {
         "patient_id": card["patient_id"],
         "fio": card["fio"],
@@ -357,34 +357,34 @@ def patient_context(db: Session, clinician_id, patient_id, ip: str | None = None
     }
 
 
-def create_adverse_event(
-    db: Session, clinician_id, patient_id,
+async def create_adverse_event(
+    db: AsyncSession, clinician_id, patient_id,
     event_text: str, severity: str, onset_date: date,
     suspected_drug: str | None, action_taken: str | None,
     ip: str | None = None,
 ) -> dict:
     """Регистрация нежелательного явления (задача кейса 3). Roster + аудит ADVERSE_EVENT."""
-    _require_roster(db, clinician_id, patient_id)
+    await _require_roster(db, clinician_id, patient_id)
     ev = AdverseEvent(
         patient_id=patient_id, clinician_id=clinician_id,
         event_text=event_text, severity=severity, onset_date=onset_date,
         suspected_drug=suspected_drug, action_taken=action_taken,
     )
     db.add(ev)
-    db.flush()
-    audit_record(db, clinician_id, "ADVERSE_EVENT", "patient", str(patient_id), ip=ip)
-    db.commit()
+    await db.flush()
+    await audit_record(db, clinician_id, "ADVERSE_EVENT", "patient", str(patient_id), ip=ip)
+    await db.commit()
     return _adverse_event_dict(ev)
 
 
-def list_adverse_events(db: Session, clinician_id, patient_id) -> list[dict]:
+async def list_adverse_events(db: AsyncSession, clinician_id, patient_id) -> list[dict]:
     """Список НЯ пациента (задача кейса 3). Roster-гейт."""
-    _require_roster(db, clinician_id, patient_id)
-    rows = db.scalars(
+    await _require_roster(db, clinician_id, patient_id)
+    rows = (await db.scalars(
         select(AdverseEvent)
         .where(AdverseEvent.patient_id == patient_id)
         .order_by(AdverseEvent.onset_date.desc(), AdverseEvent.created_at.desc())
-    ).all()
+    )).all()
     return [_adverse_event_dict(e) for e in rows]
 
 
@@ -421,33 +421,33 @@ def _checkin_dict(c: CheckinSession) -> dict:
     }
 
 
-def create_visit(
-    db: Session, clinician_id, patient_id,
+async def create_visit(
+    db: AsyncSession, clinician_id, patient_id,
     visited_at: datetime, visit_type: str, duration_min: int | None, notes: str,
     ip: str | None = None,
 ) -> dict:
     """Запись приёма (задача кейса 6, п. «приём»). Roster + аудит VISIT."""
-    _require_roster(db, clinician_id, patient_id)
+    await _require_roster(db, clinician_id, patient_id)
     v = Visit(
         patient_id=patient_id, clinician_id=clinician_id,
         visited_at=visited_at, visit_type=visit_type,
         duration_min=duration_min, notes=notes,
     )
     db.add(v)
-    db.flush()
-    audit_record(db, clinician_id, "VISIT", "patient", str(patient_id), ip=ip)
-    db.commit()
+    await db.flush()
+    await audit_record(db, clinician_id, "VISIT", "patient", str(patient_id), ip=ip)
+    await db.commit()
     return _visit_dict(v)
 
 
-def list_visits(db: Session, clinician_id, patient_id) -> list[dict]:
+async def list_visits(db: AsyncSession, clinician_id, patient_id) -> list[dict]:
     """История приёмов пациента (задача кейса 6). Roster-гейт."""
-    _require_roster(db, clinician_id, patient_id)
-    rows = db.scalars(
+    await _require_roster(db, clinician_id, patient_id)
+    rows = (await db.scalars(
         select(Visit)
         .where(Visit.patient_id == patient_id)
         .order_by(Visit.visited_at.desc(), Visit.created_at.desc())
-    ).all()
+    )).all()
     return [_visit_dict(v) for v in rows]
 
 
@@ -461,25 +461,25 @@ def _visit_dict(v: Visit) -> dict:
         "created_at": v.created_at.isoformat(),
     }
 
-def delete_visit(
-    db: Session, clinician_id, patient_id, visit_id,
+async def delete_visit(
+    db: AsyncSession, clinician_id, patient_id, visit_id,
     ip: str | None = None,
 ) -> None:
     """Удаление ошибочной записи приёма. Roster + аудит VISIT_DELETE."""
-    _require_roster(db, clinician_id, patient_id)
-    v = db.get(Visit, visit_id)
+    await _require_roster(db, clinician_id, patient_id)
+    v = await db.get(Visit, visit_id)
     if v is None or v.patient_id != patient_id:
         raise Problem(404, "NOT_FOUND", "Запись приёма не найдена")
-    db.delete(v)
-    audit_record(db, clinician_id, "VISIT_DELETE", "patient", str(patient_id), ip=ip)
-    db.commit()
+    await db.delete(v)
+    await audit_record(db, clinician_id, "VISIT_DELETE", "patient", str(patient_id), ip=ip)
+    await db.commit()
 
 
-def create_adherence(
-    db: Session, patient_id, medication_id, medication: str | None, status: str, note: str | None,
+async def create_adherence(
+    db: AsyncSession, patient_id, medication_id, medication: str | None, status: str, note: str | None,
 ) -> dict:
     """Пациент отмечает приверженность лечению (FR-27). Consent-гейт у роутера."""
-    return adherence_service.create_record(
+    return await adherence_service.create_record(
         db, patient_id, medication_id=medication_id, medication=medication,
         status=status, note=note,
     )
@@ -488,19 +488,19 @@ def create_adherence(
 MOSCOW = ZoneInfo("Europe/Moscow")
 
 
-def my_adherence(db: Session, patient_id, days: int = 14) -> dict:
+async def my_adherence(db: AsyncSession, patient_id, days: int = 14) -> dict:
     """Приверженность пациента (экран «Сегодня» и вкладка). Consent-гейт у роутера.
 
     Отдаёт отметки за окно, отметку за текущие сутки по Москве, активные
     назначения для выбора и weighted-процент от ожидаемых приёмов (FR-27).
     """
-    return adherence_service.compute(db, patient_id, days)
+    return await adherence_service.compute(db, patient_id, days)
 
 
-def adherence_summary(db: Session, clinician_id, patient_id, days: int = 14) -> dict:
+async def adherence_summary(db: AsyncSession, clinician_id, patient_id, days: int = 14) -> dict:
     """Агрегат приверженности для карточки врача (FR-27). Roster-гейт."""
-    _require_roster(db, clinician_id, patient_id)
-    return adherence_service.summary_payload(adherence_service.compute(db, patient_id, days))
+    await _require_roster(db, clinician_id, patient_id)
+    return adherence_service.summary_payload(await adherence_service.compute(db, patient_id, days))
 
 
 def _chat_dict(m: ChatMessage) -> dict:
@@ -513,40 +513,40 @@ def _chat_dict(m: ChatMessage) -> dict:
     }
 
 
-def clinician_post_chat(db: Session, clinician_id, patient_id, content: str, ip: str | None = None) -> dict:
+async def clinician_post_chat(db: AsyncSession, clinician_id, patient_id, content: str, ip: str | None = None) -> dict:
     """Врач пишет пациенту в канал коммуникации (задача кейса 6). Roster + аудит CLINICIAN_CHAT."""
-    _require_roster(db, clinician_id, patient_id)
+    await _require_roster(db, clinician_id, patient_id)
     msg = ChatMessage(patient_id=patient_id, sender="CLINICIAN", kind="TEXT", content=content)
     db.add(msg)
-    db.flush()
-    audit_record(db, clinician_id, "CLINICIAN_CHAT", "patient", str(patient_id), ip=ip)
-    db.commit()
+    await db.flush()
+    await audit_record(db, clinician_id, "CLINICIAN_CHAT", "patient", str(patient_id), ip=ip)
+    await db.commit()
     return _chat_dict(msg)
 
 
-def clinician_list_chat(db: Session, clinician_id, patient_id) -> list[dict]:
+async def clinician_list_chat(db: AsyncSession, clinician_id, patient_id) -> list[dict]:
     """История переписки с пациентом (задача кейса 6). Roster-гейт."""
-    _require_roster(db, clinician_id, patient_id)
-    rows = db.scalars(
+    await _require_roster(db, clinician_id, patient_id)
+    rows = (await db.scalars(
         select(ChatMessage)
         .where(ChatMessage.patient_id == patient_id)
         .order_by(ChatMessage.created_at.desc())
         .limit(50)
-    ).all()
+    )).all()
     # вернуть в хронологическом порядке (последние 50)
     return [_chat_dict(m) for m in reversed(rows)]
 
 
-def import_history(db: Session, clinician_id, patient_id, text: str, template_name: str | None, ip: str | None = None) -> dict:
+async def import_history(db: AsyncSession, clinician_id, patient_id, text: str, template_name: str | None, ip: str | None = None) -> dict:
     """Разбор клинической истории (метрика кейса 2). Roster + аудит IMPORT_HISTORY.
 
     Возвращает ЧЕРНОВИК извлечённых полей — врач подтверждает вручную. В клиническую
     модель не пишется (структурирование, не клиническое действие).
     """
-    _require_roster(db, clinician_id, patient_id)
+    await _require_roster(db, clinician_id, patient_id)
     ext = extract_history(text, template_name)
-    audit_record(db, clinician_id, "IMPORT_HISTORY", "patient", str(patient_id), ip=ip)
-    db.commit()
+    await audit_record(db, clinician_id, "IMPORT_HISTORY", "patient", str(patient_id), ip=ip)
+    await db.commit()
     return {
         "template": ext.template,
         "fields_found": ext.fields_found,
@@ -559,7 +559,7 @@ def import_history(db: Session, clinician_id, patient_id, text: str, template_na
     }
 
 
-def emias_summary(db: Session, clinician_id, patient_id, ip: str | None = None) -> dict:
+async def emias_summary(db: AsyncSession, clinician_id, patient_id, ip: str | None = None) -> dict:
     """Блок «ЕМИАС» в карточке врача (FR-25): связка, назначения, число приёмов.
 
     Roster-гейт + активное согласие пациента + аудит READ_EMIAS: история
@@ -574,13 +574,13 @@ def emias_summary(db: Session, clinician_id, patient_id, ip: str | None = None) 
     from app.emias.config import current_config
     from app.emias.sync import patient_summary
 
-    _require_roster(db, clinician_id, patient_id)
-    active = db.scalar(
+    await _require_roster(db, clinician_id, patient_id)
+    active = await db.scalar(
         select(Consent).where(Consent.user_id == patient_id, Consent.revoked_at.is_(None))
     )
     if active is None:
         raise Problem(403, "CONSENT_REQUIRED", "Нет активного согласия пациента — карта недоступна (152-ФЗ)")
-    data = patient_summary(db, patient_id)
-    audit_record(db, clinician_id, "READ_EMIAS", "patient", str(patient_id), ip=ip)
-    db.commit()
+    data = await patient_summary(db, patient_id)
+    await audit_record(db, clinician_id, "READ_EMIAS", "patient", str(patient_id), ip=ip)
+    await db.commit()
     return {"enabled": current_config().enabled, **data}

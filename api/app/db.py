@@ -1,8 +1,24 @@
-"""БД: engine, session, Base, привязка триггера аудита (append-only)."""
+"""БД: async engine для API, sync engine для alembic/CLI/схемы тестов, триггер аудита.
+
+Всё, что исполняется в запросе FastAPI, идёт через `engine` (async, psycopg async
+dialect) и `AsyncSessionLocal`. Синхронный `sync_engine`/`SyncSessionLocal` живут
+только для alembic, seed-скриптов и служебной подготовки схемы в тестах: их нельзя
+использовать в request-path, иначе поток AnyIO снова блокируется на драйвере.
+"""
 
 from __future__ import annotations
 
+import os
+from typing import AsyncIterator
+
+import anyio
 from sqlalchemy import create_engine, text
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from .config import settings
@@ -12,26 +28,94 @@ class Base(DeclarativeBase):
     pass
 
 
-engine = None
-SessionLocal = None
+# Async (API). Наполняется setup().
+engine: AsyncEngine | None = None
+AsyncSessionLocal: async_sessionmaker[AsyncSession] | None = None
+
+# Sync (alembic / seed / схема тестов). Наполняется setup().
+sync_engine = None
+SyncSessionLocal = None
 
 
-def setup(database_url: str | None = None) -> None:
-    global engine, SessionLocal
-    engine = create_engine(database_url or settings.database_url, pool_pre_ping=True)
-    SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
-
-
-def get_db():
-    db = SessionLocal()
+def worker_count() -> int:
+    """Число процессов uvicorn (WEB_CONCURRENCY). Каждый процесс держит свой пул."""
     try:
-        yield db
+        return max(1, int(os.environ.get("WEB_CONCURRENCY", "1")))
+    except ValueError:
+        return 1
+
+
+def pool_capacity() -> int:
+    """Сколько соединений один процесс может занять одновременно (pool+overflow)."""
+    return settings.db_pool_size + settings.db_max_overflow
+
+
+def validate_pool_budget(workers: int | None = None) -> None:
+    """Fail-fast: суммарный спрос пулов не должен превышать CC_DB_MAX_CONNECTIONS.
+
+    max_connections Postgres — общий ресурс инсталляции: его делят все процессы
+    API, воркеры/CLI и psql/миграции. При дефолтах 20+20 на процесс потолок
+    100 соединений выдерживают максимум 2 воркера (2*40=80, остаток — служебный).
+    """
+    workers = worker_count() if workers is None else workers
+    demand = workers * pool_capacity()
+    if demand > settings.db_max_connections:
+        raise RuntimeError(
+            f"Пул БД не влезает в Postgres: WEB_CONCURRENCY={workers} × "
+            f"(CC_DB_POOL_SIZE={settings.db_pool_size} + "
+            f"CC_DB_MAX_OVERFLOW={settings.db_max_overflow}) = {demand} > "
+            f"CC_DB_MAX_CONNECTIONS={settings.db_max_connections}. "
+            "Уменьшите CC_DB_POOL_SIZE/CC_DB_MAX_OVERFLOW или WEB_CONCURRENCY."
+        )
+
+
+def setup(database_url: str | None = None, *, poolclass=None) -> None:
+    """Инициализирует оба engine'а. poolclass=NullPool — для тестов.
+
+    Тесты гоняют TestClient с отдельным event loop на каждый тест; пул,
+    созданный в чужом цикле, нельзя переиспользовать, поэтому conftest
+    просит NullPool (соединение на checkout, без удержания между запросами).
+    """
+    global engine, AsyncSessionLocal, sync_engine, SyncSessionLocal
+    url = database_url or settings.database_url
+
+    if poolclass is None:
+        async_kwargs: dict = {
+            "pool_pre_ping": True,
+            "pool_size": settings.db_pool_size,
+            "max_overflow": settings.db_max_overflow,
+            "pool_timeout": settings.db_pool_timeout,
+        }
+    else:
+        async_kwargs = {"pool_pre_ping": True, "poolclass": poolclass}
+
+    engine = create_async_engine(url, **async_kwargs)
+    AsyncSessionLocal = async_sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+
+    sync_engine = create_engine(url, pool_pre_ping=True)
+    SyncSessionLocal = sessionmaker(bind=sync_engine, autoflush=False, expire_on_commit=False)
+
+
+async def get_db() -> AsyncIterator[AsyncSession]:
+    """Одна сессия на запрос. Закрытие/откат гарантированы в любом исходе.
+
+    Shield нужен на отмене (клиент отвалился): без него await в finally
+    прерывается и соединение остаётся занятым до сборки мусора.
+    """
+    session = AsyncSessionLocal()
+    try:
+        yield session
     finally:
-        db.close()
+        with anyio.CancelScope(shield=True):
+            try:
+                if session.in_transaction():
+                    await session.rollback()
+            finally:
+                await session.close()
 
 
 def install_audit_trigger(engine_=None) -> None:
-    with (engine_ or engine).begin() as conn:
+    with (engine_ or sync_engine).begin() as conn:
         conn.execute(text(
             "CREATE OR REPLACE FUNCTION forbid_audit_mutation() RETURNS trigger AS $$"
             " BEGIN RAISE EXCEPTION 'audit_log is append-only'; END; $$ LANGUAGE plpgsql"
@@ -72,10 +156,10 @@ def init_db() -> None:
     cfg = Config(str(api_dir / "alembic.ini"))
     cfg.set_main_option("script_location", str(api_dir / "alembic"))
     # URL берём из уже настроенного engine (соответствует CC_DATABASE_URL).
-    # str(engine.url) маскирует пароль как *** — нужен render_as_string без маски.
-    cfg.set_main_option("sqlalchemy.url", engine.url.render_as_string(hide_password=False))
+    # str(url) маскирует пароль как *** — нужен render_as_string без маски.
+    cfg.set_main_option("sqlalchemy.url", sync_engine.url.render_as_string(hide_password=False))
     command.upgrade(cfg, "head")
-    install_audit_trigger(engine)
+    install_audit_trigger(sync_engine)
 
 
 def truncate_all() -> None:
@@ -83,7 +167,7 @@ def truncate_all() -> None:
 
     Прямой SQL-обход (TRUNCATE audit_log вручную) по-прежнему запрещён триггером.
     """
-    with engine.begin() as conn:
+    with sync_engine.begin() as conn:
         conn.execute(text("DROP TRIGGER IF EXISTS trg_audit_no_truncate ON audit_log"))
         tables = ", ".join(t.name for t in Base.metadata.sorted_tables)
         conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))

@@ -70,6 +70,7 @@ class AgentState(TypedDict, total=False):
     exclude_ids: set[str]
     patient_context: dict | None
     patient_contexts: list[dict] | None
+    corpus_drugs: list[dict] | None
     answer: dict
 
 class AgentFactory:
@@ -85,6 +86,7 @@ class AgentFactory:
         limit: int = 5,
         exclude_ids: set[str] | None = None,
         redline_query: str | None = None,
+        corpus_drugs: list[dict] | None = None,
     ) -> list[RAGChunk]:
         """Инструмент doctor-search: гибридный поиск по Qdrant (docs/07 §7).
 
@@ -114,7 +116,7 @@ class AgentFactory:
             from app.kb_seed import build_corpus  # lazy: избегаем циклического импорта
             seen = {h.get("guideline_id") for h in hits}
             kw = sorted(
-                ((_lexical_overlap(query, d["text"]), d) for d in build_corpus()
+                ((_lexical_overlap(query, d["text"]), d) for d in build_corpus(drug_docs=corpus_drugs)
                  if (topic is None or d.get("topic") == topic)
                  and (not exclude_ids or d["guideline_id"] not in exclude_ids)),
                 key=lambda x: x[0],
@@ -151,6 +153,7 @@ class AgentFactory:
                 limit=state.get("limit", 5),
                 exclude_ids=state.get("exclude_ids"),
                 redline_query=state["query"],
+                corpus_drugs=state.get("corpus_drugs"),
             )
         }
 
@@ -201,6 +204,7 @@ class AgentFactory:
         patient_contexts: list[dict] | None = None,
         exclude_ids: set[str] | None = None,
         retrieval_query: str | None = None,
+        corpus_drugs: list[dict] | None = None,
     ) -> dict:
         # Retrieval и роутинг раздела идут по retrieval_query (FR-21):
         # assistant_chat подставляет сюда LLM-переформулировку уточняющего
@@ -221,6 +225,7 @@ class AgentFactory:
                 "limit": limit,
                 "patient_context": patient_context,
                 "patient_contexts": patient_contexts,
+                "corpus_drugs": corpus_drugs,
                 "exclude_ids": exclude_ids or set(),
             }
         )["answer"]

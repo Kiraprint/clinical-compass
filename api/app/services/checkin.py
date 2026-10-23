@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import Problem
 from app.models import CheckinSession, Escalation, Notification
@@ -74,17 +74,17 @@ def _not_started() -> dict:
     }
 
 
-def _escalation_for(db: Session, session: CheckinSession) -> Escalation | None:
-    return db.scalar(
+async def _escalation_for(db: AsyncSession, session: CheckinSession) -> Escalation | None:
+    return await db.scalar(
         select(Escalation).where(Escalation.checkin_session_id == session.id)
     )
 
 
-def _clinician_notified(db: Session, escalation: Escalation | None) -> bool:
+async def _clinician_notified(db: AsyncSession, escalation: Escalation | None) -> bool:
     """Созданы ли уведомления ростерным врачам по этой эскалации."""
     if escalation is None:
         return False
-    count = db.scalar(
+    count = await db.scalar(
         select(func.count())
         .select_from(Notification)
         .where(Notification.escalation_id == escalation.id)
@@ -92,7 +92,7 @@ def _clinician_notified(db: Session, escalation: Escalation | None) -> bool:
     return bool(count)
 
 
-def _serialize(db: Session, session: CheckinSession) -> dict:
+async def _serialize(db: AsyncSession, session: CheckinSession) -> dict:
     answers = session.answers
     plan = engine.plan(answers)
     return {
@@ -110,15 +110,15 @@ def _serialize(db: Session, session: CheckinSession) -> dict:
         "safety": session.safety,
         "modules": _modules_payload(plan.modules),
         "completed_at": session.completed_at.isoformat() if session.completed_at else None,
-        "clinician_notified": _clinician_notified(db, _escalation_for(db, session)),
+        "clinician_notified": await _clinician_notified(db, await _escalation_for(db, session)),
     }
 
 
 # --- Запросы -----------------------------------------------------------------
 
 
-def _session_for_day(db: Session, patient_id: uuid.UUID) -> CheckinSession | None:
-    return db.scalar(
+async def _session_for_day(db: AsyncSession, patient_id: uuid.UUID) -> CheckinSession | None:
+    return await db.scalar(
         select(CheckinSession).where(
             CheckinSession.patient_id == patient_id,
             CheckinSession.checkin_date == moscow_date(),
@@ -126,21 +126,21 @@ def _session_for_day(db: Session, patient_id: uuid.UUID) -> CheckinSession | Non
     )
 
 
-def today(db: Session, patient_id: uuid.UUID) -> dict:
-    session = _session_for_day(db, patient_id)
-    return _not_started() if session is None else _serialize(db, session)
+async def today(db: AsyncSession, patient_id: uuid.UUID) -> dict:
+    session = await _session_for_day(db, patient_id)
+    return _not_started() if session is None else await _serialize(db, session)
 
 
 # --- Начало сеанса -----------------------------------------------------------
 
 
-def start(db: Session, patient_id: uuid.UUID) -> tuple[dict, bool]:
+async def start(db: AsyncSession, patient_id: uuid.UUID) -> tuple[dict, bool]:
     """Идемпотентный старт: возвращает (тело, создан_ли_сеанс)."""
-    existing = _session_for_day(db, patient_id)
+    existing = await _session_for_day(db, patient_id)
     if existing is not None:
         if existing.status == "completed":
             raise Problem(409, "CHECKIN_ALREADY_DONE", "Чек-ин за сегодня уже завершён")
-        return _serialize(db, existing), False
+        return await _serialize(db, existing), False
 
     session = CheckinSession(
         patient_id=patient_id,
@@ -158,18 +158,18 @@ def start(db: Session, patient_id: uuid.UUID) -> tuple[dict, bool]:
     }
     db.add(session)
     try:
-        db.flush()
+        await db.flush()
     except IntegrityError:
         # Параллельный старт выиграл гонку — отдаём его сеанс.
-        db.rollback()
-        existing = _session_for_day(db, patient_id)
+        await db.rollback()
+        existing = await _session_for_day(db, patient_id)
         if existing is None:
             raise Problem(409, "CHECKIN_BUSY", "Не удалось открыть сеанс, повторите попытку")
-        return _serialize(db, existing), False
-    audit_record(db, patient_id, "CHECKIN_START", "checkin_session", str(session.id))
-    db.commit()
-    db.refresh(session)
-    return _serialize(db, session), True
+        return await _serialize(db, existing), False
+    await audit_record(db, patient_id, "CHECKIN_START", "checkin_session", str(session.id))
+    await db.commit()
+    await db.refresh(session)
+    return await _serialize(db, session), True
 
 
 # --- Ответы на шаг -----------------------------------------------------------
@@ -195,20 +195,20 @@ def _validate_step(payload: dict, allowed: tuple[str, ...]) -> None:
         )
 
 
-def _notify_clinicians(
-    db: Session, session: CheckinSession, escalation: Escalation
+async def _notify_clinicians(
+    db: AsyncSession, session: CheckinSession, escalation: Escalation
 ) -> list[uuid.UUID]:
-    recipients = push_service.notify_escalation_clinicians(db, session.patient_id, escalation)
+    recipients = await push_service.notify_escalation_clinicians(db, session.patient_id, escalation)
     if recipients:
         escalation.notified_clinician_at = datetime.now(timezone.utc)
     return recipients
 
 
-def _ensure_escalation(
-    db: Session, session: CheckinSession, *, urgent: bool
+async def _ensure_escalation(
+    db: AsyncSession, session: CheckinSession, *, urgent: bool
 ) -> tuple[Escalation, list[uuid.UUID]]:
     """Одна эскалация на сеанс: создать/повысить и уведомить (повторно — только при повышении)."""
-    escalation = _escalation_for(db, session)
+    escalation = await _escalation_for(db, session)
     created = False
     if escalation is None:
         candidate = Escalation(
@@ -217,14 +217,14 @@ def _ensure_escalation(
             checkin_session_id=session.id,
         )
         try:
-            with db.begin_nested():
+            async with db.begin_nested():
                 db.add(candidate)
-                db.flush()
+                await db.flush()
             escalation = candidate
             created = True
         except IntegrityError:
             # Повтор/гонка: индекс не дал дубль — работаем с существующей.
-            escalation = _escalation_for(db, session)
+            escalation = await _escalation_for(db, session)
             if escalation is None:
                 raise
     upgraded = urgent and escalation.kind != URGENT_KIND
@@ -232,13 +232,13 @@ def _ensure_escalation(
         escalation.kind = URGENT_KIND
     if not (created or upgraded):
         return escalation, []
-    return escalation, _notify_clinicians(db, session, escalation)
+    return escalation, await _notify_clinicians(db, session, escalation)
 
 
-def submit(
-    db: Session, patient_id: uuid.UUID, session_id: uuid.UUID, payload: dict
+async def submit(
+    db: AsyncSession, patient_id: uuid.UUID, session_id: uuid.UUID, payload: dict
 ) -> dict:
-    session = db.scalar(
+    session = await db.scalar(
         select(CheckinSession)
         .where(CheckinSession.id == session_id, CheckinSession.patient_id == patient_id)
         .with_for_update()
@@ -280,32 +280,32 @@ def submit(
     if new_plan.phase == "safety":
         # HR4 = «Да», но модуль RS ещё не пройден: сигнал фиксируем сразу,
         # не дожидаясь завершения чек-ина (P2, ревью security).
-        escalation, recipients = _ensure_escalation(db, session, urgent=False)
-        audit_record(db, patient_id, "CHECKIN_RISK_SIGNAL", "checkin_session", str(session.id))
+        escalation, recipients = await _ensure_escalation(db, session, urgent=False)
+        await audit_record(db, patient_id, "CHECKIN_RISK_SIGNAL", "checkin_session", str(session.id))
     elif new_plan.phase == "done":
         session.status = "completed"
         session.completed_at = datetime.now(timezone.utc)
-        audit_record(db, patient_id, "CHECKIN_COMPLETE", "checkin_session", str(session.id))
+        await audit_record(db, patient_id, "CHECKIN_COMPLETE", "checkin_session", str(session.id))
         if new_plan.safety == "signal":
             urgent = True
-            escalation, recipients = _ensure_escalation(db, session, urgent=True)
-            audit_record(
+            escalation, recipients = await _ensure_escalation(db, session, urgent=True)
+            await audit_record(
                 db, patient_id, "CHECKIN_RISK_SIGNAL", "checkin_session", str(session.id)
             )
-        elif new_plan.safety in RISK_STATES and _escalation_for(db, session) is None:
-            escalation, recipients = _ensure_escalation(db, session, urgent=False)
-            audit_record(
+        elif new_plan.safety in RISK_STATES and await _escalation_for(db, session) is None:
+            escalation, recipients = await _ensure_escalation(db, session, urgent=False)
+            await audit_record(
                 db, patient_id, "CHECKIN_RISK_SIGNAL", "checkin_session", str(session.id)
             )
 
-    db.commit()
-    db.refresh(session)
+    await db.commit()
+    await db.refresh(session)
 
     if escalation is not None and recipients:
-        push_service.push_to_clinicians(
+        await push_service.push_to_clinicians(
             db,
             recipients,
             "СРОЧНО: сигнал риска чек-ина" if urgent else "Сигнал риска чек-ина",
             "Уведомление врачу: положительный риск-ответ в ежедневном чек-ине",
         )
-    return _serialize(db, session)
+    return await _serialize(db, session)

@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import get_db
@@ -50,29 +50,29 @@ def _run_payload(run: KBRun) -> dict:
 
 
 @router.get("/kb/runs")
-def runs(limit: int = 20, user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    rows = db.scalars(select(KBRun).order_by(KBRun.started_at.desc()).limit(min(max(limit, 1), 100)))
+async def runs(limit: int = 20, user: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    rows = await db.scalars(select(KBRun).order_by(KBRun.started_at.desc()).limit(min(max(limit, 1), 100)))
     return {"runs": [_run_payload(run) for run in rows]}
 
 
 @router.get("/kb/runs/{run_id}")
-def run_detail(run_id: uuid.UUID, user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    run = db.get(KBRun, run_id)
+async def run_detail(run_id: uuid.UUID, user: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    run = await db.get(KBRun, run_id)
     if run is None:
         raise Problem(404, "NOT_FOUND", "Прогон не найден")
     return _run_payload(run)
 
 
 @router.get("/kb/works")
-def works(
+async def works(
     status: str | None = "candidate",
     kind: str | None = None,
     limit: int = 50,
     offset: int = 0,
     user: User = Depends(require_admin),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
-    rows = review.list_works(
+    rows = await review.list_works(
         db,
         status=status or None,
         kind=kind,
@@ -81,13 +81,13 @@ def works(
     )
     return {
         "works": [review.serialize(work) for work in rows],
-        "counts": _counts(db),
+        "counts": await _counts(db),
     }
 
 
 @router.get("/kb/works/{work_id}")
-def work_detail(work_id: uuid.UUID, user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    work = review.get_work(db, work_id)
+async def work_detail(work_id: uuid.UUID, user: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    work = await review.get_work(db, work_id)
     if work is None:
         raise Problem(404, "NOT_FOUND", "Источник не найден")
     return review.serialize(work)
@@ -98,45 +98,45 @@ class RejectBody(BaseModel):
 
 
 @router.post("/kb/works/{work_id}/approve")
-def approve(work_id: uuid.UUID, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+async def approve(work_id: uuid.UUID, user: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     try:
-        work = review.approve(db, _client(), work_id, user.id, EnrichmentConfig.from_env())
-        db.commit()
+        work = await review.approve(db, _client(), work_id, user.id, EnrichmentConfig.from_env())
+        await db.commit()
     except review.ReviewError as exc:
-        db.rollback()
+        await db.rollback()
         raise Problem(409, "REVIEW_CONFLICT", str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 — review.approve сам откатывает статус
-        db.rollback()
+        await db.rollback()
         raise Problem(503, "INDEX_FAILED", f"Индексация не завершена: {exc}") from exc
     return review.serialize(work)
 
 
 @router.post("/kb/works/{work_id}/reject")
-def reject(
+async def reject(
     work_id: uuid.UUID,
     body: RejectBody,
     user: User = Depends(require_admin),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     try:
-        work = review.reject(db, work_id, user.id, body.reason, client=_client())
+        work = await review.reject(db, work_id, user.id, body.reason, client=_client())
     except review.ReviewError as exc:
-        db.rollback()
+        await db.rollback()
         raise Problem(409, "REVIEW_CONFLICT", str(exc)) from exc
-    db.commit()
+    await db.commit()
     return review.serialize(work)
 
 
 @router.get("/kb/health")
-def health(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+async def health(user: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     """Состояние обогащения: последний прогон, очередь кандидатов, ошибки."""
-    last = pipeline.latest_run(db)
+    last = await pipeline.latest_run(db)
     return {
         "last_run": _run_payload(last) if last else None,
-        "counts": _counts(db),
+        "counts": await _counts(db),
     }
 
 
-def _counts(db: Session) -> dict:
-    rows = db.execute(select(KBWork.status, func.count()).group_by(KBWork.status)).all()
+async def _counts(db: AsyncSession) -> dict:
+    rows = (await db.execute(select(KBWork.status, func.count()).group_by(KBWork.status))).all()
     return {status: int(count) for status, count in rows}

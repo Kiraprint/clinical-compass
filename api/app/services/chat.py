@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Assessment, ChatMessage
 
@@ -12,17 +12,17 @@ FAQ_REPLY = "Спасибо, что поделились. Если состоя�
 HOTLINE_REPLY = "Мы заметили, что вам сейчас тяжело. Важно, чтобы вы не оставались с этим наедине: свяжитесь с вашим врачом или позвоните по одному из номеров помощи прямо сейчас."
 
 
-def _last_triage(db: Session, patient_id) -> str | None:
-    assessment = db.scalar(
+async def _last_triage(db: AsyncSession, patient_id) -> str | None:
+    assessment = await db.scalar(
         select(Assessment).where(Assessment.patient_id == patient_id).order_by(Assessment.computed_at.desc())
     )
     return assessment.triage if assessment else None
 
 
-def post_message(db: Session, patient_id, content: str) -> dict:
+async def post_message(db: AsyncSession, patient_id, content: str) -> dict:
     patient_msg = ChatMessage(patient_id=patient_id, sender="PATIENT", kind="TEXT", content=content)
     db.add(patient_msg)
-    red = _last_triage(db, patient_id) == "RED"
+    red = await _last_triage(db, patient_id) == "RED"
     reply = ChatMessage(
         patient_id=patient_id,
         sender="SYSTEM",
@@ -30,9 +30,9 @@ def post_message(db: Session, patient_id, content: str) -> dict:
         content=HOTLINE_REPLY if red else FAQ_REPLY,
     )
     db.add(reply)
-    db.commit()
-    db.refresh(patient_msg)
-    db.refresh(reply)
+    await db.commit()
+    await db.refresh(patient_msg)
+    await db.refresh(reply)
     return {
         "message": {"id": str(patient_msg.id), "sender": "PATIENT", "content": content},
         "reply": {
@@ -52,13 +52,13 @@ def post_message(db: Session, patient_id, content: str) -> dict:
     }
 
 
-def list_messages(db: Session, patient_id, limit: int = 50) -> list[ChatMessage]:
-    rows = db.scalars(
+async def list_messages(db: AsyncSession, patient_id, limit: int = 50) -> list[ChatMessage]:
+    rows = (await db.scalars(
         select(ChatMessage)
         .where(ChatMessage.patient_id == patient_id)
         .order_by(ChatMessage.no.desc())
         .limit(limit)
-    ).all()
+    )).all()
     return list(reversed(rows))
 
 

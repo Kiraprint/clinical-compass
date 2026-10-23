@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.deps import require_admin
@@ -63,10 +63,10 @@ def _run_dict(run: EmiasSyncRun | None) -> dict | None:
     }
 
 @router.get("/health")
-def health(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+async def health(user: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     """Состояние интеграции: флаг, хост (без секретов) и последний прогон."""
     cfg = current_config()
-    last = db.scalar(select(EmiasSyncRun).order_by(EmiasSyncRun.started_at.desc()).limit(1))
+    last = await db.scalar(select(EmiasSyncRun).order_by(EmiasSyncRun.started_at.desc()).limit(1))
     return {
         "enabled": cfg.enabled,
         "base_host": urlparse(cfg.base_url).netloc,
@@ -76,43 +76,43 @@ def health(user: User = Depends(require_admin), db: Session = Depends(get_db)):
     }
 
 @router.get("/runs")
-def list_runs(
+async def list_runs(
     limit: int = Query(default=20, ge=1, le=100),
     user: User = Depends(require_admin),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
-    rows = db.scalars(
+    rows = (await db.scalars(
         select(EmiasSyncRun).order_by(EmiasSyncRun.started_at.desc()).limit(limit)
-    ).all()
+    )).all()
     return {"items": [_run_dict(r) for r in rows]}
 
 @router.post("/sync", status_code=202)
-def trigger_sync(
+async def trigger_sync(
     body: SyncBody, request: Request,
-    user: User = Depends(require_admin), db: Session = Depends(get_db),
+    user: User = Depends(require_admin), db: AsyncSession = Depends(get_db),
 ):
     """Запуск синхронизации: mode=patients (обход контура) или one (patient_id)."""
     _require_enabled()
     if body.mode == "one" and body.patient_id is None:
         raise Problem(422, "EMIAS_PATIENT_REQUIRED", "Для mode=one нужен patient_id")
     ip = request.client.host if request.client else None
-    audit_service.record(db, user.id, "EMIA_SYNC", "emias_sync", None, ip=ip)
-    db.commit()
-    run = emias_sync.execute_sync(db, mode=body.mode, patient_id=body.patient_id, trigger="manual")
+    await audit_service.record(db, user.id, "EMIA_SYNC", "emias_sync", None, ip=ip)
+    await db.commit()
+    run = await emias_sync.execute_sync(db, mode=body.mode, patient_id=body.patient_id, trigger="manual")
     return {"run": _run_dict(run)}
 
 @router.post("/link", status_code=201)
-def link_patient(
+async def link_patient(
     body: LinkBody, request: Request,
-    user: User = Depends(require_admin), db: Session = Depends(get_db),
+    user: User = Depends(require_admin), db: AsyncSession = Depends(get_db),
 ):
     """Связать локального пациента с ЕМИАС по СНИЛС (поиск Patient по identifier)."""
     _require_enabled()
     ip = request.client.host if request.client else None
     try:
-        result = emias_sync.link_patient(db, body.patient_id, body.snils)
+        result = await emias_sync.link_patient(db, body.patient_id, body.snils)
     except EmiasError as exc:
         raise Problem(502, "EMIAS_UPSTREAM", f"ЕМИАС недоступен: {exc.code}") from None
-    audit_service.record(db, user.id, "EMIA_LINK", "patient", str(body.patient_id), ip=ip)
-    db.commit()
+    await audit_service.record(db, user.id, "EMIA_LINK", "patient", str(body.patient_id), ip=ip)
+    await db.commit()
     return result

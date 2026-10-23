@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import services
 from app.db import get_db
@@ -24,27 +24,27 @@ class ResolveBody(BaseModel):
 
 
 @router.get("/escalations")
-def open_escalations(
+async def open_escalations(
     request: Request,
     limit: int = Query(
         services.escalations.DEFAULT_LIMIT, ge=1, le=services.escalations.MAX_LIMIT
     ),
     user: User = Depends(_require_staff),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     ip = request.client.host if request.client else None
-    return services.escalations.list_open(
+    return await services.escalations.list_open(
         db, user.id, ip=ip, limit=limit, is_admin=user.role == "ADMIN"
     )
 
 
 @router.post("/escalations/{escalation_id}/resolve")
-def resolve_escalation(
+async def resolve_escalation(
     escalation_id: uuid.UUID,
     body: ResolveBody,
     request: Request,
     user: User = Depends(_require_staff),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     ip = request.client.host if request.client else None
-    return services.escalations.resolve(db, user.id, escalation_id, body.resolution, ip)
+    return await services.escalations.resolve(db, user.id, escalation_id, body.resolution, ip)

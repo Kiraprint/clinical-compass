@@ -13,7 +13,7 @@ from app.emias.config import EmiasConfig
 from app.errors import Problem
 from app.models import EmiasLink, PatientMedication, User, Visit
 
-from .conftest import patient_ctx
+from .conftest import patient_ctx, run_async
 
 PEPPER = "unit-test-pepper"
 SNILS = "112-233-445 95"
@@ -103,13 +103,15 @@ def test_sync_patients_creates_then_is_idempotent(client, db_session):
     user_id = _local_patient(client, db_session, "p-emias-1@test.ru", "Иванова Мария Петровна")
     fake = _client_data()
 
-    first = emias_sync.sync_patients(db_session, client=fake)
+    first = run_async(emias_sync.sync_patients, client=fake)
+    db_session.expire_all()
     assert first.fetched == 1
     assert first.errors == 0
     assert first.created == 5  # link + 2 приёма + 2 назначения
     assert first.status() == "ok"
 
-    second = emias_sync.sync_patients(db_session, client=fake)
+    second = run_async(emias_sync.sync_patients, client=fake)
+    db_session.expire_all()
     assert second.fetched == 1
     assert second.created == 0
     assert second.errors == 0
@@ -124,7 +126,8 @@ def test_sync_patients_creates_then_is_idempotent(client, db_session):
 
 def test_snils_stored_only_as_salted_hash(client, db_session):
     user_id = _local_patient(client, db_session, "p-emias-2@test.ru", "Иванова Мария Петровна")
-    emias_sync.sync_patients(db_session, client=_client_data())
+    run_async(emias_sync.sync_patients, client=_client_data())
+    db_session.expire_all()
 
     link = db_session.scalar(select(EmiasLink).where(EmiasLink.patient_id == uuid.UUID(user_id)))
     assert link.snils_hash == mapping.snils_hash(SNILS, PEPPER)
@@ -144,7 +147,8 @@ def test_match_by_snils_wins_over_fio(client, db_session):
     ))
     db_session.commit()
 
-    stats = emias_sync.sync_patients(db_session, client=_client_data())
+    stats = run_async(emias_sync.sync_patients, client=_client_data())
+    db_session.expire_all()
     assert stats.errors == 0
     assert stats.created == 4  # 2 приёма + 2 назначения (связка уже была)
     link = db_session.scalar(select(EmiasLink).where(EmiasLink.patient_id == uuid.UUID(user_id)))
@@ -152,7 +156,8 @@ def test_match_by_snils_wins_over_fio(client, db_session):
 
 def test_unmatched_patient_is_skipped(client, db_session):
     _local_patient(client, db_session, "p-emias-4@test.ru", "Петров Алексей Игоревич")
-    stats = emias_sync.sync_patients(db_session, client=_client_data())
+    stats = run_async(emias_sync.sync_patients, client=_client_data())
+    db_session.expire_all()
     assert stats.skipped == 1
     assert stats.created == 0
     assert db_session.scalar(select(EmiasLink)) is None
@@ -167,7 +172,8 @@ def test_savepoint_isolation_keeps_good_entities(client, db_session):
         medications={"emias-1001": [_medication()]},
     )
 
-    stats = emias_sync.sync_patients(db_session, client=fake)
+    stats = run_async(emias_sync.sync_patients, client=fake)
+    db_session.expire_all()
     assert stats.errors == 1
     assert stats.created == 3  # link + 1 приём + 1 назначение
     assert stats.status() == "partial"
@@ -183,7 +189,8 @@ def test_duplicate_emias_id_updates_instead_of_creating(client, db_session):
         medications={"emias-1001": []},
     )
 
-    stats = emias_sync.sync_patients(db_session, client=fake)
+    stats = run_async(emias_sync.sync_patients, client=fake)
+    db_session.expire_all()
     assert stats.created == 2  # link + один приём
     assert stats.errors == 0
     visits = db_session.scalars(select(Visit).where(Visit.emias_id == "enc-1")).all()
@@ -193,19 +200,22 @@ def test_duplicate_emias_id_updates_instead_of_creating(client, db_session):
 def test_sync_patient_requires_link(client, db_session):
     _headers, user_id = patient_ctx(client, "p-emias-7@test.ru")
     with pytest.raises(Problem) as exc:
-        emias_sync.sync_patient(db_session, uuid.UUID(user_id), client=_client_data())
+        run_async(emias_sync.sync_patient, uuid.UUID(user_id), client=_client_data())
+        db_session.expire_all()
     assert exc.value.code == "EMIAS_NOT_LINKED"
 
 def test_sync_patient_refreshes_history(client, db_session):
     user_id = _local_patient(client, db_session, "p-emias-8@test.ru", "Иванова Мария Петровна")
-    emias_sync.sync_patients(db_session, client=_client_data())
+    run_async(emias_sync.sync_patients, client=_client_data())
+    db_session.expire_all()
 
     fake = FakeClient(
         patients=[_patient_resource()],
         encounters={"emias-1001": [_encounter(reason="Обновлённая причина")]},
         medications={"emias-1001": [_medication(title="Сертралин 100 мг")]},
     )
-    stats = emias_sync.sync_patient(db_session, uuid.UUID(user_id), client=fake)
+    stats = run_async(emias_sync.sync_patient, uuid.UUID(user_id), client=fake)
+    db_session.expire_all()
     assert stats.mode == "one"
     assert stats.errors == 0
     visit = db_session.scalar(select(Visit).where(Visit.emias_id == "enc-1"))
@@ -215,16 +225,20 @@ def test_sync_patient_refreshes_history(client, db_session):
 
 def test_link_patient_by_snils_and_summary(client, db_session):
     _headers, user_id = patient_ctx(client, "p-emias-9@test.ru")
-    result = emias_sync.link_patient(db_session, uuid.UUID(user_id), SNILS, client=_client_data())
+    result = run_async(emias_sync.link_patient, uuid.UUID(user_id), SNILS, client=_client_data())
+    db_session.expire_all()
     assert result["emias_patient_id"] == "emias-1001"
 
-    summary = emias_sync.patient_summary(db_session, uuid.UUID(user_id))
+    summary = run_async(emias_sync.patient_summary, uuid.UUID(user_id))
+    db_session.expire_all()
     assert summary["linked"] is True
     assert summary["encounters"] == 0  # история ещё не синхронизирована
     assert summary["medications"] == []
 
-    emias_sync.sync_patient(db_session, uuid.UUID(user_id), client=_client_data())
-    summary = emias_sync.patient_summary(db_session, uuid.UUID(user_id))
+    run_async(emias_sync.sync_patient, uuid.UUID(user_id), client=_client_data())
+    db_session.expire_all()
+    summary = run_async(emias_sync.patient_summary, uuid.UUID(user_id))
+    db_session.expire_all()
     assert summary["encounters"] == 2
     assert len(summary["medications"]) == 2
     assert summary["last_sync"] is not None
@@ -233,8 +247,10 @@ def test_patient_summary_excludes_local_medications(client, db_session):
     """P2: витрина «ЕМИАС» не показывает назначения врача из той же таблицы."""
     _headers, user_id = patient_ctx(client, "p-emias-local-med@test.ru")
     pid = uuid.UUID(user_id)
-    emias_sync.link_patient(db_session, pid, SNILS, client=_client_data())
-    emias_sync.sync_patient(db_session, pid, client=_client_data())
+    run_async(emias_sync.link_patient, pid, SNILS, client=_client_data())
+    db_session.expire_all()
+    run_async(emias_sync.sync_patient, pid, client=_client_data())
+    db_session.expire_all()
 
     local = PatientMedication(
         patient_id=pid, title="Лоратадин", dosage="10 мг", started_on=date(2026, 10, 1),
@@ -243,7 +259,8 @@ def test_patient_summary_excludes_local_medications(client, db_session):
     db_session.add(local)
     db_session.commit()
 
-    summary = emias_sync.patient_summary(db_session, pid)
+    summary = run_async(emias_sync.patient_summary, pid)
+    db_session.expire_all()
     assert len(summary["medications"]) == 2
     assert str(local.id) not in {m["id"] for m in summary["medications"]}
     emias_ids = {m.id for m in db_session.scalars(
@@ -259,7 +276,8 @@ def test_consent_revocation_destroys_emias_pdn(client, db_session):
     user.fio = "Иванова Мария Петровна"
     db_session.commit()
 
-    emias_sync.sync_patients(db_session, client=_client_data())
+    run_async(emias_sync.sync_patients, client=_client_data())
+    db_session.expire_all()
     assert db_session.scalar(select(EmiasLink).where(EmiasLink.patient_id == pid)) is not None
     assert db_session.scalars(select(PatientMedication).where(PatientMedication.patient_id == pid)).all()
     assert db_session.scalars(
@@ -282,6 +300,7 @@ def test_link_patient_rejects_foreign_snils(client, db_session):
     fake = _client_data()
     fake.search_patients = lambda snils: [other]  # сервер игнорирует фильтр
     with pytest.raises(Problem) as exc:
-        emias_sync.link_patient(db_session, uuid.UUID(user_id), SNILS, client=fake)
+        run_async(emias_sync.link_patient, uuid.UUID(user_id), SNILS, client=fake)
+        db_session.expire_all()
     assert exc.value.code == "EMIAS_SNILS_MISMATCH"
     assert db_session.scalar(select(EmiasLink).where(EmiasLink.patient_id == uuid.UUID(user_id))) is None

@@ -20,6 +20,7 @@ from app.models import KBRun, KBWork
 from app.services import kb as kb_store
 from app.services.embeddings import HashEmbedder
 
+from .conftest import run_async
 from .enrichment_fixtures import make_doc, make_guideline
 
 
@@ -65,7 +66,8 @@ def _points(client, work: KBWork) -> int:
 
 def test_guideline_with_confirmed_license_is_auto_published(db_session, qdrant, cfg):
     doc = make_guideline()
-    summary = pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    summary = run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     assert summary.status == "ok"
     assert summary.stats["published"] == 1
 
@@ -94,7 +96,8 @@ def test_guideline_without_license_waits_for_human(db_session, qdrant, cfg):
         license="",
         text=make_guideline().text.replace("Creative Commons", "Proprietary"),
     )
-    summary = pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    summary = run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
     assert work is not None
     assert work.status == "candidate"
@@ -105,12 +108,14 @@ def test_guideline_without_license_waits_for_human(db_session, qdrant, cfg):
 
 def test_article_is_candidate_until_approved(db_session, qdrant, cfg):
     doc = make_doc()
-    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
     assert work is not None and work.status == "candidate"
     assert _points(qdrant, work) == 0
 
-    review.approve(db_session, qdrant, work.id, None, cfg)
+    run_async(review.approve, qdrant, work.id, None, cfg)
+    db_session.expire_all()
     assert work.status == "approved"
     assert _points(qdrant, work) == work.chunk_count > 0
 
@@ -139,7 +144,8 @@ def test_article_without_psychiatry_is_excluded(db_session, qdrant, cfg):
         results="LDL fell by 40%.",
         text="",
     )
-    summary = pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    summary = run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
     assert work is not None and work.status == "excluded"
     assert work.criteria["decision"] == "exclude"
@@ -150,12 +156,15 @@ def test_article_without_psychiatry_is_excluded(db_session, qdrant, cfg):
 
 def test_reject_records_reason_and_removes_chunks(db_session, qdrant, cfg):
     doc = make_doc()
-    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
-    review.approve(db_session, qdrant, work.id, None, cfg)
+    run_async(review.approve, qdrant, work.id, None, cfg)
+    db_session.expire_all()
     assert _points(qdrant, work) > 0
 
-    review.reject(db_session, work.id, None, "Выборка не соответствует популяции", client=qdrant)
+    run_async(review.reject, work.id, None, "Выборка не соответствует популяции", client=qdrant)
+    db_session.expire_all()
     assert work.status == "rejected"
     assert work.reject_reason.startswith("Выборка")
     assert _points(qdrant, work) == 0
@@ -163,32 +172,38 @@ def test_reject_records_reason_and_removes_chunks(db_session, qdrant, cfg):
 
 def test_reject_requires_reason(db_session, qdrant, cfg):
     doc = make_doc()
-    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
     with pytest.raises(review.ReviewError):
-        review.reject(db_session, work.id, None, "  ")
+        run_async(review.reject, work.id, None, "  ")
+        db_session.expire_all()
 
 
 def test_rerun_is_idempotent(db_session, qdrant, cfg):
     doc = make_guideline()
-    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
     chunks = work.chunk_count
     points = _points(qdrant, work)
 
-    second = pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    second = run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     assert second.stats["unchanged"] == 1
     assert second.stats["published"] == 0
     assert work.chunk_count == chunks
     assert _points(qdrant, work) == points
-    third = pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    third = run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     assert third.stats["published"] == 0
     assert _points(qdrant, work) == points
 
 
 def test_new_revision_replaces_old_chunks(db_session, qdrant, cfg):
     doc = make_guideline()
-    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
     first_hash = work.indexed_hash
 
@@ -197,7 +212,8 @@ def test_new_revision_replaces_old_chunks(db_session, qdrant, cfg):
         text=doc.text + "\n\nНовая редакция: добавлены рекомендации по тревоге.",
         fetched_at="2026-10-21T12:00:00+00:00",
     )
-    summary = pipeline.execute(db_session, qdrant, cfg, documents=[updated])
+    summary = run_async(pipeline.execute, qdrant, cfg, documents=[updated])
+    db_session.expire_all()
     assert summary.stats["updated"] == 1
 
     db_session.refresh(work)
@@ -209,13 +225,13 @@ def test_new_revision_replaces_old_chunks(db_session, qdrant, cfg):
 
 
 def test_source_failure_is_visible_not_silent(db_session, qdrant, cfg):
-    summary = pipeline.execute(
-        db_session,
+    summary = run_async(pipeline.execute,
         qdrant,
         cfg,
         documents=[],
         source_errors=["pubmed: HTTP 503"],
     )
+    db_session.expire_all()
     assert summary.status == "failed"
     assert summary.errors == ["pubmed: HTTP 503"]
     run = db_session.get(KBRun, uuid.UUID(summary.run_id))
@@ -235,14 +251,16 @@ def test_offline_mode_never_calls_network(db_session, qdrant, monkeypatch):
     with monkeypatch.context() as patched:
         patched.setattr(socket.socket, "connect", forbidden)
         cfg = EnrichmentConfig(offline=True)
-        summary = pipeline.execute(db_session, qdrant, cfg)
+        summary = run_async(pipeline.execute, qdrant, cfg)
+        db_session.expire_all()
     assert summary.status == "failed"
     assert any("OFFLINE" in error for error in summary.errors)
 
 
 def test_run_record_has_query_plan_versions_and_stats(db_session, qdrant, cfg):
     plan = {"pubmed": {"params": {"term": "test"}}, "who": {"handles": ["10665/374250"]}}
-    summary = pipeline.execute(db_session, qdrant, cfg, documents=[make_doc()], query_plan=plan)
+    summary = run_async(pipeline.execute, qdrant, cfg, documents=[make_doc()], query_plan=plan)
+    db_session.expire_all()
     run = db_session.get(KBRun, uuid.UUID(summary.run_id))
     assert run is not None
     assert run.query_plan == plan
@@ -254,9 +272,11 @@ def test_run_record_has_query_plan_versions_and_stats(db_session, qdrant, cfg):
 
 def test_articles_index_has_provenance_and_abstract_only(db_session, qdrant, cfg):
     doc = make_doc()
-    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
-    review.approve(db_session, qdrant, work.id, None, cfg)
+    run_async(review.approve, qdrant, work.id, None, cfg)
+    db_session.expire_all()
     points = qdrant.scroll(
         collection_name=kb_store.COLLECTION,
         scroll_filter=qm.Filter(
@@ -275,12 +295,15 @@ def test_articles_index_has_provenance_and_abstract_only(db_session, qdrant, cfg
 
 def test_rerun_keeps_approved_article_and_its_chunks(db_session, qdrant, cfg):
     doc = make_doc()
-    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
-    review.approve(db_session, qdrant, work.id, None, cfg)
+    run_async(review.approve, qdrant, work.id, None, cfg)
+    db_session.expire_all()
     points = _points(qdrant, work)
 
-    second = pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    second = run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     db_session.refresh(work)
     assert second.stats["unchanged"] == 1
     assert work.status == "approved"
@@ -289,11 +312,14 @@ def test_rerun_keeps_approved_article_and_its_chunks(db_session, qdrant, cfg):
 
 def test_rerun_keeps_rejected_article_rejected(db_session, qdrant, cfg):
     doc = make_doc()
-    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
-    review.reject(db_session, work.id, None, "Не подходит по выборке")
+    run_async(review.reject, work.id, None, "Не подходит по выборке")
+    db_session.expire_all()
 
-    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     db_session.refresh(work)
     assert work.status == "rejected"
     assert work.reject_reason.startswith("Не подходит")
@@ -301,16 +327,19 @@ def test_rerun_keeps_rejected_article_rejected(db_session, qdrant, cfg):
 
 def test_new_article_version_requires_new_approval(db_session, qdrant, cfg):
     doc = make_doc()
-    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
-    review.approve(db_session, qdrant, work.id, None, cfg)
+    run_async(review.approve, qdrant, work.id, None, cfg)
+    db_session.expire_all()
 
     updated = make_doc(
         abstract=doc.abstract + " ADDENDUM: 3-year follow-up data added.",
         results=doc.results + " Follow-up confirmed the effect.",
         revision="2026#998877665544",
     )
-    summary = pipeline.execute(db_session, qdrant, cfg, documents=[updated])
+    summary = run_async(pipeline.execute, qdrant, cfg, documents=[updated])
+    db_session.expire_all()
     db_session.refresh(work)
     assert summary.stats["updated"] == 1
     assert work.status == "candidate"
@@ -321,52 +350,62 @@ def test_new_article_version_requires_new_approval(db_session, qdrant, cfg):
 def test_reindex_after_external_collection_reset(db_session, qdrant, cfg):
     """kb-seed --reset пересоздаёт коллекцию: approved-контент должен вернуться."""
     doc = make_guideline()
-    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
     assert _points(qdrant, work) > 0
 
     qdrant.delete_collection(kb_store.COLLECTION)
 
-    summary = pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    summary = run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     assert summary.stats["published"] == 1
     assert _points(qdrant, work) == work.chunk_count > 0
 
 
 def test_proprietary_guideline_cannot_be_approved(db_session, qdrant, cfg):
     doc = make_guideline(license="proprietary")
-    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
     assert work.status == "candidate"
     with pytest.raises(review.ReviewError):
-        review.approve(db_session, qdrant, work.id, None, cfg)
+        run_async(review.approve, qdrant, work.id, None, cfg)
+        db_session.expire_all()
     assert _points(qdrant, work) == 0
 
 
 def test_unknown_cc_guideline_can_be_approved_after_manual_review(db_session, qdrant, cfg):
     doc = make_guideline(license="other-cc")
-    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
     assert work.status == "candidate"
-    review.approve(db_session, qdrant, work.id, None, cfg)
+    run_async(review.approve, qdrant, work.id, None, cfg)
+    db_session.expire_all()
     assert work.status == "approved"
     assert _points(qdrant, work) > 0
 
 
 def test_retracted_article_cannot_be_approved(db_session, qdrant, cfg):
     doc = make_doc(retraction="retracted", retraction_note="Retraction: data fabrication")
-    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
     assert work.status == "excluded"
     with pytest.raises(review.ReviewError):
-        review.approve(db_session, qdrant, work.id, None, cfg)
+        run_async(review.approve, qdrant, work.id, None, cfg)
+        db_session.expire_all()
     assert _points(qdrant, work) == 0
 
 
 def test_same_title_with_conflicting_ids_is_not_merged(db_session, qdrant, cfg):
     first = make_doc(pmid="40000001", external_id="40000001", doi="10.1/aaa")
     second = make_doc(pmid="40000002", external_id="40000002", doi="10.1/bbb")
-    pipeline.execute(db_session, qdrant, cfg, documents=[second])
-    summary = pipeline.execute(db_session, qdrant, cfg, documents=[first])
+    run_async(pipeline.execute, qdrant, cfg, documents=[second])
+    db_session.expire_all()
+    summary = run_async(pipeline.execute, qdrant, cfg, documents=[first])
+    db_session.expire_all()
     works = list(db_session.scalars(select(KBWork)))
     assert summary.stats["new"] == 1
     assert summary.errors == []
@@ -401,7 +440,8 @@ def test_commit_failure_never_publishes_uncommitted_content(db_session, qdrant, 
         return original_commit()
 
     monkeypatch.setattr(db_session, "commit", flaky_commit)
-    summary = pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    summary = run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
 
     assert summary.stats["published"] == 0
     assert summary.stats["failed_documents"] == 1
@@ -416,7 +456,8 @@ def test_commit_failure_never_publishes_uncommitted_content(db_session, qdrant, 
 def test_failed_reindex_restores_previous_points(db_session, qdrant, cfg, monkeypatch):
     """Неудачный upsert новой версии не должен стирать опубликованную версию."""
     doc = make_guideline()
-    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
     assert work.status == "approved"
     before = _points(qdrant, work)
@@ -455,11 +496,13 @@ def test_excluded_work_cannot_be_approved(db_session, qdrant, cfg):
         results="LDL fell by 40%.",
         text="",
     )
-    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
     assert work.status == "excluded"
     with pytest.raises(review.ReviewError):
-        review.approve(db_session, qdrant, work.id, None, cfg)
+        run_async(review.approve, qdrant, work.id, None, cfg)
+        db_session.expire_all()
 
 
 def test_failed_indexing_returns_work_to_review_queue(db_session, qdrant, cfg, monkeypatch):
@@ -468,7 +511,8 @@ def test_failed_indexing_returns_work_to_review_queue(db_session, qdrant, cfg, m
         license="",
         text=make_guideline().text.replace("Creative Commons", "Proprietary"),
     )
-    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
     assert work.status == "candidate"
 
@@ -477,7 +521,7 @@ def test_failed_indexing_returns_work_to_review_queue(db_session, qdrant, cfg, m
         # финального коммита оставил бы точки без одобренной записи.
         from app import db as db_module
 
-        with db_module.SessionLocal() as other:
+        with db_module.SyncSessionLocal() as other:
             durable = other.scalar(select(KBWork).where(KBWork.id == work.id))
             assert durable is not None and durable.status == "approved"
             assert durable.chunk_count == 0
@@ -485,7 +529,8 @@ def test_failed_indexing_returns_work_to_review_queue(db_session, qdrant, cfg, m
 
     monkeypatch.setattr(review.index_mod, "index_work", broken_index)
     with pytest.raises(RuntimeError):
-        review.approve(db_session, qdrant, work.id, None, cfg)
+        run_async(review.approve, qdrant, work.id, None, cfg)
+        db_session.expire_all()
 
     assert work.status == "candidate"
     assert work.approved_at is None
@@ -501,7 +546,8 @@ def test_approve_is_cancelled_when_version_replaced_during_indexing(
         license="",
         text=make_guideline().text.replace("Creative Commons", "Proprietary"),
     )
-    pipeline.execute(db_session, qdrant, cfg, documents=[doc])
+    run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
     assert work.status == "candidate"
 
@@ -515,7 +561,8 @@ def test_approve_is_cancelled_when_version_replaced_during_indexing(
 
     monkeypatch.setattr(review.index_mod, "index_work", replaced_version)
     with pytest.raises(review.ReviewError):
-        review.approve(db_session, qdrant, work.id, None, cfg)
+        run_async(review.approve, qdrant, work.id, None, cfg)
+        db_session.expire_all()
 
     db_session.refresh(work)
     assert _points(qdrant, work) == 0

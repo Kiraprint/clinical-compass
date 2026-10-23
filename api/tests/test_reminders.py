@@ -16,7 +16,7 @@ from sqlalchemy import text
 from app import db
 from app.services import reminders
 
-from .conftest import admin_ctx, clinician_ctx, patient_ctx
+from .conftest import admin_ctx, clinician_ctx, patient_ctx, run_async
 
 NOW = datetime(2026, 5, 10, 9, 0, tzinfo=timezone.utc)  # 12:00 МСК
 PAST = "2026-05-09T09:00:00+00:00"
@@ -155,10 +155,9 @@ def test_worker_tick_creates_one_notification_idempotent(client, frozen):
     _, pid, c, _ = _setup(client, "rwp@test.ru", "rwc@test.ru")
     reminder = _create(client, c, pid, due_at=PAST, kind="write", note="Иванов И.И. — состояние")
 
-    with db.SessionLocal() as s:
-        assert reminders.deliver_due(s, now=NOW) == 1
-        # Второй тик не создаёт дубль (notified_at + unique reminder_id).
-        assert reminders.deliver_due(s, now=NOW) == 0
+    assert run_async(reminders.deliver_due, now=NOW) == 1
+    # Второй тик не создаёт дубль (notified_at + unique reminder_id).
+    assert run_async(reminders.deliver_due, now=NOW) == 0
 
     items = client.get("/api/v1/me/notifications", headers=c).json()["items"]
     assert len(items) == 1
@@ -167,7 +166,7 @@ def test_worker_tick_creates_one_notification_idempotent(client, frozen):
     # note (свободный текст ПДн) в канал доставки не попадает.
     assert "Иванов" not in items[0]["body"]
 
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         notified = s.execute(
             text("SELECT notified_at, (SELECT count(*) FROM notifications WHERE reminder_id = :id) "
                  "FROM clinician_reminders WHERE id = :id"),
@@ -183,26 +182,23 @@ def test_worker_respects_advisory_lock(client, frozen, engine):
     with engine.connect() as conn:
         conn.execute(text("SELECT pg_advisory_lock(hashtext('clinician-reminders'))"))
         try:
-            with db.SessionLocal() as s:
-                assert reminders.deliver_due(s, now=NOW) == 0
+            assert run_async(reminders.deliver_due, now=NOW) == 0
         finally:
             conn.execute(text("SELECT pg_advisory_unlock(hashtext('clinician-reminders'))"))
 
     assert client.get("/api/v1/me/notifications", headers=c).json()["items"] == []
-    with db.SessionLocal() as s:
-        assert reminders.deliver_due(s, now=NOW) == 1
+    assert run_async(reminders.deliver_due, now=NOW) == 1
 
 def test_failed_tick_releases_advisory_lock(client, frozen, engine, monkeypatch):
     _, pid, c, _ = _setup(client, "rfail@test.ru", "rfailc@test.ru")
     _create(client, c, pid, due_at=PAST)
 
-    def boom(*_args, **_kwargs):
+    async def boom(*_args, **_kwargs):
         raise RuntimeError("tick failed")
 
     monkeypatch.setattr(reminders, "_patient_name", boom)
-    with db.SessionLocal() as s:
-        with pytest.raises(RuntimeError):
-            reminders.deliver_due(s, now=NOW)
+    with pytest.raises(RuntimeError):
+        run_async(reminders.deliver_due, now=NOW)
 
     # Лок обязан освободиться: иначе утечка на пул-соединение заблокирует все
     # последующие тики этого инстанса (и маскирует исходную ошибку).
@@ -221,12 +217,11 @@ def test_failed_tick_releases_advisory_lock(client, frozen, engine, monkeypatch)
 def test_reminder_delete_cascades_notification(client, frozen):
     _, pid, c, _ = _setup(client, "rcd@test.ru", "rcdc@test.ru")
     reminder = _create(client, c, pid, due_at=PAST)
-    with db.SessionLocal() as s:
-        assert reminders.deliver_due(s, now=NOW) == 1
+    assert run_async(reminders.deliver_due, now=NOW) == 1
 
     # FK notifications.reminder_id ON DELETE CASCADE: удаление напоминания
     # (в т.ч. гонка с отзывом согласия) не должно упираться в FK.
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         s.execute(text("DELETE FROM clinician_reminders WHERE id = :id"), {"id": reminder["id"]})
         s.commit()
         left = s.execute(
@@ -237,11 +232,10 @@ def test_reminder_delete_cascades_notification(client, frozen):
 def test_consent_revocation_destroys_reminders(client, frozen):
     h, pid, c, _ = _setup(client, "rrev@test.ru", "rrevc@test.ru")
     _create(client, c, pid, due_at=PAST, note="ФИО и состояние")
-    with db.SessionLocal() as s:
-        assert reminders.deliver_due(s, now=NOW) == 1
+    assert run_async(reminders.deliver_due, now=NOW) == 1
 
     assert client.post("/api/v1/consent/revoke", headers=h).status_code == 204
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         left = s.execute(
             text("SELECT count(*) FROM clinician_reminders WHERE patient_id = :p"), {"p": pid}
         ).scalar()

@@ -145,22 +145,25 @@ def _guideline_docs(with_full_text: bool = False) -> list[dict]:
     return docs
 
 
-def _drug_docs() -> list[dict]:
+def _drug_docs(rows: list | None = None) -> list[dict]:
     """Чанки по препаратам из таблицы drugs (источник — ГРЛС, усл.7 кейса).
 
     Таблица — единственный источник правды: seed.py грузит api/app/data/drugs.json
     в drugs, отсюда же строятся чанки для Qdrant. На препарат — основной чанк
     (показания/дозировка/механизм) + отдельный чанк НЯ/противопоказаний, чтобы
     retrieval по «побочные эффекты <препарат>» попадал точно. Тема ЛЕКАРСТВА.
+
+    В request-path строки передаёт `load_drug_docs` (async-сессия запроса);
+    sync-фолбэк ниже — только CLI/тесты (build_corpus без аргумента).
     """
-    from app.db import SessionLocal
-    from app.models import Drug
+    if rows is None:
+        from app.db import SyncSessionLocal
+        from app.models import Drug
+
+        with SyncSessionLocal() as s:
+            rows = list(s.execute(select(Drug).order_by(Drug.drug_id)).scalars().all())
 
     docs: list[dict] = []
-    with SessionLocal() as s:
-        rows = s.execute(
-            select(Drug).order_by(Drug.drug_id)
-        ).scalars().all()
     for d in rows:
         title = f"{d.trade_name} ({d.inn})"
         ru = f"РУ {d.reg_certificate} от {d.reg_date}"
@@ -268,10 +271,19 @@ def _article_docs() -> list[dict]:
     ]
 
 
-def build_corpus(with_guidelines: bool = False) -> list[dict]:
+async def load_drug_docs(db) -> list[dict]:
+    """drug-чанки через async-сессию запроса (без sync Session в request-path)."""
+    from app.models import Drug
+
+    rows = (await db.scalars(select(Drug).order_by(Drug.drug_id))).all()
+    return _drug_docs(list(rows))
+
+
+def build_corpus(with_guidelines: bool = False, drug_docs: list[dict] | None = None) -> list[dict]:
     return (
         _scale_docs() + _triage_docs() + _redlines_docs()
-        + _drug_docs() + _guideline_docs(with_full_text=with_guidelines)
+        + (drug_docs if drug_docs is not None else _drug_docs())
+        + _guideline_docs(with_full_text=with_guidelines)
         + _article_docs()
     )
 

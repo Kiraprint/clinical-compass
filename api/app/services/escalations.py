@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CheckinSession, ClinicianRoster, Escalation, User
 from app.errors import Problem
@@ -37,8 +37,8 @@ def _risk_answers(raw: str | None) -> dict:
     answers = json.loads(raw)
     return {item: answers[item] for item in RISK_ITEMS if item in answers}
 
-def list_open(
-    db: Session,
+async def list_open(
+    db: AsyncSession,
     actor_id: uuid.UUID,
     ip: str | None = None,
     *,
@@ -47,7 +47,7 @@ def list_open(
 ) -> dict:
     """Открытые эскалации за последние 90 дней, новые сверху."""
     since = datetime.now(timezone.utc) - timedelta(days=QUEUE_WINDOW_DAYS)
-    rows = db.execute(
+    rows = (await db.execute(
         select(
             Escalation,
             User.fio,
@@ -62,12 +62,12 @@ def list_open(
         )
         .order_by(Escalation.created_at.desc().nulls_last(), Escalation.id.desc())
         .limit(limit)
-    ).all()
+    )).all()
 
     roster: set[uuid.UUID] = set()
     if not is_admin and rows:
         roster = set(
-            db.scalars(
+            await db.scalars(
                 select(ClinicianRoster.patient_id).where(
                     ClinicianRoster.clinician_id == actor_id,
                     ClinicianRoster.patient_id.in_([e.patient_id for e, *_ in rows]),
@@ -90,13 +90,13 @@ def list_open(
         }
         for e, fio, safety, answers in rows
     ]
-    audit_record(db, actor_id, "READ_ESCALATIONS", "escalation", ip=ip)
-    db.commit()
+    await audit_record(db, actor_id, "READ_ESCALATIONS", "escalation", ip=ip)
+    await db.commit()
     return {"items": items}
 
 
-def resolve(
-    db: Session,
+async def resolve(
+    db: AsyncSession,
     actor_id: uuid.UUID,
     escalation_id: uuid.UUID,
     resolution: str | None = None,
@@ -104,7 +104,7 @@ def resolve(
 ) -> dict:
     """Закрыть сигнал: resolved_at + комментарий (шифруется EncryptedText)."""
     # FOR UPDATE: два врача одновременно не закроют сигнал дважды (409 у второго).
-    escalation = db.scalar(
+    escalation = await db.scalar(
         select(Escalation).where(Escalation.id == escalation_id).with_for_update()
     )
     if escalation is None:
@@ -120,10 +120,10 @@ def resolve(
 
     escalation.resolved_at = datetime.now(timezone.utc)
     escalation.resolution = text or None
-    audit_record(
+    await audit_record(
         db, actor_id, "ESCALATION_RESOLVE", "escalation", object_id=escalation.id, ip=ip
     )
-    db.commit()
+    await db.commit()
     return {
         "id": str(escalation.id),
         "resolved_at": escalation.resolved_at.isoformat(),

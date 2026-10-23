@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.engine import Connection
 
 from app.errors import Problem
@@ -83,8 +83,8 @@ def _due_state(due_at: datetime, now: datetime) -> str:
         return "soon"
     return "later"
 
-def _patient_name(db: Session, patient_id: uuid.UUID) -> str:
-    patient = db.get(User, patient_id)
+async def _patient_name(db: AsyncSession, patient_id: uuid.UUID) -> str:
+    patient = await db.get(User, patient_id)
     if patient is None:
         return "пациент"
     return patient.fio or "пациент"
@@ -110,9 +110,9 @@ def _serialize(row: ClinicianReminder, patient_fio: str, now: datetime) -> dict:
         "created_at": _iso(row.created_at),
     }
 
-def _get_owned(db: Session, clinician_id: uuid.UUID, reminder_id: uuid.UUID) -> ClinicianReminder:
+async def _get_owned(db: AsyncSession, clinician_id: uuid.UUID, reminder_id: uuid.UUID) -> ClinicianReminder:
     """Напоминание владельца; чужое → 404 (не подтверждаем существование — IDOR)."""
-    row = db.get(ClinicianReminder, reminder_id)
+    row = await db.get(ClinicianReminder, reminder_id)
     if row is None or row.clinician_id != clinician_id:
         raise Problem(404, "NOT_FOUND", "Напоминание не найдено")
     return row
@@ -122,15 +122,15 @@ def _check_kind(kind: str) -> str:
         raise Problem(422, "VALIDATION", "Неизвестный вид напоминания")
     return kind
 
-def create(
-    db: Session,
+async def create(
+    db: AsyncSession,
     clinician_id: uuid.UUID,
     patient_id: uuid.UUID,
     kind: str,
     note: str | None,
     due_at: datetime,
 ) -> dict:
-    require_roster(db, clinician_id, patient_id)
+    await require_roster(db, clinician_id, patient_id)
     row = ClinicianReminder(
         clinician_id=clinician_id,
         patient_id=patient_id,
@@ -140,11 +140,11 @@ def create(
         status="open",
     )
     db.add(row)
-    db.commit()
-    return _serialize(row, _patient_name(db, patient_id), _now())
+    await db.commit()
+    return _serialize(row, await _patient_name(db, patient_id), _now())
 
-def list_reminders(
-    db: Session,
+async def list_reminders(
+    db: AsyncSession,
     clinician_id: uuid.UUID,
     status: str = "open",
     due: str | None = None,
@@ -174,13 +174,13 @@ def list_reminders(
             q = q.where(ClinicianReminder.due_at <= now + timedelta(days=7))
         else:
             raise Problem(422, "VALIDATION", "due: ожидается overdue|today|week")
-    rows = db.scalars(q.order_by(ClinicianReminder.due_at, ClinicianReminder.id)).all()
+    rows = (await db.scalars(q.order_by(ClinicianReminder.due_at, ClinicianReminder.id))).all()
 
     names: dict[uuid.UUID, str] = {}
     items = []
     for row in rows:
         if row.patient_id not in names:
-            names[row.patient_id] = _patient_name(db, row.patient_id)
+            names[row.patient_id] = await _patient_name(db, row.patient_id)
         items.append(_serialize(row, names[row.patient_id], now))
 
     overdue_q = select(func.count(ClinicianReminder.id)).where(
@@ -190,11 +190,11 @@ def list_reminders(
     )
     if patient_id is not None:
         overdue_q = overdue_q.where(ClinicianReminder.patient_id == patient_id)
-    overdue = int(db.scalar(overdue_q) or 0)
+    overdue = int(await db.scalar(overdue_q) or 0)
     return {"items": items, "overdue": overdue}
 
-def update(
-    db: Session,
+async def update(
+    db: AsyncSession,
     clinician_id: uuid.UUID,
     reminder_id: uuid.UUID,
     *,
@@ -204,7 +204,7 @@ def update(
     kind: str | None = None,
 ) -> dict:
     """Правка напоминания: note/due_at/kind. Закрытое (done/cancelled) не меняется."""
-    row = _get_owned(db, clinician_id, reminder_id)
+    row = await _get_owned(db, clinician_id, reminder_id)
     if row.status != "open":
         raise Problem(409, "REMINDER_CLOSED", "Напоминание уже закрыто")
     if note_set:
@@ -216,28 +216,28 @@ def update(
         row.due_at = _as_aware(due_at)
     if kind is not None:
         row.kind = _check_kind(kind)
-    db.commit()
-    return _serialize(row, _patient_name(db, row.patient_id), _now())
+    await db.commit()
+    return _serialize(row, await _patient_name(db, row.patient_id), _now())
 
-def complete(db: Session, clinician_id: uuid.UUID, reminder_id: uuid.UUID) -> dict:
-    row = _get_owned(db, clinician_id, reminder_id)
+async def complete(db: AsyncSession, clinician_id: uuid.UUID, reminder_id: uuid.UUID) -> dict:
+    row = await _get_owned(db, clinician_id, reminder_id)
     if row.status != "open":
         raise Problem(409, "REMINDER_CLOSED", "Напоминание уже закрыто")
     row.status = "done"
     row.done_at = _now()
-    db.commit()
-    return _serialize(row, _patient_name(db, row.patient_id), _now())
+    await db.commit()
+    return _serialize(row, await _patient_name(db, row.patient_id), _now())
 
-def cancel(db: Session, clinician_id: uuid.UUID, reminder_id: uuid.UUID) -> dict:
-    row = _get_owned(db, clinician_id, reminder_id)
+async def cancel(db: AsyncSession, clinician_id: uuid.UUID, reminder_id: uuid.UUID) -> dict:
+    row = await _get_owned(db, clinician_id, reminder_id)
     if row.status != "open":
         raise Problem(409, "REMINDER_CLOSED", "Напоминание уже закрыто")
     row.status = "cancelled"
     row.done_at = _now()
-    db.commit()
-    return _serialize(row, _patient_name(db, row.patient_id), _now())
+    await db.commit()
+    return _serialize(row, await _patient_name(db, row.patient_id), _now())
 
-def delete_for_patient(db: Session, patient_id: uuid.UUID) -> int:
+async def delete_for_patient(db: AsyncSession, patient_id: uuid.UUID) -> int:
     """Уничтожение напоминаний пациента (отзыв согласия, 152-ФЗ ст.9 ч.2-3).
 
     Вызывается из routers/consent._destroy_patient_pdn ПОСЛЕ удаления
@@ -245,10 +245,10 @@ def delete_for_patient(db: Session, patient_id: uuid.UUID) -> int:
     """
     from sqlalchemy import delete as sa_delete
 
-    result = db.execute(sa_delete(ClinicianReminder).where(ClinicianReminder.patient_id == patient_id))
+    result = await db.execute(sa_delete(ClinicianReminder).where(ClinicianReminder.patient_id == patient_id))
     return int(result.rowcount or 0)
 
-def deliver_due(db: Session, now: datetime | None = None) -> int:
+async def deliver_due(db: AsyncSession, now: datetime | None = None) -> int:
     """Тик доставки: open + due_at <= now + notified_at is null → Notification + push.
 
     Идемпотентно: notified_at ставится в той же транзакции, что и Notification;
@@ -257,24 +257,22 @@ def deliver_due(db: Session, now: datetime | None = None) -> int:
     Возвращает число доставленных напоминаний.
     """
     now = now or _now()
-    bind = db.get_bind()
-    engine = bind.engine if isinstance(bind, Connection) else bind
+    engine = db.bind  # AsyncEngine: PgAsyncSession привязан к нему в db.setup()
+    pushes: list[tuple[uuid.UUID, str, str]] = []
     # Лок берём на отдельном соединении: после ошибки транзакция сессии может
     # быть aborted, и pg_advisory_unlock на ней же не выполнится — лок утечёт
     # на пул-соединение и заблокирует все следующие тики этого воркера.
-    lock_conn = engine.connect()
-    pushes: list[tuple[uuid.UUID, str, str]] = []
-    try:
+    async with engine.connect() as lock_conn:
         locked = bool(
-            lock_conn.execute(
+            (await lock_conn.execute(
                 text("SELECT pg_try_advisory_lock(hashtext(:k))"), {"k": DELIVERY_LOCK_KEY}
-            ).scalar()
+            )).scalar()
         )
         if not locked:
             log.info("reminders: другой воркер уже держит лок, пропуск тика")
             return 0
         try:
-            rows = db.scalars(
+            rows = (await db.scalars(
                 select(ClinicianReminder)
                 .where(
                     ClinicianReminder.status == "open",
@@ -284,20 +282,20 @@ def deliver_due(db: Session, now: datetime | None = None) -> int:
                 .order_by(ClinicianReminder.due_at)
                 .limit(DELIVERY_BATCH)
                 .with_for_update(skip_locked=True)
-            ).all()
+            )).all()
             if not rows:
-                db.rollback()
+                await db.rollback()
                 return 0
 
             names: dict[uuid.UUID, str] = {}
             for row in rows:
                 if row.patient_id not in names:
-                    names[row.patient_id] = _patient_name(db, row.patient_id)
+                    names[row.patient_id] = await _patient_name(db, row.patient_id)
                 fio = names[row.patient_id]
                 label = KIND_LABELS.get(row.kind, row.kind)
                 title = "Напоминание врача"
                 body = f"{fio}: {label.lower()}"
-                exists = db.scalar(
+                exists = await db.scalar(
                     select(Notification.id).where(Notification.reminder_id == row.id).limit(1)
                 )
                 if exists is None:
@@ -313,19 +311,17 @@ def deliver_due(db: Session, now: datetime | None = None) -> int:
                     )
                 row.notified_at = now
                 pushes.append((row.clinician_id, title, body))
-            db.commit()
+            await db.commit()
         except Exception:
-            db.rollback()
+            await db.rollback()
             raise
         finally:
-            lock_conn.execute(
+            await lock_conn.execute(
                 text("SELECT pg_advisory_unlock(hashtext(:k))"), {"k": DELIVERY_LOCK_KEY}
             )
-            lock_conn.commit()
-    finally:
-        lock_conn.close()
+            await lock_conn.commit()
 
     # Push — best-effort и вне критической секции лока: сбой доставки не откатывает БД.
     for clinician_id, title, body in pushes:
-        push.push_to_clinicians(db, [clinician_id], title, body)
+        await push.push_to_clinicians(db, [clinician_id], title, body)
     return len(pushes)

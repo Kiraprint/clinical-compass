@@ -13,12 +13,14 @@ Qdrant — агент не может это процитировать.
 
 from __future__ import annotations
 
+import anyio
+
 import datetime as dt
 import hashlib
 from dataclasses import asdict, dataclass, field
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.enrichment import (
     APPRAISAL_VERSION,
@@ -241,9 +243,13 @@ def _apply_work(
     return existing, changed
 
 
-def _publish(work: KBWork, client, embedder, cfg: EnrichmentConfig) -> int:
-    chunks = index_mod.index_work(
-        client, embedder, work, chunk_chars=cfg.chunk_chars, chunk_overlap=cfg.chunk_overlap
+async def _publish(work: KBWork, client, embedder, cfg: EnrichmentConfig) -> int:
+    # Qdrant-клиент синхронный → в поток, чтобы не держать event loop.
+    chunks = await anyio.to_thread.run_sync(
+        lambda: index_mod.index_work(
+            client, embedder, work,
+            chunk_chars=cfg.chunk_chars, chunk_overlap=cfg.chunk_overlap,
+        )
     )
     work.chunk_count = chunks
     work.published_at = dt.datetime.now(dt.timezone.utc)
@@ -251,8 +257,8 @@ def _publish(work: KBWork, client, embedder, cfg: EnrichmentConfig) -> int:
     return chunks
 
 
-def execute(
-    db: Session,
+async def execute(
+    db: AsyncSession,
     client,
     cfg: EnrichmentConfig,
     *,
@@ -277,20 +283,22 @@ def execute(
             errors=[],
         )
         db.add(run)
-        db.flush()
+        await db.flush()
         # Журнал прогона фиксируется сразу: откат отдельного документа
         # (rollback в обработчике) не должен лишать прогон записи в kb_runs.
-        db.commit()
+        await db.commit()
 
     errors: list[str] = list(source_errors or [])
     if documents is None:
-        documents, fetched_plan, fetch_errors = collect_documents(cfg, today)
+        documents, fetched_plan, fetch_errors = await anyio.to_thread.run_sync(
+            lambda: collect_documents(cfg, today)
+        )
         query_plan = query_plan or fetched_plan
         errors.extend(fetch_errors)
         if run is not None:
             # план должен попасть в журнал: он коммитится до сбора документов.
             run.query_plan = query_plan
-            db.commit()
+            await db.commit()
 
     stats: dict[str, int] = {
         "fetched": len(documents),
@@ -328,7 +336,7 @@ def execute(
             appraisal_result = appraisal_mod.appraise(doc, design_result)
             status = _decide(doc, evaluation, cfg)
 
-            existing = None if dry_run else dedupe.find_existing(db, doc)
+            existing = None if dry_run else await dedupe.find_existing(db, doc)
             changed = True
             if existing is not None:
                 changed = existing.content_hash != content_hash(doc)
@@ -362,11 +370,11 @@ def execute(
                 )
                 if existing is None:
                     db.add(work)
-                db.flush()
+                await db.flush()
                 # id фиксируется до публикации: точки снимаются по нему, даже
                 # если ORM-объект уже откатан.
                 work_id = work.id
-                db.commit()
+                await db.commit()
 
                 if status == "approved":
                     # Сверка с фактическим индексом: коллекцию мог пересоздать
@@ -376,21 +384,21 @@ def execute(
                     )
                     if not needs_publish:
                         needs_publish = (
-                            index_mod.remote_count(client, work) != work.chunk_count
-                        )
+                            await anyio.to_thread.run_sync(index_mod.remote_count, client, work)
+                        ) != work.chunk_count
                     if needs_publish:
-                        chunks = _publish(work, client, embedder, cfg)
+                        chunks = await _publish(work, client, embedder, cfg)
                         published = True
                         stats["published"] += 1
                     else:
                         chunks = work.chunk_count
                 elif status != "approved" and (work.indexed_hash or work.chunk_count):
                     # Снят с публикации (retraction/license/новая версия) — убрать чанки.
-                    index_mod.remove_work(client, work)
+                    await anyio.to_thread.run_sync(index_mod.remove_work, client, work)
                     work.indexed_hash = None
                     work.chunk_count = 0
                 # Фиксируем результат публикации (chunk_count/indexed_hash).
-                db.commit()
+                await db.commit()
 
             decisions.append(
                 WorkDecision(
@@ -410,12 +418,12 @@ def execute(
                 )
             )
         except Exception as exc:  # noqa: BLE001 — один документ не должен валить прогон
-            db.rollback()
+            await db.rollback()
             # Qdrant не участвует в транзакции: если публикация успела создать
             # точки, а коммит реестра — нет, снимаем их по work_id (best effort).
             if published and work_id is not None and client is not None:
                 try:
-                    index_mod.remove_work_id(client, work_id)
+                    await anyio.to_thread.run_sync(index_mod.remove_work_id, client, work_id)
                 except Exception:  # noqa: BLE001 — уборка не должна маскировать исходную ошибку
                     pass
             stats["failed_documents"] += 1
@@ -445,7 +453,7 @@ def execute(
     run_id = str(run.id)
     # Прогон фиксируется здесь: вызывающий код (CLI/сервис) не обязан помнить
     # про commit, иначе запись журнала терялась бы при его сбое.
-    db.commit()
+    await db.commit()
     return RunSummary(
         run_id=run_id,
         status=run.status,
@@ -456,5 +464,5 @@ def execute(
     )
 
 
-def latest_run(db: Session) -> KBRun | None:
-    return db.scalar(select(KBRun).order_by(KBRun.started_at.desc()).limit(1))
+async def latest_run(db: AsyncSession) -> KBRun | None:
+    return await db.scalar(select(KBRun).order_by(KBRun.started_at.desc()).limit(1))
