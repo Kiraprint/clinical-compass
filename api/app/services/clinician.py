@@ -126,9 +126,14 @@ def create_clinician_assessment(
     return finish_screening(db, run.id, patient_id, audit_action="CLINICIAN_ASSESSMENT", ip=ip)
 
 
+# FR-30: порядок карточек — красные всегда сверху. Внутри ранга: больше
+# открытых эскалаций, затем более свежая оценка, затем ФИО/email (стабильно).
+TRIAGE_RANK = {"RED": 0, "YELLOW": 1, "GREEN": 2}
+
+
 def list_patients(db: Session, clinician_id, triage: str | None = None) -> list[dict]:
     rows = db.scalars(select(ClinicianRoster).where(ClinicianRoster.clinician_id == clinician_id)).all()
-    cards = []
+    entries: list[tuple[tuple, dict]] = []
     for row in rows:
         patient = db.get(User, row.patient_id)
         if patient is None:
@@ -149,7 +154,7 @@ def list_patients(db: Session, clinician_id, triage: str | None = None) -> list[
             .where(Escalation.patient_id == row.patient_id, Escalation.resolved_at.is_(None))
         )
         contacts = contacts_payload(patient, masked=True)  # FR-22: телефон — только маска
-        cards.append({
+        card = {
             "patient_id": str(row.patient_id),
             "email": patient.email,
             "fio": patient.fio,
@@ -161,8 +166,18 @@ def list_patients(db: Session, clinician_id, triage: str | None = None) -> list[
             "phone": contacts["phone"],
             "birth_date": contacts["birth_date"],
             "age": contacts["age"],
-        })
-    return cards
+        }
+        entries.append((
+            (
+                TRIAGE_RANK.get(last_triage, 3),
+                -(open_esc or 0),
+                -last.computed_at.timestamp() if last else float("inf"),
+                (patient.fio or patient.email or "").lower(),
+            ),
+            card,
+        ))
+    entries.sort(key=lambda e: e[0])
+    return [card for _, card in entries]
 
 
 def patient_timeline(db: Session, patient_id, days: int) -> dict:
@@ -531,6 +546,71 @@ def clinician_list_chat(db: Session, clinician_id, patient_id) -> list[dict]:
     ).all()
     # вернуть в хронологическом порядке (последние 50)
     return [_chat_dict(m) for m in reversed(rows)]
+
+
+# FR-29: превью последнего сообщения в списке переписок — обрезка, не лог.
+CHAT_PREVIEW_MAX = 120
+
+
+def list_patient_chats(db: Session, clinician_id) -> list[dict]:
+    """Переписки врача с roster-пациентами (FR-29): последнее сообщение и счётчик.
+
+    Превью дешифруется сервером (content — EncryptedText) и обрезается до
+    CHAT_PREVIEW_MAX; в логи не попадает. Аудит не пишем: сводка для списка —
+    чтение внутри уже разрешённой roster-переписки.
+    """
+    patient_ids = list(db.scalars(
+        select(ClinicianRoster.patient_id).where(ClinicianRoster.clinician_id == clinician_id)
+    ))
+    if not patient_ids:
+        return []
+
+    stats = {
+        pid: (int(cnt), last_at)
+        for pid, cnt, last_at in db.execute(
+            select(ChatMessage.patient_id, func.count(), func.max(ChatMessage.created_at))
+            .where(ChatMessage.patient_id.in_(patient_ids))
+            .group_by(ChatMessage.patient_id)
+        )
+    }
+    if not stats:
+        return []
+
+    # Последнее сообщение каждого пациента: оконная функция выбирает id, сами
+    # сообщения грузим ORM-сущностью — иначе TypeDecorator не расшифрует content.
+    rn = func.row_number().over(
+        partition_by=ChatMessage.patient_id,
+        order_by=ChatMessage.created_at.desc(),
+    ).label("rn")
+    last_ids = select(ChatMessage.id, rn).where(
+        ChatMessage.patient_id.in_(list(stats))
+    ).subquery()
+    ids = list(db.scalars(select(last_ids.c.id).where(last_ids.c.rn == 1)))
+    last_messages = {
+        m.patient_id: m
+        for m in db.scalars(select(ChatMessage).where(ChatMessage.id.in_(ids)))
+    }
+    fios = {
+        u.id: (u.fio or u.email)
+        for u in db.scalars(select(User).where(User.id.in_(list(stats))))
+    }
+
+    items = []
+    for pid, (count, last_at) in stats.items():
+        msg = last_messages.get(pid)
+        preview = (msg.content or "").strip() if msg is not None else ""
+        if len(preview) > CHAT_PREVIEW_MAX:
+            preview = preview[: CHAT_PREVIEW_MAX - 1].rstrip() + "…"
+        items.append({
+            "patient_id": str(pid),
+            "fio": fios.get(pid),
+            "last_at": (msg.created_at if msg is not None else last_at).isoformat(),
+            "last_sender": msg.sender if msg is not None else None,
+            "preview": preview,
+            "message_count": count,
+        })
+    items.sort(key=lambda i: i["last_at"], reverse=True)
+    return items
 
 
 def import_history(db: Session, clinician_id, patient_id, text: str, template_name: str | None, ip: str | None = None) -> dict:

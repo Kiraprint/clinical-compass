@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { api, AdverseSeverity, ApiError, Assessment, ClinicianAdverseEvent, ClinicianReminder, Drug, EmiasSummary, Escalation, HistoryType, ImportHistoryResult, PatientCard, PatientContacts, PatientHistoryItem, PatientMedication, RemindersResponse, Report, Visit } from "../api";
+import { api, AdverseSeverity, ApiError, Assessment, ClinicianAdverseEvent, ClinicianReminder, Drug, EmiasSummary, Escalation, HistoryType, ImportHistoryResult, PatientCard, PatientChatMessage, PatientContacts, PatientHistoryItem, PatientMedication, RemindersResponse, Report, Visit } from "../api";
 import TrendChart from "../TrendChart";
-import AssistantTab from "./AssistantTab";
+import ChatsView from "./ChatsView";
 import DrugLibraryTab from "./DrugLibraryTab";
 
 const MED_STATUS_LABELS: Record<string, string> = {
@@ -162,7 +162,9 @@ function EscalationsQueue({
 
 
 export default function ClinicianView() {
-  const [section, setSection] = useState<"patients" | "assistant" | "library">("patients");
+  const [section, setSection] = useState<"patients" | "chats" | "library">("patients");
+  // FR-29: выбранный пациент на экране «Чаты» (deep-link #chats=patient:<id>).
+  const [chatPatient, setChatPatient] = useState<string | null>(null);
   const [filter, setFilter] = useState<(typeof TRIAGE_FILTERS)[number]>("");
   const [cards, setCards] = useState<PatientCard[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -232,6 +234,14 @@ export default function ClinicianView() {
   // чтобы клик по уведомлению об эскалации открывал нужного пациента.
   useEffect(() => {
     const applyHash = () => {
+      // FR-29: #chats=patient:<id> — прямой переход к переписке с пациентом.
+      const chat = window.location.hash.match(/chats=patient:([0-9a-fA-F-]+)/);
+      if (chat) {
+        setSection("chats");
+        setChatPatient((cur) => (cur === chat[1] ? cur : chat[1]));
+        setSelected(null);
+        return;
+      }
       const m = window.location.hash.match(/patient=([0-9a-fA-F-]+)/);
       const pid = m ? m[1] : null;
       if (pid) setSection("patients");
@@ -266,17 +276,51 @@ export default function ClinicianView() {
     };
   }, [selected, reportVersion]);
 
-  if (section === "assistant") {
+  // FR-29: навигация врача — Пациенты · Чаты · Библиотека · Все напоминания.
+  const nav = (
+    <div className="tabs top-tabs">
+      <button
+        className={section === "patients" && !showReminders ? "active" : ""}
+        onClick={() => {
+          setSection("patients");
+          setShowReminders(false);
+        }}
+      >
+        Пациенты
+      </button>
+      <button className={section === "chats" ? "active" : ""} onClick={() => setSection("chats")}>
+        Чаты
+      </button>
+      <button
+        className={section === "library" ? "active" : ""}
+        onClick={() => setSection("library")}
+      >
+        Библиотека
+      </button>
+      <button
+        className={`push-right${section === "patients" && showReminders ? " active" : ""}`}
+        onClick={() => {
+          setSection("patients");
+          setShowReminders((v) => !v);
+        }}
+      >
+        Все напоминания
+        {overdueCount > 0 && <span className="count-badge">{overdueCount}</span>}
+      </button>
+    </div>
+  );
+
+  if (section === "chats") {
     return (
       <>
-        <div className="tabs">
-          <button onClick={() => setSection("patients")}>Пациенты</button>
-          <button className="active" onClick={() => setSection("assistant")}>
-            Ассистент
-          </button>
-          <button onClick={() => setSection("library")}>Библиотека</button>
-        </div>
-        <AssistantTab />
+        {nav}
+        <ChatsView
+          patientId={chatPatient}
+          onSelectPatient={(id) => {
+            setChatPatient(id);
+            if (id) window.location.hash = `chats=patient:${id}`;
+          }}
+        />
       </>
     );
   }
@@ -284,13 +328,7 @@ export default function ClinicianView() {
   if (section === "library") {
     return (
       <>
-        <div className="tabs">
-          <button onClick={() => setSection("patients")}>Пациенты</button>
-          <button onClick={() => setSection("assistant")}>Ассистент</button>
-          <button className="active" onClick={() => setSection("library")}>
-            Библиотека
-          </button>
-        </div>
+        {nav}
         <DrugLibraryTab />
       </>
     );
@@ -298,34 +336,7 @@ export default function ClinicianView() {
 
   return (
     <>
-      <div className="tabs">
-        <button className="active" onClick={() => setSection("patients")}>
-          Пациенты
-        </button>
-        <button onClick={() => setSection("assistant")}>Ассистент</button>
-        <button onClick={() => setSection("library")}>Библиотека</button>
-        <button
-          className={showReminders ? "active" : ""}
-          onClick={() => setShowReminders((v) => !v)}
-          style={{ marginLeft: "auto" }}
-        >
-          Напоминания
-          {overdueCount > 0 && (
-            <span
-              style={{
-                marginLeft: 6,
-                background: "#d32f2f",
-                color: "#fff",
-                borderRadius: 8,
-                padding: "0 6px",
-                fontSize: 12,
-              }}
-            >
-              {overdueCount}
-            </span>
-          )}
-        </button>
-      </div>
+      {nav}
       <div className="tabs">
         {TRIAGE_FILTERS.map((f) => (
           <button key={f} className={filter === f ? "active" : ""} onClick={() => setFilter(f)}>
@@ -354,7 +365,10 @@ export default function ClinicianView() {
       {!selected ? (
         <div className="card">
           <h2>Мои пациенты ({cards.length})</h2>
-          {cards.length === 0 && <p style={{ color: "#5a6478" }}>Нет пациентов в выбранном фильтре.</p>}
+          <p className="muted small">
+            Сначала красные: выше — больше открытых эскалаций и более свежая оценка.
+          </p>
+          {cards.length === 0 && <p className="muted">Нет пациентов в выбранном фильтре.</p>}
           <div className="table-wrap">
             <table className="patients">
               <thead>
@@ -411,15 +425,16 @@ export default function ClinicianView() {
           onBack={() => { window.location.hash = ""; }}
           onRefresh={() => setReportVersion((v) => v + 1)}
           onOpenLibrary={() => { setSelected(null); setSection("library"); }}
+          onOpenChats={(pid) => { window.location.hash = `chats=patient:${pid}`; }}
         />
       )}
     </>
   );
 }
 
-function ReportView({ report, error, onBack, onRefresh, onOpenLibrary }: {
+function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenChats }: {
   report: Report | null; error: string; onBack: () => void; onRefresh: () => void;
-  onOpenLibrary: () => void;
+  onOpenLibrary: () => void; onOpenChats: (patientId: string) => void;
 }) {
   const [picked, setPicked] = useState<string[]>([]);
   const [scaleSaved, setScaleSaved] = useState<number | null>(null);
@@ -434,9 +449,7 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary }: {
   const [aeList, setAeList] = useState<Report["adverse_events"]>([]);
   // FR-28: справочник ГРЛС для связи НЯ с препаратом (доступ врачу).
   const [drugs, setDrugs] = useState<Drug[]>([]);
-  const [chatMsgs, setChatMsgs] = useState<{ id: string; sender: string; content: string; created_at: string }[]>([]);
-  const [chatInput, setChatInput] = useState("");
-  const [chatErr, setChatErr] = useState("");
+  const [chatMsgs, setChatMsgs] = useState<PatientChatMessage[]>([]);
   const [histText, setHistText] = useState("");
   const [histResult, setHistResult] = useState<ImportHistoryResult | null>(null);
   const [assessCode, setAssessCode] = useState("");
@@ -564,17 +577,6 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary }: {
     }
   };
 
-  const sendChat = async () => {
-    if (!report || !chatInput.trim()) return;
-    setChatErr("");
-    try {
-      const m = await api.clinicianChatPost(report.patient_id, chatInput.trim());
-      setChatMsgs([...chatMsgs, m]);
-      setChatInput("");
-    } catch (e: unknown) {
-      setChatErr(e instanceof Error ? e.message : String(e));
-    }
-  };
 
   const runImport = async () => {
     if (!report || !histText.trim()) return;
@@ -621,6 +623,9 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary }: {
       </h2>
 
       <ContactsBlock patientId={report.patient_id} hasConsent={report.contacts !== null} />
+      <Collapsible storageKey="cc.clinician.reminders" summary="Напоминания">
+        <PatientReminders patientId={report.patient_id} />
+      </Collapsible>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <Collapsible storageKey="cc.clinician.screening-scales" summary="Шкалы скрининга">
@@ -934,22 +939,20 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary }: {
       </div>
       {aeError && <p className="error">{aeError}</p>}
 
-      <h3>Переписка с пациентом (задача кейса 6)</h3>
-      <div style={{ maxHeight: 280, overflowY: "auto", marginBottom: 8 }}>
-        {chatMsgs.length > 0 ? chatMsgs.map((m) => (
+      <h3>Переписка с пациентом</h3>
+      <div className="chat-mini">
+        {chatMsgs.length > 0 ? chatMsgs.slice(-3).map((m) => (
           <div key={m.id} className={`msg ${m.sender === "SYSTEM" ? "system" : ""}`}>
             <b>{m.sender === "CLINICIAN" ? "Врач: " : m.sender === "SYSTEM" ? "Помощник: " : "Пациент: "}</b>
             {m.content}
           </div>
-        )) : <p style={{ color: "#5a6478", fontSize: 13 }}>Переписки пока нет.</p>}
+        )) : <p className="muted small">Переписки пока нет.</p>}
       </div>
       <div className="row">
-        <input placeholder="Сообщение пациенту" value={chatInput}
-          onChange={(e) => setChatInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && sendChat()} />
-        <button onClick={sendChat} disabled={!chatInput.trim()}>Отправить</button>
+        <button className="ghost" onClick={() => onOpenChats(report.patient_id)}>
+          Открыть в чатах
+        </button>
       </div>
-      {chatErr && <p className="error">{chatErr}</p>}
 
       <h3>Приёмы (запись беседы врач-пациент)</h3>
       <div style={{ display: "flex", flexDirection: "column", gap: 6, maxWidth: 560, marginTop: 8 }}>
@@ -1625,6 +1628,170 @@ const REMINDER_GROUPS: { key: NonNullable<ClinicianReminder["due_state"]>; label
   { key: "soon", label: "Ближайшие 7 дней" },
   { key: "later", label: "Позже" },
 ];
+const REMINDER_STATE_LABELS: Record<string, string> = {
+  overdue: "просрочено",
+  today: "сегодня",
+  soon: "скоро",
+  later: "позже",
+};
+
+function nextHourLocal(): string {
+  const d = new Date(Date.now() + 3600_000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function fmtDue(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+// FR-24: напоминания выбранного пациента — прямо в карточке (п.3 фидбека).
+function PatientReminders({ patientId }: { patientId: string }) {
+  const [data, setData] = useState<RemindersResponse>({ items: [], overdue: 0 });
+  const [formOpen, setFormOpen] = useState(false);
+  const [kind, setKind] = useState<ClinicianReminder["kind"]>("call");
+  const [note, setNote] = useState("");
+  const [due, setDue] = useState(nextHourLocal);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const reload = () => {
+    api
+      .clinicianPatientReminders(patientId)
+      .then((r) => {
+        setData(r);
+        setErr("");
+      })
+      .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)));
+  };
+
+  useEffect(() => {
+    reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [patientId]);
+
+  const create = async () => {
+    if (!due) {
+      setErr("Укажите срок");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.createReminder({
+        patient_id: patientId,
+        kind,
+        note: note.trim() || null,
+        due_at: new Date(due).toISOString(),
+      });
+      setNote("");
+      setFormOpen(false);
+      reload();
+    } catch (e: unknown) {
+      setErr(e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const act = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    try {
+      await fn();
+      reload();
+    } catch (e: unknown) {
+      setErr(e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const snooze = (r: ClinicianReminder) => {
+    const next = new Date(r.due_at);
+    next.setDate(next.getDate() + 1);
+    return act(() => api.patchReminder(r.id, { due_at: next.toISOString() }));
+  };
+
+  return (
+    <div className="reminders-block">
+      <div className="row">
+        <button className="ghost" onClick={() => setFormOpen((v) => !v)}>
+          {formOpen ? "Скрыть форму" : "Добавить напоминание"}
+        </button>
+        <span className="muted small">
+          {data.overdue > 0 ? `Просрочено: ${data.overdue}` : "Просроченных нет"}
+        </span>
+      </div>
+      {formOpen && (
+        <div className="reminder-form">
+          <select
+            aria-label="Вид напоминания"
+            value={kind}
+            onChange={(e) => setKind(e.target.value as ClinicianReminder["kind"])}
+          >
+            {REMINDER_KINDS.map((k) => (
+              <option key={k.value} value={k.value}>
+                {k.label}
+              </option>
+            ))}
+          </select>
+          <input
+            type="datetime-local"
+            aria-label="Срок напоминания"
+            value={due}
+            onChange={(e) => setDue(e.target.value)}
+          />
+          <input
+            placeholder="Комментарий"
+            aria-label="Комментарий к напоминанию"
+            value={note}
+            maxLength={2000}
+            onChange={(e) => setNote(e.target.value)}
+          />
+          <button onClick={() => void create()} disabled={busy || !due}>
+            Создать
+          </button>
+        </div>
+      )}
+      {data.items.length === 0 ? (
+        <p className="muted small">Напоминаний по пациенту нет.</p>
+      ) : (
+        <ul className="reminder-list">
+          {data.items.map((r) => (
+            <li key={r.id} className={`reminder-item ${r.due_state ?? ""}`}>
+              <div className="reminder-main">
+                <strong>{r.kind_label}</strong>
+                <span className="muted small"> · {fmtDue(r.due_at)}</span>
+                {r.due_state && (
+                  <span className="reminder-state">{REMINDER_STATE_LABELS[r.due_state]}</span>
+                )}
+                {r.note && <div className="reminder-note">{r.note}</div>}
+              </div>
+              <div className="reminder-actions">
+                <button className="ghost" disabled={busy} onClick={() => void act(() => api.doneReminder(r.id))}>
+                  Выполнено
+                </button>
+                <button className="ghost" disabled={busy} onClick={() => void snooze(r)}>
+                  Сдвинуть на день
+                </button>
+                <button className="ghost" disabled={busy} onClick={() => void act(() => api.cancelReminder(r.id))}>
+                  Отменить
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+      {err && <p className="error">{err}</p>}
+    </div>
+  );
+}
 
 function RemindersPanel({ cards, onChanged }: { cards: PatientCard[]; onChanged: () => void }) {
   const [data, setData] = useState<RemindersResponse>({ items: [], overdue: 0 });
