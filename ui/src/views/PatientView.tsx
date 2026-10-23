@@ -480,7 +480,7 @@ function TodayTab() {
       <div className="two">
         <div>
           <label>Настроение</label>
-          <div className="row">
+          <div className="row mood">
             {MOOD_OPTIONS.map((option, v) => (
               <button
                 key={v}

@@ -79,8 +79,8 @@ test("«Сегодня»: первый шаг — 7 пунктов ядра; н�
   // Дневник: настроение — 5 кнопок 0..4, сон — часы.
   const content = `День прошёл ровно ${Date.now()}`;
   await page.locator("#today-diary").fill(content);
-  await expect(page.getByRole("button", { name: /Очень плохо|Плохо|Так себе|Хорошо|Отлично/ })).toHaveCount(5);
-  await page.getByRole("button", { name: /Отлично/ }).click();
+  await expect(page.locator(".mood").getByRole("button")).toHaveCount(5);
+  await page.locator(".mood").getByRole("button", { name: /Отлично/ }).click();
   await page.getByRole("button", { name: "Принял", exact: true }).click();
   await page.getByPlaceholder("Препарат (напр. Авиандр) — необязательно").fill("Авиандр");
   await page.getByRole("button", { name: "Сохранить за сегодня" }).click();
@@ -88,7 +88,7 @@ test("«Сегодня»: первый шаг — 7 пунктов ядра; н�
   // Неполный чек-ин не мешает сохранить дневник и приём лекарств.
   await expect(page.getByText("Сохранено: дневник · приём лекарств")).toBeVisible();
   await expect(page.getByText(content)).toBeVisible();
-  await expect(page.getByText("😄 Отлично")).toBeVisible();
+  await expect(page.locator(".msg", { hasText: content }).getByText("😄 Отлично")).toBeVisible();
   await expect(page.getByText(/За сегодня отмечено: Принял/)).toBeVisible();
   await expect(page.getByText("Чек-ин за сегодня выполнен")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Далее" })).toBeVisible();
