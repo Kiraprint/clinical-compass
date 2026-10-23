@@ -44,6 +44,40 @@ EN-источникам). Метрики: **Recall@1/5/10, nDCG@10, MRR@10**.
 Модели тянутся с HF при первом запуске (bge-m3 ≈ 2.3 ГБ; GPU считает 108 чанков
 за секунды, CPU — минуты).
 
+## Замер на прикладном пути API (`eval_app_path.py`)
+
+`run_bench.py` — упрощённый harness (свой косинусный поиск). `eval_app_path.py`
+меряет **реальную логику приложения**: индексация через
+`app.services.kb.upsert_documents`, поиск через `app.services.kb.hybrid_search`
+(NamedVector dense+sparse → prefetch/RRF либо dense-only, как в проде) в
+изолированной коллекции Qdrant. Метрики: **RU/EN nDCG@3 и Recall@3** (целевые
+для русскоязычного поиска), nDCG@10/MRR@10, латентность p50/p95, время
+индексации и память модели.
+
+```bash
+# env: torch + FlagEmbedding + sentence-transformers + qdrant-client
+python bench/eval_app_path.py --profile hash    --collection kb_eval_hash
+python bench/eval_app_path.py --profile bge-m3  --collection kb_eval_bge \
+    --json-out bench/data/eval_app_bge_m3.json
+python bench/eval_app_path.py --profile e5      --collection kb_eval_e5     # альтернатива
+python bench/eval_app_path.py --profile frida   --collection kb_eval_frida  # альтернатива
+```
+
+Коллекция пересоздаётся на каждый прогон; `kb`/`kb_test` использовать нельзя.
+Результат (55 запросов, 108 чанков, RTX 5090, fp16; hash — RRF, нейросетевые —
+dense-only, как в проде):
+
+| Профиль | RU nDCG@3 | RU R@3 | EN nDCG@3 | EN R@3 | all nDCG@10 | p50/p95, мс | Индексация | RAM/VRAM |
+|---|---|---|---|---|---|---|---|---|
+| hash | 0.142 | 0.139 | 0.413 | 0.450 | 0.434 | 6/8 | 0.5 с | 0.9 ГБ / — |
+| **bge-m3** | **0.776** | **0.819** | 0.723 | 0.787 | 0.815 | 49/92 | 4.4 с | 4.6 ГБ / 1.1 ГБ |
+| e5-large | 0.616 | 0.611 | 0.739 | 0.860 | 0.788 | 17/37 | 4.5 с | 3.6 ГБ / 2.2 ГБ |
+| FRIDA | 0.635 | 0.653 | 0.710 | 0.775 | 0.788 | 47/74 | 23.6 с | 4.3 ГБ / 3.2 ГБ |
+
+Вывод: RU-качество на прод-пути растёт в 5.5x (nDCG@3 0.142 → 0.776). bge-m3 —
+прод-профиль (`CC_EMBEDDER=bge-m3`, extra `embeddings`), **с переиндексацией
+коллекции** (dense 512 → 1024, docs/08 §4).
+
 ## Результат (55 запросов, nDCG@10; плотности: dense / dense+sparse RRF / dense+BM25 RRF)
 
 | Модель | dense | hybrid (RRF) | +BM25 | R@1(dense) | R@5(dense) | R@10(dense) | MRR(dense) |

@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from compass.models import AUDIENCE_CLINICIAN, AUDIENCE_PATIENT, RiskFlag, ScaleResult
@@ -127,37 +128,65 @@ async def create_clinician_assessment(
 
 
 async def list_patients(db: AsyncSession, clinician_id, triage: str | None = None) -> list[dict]:
-    rows = (await db.scalars(select(ClinicianRoster).where(ClinicianRoster.clinician_id == clinician_id))).all()
+    """Roster-список врача: 4 запроса независимо от числа пациентов (было N+1).
+
+    Порядок карточек — порядок строк clinician_roster; за пациентов без
+    assessment/escalation отдаём None/0, а не отбрасываем.
+    """
+    patient_ids = (await db.scalars(
+        select(ClinicianRoster.patient_id).where(ClinicianRoster.clinician_id == clinician_id)
+    )).all()
+    if not patient_ids:
+        return []
+
+    patients = {p.id: p for p in (await db.scalars(select(User).where(User.id.in_(patient_ids)))).all()}
+    # DISTINCT ON (patient_id) + ORDER BY computed_at DESC — ровно та же «последняя»
+    # оценка, что давал прежний запрос с order_by(...).first().
+    latest = {
+        r.patient_id: r
+        for r in (await db.execute(
+            select(
+                Assessment.patient_id,
+                Assessment.total_score,
+                Assessment.severity,
+                Assessment.triage,
+                Assessment.computed_at,
+            )
+            .where(Assessment.patient_id.in_(patient_ids))
+            .ext(distinct_on(Assessment.patient_id))
+            .order_by(Assessment.patient_id, Assessment.computed_at.desc(), Assessment.id.desc())
+        )).all()
+    }
+    open_esc = dict(
+        (await db.execute(
+            select(Escalation.patient_id, func.count())
+            .where(Escalation.patient_id.in_(patient_ids), Escalation.resolved_at.is_(None))
+            .group_by(Escalation.patient_id)
+        )).all()
+    )
+
     cards = []
-    for row in rows:
-        patient = await db.get(User, row.patient_id)
+    for patient_id in patient_ids:
+        patient = patients.get(patient_id)
         if patient is None:
             continue
-        last = await db.scalar(
-            select(Assessment)
-            .where(Assessment.patient_id == row.patient_id)
-            .order_by(Assessment.computed_at.desc())
-        )
+        last = latest.get(patient_id)
 
         last_triage = last.triage if last else None
         if triage is not None and last_triage != triage:
             continue  # игнорируем, если фильтр не совпадает
 
-        open_esc = await db.scalar(
-            select(func.count())
-            .select_from(Escalation)
-            .where(Escalation.patient_id == row.patient_id, Escalation.resolved_at.is_(None))
-        )
+
         contacts = contacts_payload(patient, masked=True)  # FR-22: телефон — только маска
         cards.append({
-            "patient_id": str(row.patient_id),
+            "patient_id": str(patient_id),
             "email": patient.email,
             "fio": patient.fio,
             "last_triage": last_triage,
             "last_score": last.total_score if last else None,
             "last_severity": last.severity if last else None,
             "last_assessment_at": last.computed_at.isoformat() if last else None,
-            "open_escalations": open_esc or 0,
+            "open_escalations": open_esc.get(patient_id) or 0,
             "phone": contacts["phone"],
             "birth_date": contacts["birth_date"],
             "age": contacts["age"],
@@ -278,7 +307,7 @@ async def _patient_card(db: AsyncSession, patient_id) -> dict:
         "routing": routing,
         "adherence": adherence,
         "adverse_events": [
-            _adverse_event_dict(e) for e in (await db.scalars(
+            await _adverse_event_dict(db, e) for e in (await db.scalars(
                 select(AdverseEvent)
                 .where(AdverseEvent.patient_id == patient_id)
                 .order_by(AdverseEvent.onset_date.desc(), AdverseEvent.created_at.desc())
@@ -363,41 +392,37 @@ async def create_adverse_event(
     suspected_drug: str | None, action_taken: str | None,
     ip: str | None = None,
 ) -> dict:
-    """Регистрация нежелательного явления (задача кейса 3). Roster + аудит ADVERSE_EVENT."""
+    """Регистрация НЯ врачом (FR-28 legacy): сразу confirmed, автор — врач."""
     await _require_roster(db, clinician_id, patient_id)
     ev = AdverseEvent(
         patient_id=patient_id, clinician_id=clinician_id,
         event_text=event_text, severity=severity, onset_date=onset_date,
         suspected_drug=suspected_drug, action_taken=action_taken,
+        reported_by="clinician", status="confirmed",
     )
     db.add(ev)
     await db.flush()
     await audit_record(db, clinician_id, "ADVERSE_EVENT", "patient", str(patient_id), ip=ip)
     await db.commit()
-    return _adverse_event_dict(ev)
+    return await _adverse_event_dict(db, ev)
 
 
 async def list_adverse_events(db: AsyncSession, clinician_id, patient_id) -> list[dict]:
-    """Список НЯ пациента (задача кейса 3). Roster-гейт."""
+    """Список НЯ пациента (FR-28): статус проверки + ссылка на справочник."""
     await _require_roster(db, clinician_id, patient_id)
     rows = (await db.scalars(
         select(AdverseEvent)
         .where(AdverseEvent.patient_id == patient_id)
         .order_by(AdverseEvent.onset_date.desc(), AdverseEvent.created_at.desc())
     )).all()
-    return [_adverse_event_dict(e) for e in rows]
+    return [await _adverse_event_dict(db, e) for e in rows]
 
 
-def _adverse_event_dict(e: AdverseEvent) -> dict:
-    return {
-        "id": str(e.id),
-        "event_text": e.event_text,
-        "severity": e.severity,
-        "onset_date": e.onset_date.isoformat(),
-        "suspected_drug": e.suspected_drug,
-        "action_taken": e.action_taken,
-        "created_at": e.created_at.isoformat(),
-    }
+async def _adverse_event_dict(db: AsyncSession, e: AdverseEvent) -> dict:
+    """Единый формат НЯ для врача (см. services/adverse.event_dict)."""
+    from .adverse import event_dict
+
+    return await event_dict(db, e)
 
 
 

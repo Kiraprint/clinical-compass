@@ -125,6 +125,7 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | E11 | Контакты пациента в карточке: `users.phone` (шифруется) + `users.birth_date`, нормализация РФ-номера, маскирование в витринах, self-service пациента, уничтожение при отзыве согласия | FR-22 | `test_patient_contacts.py` (RBAC/roster, нормализация и границы даты, маска в списке, аудит, отзыв согласия) + `npm run build` |
 | E12 | История приёма и назначений: `patient_medications` для назначений врача (`source`, `clinician_id`, `ended_on`, `notes`; импорт ЕМИАС read-only), CRUD назначений и остановка приёма, единая лента карточки (приёмы/назначения/скрининги/НЯ) с курсором и фильтром типов, блоки «Назначения» и «История пациента» в UI | FR-23 | `test_patient_medications.py`, `test_patient_history.py` (roster/IDOR, шифрование, EMIAS read-only, валидация, курсор, аудит, отзыв согласия) + `npm run build` |
 | E13 | Напоминания врача по пациентам: `clinician_reminders` (kind/note/sha), roster-скоуп, фильтры срока, done/cancel, доставка воркером `python -m app.reminders_worker` (advisory-lock, `notifications.reminder_id`), панель «Напоминания» и бейдж просроченных в UI | FR-24 | `test_reminders.py` (RBAC/IDOR, фильтры срока, переходы, шифрование note, тик воркера + идемпотентность, advisory-lock, отзыв согласия) + `docker compose config` + `npm run build` |
+| E14 | НЯ от пациента и проверка врачом: `adverse_events` (`reported_by`, `status`, `verified_by/at`, `verification_note`, `drug_id` → справочник ГРЛС, `medication_id` → назначение), очередь врача и PATCH проверки, уведомление ростерных врачей о серьёзном НЯ без ПДн, UI пациента (форма + статусы + 112 при severe) и карточки врача (плашка «НЯ на проверке», форма проверки, фрагмент справочника) | FR-28 | `test_adverse_events.py` (pending/confirm/reject, идемпотентность и 409, 404/422, уведомление без ПДн, шифрование, отзыв согласия) + `npm run build` |
 
 ## 5. DoD (Definition of Done) эпика
 
@@ -164,6 +165,7 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | FR-23 | E12 | `test_patient_medications.py`, `test_patient_history.py` (roster/IDOR, шифрование в покое, EMIAS read-only, валидация дат, курсор/фильтр ленты, аудит, отзыв согласия) |
 | FR-24 | E13 | `test_reminders.py` (RBAC/IDOR, фильтры overdue/today/week, done/cancel, шифрование note, тик воркера и идемпотентность, advisory-lock, отзыв согласия) |
 | FR-25 | E10 | `test_emias_mock.py`, `test_emias_client.py`, `test_emias_mapping.py`, `test_emias_sync.py`, `test_emias_api.py` |
+| FR-28 | E14 | `test_adverse_events.py` (pending/confirm/reject, 409 `ADVERSE_ALREADY_VERIFIED`, 404 `ADVERSE_NOT_FOUND`/`DRUG_NOT_FOUND`, 422 `MEDICATION_NOT_FOUND`, уведомление без ПДн, шифрование `event_text`/`verification_note`, отзыв согласия) |
 
 ## 7. Границы инкремента
 

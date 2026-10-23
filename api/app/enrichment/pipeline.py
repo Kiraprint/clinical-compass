@@ -34,7 +34,7 @@ from app.enrichment import dedupe, design as design_mod, index as index_mod, pub
 from app.enrichment.config import EnrichmentConfig
 from app.enrichment.types import VERDICT_MET, SourceDocument
 from app.models import KBRun, KBWork
-from app.services.embeddings import build_embedder
+from app.services.embeddings import get_embedder
 
 
 
@@ -271,7 +271,7 @@ async def execute(
 ) -> RunSummary:
     """Один прогон. documents/query_plan позволяют прогнать фикстуры оффлайн."""
     today = today or dt.date.today()
-    embedder = build_embedder()
+    embedder = get_embedder()
     run: KBRun | None = None
     run_id: str | None = None
     if not dry_run:

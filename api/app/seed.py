@@ -100,6 +100,11 @@ def _seed_drugs(s) -> None:
     s.execute(delete(Drug))
     s.add_all(_drug_rows(payload))
     s.flush()
+    # drugs — источник чанков корпуса (kb_seed._drug_docs): сбрасываем кеш корпуса,
+    # иначе python -m app.kb_seed / тесты увидят старые чанки до истечения TTL.
+    from app.kb_seed import clear_corpus_cache
+
+    clear_corpus_cache()
     print(f"[seed] drugs: {len(payload)} в таблице (источник для KB-чанков и /drugs)")
 
 
@@ -111,6 +116,10 @@ async def _seed_drugs_async(s) -> None:
     await s.execute(delete(Drug))
     s.add_all(_drug_rows(payload))
     await s.flush()
+    # См. _seed_drugs: срез препаратов в кеше корпуса устарел.
+    from app.kb_seed import clear_corpus_cache
+
+    clear_corpus_cache()
     print(f"[seed] drugs: {len(payload)} в таблице (источник для KB-чанков и /drugs)")
 
 

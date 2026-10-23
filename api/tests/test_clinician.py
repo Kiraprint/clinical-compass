@@ -1,10 +1,15 @@
 # E5: панель врача, roster, аудит доступа. Контракт: docs/04 §3.1; docs/06 §3.
-from datetime import datetime
+import uuid
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from app.models import AuditLog
+from sqlalchemy import event
 
-from .conftest import admin_ctx, auth_header, clinician_ctx, finish_screening, patient_ctx
+from app import db as db_module
+from app.models import Assessment, AuditLog, ClinicianRoster, Escalation, Run, User
+from app.services import clinician as clinician_service
+
+from .conftest import admin_ctx, auth_header, clinician_ctx, finish_screening, patient_ctx, run_async
 
 PHQ_ALL = {f"q{i}": 0 for i in range(1, 10)}
 
@@ -472,3 +477,132 @@ def test_clinician_assessment_patient_forbidden(client):
         json={"questionnaire_code": "HDRS-17", "answers": HDRS_ALL_ZERO}, headers=h,
     )
     assert resp.status_code == 403
+
+
+def _seed_roster_case(db, clinician_id, count: int) -> list[str]:
+    """Пациенты с перемешанными данными: GREEN/RED/YELLOW, без оценки,
+    две оценки, открытые и закрытые эскалации. Возвращает id в порядке roster."""
+    base = datetime(2026, 1, 1, 9, 0, tzinfo=timezone.utc)
+    patient_ids: list[str] = []
+    for i in range(count):
+        patient = User(
+            email=f"n1p{i}@test.ru",
+            fio=f"Пациентов {i}",
+            password_hash="x",
+            role="PATIENT",
+            phone="+79261234567" if i == 0 else None,
+            birth_date=date(1990, 5, 15) if i == 0 else None,
+        )
+        db.add(patient)
+        db.flush()
+        patient_uuid = patient.id
+        patient_ids.append(str(patient_uuid))
+        db.add(ClinicianRoster(
+            clinician_id=clinician_id,
+            patient_id=patient_uuid,
+            granted_at=base + timedelta(minutes=i),
+        ))
+
+        # 0..9 GREEN, 10..13 RED, 14 YELLOW, 15..17 без оценок,
+        # 18 — две оценки (последняя RED), 19..23 RED.
+        if i in range(15, 18):
+            continue
+        if i == 18:
+            scores = ((3, "GREEN", base), (17, "RED", base + timedelta(days=1)))
+        else:
+            triage = "GREEN" if i < 10 else ("YELLOW" if i == 14 else "RED")
+            scores = ((i, triage, base),)
+        for total, triage, when in scores:
+            run = Run(patient_id=patient_uuid, questionnaire_code="PHQ-9", mode="SCREENING",
+                      finished_at=when)
+            db.add(run)
+            db.flush()
+            db.add(Assessment(run_id=run.id, patient_id=patient_uuid, total_score=total,
+                              severity="MODERATE", triage=triage, risk_flags=[], computed_at=when))
+
+    # p10 — 2 открытые + 1 закрытая, p11 — 1 открытая, p12 — только закрытая.
+    for idx, resolved in ((10, False), (10, False), (10, True), (11, False), (12, True)):
+        db.add(Escalation(
+            patient_id=uuid.UUID(patient_ids[idx]),
+            kind="SEVERE",
+            resolved_at=base + timedelta(days=2) if resolved else None,
+        ))
+    db.commit()
+    return patient_ids
+
+
+def test_list_patients_batches_queries(db_session):
+    """N+1 → константа: <=4 запроса при любом размере roster + прежние поля/значения.
+
+    async-db: считаем на sync_engine async-движка, т.е. запросы самой сессии
+    запроса (request-path идёт через AsyncSession).
+    """
+    db = db_session
+    clinician = User(email="n1c@test.ru", password_hash="x", role="CLINICIAN",
+                     totp_secret="SECRET")
+    db.add(clinician)
+    db.flush()
+    clinician_id = clinician.id
+    patient_ids = _seed_roster_case(db, clinician_id, 24)
+
+    statements: list[str] = []
+
+    def _count(conn, cursor, statement, params, context, executemany):
+        statements.append(statement)
+
+    async_engine = db_module.engine.sync_engine
+    event.listen(async_engine, "before_cursor_execute", _count)
+    try:
+        async def _load(session):
+            cards = await clinician_service.list_patients(session, clinician_id)
+            full_count = len(statements)
+            statements.clear()
+            red_cards = await clinician_service.list_patients(session, clinician_id, "RED")
+            return cards, full_count, red_cards, len(statements)
+
+        cards, full_count, red_cards, red_count = run_async(_load)
+    finally:
+        event.remove(async_engine, "before_cursor_execute", _count)
+
+    assert full_count <= 4, statements
+    assert red_count <= 4, statements
+    assert full_count == red_count  # фильтр не добавляет запросов на пациента
+
+    # Порядок показываем как порядок roster; никого не теряем.
+    assert [c["patient_id"] for c in cards] == patient_ids
+    assert len(cards) == len(patient_ids)
+    assert set(cards[0]) == {
+        "patient_id", "email", "fio", "last_triage", "last_score", "last_severity",
+        "last_assessment_at", "open_escalations", "phone", "birth_date", "age",
+    }
+
+    by_id = {c["patient_id"]: c for c in cards}
+    first = by_id[patient_ids[0]]
+    assert first["last_triage"] == "GREEN"
+    assert first["last_score"] == 0
+    assert first["last_severity"] == "MODERATE"
+    assert first["last_assessment_at"] == "2026-01-01T09:00:00+00:00"
+    assert first["phone"] == "+7•••123-45-67"  # FR-22: только маска
+    assert first["birth_date"] == "1990-05-15"
+
+    no_assessment = by_id[patient_ids[15]]
+    assert no_assessment["last_triage"] is None
+    assert no_assessment["last_score"] is None
+    assert no_assessment["last_severity"] is None
+    assert no_assessment["last_assessment_at"] is None
+    assert no_assessment["open_escalations"] == 0
+
+    two_assessments = by_id[patient_ids[18]]
+    assert two_assessments["last_triage"] == "RED"  # берём более новую
+    assert two_assessments["last_score"] == 17
+
+    assert by_id[patient_ids[10]]["open_escalations"] == 2  # закрытая не считается
+    assert by_id[patient_ids[11]]["open_escalations"] == 1
+    assert by_id[patient_ids[12]]["open_escalations"] == 0  # только закрытая
+    assert by_id[patient_ids[13]]["open_escalations"] == 0
+
+    assert [c["patient_id"] for c in red_cards] == [
+        pid for pid in patient_ids if by_id[pid]["last_triage"] == "RED"
+    ]
+    assert all(c["last_triage"] == "RED" for c in red_cards)
+    assert len(red_cards) == len(patient_ids) - 10 - 1 - 3  # не GREEN/YELLOW/без оценки
