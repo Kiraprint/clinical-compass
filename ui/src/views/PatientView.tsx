@@ -12,10 +12,12 @@ import {
   MoodScale,
   Questionnaire,
   Timeline,
+  MyAdverseEvent,
+  AdverseSeverity,
 } from "../api";
 import TrendChart from "../TrendChart";
 
-type Tab = "today" | "screening" | "diary" | "chat" | "trend" | "adherence" | "contacts";
+type Tab = "today" | "screening" | "diary" | "chat" | "trend" | "adherence" | "adverse" | "contacts";
 
 // «Сегодня» — один ежедневный экран: чек-ин + дневник + приём лекарств.
 // Дневник и Приверженность остаются как история, запись идёт только из «Сегодня».
@@ -26,6 +28,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "adherence", label: "Приверженность" },
   { id: "chat", label: "Чат поддержки" },
   { id: "trend", label: "Мой тренд" },
+  { id: "adverse", label: "Побочные эффекты" },
   { id: "contacts", label: "Контакты" },
 ];
 
@@ -95,6 +98,7 @@ export default function PatientView() {
       {tab === "adherence" && <AdherenceTab />}
       {tab === "chat" && <ChatTab />}
       {tab === "trend" && <TrendTab />}
+      {tab === "adverse" && <AdverseTab />}
       {tab === "contacts" && <ContactsTab />}
     </>
   );
@@ -911,6 +915,149 @@ function ContactsTab() {
       </div>
       {age !== null && <p style={{ color: "#5a6478", fontSize: 13 }}>Возраст: {age}</p>}
       {error && <p className="error">{error}</p>}
+    </div>
+  );
+}
+
+// FR-28: пациент сообщает о нежелательном явлении, врач проверяет его в карточке.
+// Статус виден пациенту, врачебные заметки — нет. При тяжёлом явлении форма
+// не обещает мгновенного ответа, а прямо направляет в экстренную помощь.
+function AdverseTab() {
+  const [items, setItems] = useState<MyAdverseEvent[]>([]);
+  const [active, setActive] = useState<{ id: string; title: string }[]>([]);
+  const [text, setText] = useState("");
+  const [severity, setSeverity] = useState<AdverseSeverity>("mild");
+  const [onsetDate, setOnsetDate] = useState(new Date().toISOString().slice(0, 10));
+  const [medId, setMedId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+
+  const load = async () => {
+    const [events, adherence] = await Promise.all([
+      api.myAdverseEvents(),
+      api.getMyAdherence(14),
+    ]);
+    setItems(events.items);
+    setActive(adherence.active_medications);
+  };
+
+  useEffect(() => {
+    load().catch((e: unknown) => setError(e instanceof ApiError ? e.detail : String(e)));
+  }, []);
+
+  const submit = async () => {
+    if (!text.trim()) return;
+    setError("");
+    setSaved(false);
+    setBusy(true);
+    try {
+      await api.reportAdverseEvent({
+        event_text: text.trim(),
+        severity,
+        onset_date: onsetDate,
+        medication_id: medId || undefined,
+      });
+      setText("");
+      setMedId("");
+      setSeverity("mild");
+      setSaved(true);
+      await load();
+    } catch (e: unknown) {
+      setError(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card">
+      <h2>Нежелательные явления</h2>
+      <p style={{ color: "#5a6478", fontSize: 14 }}>
+        Сообщите, если после приёма препарата появились необычные симптомы. Сообщение увидит ваш
+        врач и отметит результат проверки; ответ приходит не мгновенно.
+      </p>
+      <div className="row" style={{ flexWrap: "wrap", gap: 8, alignItems: "flex-start" }}>
+        <textarea
+          value={text}
+          maxLength={1000}
+          rows={3}
+          placeholder="Что случилось (до 1000 символов)"
+          onChange={(e) => setText(e.target.value)}
+          style={{ flex: "1 1 260px", minWidth: 220 }}
+        />
+        <label style={{ fontSize: 13 }}>
+          Тяжесть
+          <select value={severity} onChange={(e) => setSeverity(e.target.value as AdverseSeverity)}>
+            <option value="mild">лёгкое</option>
+            <option value="moderate">умеренное</option>
+            <option value="severe">тяжёлое</option>
+          </select>
+        </label>
+        <label style={{ fontSize: 13 }}>
+          Дата
+          <input
+            type="date"
+            value={onsetDate}
+            onChange={(e) => setOnsetDate(e.target.value)}
+            style={{ maxWidth: 170 }}
+          />
+        </label>
+        <label style={{ fontSize: 13 }}>
+          Препарат
+          <select value={medId} onChange={(e) => setMedId(e.target.value)}>
+            <option value="">не указан</option>
+            {active.map((m) => (
+              <option key={m.id} value={m.id}>{m.title}</option>
+            ))}
+          </select>
+        </label>
+        <button onClick={submit} disabled={busy || !text.trim()}>
+          {busy ? "Отправка…" : "Сообщить"}
+        </button>
+      </div>
+      {severity === "severe" && (
+        <p className="error" style={{ fontWeight: 600 }}>
+          Срочно обратитесь за помощью: 112
+        </p>
+      )}
+      {saved && <p style={{ color: "#2e7d32", fontSize: 13 }}>Сообщение отправлено врачу</p>}
+      {error && <p className="error">{error}</p>}
+
+      {items.length === 0 ? (
+        <p style={{ color: "#5a6478", fontSize: 13 }}>Сообщений пока нет.</p>
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Дата</th><th>Событие</th><th>Тяжесть</th><th>Статус проверки</th></tr>
+            </thead>
+            <tbody>
+              {items.map((e) => (
+                <tr key={e.id}>
+                  <td>{e.onset_date}</td>
+                  <td>{e.event_text}</td>
+                  <td>
+                    <span className={`badge ${e.severity === "severe" ? "RED" : e.severity === "moderate" ? "YELLOW" : "GREEN"}`}>
+                      {e.severity}
+                    </span>
+                    {e.severity === "severe" && (
+                      <div style={{ color: "#b00020", fontSize: 12, marginTop: 4 }}>
+                        Срочно обратитесь за помощью: 112
+                      </div>
+                    )}
+                  </td>
+                  <td>
+                    <span className={`badge ${e.status === "confirmed" ? "GREEN" : e.status === "pending" ? "YELLOW" : ""}`}>
+                      {e.status_label}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

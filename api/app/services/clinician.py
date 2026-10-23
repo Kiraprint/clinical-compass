@@ -278,7 +278,7 @@ def _patient_card(db: Session, patient_id) -> dict:
         "routing": routing,
         "adherence": adherence,
         "adverse_events": [
-            _adverse_event_dict(e) for e in db.scalars(
+            _adverse_event_dict(db, e) for e in db.scalars(
                 select(AdverseEvent)
                 .where(AdverseEvent.patient_id == patient_id)
                 .order_by(AdverseEvent.onset_date.desc(), AdverseEvent.created_at.desc())
@@ -363,41 +363,37 @@ def create_adverse_event(
     suspected_drug: str | None, action_taken: str | None,
     ip: str | None = None,
 ) -> dict:
-    """Регистрация нежелательного явления (задача кейса 3). Roster + аудит ADVERSE_EVENT."""
+    """Регистрация НЯ врачом (FR-28 legacy): сразу confirmed, автор — врач."""
     _require_roster(db, clinician_id, patient_id)
     ev = AdverseEvent(
         patient_id=patient_id, clinician_id=clinician_id,
         event_text=event_text, severity=severity, onset_date=onset_date,
         suspected_drug=suspected_drug, action_taken=action_taken,
+        reported_by="clinician", status="confirmed",
     )
     db.add(ev)
     db.flush()
     audit_record(db, clinician_id, "ADVERSE_EVENT", "patient", str(patient_id), ip=ip)
     db.commit()
-    return _adverse_event_dict(ev)
+    return _adverse_event_dict(db, ev)
 
 
 def list_adverse_events(db: Session, clinician_id, patient_id) -> list[dict]:
-    """Список НЯ пациента (задача кейса 3). Roster-гейт."""
+    """Список НЯ пациента (FR-28): статус проверки + ссылка на справочник."""
     _require_roster(db, clinician_id, patient_id)
     rows = db.scalars(
         select(AdverseEvent)
         .where(AdverseEvent.patient_id == patient_id)
         .order_by(AdverseEvent.onset_date.desc(), AdverseEvent.created_at.desc())
     ).all()
-    return [_adverse_event_dict(e) for e in rows]
+    return [_adverse_event_dict(db, e) for e in rows]
 
 
-def _adverse_event_dict(e: AdverseEvent) -> dict:
-    return {
-        "id": str(e.id),
-        "event_text": e.event_text,
-        "severity": e.severity,
-        "onset_date": e.onset_date.isoformat(),
-        "suspected_drug": e.suspected_drug,
-        "action_taken": e.action_taken,
-        "created_at": e.created_at.isoformat(),
-    }
+def _adverse_event_dict(db: Session, e: AdverseEvent) -> dict:
+    """Единый формат НЯ для врача (см. services/adverse.event_dict)."""
+    from .adverse import event_dict
+
+    return event_dict(db, e)
 
 
 
