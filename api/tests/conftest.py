@@ -60,13 +60,19 @@ def db_session(engine):
 def clean(engine):
     # Справочник препаратов нужен build_corpus()/KB-тестам (kb_seed._drug_docs
     # читает из таблицы drugs). Сеем перед каждым тестом, т.к. teardown тронкает.
+    from app.kb_seed import clear_corpus_cache
     from app.seed import _seed_drugs
+
     with db.SessionLocal() as s:
         _seed_drugs(s)
         s.commit()
+    # Кеш корпуса живёт в процессе тестов: после пересева/тронка он устарел.
+    clear_corpus_cache()
     yield
     from app.ratelimit import reset_rate_limits
+
     reset_rate_limits()
+    clear_corpus_cache()
     db.truncate_all()
 
 
