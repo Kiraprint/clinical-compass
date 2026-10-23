@@ -6,12 +6,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, text
 
 from app import db
+from app.services.checkin import _ensure_escalation
 from app.models import AuditLog, CheckinSession, ClinicianRoster, Escalation, Notification
 
 from .conftest import admin_ctx, clinician_ctx, patient_ctx
@@ -462,6 +463,8 @@ def test_escalation_queue_visible_to_staff_only(client):
         assert item["safety"] == "signal"
         assert item["checkin_session_id"] == sid
         assert item["created_at"] is not None
+        assert item["in_roster"] is False  # ростера нет; админу флаг всегда false
+        assert item["risk_answers"] == {"HR4": 1, "RS1": 0, "RS2": 1, "RS3": 0}
     assert client.get("/api/v1/escalations", headers=h).status_code == 403
 
     with db.SessionLocal() as s:
@@ -487,3 +490,145 @@ def test_consent_revoke_removes_checkin_and_escalations(client, db_session):
         assert s.scalars(
             select(Notification).where(Notification.patient_id == uuid.UUID(pid))
         ).all() == []
+
+
+def test_resubmit_of_core_step_does_not_duplicate_escalation(client):
+    """Повторная отправка завершённого шага ядра не создаёт вторую эскалацию/уведомление."""
+    h, pid = patient_ctx(client, "chk_dup_step@test.ru")
+    _, cid = clinician_ctx(client, "chk_dup_step_doc@test.ru")
+    _add_roster(pid, cid)
+    sid = _start(client, h)["session_id"]
+    _answer(client, h, sid, {**CORE, "HR4": 1})
+    assert len(_escalations(pid)) == 1
+    assert len(_notifications(cid)) == 1
+
+    body = _answer(client, h, sid, {**CORE, "HR4": 1}, expected=422)
+    assert body["code"] == "CHECKIN_UNKNOWN_ITEM"
+    assert len(_escalations(pid)) == 1
+    assert len(_notifications(cid)) == 1
+
+
+def test_ensure_escalation_is_single_row_and_upgrades(client):
+    """Прямой вызов _ensure_escalation дважды: одна строка, повышение kind, второе уведомление."""
+    h, pid = patient_ctx(client, "chk_ensure@test.ru")
+    _, cid = clinician_ctx(client, "chk_ensure_doc@test.ru")
+    _add_roster(pid, cid)
+    sid = _start(client, h)["session_id"]
+
+    with db.SessionLocal() as s:
+        session = s.get(CheckinSession, uuid.UUID(sid))
+        first, recipients = _ensure_escalation(s, session, urgent=False)
+        s.commit()
+        assert first.kind == "CHECKIN_RISK"
+        assert recipients == [uuid.UUID(cid)]
+
+        again, recipients = _ensure_escalation(s, session, urgent=False)
+        s.commit()
+        assert again.id == first.id
+        assert recipients == []  # без повышения повторно не уведомляем
+
+        urgent, recipients = _ensure_escalation(s, session, urgent=True)
+        s.commit()
+        assert urgent.id == first.id
+        assert urgent.kind == "CHECKIN_RISK_URGENT"
+        assert recipients == [uuid.UUID(cid)]
+
+    assert len(_escalations(pid)) == 1
+    assert len(_notifications(cid)) == 2
+
+
+def test_escalation_queue_marks_roster_and_hides_admin(client):
+    h, pid = patient_ctx(client, "chk_queue_roster@test.ru")
+    ch, cid = clinician_ctx(client, "chk_queue_my_doc@test.ru")
+    oh, _ = clinician_ctx(client, "chk_queue_other_doc@test.ru")
+    _add_roster(pid, cid)
+    sid = _start(client, h)["session_id"]
+    _answer(client, h, sid, {**CORE, "HR4": 1})
+    _answer(client, h, sid, {"RS1": 1, "RS2": 0, "RS3": 0})
+
+    mine = client.get("/api/v1/escalations", headers=ch).json()["items"]
+    (item,) = mine
+    assert item["in_roster"] is True
+    other = client.get("/api/v1/escalations", headers=oh).json()["items"]
+    (item,) = other
+    assert item["in_roster"] is False
+    ah, _ = admin_ctx(client, "chk_queue_admin2@test.ru")
+    (item,) = client.get("/api/v1/escalations", headers=ah).json()["items"]
+    assert item["in_roster"] is False
+
+
+def test_escalation_queue_window_and_limit(client):
+    h1, pid1 = patient_ctx(client, "chk_win1@test.ru")
+    h2, pid2 = patient_ctx(client, "chk_win2@test.ru")
+    for h in (h1, h2):
+        sid = _start(client, h)["session_id"]
+        _answer(client, h, sid, {**CORE, "HR4": 1})
+        _answer(client, h, sid, {"RS1": 1, "RS2": 0, "RS3": 0})
+
+    with db.SessionLocal() as s:
+        old = s.scalars(select(Escalation).where(Escalation.patient_id == uuid.UUID(pid2))).one()
+        old.created_at = datetime.now(timezone.utc) - timedelta(days=91)
+        s.commit()
+
+    ch, _ = clinician_ctx(client, "chk_win_doc@test.ru")
+    items = client.get("/api/v1/escalations", headers=ch).json()["items"]
+    assert [i["patient_id"] for i in items] == [pid1]
+
+    limited = client.get("/api/v1/escalations?limit=1", headers=ch).json()["items"]
+    assert len(limited) == 1
+    assert client.get("/api/v1/escalations?limit=201", headers=ch).status_code == 422
+
+
+def test_escalation_resolve_closes_signal(client):
+    h, pid = patient_ctx(client, "chk_resolve@test.ru")
+    sid = _start(client, h)["session_id"]
+    _answer(client, h, sid, {**CORE, "HR4": 1})
+    _answer(client, h, sid, {"RS1": 1, "RS2": 0, "RS3": 0})
+    (escalation,) = _escalations(pid)
+
+    url = f"/api/v1/escalations/{escalation.id}/resolve"
+    assert client.post(url, json={}, headers=h).status_code == 403  # пациент не закрывает
+
+    ch, cid = clinician_ctx(client, "chk_resolve_doc@test.ru")
+    resp = client.post(url, json={"resolution": "Позвонили, состояние стабильно"}, headers=ch)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == str(escalation.id)
+    assert body["resolved_at"] is not None
+    assert body["resolution"] == "Позвонили, состояние стабильно"
+
+    assert client.post(url, json={}, headers=ch).status_code == 409
+    assert client.get("/api/v1/escalations", headers=ch).json()["items"] == []
+    with db.SessionLocal() as s:
+        resolved_actions = list(
+            s.scalars(select(AuditLog.action).where(AuditLog.actor_id == uuid.UUID(cid)))
+        )
+    assert "ESCALATION_RESOLVE" in resolved_actions
+    assert client.post(
+        f"/api/v1/escalations/{uuid.uuid4()}/resolve", json={}, headers=ch
+    ).status_code == 404
+
+
+def test_escalation_resolution_is_encrypted(client):
+    h, pid = patient_ctx(client, "chk_res_secret@test.ru")
+    sid = _start(client, h)["session_id"]
+    _answer(client, h, sid, {**CORE, "HR4": 1})
+    _answer(client, h, sid, {"RS1": 1, "RS2": 0, "RS3": 0})
+    (escalation,) = _escalations(pid)
+    ch, _ = clinician_ctx(client, "chk_res_secret_doc@test.ru")
+    assert (
+        client.post(
+            f"/api/v1/escalations/{escalation.id}/resolve",
+            json={"resolution": "маркер-секрет-42"},
+            headers=ch,
+        ).status_code
+        == 200
+    )
+    with db.SessionLocal() as s:
+        raw, = s.execute(
+            text("SELECT resolution::text FROM escalations WHERE id = :id"),
+            {"id": escalation.id},
+        ).one()
+        assert raw.startswith("\\x")
+        assert "маркер-секрет-42" not in raw
+        assert s.get(Escalation, escalation.id).resolution == "маркер-секрет-42"

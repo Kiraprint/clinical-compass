@@ -207,8 +207,9 @@ def _notify_clinicians(
 def _ensure_escalation(
     db: Session, session: CheckinSession, *, urgent: bool
 ) -> tuple[Escalation, list[uuid.UUID]]:
-    """Одна эскалация на сеанс (partial unique index): создать/обновить и уведомить."""
+    """Одна эскалация на сеанс: создать/повысить и уведомить (повторно — только при повышении)."""
     escalation = _escalation_for(db, session)
+    created = False
     if escalation is None:
         candidate = Escalation(
             kind=URGENT_KIND if urgent else RISK_KIND,
@@ -220,13 +221,17 @@ def _ensure_escalation(
                 db.add(candidate)
                 db.flush()
             escalation = candidate
+            created = True
         except IntegrityError:
             # Повтор/гонка: индекс не дал дубль — работаем с существующей.
             escalation = _escalation_for(db, session)
             if escalation is None:
                 raise
-    if urgent and escalation.kind != URGENT_KIND:
+    upgraded = urgent and escalation.kind != URGENT_KIND
+    if upgraded:
         escalation.kind = URGENT_KIND
+    if not (created or upgraded):
+        return escalation, []
     return escalation, _notify_clinicians(db, session, escalation)
 
 

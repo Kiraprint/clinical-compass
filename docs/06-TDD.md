@@ -107,7 +107,13 @@
 | checkin_gate_open_signal | HR4=«Да», RS не отправлены | эскалация уже есть, `status=in_progress`, `phase=safety`, уведомление ростерному врачу создано |
 | checkin_review_state | HR4=«Да», RS1/RS2=«Нет», RS3=«Да» | `safety=review`, одна `Escalation CHECKIN_RISK`, повторного уведомления нет |
 | checkin_no_duplicate_escalation | повторная отправка ответов после завершения | `409`, эскалация одна (partial unique по `checkin_session_id`), уведомлений по-прежнему два |
-| escalations_queue_access | открытая эскалация; врач, админ, пациент | врач/админ — `200` с `{id, patient_id, patient_fio, kind, safety, checkin_session_id, notified_at, created_at}`; пациент — `403`; закрытая (`resolved_at`) не попадает |
+| checkin_duplicate_step_submit | повторный submit шага ядра с HR4=«Да» | `422 CHECKIN_UNKNOWN_ITEM`, одна эскалация и одно уведомление |
+| checkin_ensure_escalation_idempotent | прямой `_ensure_escalation` (urgent=False, снова False, затем True) | одна строка; `kind` повышается до `CHECKIN_RISK_URGENT`; второе уведомление только при повышении |
+| escalations_queue_access | открытая эскалация; врач, админ, пациент | врач/админ — `200` с `{id, patient_id, patient_fio, kind, safety, checkin_session_id, notified_at, created_at, in_roster, risk_answers}`; пациент — `403`; закрытая (`resolved_at`) не попадает |
+| escalations_queue_roster | один пациент в ростере врача, второй — нет | `in_roster=true` только у своего врача; у админа всегда `false`; `risk_answers` содержит только `HR4, RS1, RS2, RS3` |
+| escalations_queue_window_limit | эскалация с `created_at` 91 день назад; `?limit=1`; `?limit=201` | старая не попадает (окно 90 дней), `limit=1` → один элемент, `limit=201` → `422 VALIDATION` |
+| escalations_resolve | врач закрывает сигнал `{resolution}`; повтор; чужой id; пациент | `200 {id, resolved_at, resolution}`, аудит `ESCALATION_RESOLVE`, после закрытия очередь пуста; повтор → `409`, неизвестный id → `404`, пациент → `403` |
+| escalations_resolution_encrypted | raw `SELECT resolution::text` | bytea (`\x…`), текста в открытом виде нет; ORM расшифровывает обратно |
 | consent_revoke_checkin | завершённый риск-чек-ин + эскалация + уведомление | после отзыва согласия нет сеансов, эскалаций и уведомлений |
 | diary_mood_scale | новая запись `mood=0`; историчная строка `mood=7, mood_scale=NULL` | `mood_scale="0-4"` / `"1-10"` в `/diary` и в карте врача; старые строки не переписываются; `mood=5` → `422` |
 | checkin_foreign_session | чужой или несуществующий `session_id` | `404 CHECKIN_NOT_FOUND` |

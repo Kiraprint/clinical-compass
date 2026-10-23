@@ -161,6 +161,13 @@ class Escalation(Base):
             unique=True,
             postgresql_where=text("checkin_session_id IS NOT NULL"),
         ),
+        # Очередь открытых сигналов: выборка по (resolved_at is null, created_at).
+        Index(
+            "escalations_open_queue",
+            "resolved_at",
+            "created_at",
+            postgresql_where=text("resolved_at IS NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -174,7 +181,7 @@ class Escalation(Base):
     patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
     kind: Mapped[str] = mapped_column(String)  # SUICIDAL | SEVERE | CHECKIN_RISK | CHECKIN_RISK_URGENT
     notified_clinician_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # NULL у эскалаций, созданных до появления колонки (миграция c6d7e8f9a0b1).
+    # server_default now() заполняет и старые строки временем миграции — NULL не остаётся.
     created_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=True
     )
