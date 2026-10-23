@@ -176,7 +176,33 @@ export const api = {
   postDiary: verb<DiaryEntry>("POST")("/api/v1/diary"),
   getDiary: () => req<{ items: DiaryEntry[] }>("/api/v1/diary"),
   getMyAdherence: (days = 14) =>
-    req<{ items: AdherenceRecord[]; today: AdherenceRecord | null }>(`/api/v1/me/adherence?days=${days}`),
+    req<AdherenceSummary>(`/api/v1/me/adherence?days=${days}`),
+  // FR-28: нежелательные явления. Пациент сообщает, врач проверяет.
+  myAdverseEvents: () => req<{ items: MyAdverseEvent[] }>("/api/v1/me/adverse-events"),
+  reportAdverseEvent: (body: {
+    event_text: string; severity: AdverseSeverity; onset_date: string; medication_id?: string;
+  }) =>
+    req<MyAdverseEvent>("/api/v1/me/adverse-events", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  adverseQueue: (status?: AdverseStatus) =>
+    req<{ items: ClinicianAdverseEvent[] }>(
+      `/api/v1/clinician/adverse-events${status ? `?status=${status}` : ""}`,
+    ),
+  verifyAdverseEvent: (patientId: string, eventId: string, body: {
+    status: "confirmed" | "rejected";
+    severity?: AdverseSeverity;
+    suspected_drug?: string;
+    medication_id?: string;
+    drug_id?: string;
+    action_taken?: string;
+    verification_note?: string;
+  }) =>
+    req<ClinicianAdverseEvent>(
+      `/api/v1/clinician/patients/${patientId}/adverse-events/${eventId}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    ),
   postChat: (content: string) =>
     req<ChatReply>("/api/v1/chat/thread", { method: "POST", body: JSON.stringify({ content }) }),
   getChat: () => req<{ items: ChatMessage[] }>("/api/v1/chat/thread"),
@@ -280,7 +306,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  recordAdherence: (body: { medication?: string; status: "taken" | "partial" | "missed"; note?: string }) =>
+  recordAdherence: (body: {
+    medication_id?: string; medication?: string;
+    status: "taken" | "partial" | "missed"; note?: string;
+  }) =>
     req<Report["adherence"]["records"][number]>("/api/v1/me/adherence", {
       method: "POST",
       body: JSON.stringify(body),
@@ -324,7 +353,7 @@ export const api = {
   },
   createMedication: (patientId: string, body: {
     title: string; dosage?: string; started_on?: string; ended_on?: string;
-    status?: string; notes?: string;
+    status?: string; notes?: string; times_per_day?: number | null;
   }) =>
     req<PatientMedication>(`/api/v1/clinician/patients/${patientId}/medications`, {
       method: "POST",
@@ -332,6 +361,7 @@ export const api = {
     }),
   updateMedication: (patientId: string, medId: string, body: {
     dosage?: string | null; status?: string; ended_on?: string | null; notes?: string | null;
+    times_per_day?: number | null;
   }) =>
     req<PatientMedication>(`/api/v1/clinician/patients/${patientId}/medications/${medId}`, {
       method: "PATCH",
@@ -424,7 +454,7 @@ export interface Consent {
 export interface Questionnaire {
   code: string;
   title: string;
-  items: { key: string; text: string; max_value: number }[];
+  items: { key: string; text: string; max_value: number; anchors: string[] }[];
 }
 export interface Assessment {
   assessment_id: string;
@@ -489,10 +519,45 @@ export interface DiaryEntry {
 }
 export interface AdherenceRecord {
   id: string;
+  medication_id: string | null;
   medication: string | null;
   status: string;
   note: string | null;
   created_at: string;
+}
+
+// FR-27: приверженность по назначению — знаменатель из режима (times_per_day).
+export interface AdherenceMedication {
+  id: string;
+  title: string;
+  status: string;
+  times_per_day: number | null;
+  started_on: string | null;
+  ended_on: string | null;
+  active_days: number;
+  expected: number;
+  taken: number;
+  partial: number;
+  missed: number;
+  score: number;
+  pct: number | null;
+}
+export interface AdherenceSummary {
+  days: number;
+  window: { from: string; to: string };
+  // Общий процент — weighted: сумма score / сумма expected (не среднее процентов).
+  summary: { pct: number | null; score: number; expected: number };
+  medications: AdherenceMedication[];
+  active_medications: {
+    id: string; title: string; times_per_day: number | null; started_on: string | null;
+  }[];
+  total: number;
+  taken: number;
+  partial: number;
+  missed: number;
+  excluded: { count: number; items: AdherenceRecord[] };
+  items: AdherenceRecord[];
+  today: AdherenceRecord | null;
 }
 export interface ChatMessage {
   id: string;
@@ -583,6 +648,7 @@ export interface PatientMedication {
   dosage: string | null;
   started_on: string | null;
   ended_on: string | null;
+  times_per_day: number | null;
   status: string;
   notes: string | null;
   source: MedicationSource;
@@ -645,17 +711,20 @@ export interface Report {
     reason: string;
   } | null;
   adherence: {
-    pct: number | null; total: number; taken: number; partial: number; missed: number;
+    days: number;
+    window: { from: string; to: string };
+    // weighted: сумма score / сумма expected по назначениям с режимом.
+    pct: number | null; score: number; expected: number;
+    total: number; taken: number; partial: number; missed: number;
+    medications: AdherenceMedication[];
+    excluded_count: number;
     records: AdherenceRecord[];
   };
-  adverse_events: {
-    id: string; event_text: string; severity: string; onset_date: string;
-    suspected_drug: string | null; action_taken: string | null; created_at: string;
-  }[];
+  adverse_events: ClinicianAdverseEvent[];
   diary: { id: string; content: string; mood: number | null; mood_scale: MoodScale; created_at: string }[];
   available_scales: {
     code: string; title: string; audience: "PATIENT" | "CLINICIAN";
-    items: { key: string; text: string; max_value: number }[];
+    items: { key: string; text: string; max_value: number; anchors: string[] }[];
   }[];
   open_escalations: { id: string; kind: string; notified_at: string | null; checkin_session_id?: string | null }[];
   // docs/16 §3: ответы чек-ина, состояние риска и основания включённых модулей.
@@ -771,6 +840,51 @@ export interface Drug {
   contraindications: string;
   adverse_events: string;
   special_notes: string;
+}
+
+// --- FR-28: нежелательные явления ---
+export type AdverseSeverity = "mild" | "moderate" | "severe";
+export type AdverseStatus = "pending" | "confirmed" | "rejected";
+/** Фрагмент справочника ГРЛС, привязанный врачом к событию. */
+export interface DrugReference {
+  drug_id: string;
+  trade_name: string;
+  adverse_events: string;
+}
+/** Событие глазами пациента: без врачебных заметок. */
+export interface MyAdverseEvent {
+  id: string;
+  event_text: string;
+  severity: AdverseSeverity;
+  onset_date: string;
+  status: AdverseStatus;
+  status_label: string;
+  medication_id: string | null;
+  medication_title: string | null;
+  verified_at: string | null;
+  created_at: string;
+}
+/** Событие для врача: проверка, назначение и ссылка на справочник. */
+export interface ClinicianAdverseEvent {
+  id: string;
+  patient_id: string;
+  patient_fio: string | null;
+  event_text: string;
+  severity: AdverseSeverity;
+  onset_date: string;
+  status: AdverseStatus;
+  reported_by: "clinician" | "patient";
+  suspected_drug: string | null;
+  action_taken: string | null;
+  medication_id: string | null;
+  medication_title: string | null;
+  drug_id: string | null;
+  drug_trade_name: string | null;
+  reference: DrugReference | null;
+  verification_note: string | null;
+  verified_by: string | null;
+  verified_at: string | null;
+  created_at: string;
 }
 
 // --- Обогащение КБ (docs/15): прогоны, источники, вердикты ---

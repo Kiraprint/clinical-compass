@@ -63,6 +63,10 @@
 | test_pss10_reverse_scoring_concrete_total | положительные пункты 4/5/7/8 | score(PSS10) | обратный подсчёт, конкретная сумма |
 | test_pss10_severity_boundaries | пороги 13/14 и 26/27 | severity_for() | NONE/MILD/MODERATE без SEVERE |
 | test_hdrs17_severity_boundaries / test_hdrs17_triage | HAM-D17 (8/17/24), h3 как суицидальный пункт | severity_for()/triage() | MODERATE и RED при h3≥1 |
+| test_every_item_has_anchors_for_all_values | все шкалы ALL_SCALES | ScaleItem.anchors | `len(anchors) == max_value+1`, строки непустые |
+| test_binary_scale_anchors_are_yes_no / test_questionnaire_frequency_anchors | HCL-32, PHQ-9, PSS-10 | anchors | HCL — («Нет», «Да»); PHQ-9 — («Совсем нет», «Несколько дней», «Более половины дней», «Почти каждый день»); PSS-10 — 5 подписей частоты |
+| test_hdrs17_anchors_follow_item_max_value | HDRS-17 (пункты 0–4 и 0–2) | anchors | число якорей 5/3 по пункту, h1 — 5 разных подписей |
+| test_anchors_length_mismatch_raises | anchors длиной ≠ max_value+1 | ScaleItem() | ValueError; пустые anchors допустимы |
 
 ### 2.4 trend
 
@@ -80,15 +84,18 @@
 | auth_otp_optional_flag | CC_REQUIRE_OTP=false → login CLINICIAN без otp → 200; секрет остаётся в БД; prod_mode+false → fail-fast |
 | auth_config_public | публичный GET /auth/config → {require_otp} по CC_REQUIRE_OTP (UI скрывает поле 2FA) |
 | llm_router_* | LLM-роутер раздела: tool_call search_<раздел> → topic, off→None, ошибка/таймаут/неизвестная тулза/без тулзы → None (fallback все разделы) |
+| `rewrite_followup_*` (FR-21) | LLM-переформулировка уточняющего вопроса треда: первая строка ответа без кавычек/префикса, no URL → None без вызова, пустая история → None без вызова, ошибка/таймаут/пустой ответ → None, обрезка истории 8×800≤3000 с конца | самодостаточный запрос либо None (= поиск по исходному вопросу), ответ не ломается |
 | consent_gating | PATIENT без согласия → POST /screenings | 403 CONSENT_REQUIRED; после /consent → 201 |
 | screening_closes_run | finish → повторные answers | 409 RUN_CLOSED |
 | screening_one_open_only | 2-й screenings при открытом | 409 CONFLICT |
+| test_questionnaires_expose_answer_anchors | GET /questionnaires | каталог шкал | у каждого пункта `anchors` длиной `max_value+1`, PHQ-9 и HCL-32 — ожидаемые подписи |
 | escalation_under_1s | красный ответ → POST finish | 201; escalation создан; время полного ответа < 1 с |
 | escalation_notifies | RED с суицид. флагом | уведомление врачу в БД (escalations.row) + контакты помощи в ответе |
 | checkin_start_core_seven | POST /checkins (docs/16 §4) | `201`, status in_progress, шаг `core` из 7 пунктов, `progress {0,7}` |
 | checkin_start_idempotent | повторный POST /checkins в тот же день | `200`, тот же `session_id`, одна строка `checkin_sessions`, один `CHECKIN_START` в аудите |
 | checkin_once_per_day | POST /checkins и answers после завершения дня | `409 CHECKIN_ALREADY_DONE` |
 | roster_enforcement | врач без roster → GET patients/{id} | 403 NO_ROSTER; после /admin/roster → 200 |
+| test_report_exposes_scale_anchors | GET report при roster | карточка | `available_scales[].items[].anchors` длиной `max_value+1`, HDRS-17: h1 — 5 якорей, h4 — 3 |
 | patient_cannot_read_others | PATIENT → GET diary другого пациента / report | 403 |
 | diary_mood_scale | POST /diary с mood 0 и 5 | 0 → 201 (5-точечная шкала), 5 → 422 VALIDATION |
 | audit_append_only | прямой UPDATE/DELETE audit_log на уровне БД | ошибка БД-триггера (исключение) — отдельный БД-тест, вне HTTP-слоя (API не предоставляет UPDATE/DELETE-эндпоинтов для audit_log) |
@@ -154,7 +161,11 @@
 | `test_delete_thread_cascades` | DELETE треда | 404 после удаления, сообщения и привязки удалены каскадом |
 | `test_redline_in_history_does_not_poison_next_turn` | ход 1 — redline (диагноз), ход 2 — обычный вопрос по КБ | ход 2 не refused и возвращает KB-цитаты (red line только по текущему вопросу) |
 | `test_revoked_consent_skips_patient_card` | отзыв согласия после создания треда | `skipped_patient_ids == [p1]`, карты p1 нет в цитатах, запись `READ_ASSISTANT_THREAD` |
-| `test_retrieval_uses_only_current_question` | ФИО в прошлой реплике | агент получает только текущий вопрос, `retrieval_query` не передаётся |
+| `test_followup_question_rewritten_for_retrieval` | тред: «что известно про Авиандр?» → «а в каких дозах?» | LLM-переформулировка уходит в агент как `retrieval_query`, исходный вопрос — как `query` (red line/ответ); первый ход LLM не вызывает; `rewritten=true` |
+| `test_followup_without_llm_uses_current_question`, `test_followup_llm_failure_falls_back_to_original` (пустой ответ/URLError/таймаут) | LLM выключен или недоступен | поиск по исходному вопросу, `rewritten=false`, ответ не ломается |
+| `test_followup_rewrite_prompt_has_no_pii` | ФИО/телефон/дата рождения в прошлой реплике | в промпте переформулировки только `[ФИО]/[ТЕЛЕФОН]/[ДАТА РОЖДЕНИЯ]`, секретов нет |
+| `test_followup_redline_uses_only_current_question` | redline в истории + обычный вопрос / обычная история + redline-вопрос | red line только по текущему вопросу: поиск не глушится, отказ сохраняется |
+| `test_followup_question_retrieves_drug_chunk` | «а в каких дозах?» после вопроса про препарат | чанк ЛЕКАРСТВА (`drug-aviandr`), `grounded=true` — не NO_KB_DATA |
 | `test_emias_mock_*` (token/bad creds/rate limit/scopes/pagination/bundle/404) | контракт мока ЕМИАС | 401 `invalid_client`, 429 + `Retry-After`, 403 `insufficient_scope`, Bundle(searchset) с total/link[next] |
 | `test_create_list_and_audit`, `test_update_fields_and_audit`, `test_stop_sets_today_and_status`, `test_delete_local_row` (FR-23) | назначение → список → правка → остановка → удаление | 201/200/204, `status='stopped'` + `ended_on` сегодня, аудит `PRESCRIBE/UPDATE/STOP/DELETE_MEDICATION` |
 | `test_validation_rejects_bad_status_and_dates` | статус `unknown`, пустой title, старт в будущем, конец раньше старта | 422 `VALIDATION` |
@@ -193,6 +204,33 @@
 | `test_worker_tick_creates_one_notification_idempotent` | два тика `deliver_due` по одному due-напоминанию | ровно один `Notification kind='REMINDER'`; `notified_at` заполнен; второй тик — 0 |
 | `test_worker_respects_advisory_lock` | лок удерживает другой коннект | тик возвращает 0 и не создаёт уведомление; после снятия лока — доставка |
 | `test_consent_revocation_destroys_reminders` | напоминание задано → POST /consent/revoke | строк пациента в `clinician_reminders` нет |
+| `test_percentage_from_expected_doses` (`test_adherence.py`) | режим 2×день, назначение 7 дней назад, 5 отметок `taken` | `expected=14`, `score=5`, `pct=36` (а не 5/5 = 100%) |
+| `test_expected_is_calendar_days_not_weekdays` | тот же режим, окна 7 и 14 дней | знаменатель — все календарные дни активности; выходные не исключаются |
+| `test_ended_on_cuts_expected_days` | `started_on` = −9 дн, `ended_on` = −3 дн, окно 7 дней | `active_days=4`, `expected=4`, 2 `taken` → 50% |
+| `test_overall_pct_is_weighted_not_average` | препарат A 2/2, препарат B 0/1 | общий 67% (2/3), не среднее 50% |
+| `test_partial_counts_half` | 3 `partial` при режиме 2×день | `score=1.5`, `pct=75` |
+| `test_no_schedule_means_no_percent` | `times_per_day IS NULL`, отметка привязана | `pct=null`, `expected=0`, отметка в `excluded` |
+| `test_no_medications_gives_empty_aggregate` | нет назначений | `medications=[]`, `summary.pct=null` |
+| `test_legacy_records_are_outside_denominator` | отметка без `medication_id` рядом со связанной | 100% по назначению, legacy-отметка только в `excluded`/`total` |
+| `test_post_foreign_or_stopped_medication_422` | `POST /me/adherence` с чужим и остановленным назначением | 422 `MEDICATION_NOT_ACTIVE` |
+| `test_times_per_day_validation` | создание/правка `times_per_day` = 0 и 7; затем 4 | 422 `TIMES_PER_DAY_INVALID`; 4 сохраняется |
+| `test_consent_revoke_deletes_linked_records_and_medications` | отметка по назначению → POST /consent/revoke | `adherence_records` и `patient_medications` пациента пусты |
+| `test_adherence_patient_records_and_doctor_aggregate` (`test_clinician.py`, обновлён) | taken + partial по назначению 2×день + legacy-отметка | `pct=75`, `expected=2`, `excluded_count=1`, агрегат в `report.adherence` |
+| `test_patient_reports_pending_event` | пациент отправляет НЯ с назначением | `201`, `status=pending`, `status_label=на проверке`, `reported_by=patient`, `clinician_id`/`verified_by` пусты; событие видно в `GET /me/adverse-events` |
+| `test_patient_report_requires_consent` | без активного согласия | 403 `CONSENT_REQUIRED` |
+| `test_patient_foreign_medication_rejected` | `medication_id` чужого пациента, затем своё | 422 `MEDICATION_NOT_FOUND`; своё — 201 с `medication_title` |
+| `test_severe_report_notifies_roster_without_pdn` | `severity=severe` при roster-враче | один `Notification` с `kind=ADVERSE_EVENT`, текст «Пациент сообщил о серьёзном нежелательном явлении», без имени и описания |
+| `test_mild_report_does_not_notify` | `severity=mild` | уведомлений нет |
+| `test_clinician_queue_contains_pending` | `GET /clinician/adverse-events?status=pending` | событие с полями пациента/статусом, `reference=null` без препарата |
+| `test_verify_confirm_sets_verifier_and_drug_reference` | PATCH confirm с `drug_id` и заметкой | `verified_by/at`, `reference.trade_name`, пациент видит «проверено врачом» без заметки; очередь pending пустеет; повтор того же статуса — 200 без изменения `verified_at`; смена на rejected — 409 `ADVERSE_ALREADY_VERIFIED` |
+| `test_verify_reject` | PATCH rejected | статус `rejected`, пациент видит «отклонено» |
+| `test_verify_foreign_patient_and_event_404` | врач вне ростера / чужой `event_id` | 404 `ADVERSE_NOT_FOUND` в обоих случаях |
+| `test_verify_unknown_drug_404` | `drug_id` вне справочника | 404 `DRUG_NOT_FOUND` |
+| `test_legacy_clinician_event_is_confirmed` | легаси POST врача | сразу `confirmed`/`clinician`, список отдаёт `status` и `reference` |
+| `test_patient_report_audit_has_no_content` | создание НЯ пациентом | в `audit_log` только `ADVERSE_REPORT` и id объекта, без текста |
+| `test_consent_revoke_deletes_patient_events` | НЯ → отзыв согласия | строки пациента в `adverse_events` удалены |
+| `test_adverse_text_encrypted_at_rest` | после проверки врача | `event_text`/`verification_note` — `bytea`, plaintext на диске отсутствует, ORM расшифровывает |
+
 
 ## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/`)
 

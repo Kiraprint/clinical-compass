@@ -23,7 +23,7 @@ from .clinician import MOSCOW, require_patient_consent, require_roster
 ALL_STATUSES = ("active", "completed", "stopped", "unknown")
 # 'unknown' — статус импорта ЕМИАС, врач его выставить не может.
 CLINICIAN_STATUSES = ("active", "completed", "stopped")
-EDITABLE_FIELDS = ("dosage", "status", "ended_on", "notes")
+EDITABLE_FIELDS = ("dosage", "status", "ended_on", "notes", "times_per_day")
 
 def _today() -> date:
     return datetime.now(MOSCOW).date()
@@ -66,6 +66,14 @@ def _validate(
         raise Problem(422, "VALIDATION", "Дата окончания раньше даты начала")
     return title, started_on, ended_on
 
+def _validate_times_per_day(value: int | None) -> int | None:
+    """FR-27: режим 1..6 приёмов в день; None — расписание не задано."""
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 6:
+        raise Problem(422, "TIMES_PER_DAY_INVALID", "Режим приёма: целое число от 1 до 6 раз в день")
+    return value
+
 def medication_dict(med: PatientMedication, actor_id=None) -> dict:
     """JSON для UI. editable — можно ли править этому врачу (своя локальная строка)."""
     return {
@@ -74,6 +82,7 @@ def medication_dict(med: PatientMedication, actor_id=None) -> dict:
         "dosage": med.dosage,
         "started_on": med.started_on.isoformat() if med.started_on else None,
         "ended_on": med.ended_on.isoformat() if med.ended_on else None,
+        "times_per_day": med.times_per_day,
         "status": med.status,
         "notes": med.notes,
         "source": med.source,
@@ -105,15 +114,17 @@ def create_medication(
     db: Session, clinician_id, patient_id, *,
     title: str, dosage: str | None = None, started_on: date | None = None,
     ended_on: date | None = None, status: str = "active", notes: str | None = None,
-    ip: str | None = None,
+    times_per_day: int | None = None, ip: str | None = None,
 ) -> dict:
     """Назначение препарата врачом. Roster + consent + аудит PRESCRIBE_MEDICATION."""
     _require_access(db, clinician_id, patient_id)
     title, started_on, ended_on = _validate(title, status, started_on, ended_on)
+    times_per_day = _validate_times_per_day(times_per_day)
     med = PatientMedication(
         patient_id=patient_id, clinician_id=clinician_id, title=title,
         dosage=(dosage or "").strip() or None, started_on=started_on, ended_on=ended_on,
         status=status, notes=(notes or "").strip() or None, source="clinician",
+        times_per_day=times_per_day,
     )
     db.add(med)
     db.flush()
@@ -124,7 +135,7 @@ def create_medication(
 def update_medication(
     db: Session, clinician_id, patient_id, med_id, changes: dict, ip: str | None = None,
 ) -> dict:
-    """Правка дозировки/статуса/даты окончания/заметки. Аудит UPDATE_MEDICATION."""
+    """Правка дозировки/режима/статуса/даты окончания/заметки. Аудит UPDATE_MEDICATION."""
     _require_access(db, clinician_id, patient_id)
     med = _get_mutable(db, clinician_id, patient_id, med_id)
     unknown = set(changes) - set(EDITABLE_FIELDS)
@@ -138,7 +149,8 @@ def update_medication(
         med.dosage = (changes["dosage"] or "").strip() or None
     if "notes" in changes:
         med.notes = (changes["notes"] or "").strip() or None
-    med.status = status
+    if "times_per_day" in changes:
+        med.times_per_day = _validate_times_per_day(changes["times_per_day"])
     med.ended_on = ended_on
     audit_record(db, clinician_id, "UPDATE_MEDICATION", "patient", str(patient_id), ip=ip)
     db.commit()

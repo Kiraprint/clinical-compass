@@ -297,7 +297,7 @@ class Notification(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
-    kind: Mapped[str] = mapped_column(String)  # RED_ESCALATION | REMINDER
+    kind: Mapped[str] = mapped_column(String)  # RED_ESCALATION | REMINDER | ADVERSE_EVENT
     title: Mapped[str] = mapped_column(String)
     body: Mapped[str] = mapped_column(String)
     patient_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
@@ -312,7 +312,8 @@ class Notification(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)
 
     __table_args__ = (
-        CheckConstraint("kind in ('RED_ESCALATION','REMINDER')", name="notifications_kind"),
+        # ADVERSE_EVENT — FR-28: серьёзное НЯ, о котором сообщил пациент.
+        CheckConstraint("kind in ('RED_ESCALATION','REMINDER','ADVERSE_EVENT')", name="notifications_kind"),
         Index("notifications_user_read", "user_id", "read_at"),
     )
 
@@ -346,24 +347,41 @@ class FcmState(Base):
 
 
 class AdverseEvent(Base):
-    """Нежелательное явление (задача кейса 3). Спецкатегория ПДн (152-ФЗ).
+    """Нежелательное явление (FR-28). Спецкатегория ПДн (152-ФЗ).
 
-    Вносит врач (clinician_id) в карточку пациента: событие, тяжесть, предполагаемый
-    препарат (напр. «Авиандр»), дата начала, предпринятое действие. Учёт рисков и НЯ
-    терапии — для мониторинга безопасности (обязательное условие: предупреждения о
-    безопасности терапии визуально выделены, связка с P6 routing в UI).
+    Два источника:
+      * patient — пациент сообщает о НЯ сам (status='pending', clinician_id NULL).
+        Врач закреплённого ростера подтверждает, отклоняет или корректирует запись
+        (verified_by/verified_at/verification_note).
+      * clinician — врач вносит НЯ в карточку: сразу confirmed, clinician_id автора
+        (историческое поведение до FR-28).
+    drug_id/medication_id связывают событие со справочником ГРЛС (текст побочек
+    доступен врачу) и с конкретным назначением пациента.
     """
 
     __tablename__ = "adverse_events"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
-    clinician_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    clinician_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     event_text: Mapped[str] = mapped_column(EncryptedText())
     severity: Mapped[str] = mapped_column(String(16))   # mild | moderate | severe
     onset_date: Mapped[datetime] = mapped_column(Date)
     suspected_drug: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)  # NEW-3: контекст лечения
     action_taken: Mapped[str | None] = mapped_column(String(32))  # none|monitoring|dose_reduced|stopped|referred
+    # FR-28: кто сообщил и состояние проверки. У исторических строк —
+    # clinician/confirmed (server_default миграции).
+    reported_by: Mapped[str] = mapped_column(String(16), server_default=text("'clinician'"))
+    status: Mapped[str] = mapped_column(String(16), server_default=text("'confirmed'"))
+    drug_id: Mapped[str | None] = mapped_column(
+        ForeignKey("drugs.drug_id"), nullable=True, index=True
+    )  # справочник ГРЛС
+    medication_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("patient_medications.id", ondelete="SET NULL"), nullable=True
+    )
+    verified_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    verification_note: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)
 
     __table_args__ = (
@@ -372,6 +390,10 @@ class AdverseEvent(Base):
             "action_taken is null or action_taken in ('none','monitoring','dose_reduced','stopped','referred')",
             name="adverse_events_action",
         ),
+        CheckConstraint("reported_by in ('clinician','patient')", name="adverse_events_reported_by"),
+        CheckConstraint("status in ('pending','confirmed','rejected')", name="adverse_events_status"),
+        # Очередь врача: pending, свежие сверху.
+        Index("ix_adverse_events_status_created", "status", text("created_at desc")),
     )
 
 
@@ -379,8 +401,11 @@ class AdherenceRecord(Base):
     """Приверженность лечению (задача кейса 7). Спецкатегория ПДн (152-ФЗ).
 
     Пациент ежедневно отмечает приём назначенного препарата: taken/partial/missed.
-    Врач видит агрегат (% приверженности за окно) в карточке. medication — свободная
-    строка (напр. «Авиандр»), без FK на модель назначения (YAGNI для демо).
+    Врач видит агрегат (% приверженности за окно) в карточке. medication_id —
+    FK на назначение (FR-27): по нему считается ожидаемое число приёмов из
+    режима (PatientMedication.times_per_day). medication — свободный текст
+    названия для отображения и для исторических записей без связи (backfill
+    не делался).
     """
 
     __tablename__ = "adherence_records"
@@ -388,6 +413,11 @@ class AdherenceRecord(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
     medication: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)  # F1: контекст лечения
+    # FR-27: связь с назначением. При удалении назначения отметка остаётся без
+    # связи (SET NULL) и выпадает из знаменателя — история пациента не теряется.
+    medication_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("patient_medications.id", ondelete="SET NULL"), index=True, nullable=True,
+    )
     status: Mapped[str] = mapped_column(String(16))   # taken | partial | missed
     note: Mapped[str | None] = mapped_column(EncryptedText())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)
@@ -648,6 +678,12 @@ class PatientMedication(Base):
             "ended_on is null or started_on is null or ended_on >= started_on",
             name="patient_medications_dates",
         ),
+        # FR-27: режим приёма — знаменатель приверженности. NULL — расписание
+        # неизвестно (все строки импорта ЕМИАС), процент не считается.
+        CheckConstraint(
+            "times_per_day is null or times_per_day between 1 and 6",
+            name="patient_medications_times_per_day",
+        ),
         # emias_id уникален только среди импортированных строк: у локальных
         # назначений его нет, NULL не должен блокировать вставку.
         Index(
@@ -670,7 +706,8 @@ class PatientMedication(Base):
     source: Mapped[str] = mapped_column(String(16), default="clinician", server_default=text("'clinician'"))
     emias_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
-
+    # FR-27: сколько раз в день принимать. NULL — режим не задан (ЕМИАС).
+    times_per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 class EmiasSyncRun(Base):
     """Прогон синхронизации с ЕМИАС (по образцу KBRun, docs/15 §4).

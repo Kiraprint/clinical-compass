@@ -168,6 +168,8 @@ class MedicationBody(BaseModel):
     ended_on: date | None = None
     status: str = "active"
     notes: str | None = Field(default=None, max_length=2000)
+    # FR-27: режим приёма (1..6). Не задан — процент приверженности не считается.
+    times_per_day: int | None = None
 
 class MedicationPatchBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -176,6 +178,7 @@ class MedicationPatchBody(BaseModel):
     status: str | None = None
     ended_on: date | None = None
     notes: str | None = Field(default=None, max_length=2000)
+    times_per_day: int | None = None
 
 class StopMedicationBody(BaseModel):
     ended_on: date | None = None
@@ -204,7 +207,8 @@ def create_medication(
     return services.medications.create_medication(
         db, user.id, patient_id,
         title=body.title, dosage=body.dosage, started_on=body.started_on,
-        ended_on=body.ended_on, status=body.status, notes=body.notes, ip=ip,
+        ended_on=body.ended_on, status=body.status, notes=body.notes,
+        times_per_day=body.times_per_day, ip=ip,
     )
 
 @router.patch("/clinician/patients/{patient_id}/medications/{med_id}")
@@ -375,6 +379,9 @@ def timeline(days: int = Query(default=90, ge=1, le=365), user: User = Depends(r
     return services.clinician.patient_timeline(db, user.id, days)
 
 class AdherenceBody(BaseModel):
+    # FR-27: отметка привязывается к активному назначению пациента. medication_id
+    # необязателен только для исторических/внеплановых отметок — они вне расчёта.
+    medication_id: uuid.UUID | None = None
     medication: str | None = None
     status: str = Field(pattern="^(taken|partial|missed)$")
     note: str | None = None
@@ -397,4 +404,6 @@ def record_adherence(
     user: User = Depends(require_consent), db: Session = Depends(get_db),
 ):
     """Пациент отмечает приверженность лечению (задача кейса 7). consent-гейт."""
-    return services.clinician.create_adherence(db, user.id, body.medication, body.status, body.note)
+    return services.clinician.create_adherence(
+        db, user.id, body.medication_id, body.medication, body.status, body.note,
+    )

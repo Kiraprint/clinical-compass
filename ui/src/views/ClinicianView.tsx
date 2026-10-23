@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { api, ApiError, Assessment, ClinicianReminder, EmiasSummary, Escalation, HistoryType, ImportHistoryResult, PatientCard, PatientContacts, PatientHistoryItem, PatientMedication, RemindersResponse, Report, Visit } from "../api";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { api, AdverseSeverity, ApiError, Assessment, ClinicianAdverseEvent, ClinicianReminder, Drug, EmiasSummary, Escalation, HistoryType, ImportHistoryResult, PatientCard, PatientContacts, PatientHistoryItem, PatientMedication, RemindersResponse, Report, Visit } from "../api";
 import TrendChart from "../TrendChart";
 import AssistantTab from "./AssistantTab";
 import DrugLibraryTab from "./DrugLibraryTab";
@@ -9,6 +9,47 @@ const MED_STATUS_LABELS: Record<string, string> = {
   completed: "завершено",
   stopped: "отменено",
 };
+
+
+// Сворачиваемый блок карточки врача: состояние раскрытия запоминаем в localStorage,
+// чтобы врач не терял привычный вид между визитами (отзыв эксперта: шкала Гамильтона
+// занимает весь экран).
+function Collapsible({
+  storageKey,
+  summary,
+  children,
+}: {
+  storageKey: string;
+  summary: ReactNode;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(() => {
+    try {
+      return localStorage.getItem(storageKey) !== "0";
+    } catch {
+      return true;
+    }
+  });
+  return (
+    <details
+      open={open}
+      onToggle={(e) => {
+        const next = e.currentTarget.open;
+        setOpen(next);
+        try {
+          localStorage.setItem(storageKey, next ? "1" : "0");
+        } catch {
+          // приватный режим — просто не запоминаем
+        }
+      }}
+    >
+      <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: 16, marginBottom: 8 }}>
+        {summary}
+      </summary>
+      {children}
+    </details>
+  );
+}
 
 const TRIAGE_FILTERS = ["", "GREEN", "YELLOW", "RED"] as const;
 
@@ -136,6 +177,8 @@ export default function ClinicianView() {
   const [reminderVersion, setReminderVersion] = useState(0);
   // Общая очередь эскалаций — не только свои пациенты (docs/16 §3).
   const [escalations, setEscalations] = useState<Escalation[]>([]);
+  // FR-28: НЯ, сообщённые пациентами и ждущие проверки врача.
+  const [pendingAe, setPendingAe] = useState<ClinicianAdverseEvent[]>([]);
   useEffect(() => {
     api
       .clinicianReminders()
@@ -153,6 +196,23 @@ export default function ClinicianView() {
       })
       .catch(() => {
         if (!cancelled) setEscalations([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected, reportVersion]);
+
+
+  useEffect(() => {
+    if (selected) return;
+    let cancelled = false;
+    api
+      .adverseQueue("pending")
+      .then((r) => {
+        if (!cancelled) setPendingAe(r.items);
+      })
+      .catch(() => {
+        if (!cancelled) setPendingAe([]);
       });
     return () => {
       cancelled = true;
@@ -276,6 +336,15 @@ export default function ClinicianView() {
       {showReminders && (
         <RemindersPanel cards={cards} onChanged={() => setReminderVersion((v) => v + 1)} />
       )}
+      {!selected && pendingAe.length > 0 && (
+        <div className="alert-warn" style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+          <strong>НЯ на проверке: {pendingAe.length}</strong>
+          <span style={{ fontSize: 13 }}>
+            {pendingAe.slice(0, 3).map((e) => e.patient_fio ?? "Пациент").join(", ")}
+            {pendingAe.length > 3 ? " …" : ""} — откройте карточку пациента.
+          </span>
+        </div>
+      )}
       {!selected && (
         <EscalationsQueue
           items={escalations}
@@ -341,14 +410,16 @@ export default function ClinicianView() {
           error={reportError}
           onBack={() => { window.location.hash = ""; }}
           onRefresh={() => setReportVersion((v) => v + 1)}
+          onOpenLibrary={() => { setSelected(null); setSection("library"); }}
         />
       )}
     </>
   );
 }
 
-function ReportView({ report, error, onBack, onRefresh }: {
+function ReportView({ report, error, onBack, onRefresh, onOpenLibrary }: {
   report: Report | null; error: string; onBack: () => void; onRefresh: () => void;
+  onOpenLibrary: () => void;
 }) {
   const [picked, setPicked] = useState<string[]>([]);
   const [scaleSaved, setScaleSaved] = useState<number | null>(null);
@@ -361,6 +432,8 @@ function ReportView({ report, error, onBack, onRefresh }: {
   const [aeSaved, setAeSaved] = useState<number | null>(null);
   const [aeError, setAeError] = useState("");
   const [aeList, setAeList] = useState<Report["adverse_events"]>([]);
+  // FR-28: справочник ГРЛС для связи НЯ с препаратом (доступ врачу).
+  const [drugs, setDrugs] = useState<Drug[]>([]);
   const [chatMsgs, setChatMsgs] = useState<{ id: string; sender: string; content: string; created_at: string }[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [chatErr, setChatErr] = useState("");
@@ -394,6 +467,14 @@ function ReportView({ report, error, onBack, onRefresh }: {
       .catch(() => { if (!cancelled) setChatMsgs([]); });
     return () => { cancelled = true; };
   }, [report]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.drugs()
+      .then((r) => { if (!cancelled) setDrugs(r.items); })
+      .catch(() => { if (!cancelled) setDrugs([]); });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (!report) return;
@@ -519,6 +600,14 @@ function ReportView({ report, error, onBack, onRefresh }: {
   if (!report) return <div className="card">Загрузка…</div>;
   const last = report.last_assessment;
   const assessScale = report.available_scales.find((s) => s.code === assessCode);
+  // Итог в summary свёрнутой карточки: свежая оценка из формы или последняя сохранённая.
+  const assessFmt = (score: number, sev: string, at: string) =>
+    `${score} · ${sev} · ${new Date(at).toLocaleDateString("ru-RU")}`;
+  const assessSummary = assessResult
+    ? assessFmt(assessResult.total_score, assessResult.severity, assessResult.computed_at)
+    : report.last_assessment
+      ? `последняя ${assessFmt(report.last_assessment.total_score, report.last_assessment.severity, report.last_assessment.computed_at)}`
+      : "";
   return (
     <div className="card">
       <button className="ghost" onClick={onBack}>
@@ -534,83 +623,103 @@ function ReportView({ report, error, onBack, onRefresh }: {
       <ContactsBlock patientId={report.patient_id} hasConsent={report.contacts !== null} />
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        <h3 style={{ margin: 0 }}>Шкалы скрининга</h3>
-        <table className="scale-table" style={{ fontSize: 14 }}>
-          <tbody>
-            {report.available_scales.filter((s) => s.audience === "PATIENT").map((s) => (
-              <tr key={s.code}>
-                <td style={{ textAlign: "left" }}>
-                  <label htmlFor={s.code}>{s.title}</label>
-                </td>
-                <td style={{ textAlign: "right", width: 44, whiteSpace: "nowrap" }}>
-                  <input
-                    id={s.code}
-                    type="checkbox"
-                    checked={picked.includes(s.code)}
-                    onChange={() =>
-                      setPicked((cur) =>
-                        cur.includes(s.code) ? cur.filter((c) => c !== s.code) : [...cur, s.code],
-                      )
-                    }
-                  />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, alignItems: "center" }}>
-          <button onClick={saveScale} disabled={picked.length === 0}>Назначить</button>
-          {scaleSaved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
-        </div>
+        <Collapsible storageKey="cc.clinician.screening-scales" summary="Шкалы скрининга">
+          <table className="scale-table" style={{ fontSize: 14 }}>
+            <tbody>
+              {report.available_scales.filter((s) => s.audience === "PATIENT").map((s) => (
+                <tr key={s.code}>
+                  <td style={{ textAlign: "left" }}>
+                    <label htmlFor={s.code}>{s.title}</label>
+                  </td>
+                  <td style={{ textAlign: "right", width: 44, whiteSpace: "nowrap" }}>
+                    <input
+                      id={s.code}
+                      type="checkbox"
+                      checked={picked.includes(s.code)}
+                      onChange={() =>
+                        setPicked((cur) =>
+                          cur.includes(s.code) ? cur.filter((c) => c !== s.code) : [...cur, s.code],
+                        )
+                      }
+                    />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, alignItems: "center" }}>
+            <button onClick={saveScale} disabled={picked.length === 0}>Назначить</button>
+            {scaleSaved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
+          </div>
+        </Collapsible>
       </div>
       {scaleError && <p className="error">{scaleError}</p>}
 
       {report.available_scales.some((s) => s.audience === "CLINICIAN") && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <h3 style={{ margin: 0 }}>Оценка врачом</h3>
-          <select
-            aria-label="Шкала врачебной оценки"
-            value={assessCode}
-            onChange={(e) => {
-              setAssessCode(e.target.value);
-              setAssessAnswers({});
-              setAssessResult(null);
-            }}
+          <Collapsible
+            storageKey="cc.clinician.assessment"
+            summary={
+              <>
+                Оценка врачом: {assessScale?.code ?? "—"}
+                {assessSummary && (
+                  <span style={{ color: "#5a6478", fontSize: 13, fontWeight: 400 }}>
+                    {" "}· {assessSummary}
+                  </span>
+                )}
+              </>
+            }
           >
-            {report.available_scales.filter((s) => s.audience === "CLINICIAN").map((s) => (
-              <option key={s.code} value={s.code}>{s.title}</option>
+            <select
+              aria-label="Шкала врачебной оценки"
+              value={assessCode}
+              onChange={(e) => {
+                setAssessCode(e.target.value);
+                setAssessAnswers({});
+                setAssessResult(null);
+              }}
+            >
+              {report.available_scales.filter((s) => s.audience === "CLINICIAN").map((s) => (
+                <option key={s.code} value={s.code}>{s.title}</option>
+              ))}
+            </select>
+            {assessScale?.items.map((i) => (
+              <label
+                key={i.key}
+                style={{
+                  display: "flex", flexWrap: "wrap", justifyContent: "space-between",
+                  alignItems: "center", gap: 8, fontSize: 14,
+                }}
+              >
+                <span style={{ flex: "1 1 260px" }}>{i.text}</span>
+                <select
+                  aria-label={i.text}
+                  value={assessAnswers[i.key] ?? 0}
+                  onChange={(e) =>
+                    setAssessAnswers((cur) => ({ ...cur, [i.key]: Number(e.target.value) }))
+                  }
+                  style={{ flex: "0 1 320px", maxWidth: "100%" }}
+                >
+                  {Array.from({ length: i.max_value + 1 }, (_, v) => v).map((v) => (
+                    <option key={v} value={v}>
+                      {i.anchors[v] ? `${v} — ${i.anchors[v]}` : String(v)}
+                    </option>
+                  ))}
+                </select>
+              </label>
             ))}
-          </select>
-          {assessScale?.items.map((i) => (
-            <label key={i.key} style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 14 }}>
-              <span>{i.text}</span>
-              <input
-                type="number"
-                min={0}
-                max={i.max_value}
-                value={assessAnswers[i.key] ?? 0}
-                onChange={(e) =>
-                  setAssessAnswers((cur) => ({
-                    ...cur,
-                    [i.key]: Math.max(0, Math.min(i.max_value, Number(e.target.value) || 0)),
-                  }))
-                }
-                style={{ width: 64 }}
-              />
-            </label>
-          ))}
-          <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8 }}>
-            <button onClick={submitAssessment} disabled={!assessScale}>Сохранить оценку</button>
-            {assessResult && (
-              <span style={{ fontSize: 13 }}>
-                {assessResult.total_score} · {assessResult.severity} · {assessResult.triage}
-              </span>
-            )}
-          </div>
-          {assessErr && <p className="error">{assessErr}</p>}
+            <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8 }}>
+              <button onClick={submitAssessment} disabled={!assessScale}>Сохранить оценку</button>
+              {assessResult && (
+                <span style={{ fontSize: 13 }}>
+                  {assessResult.total_score} · {assessResult.severity} · {assessResult.triage}
+                </span>
+              )}
+            </div>
+            {assessErr && <p className="error">{assessErr}</p>}
+          </Collapsible>
         </div>
       )}
-
 
       {report.checkin.recent.length > 0 && (
         <div className="card">
@@ -682,19 +791,42 @@ function ReportView({ report, error, onBack, onRefresh }: {
         </div>
       )}
 
-      <h3>Приверженность лечению (задача кейса 7, 14 дней)</h3>
-      {report.adherence.pct !== null ? (
+      <h3>Приверженность лечению (FR-27, 14 дней)</h3>
+      {report.adherence.medications.length > 0 ? (
         <>
-          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
-            <div style={{ flex: 1, maxWidth: 320, height: 18, background: "#eef0f4", borderRadius: 9, overflow: "hidden" }}>
-              <div style={{ width: `${Math.round(report.adherence.pct)}%`, height: "100%",
-                background: report.adherence.pct >= 80 ? "#2e7d32" : report.adherence.pct >= 50 ? "#c9a227" : "#b3261e" }} />
-            </div>
-            <b>{report.adherence.pct}%</b>
-            <span style={{ color: "#5a6478", fontSize: 13 }}>
-              принят {report.adherence.taken} · частично {report.adherence.partial} · пропущен {report.adherence.missed}
-            </span>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Препарат</th><th>Режим</th><th>Принято</th><th>Частично</th>
+                  <th>Пропущено</th><th>Ожидалось</th><th>%</th>
+                </tr>
+              </thead>
+              <tbody>
+                {report.adherence.medications.map((m) => (
+                  <tr key={m.id}>
+                    <td>{m.title}</td>
+                    <td>{m.times_per_day != null ? `${m.times_per_day} р/день` : "не задан"}</td>
+                    <td>{m.taken}</td>
+                    <td>{m.partial}</td>
+                    <td>{m.missed}</td>
+                    <td>{m.expected}</td>
+                    <td>{m.pct != null ? `${m.pct}%` : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
+          <p style={{ fontSize: 13, marginTop: 6 }}>
+            <b>Общий процент: {report.adherence.pct}%</b>{" "}
+            <span style={{ color: "#5a6478" }}>
+              — это сумма (принято + 0,5 × частично) по назначениям с заданным режимом,
+              делённая на сумму ожидаемых приёмов; не среднее процентов по препаратам.
+              {report.adherence.excluded_count > 0
+                ? ` Вне расчёта ${report.adherence.excluded_count} отметок без привязки к назначению или у назначений без режима.`
+                : ""}
+            </span>
+          </p>
           {report.adherence.records.length > 0 && (
             <div className="table-wrap">
               <table>
@@ -714,15 +846,40 @@ function ReportView({ report, error, onBack, onRefresh }: {
           )}
         </>
       ) : (
-        <p style={{ color: "#5a6478", fontSize: 13 }}>Записей о приверженности за 14 дней нет.</p>
+        <p style={{ color: "#5a6478", fontSize: 13 }}>
+          Процент не считается: ни у одного назначения не задан режим приёма (сколько раз в день).
+          {report.adherence.total > 0 && ` Отметок за 14 дней: ${report.adherence.total}, все вне расчёта.`}
+        </p>
       )}
 
-      <h3>Нежелательные явления (задача кейса 3)</h3>
+      <h3>Нежелательные явления</h3>
+      {aeList.filter((e) => e.status === "pending").length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 12 }}>
+          <strong style={{ fontSize: 14 }}>
+            На проверке: {aeList.filter((e) => e.status === "pending").length}
+          </strong>
+          {aeList
+            .filter((e) => e.status === "pending")
+            .map((e) => (
+              <VerifyAdverseEvent
+                key={e.id}
+                event={e}
+                medications={report.adherence.medications}
+                drugs={drugs}
+                onOpenLibrary={onOpenLibrary}
+                onVerified={(updated) => {
+                  setAeList((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
+                  onRefresh();
+                }}
+              />
+            ))}
+        </div>
+      )}
       {aeList.length > 0 ? (
         <div className="table-wrap">
           <table>
             <thead>
-              <tr><th>Дата</th><th>Событие</th><th>Тяжесть</th><th>Препарат</th><th>Действие</th></tr>
+              <tr><th>Дата</th><th>Событие</th><th>Тяжесть</th><th>Статус</th><th>Препарат</th><th>Действие</th></tr>
             </thead>
             <tbody>
               {aeList.map((e) => (
@@ -730,7 +887,23 @@ function ReportView({ report, error, onBack, onRefresh }: {
                   <td>{e.onset_date}</td>
                   <td>{e.event_text}</td>
                   <td><span className={`badge ${e.severity === "severe" ? "RED" : e.severity === "moderate" ? "YELLOW" : "GREEN"}`}>{e.severity}</span></td>
-                  <td>{e.suspected_drug ?? "—"}</td>
+                  <td>
+                    <span className={`badge ${e.status === "confirmed" ? "GREEN" : e.status === "pending" ? "YELLOW" : ""}`}>
+                      {e.status === "confirmed" ? "подтверждено" : e.status === "pending" ? "на проверке" : "отклонено"}
+                    </span>
+                    {e.reported_by === "patient" && (
+                      <div style={{ color: "#5a6478", fontSize: 12 }}>сообщил пациент</div>
+                    )}
+                  </td>
+                  <td>
+                    {e.suspected_drug ?? e.drug_trade_name ?? "—"}
+                    {e.reference && (
+                      <div style={{ color: "#5a6478", fontSize: 12 }} title={e.reference.adverse_events}>
+                        ГРЛС: {e.reference.adverse_events.slice(0, 80)}
+                        {e.reference.adverse_events.length > 80 ? "…" : ""}
+                      </div>
+                    )}
+                  </td>
                   <td>{e.action_taken ?? "—"}</td>
                 </tr>
               ))}
@@ -901,6 +1074,116 @@ function ReportView({ report, error, onBack, onRefresh }: {
   );
 }
 
+// FR-28: проверка сообщения пациента. Решение выбирается кнопкой, поля
+// (тяжесть, назначение, препарат ГРЛС, действие, заметка) применяются при
+// сохранении. После сохранения строка уходит из очереди «на проверке».
+function VerifyAdverseEvent({ event, medications, drugs, onOpenLibrary, onVerified }: {
+  event: ClinicianAdverseEvent;
+  medications: Report["adherence"]["medications"];
+  drugs: Drug[];
+  onOpenLibrary: () => void;
+  onVerified: (updated: ClinicianAdverseEvent) => void;
+}) {
+  const [decision, setDecision] = useState<"confirmed" | "rejected">("confirmed");
+  const [severity, setSeverity] = useState(event.severity);
+  const [medId, setMedId] = useState(event.medication_id ?? "");
+  const [drugId, setDrugId] = useState(event.drug_id ?? "");
+  const [action, setAction] = useState(event.action_taken ?? "monitoring");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const drug = drugs.find((d) => d.drug_id === drugId);
+
+  const save = async () => {
+    setErr("");
+    setBusy(true);
+    try {
+      onVerified(await api.verifyAdverseEvent(event.patient_id, event.id, {
+        status: decision,
+        severity,
+        medication_id: medId || undefined,
+        drug_id: drugId || undefined,
+        action_taken: action,
+        verification_note: note.trim() || undefined,
+      }));
+    } catch (e: unknown) {
+      setErr(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className="msg"
+      style={{ borderLeft: `3px solid ${event.severity === "severe" ? "#d64545" : "#c9a227"}`, paddingLeft: 10 }}
+    >
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", fontSize: 13 }}>
+        <b>{event.onset_date}</b>
+        <span className={`badge ${event.severity === "severe" ? "RED" : event.severity === "moderate" ? "YELLOW" : "GREEN"}`}>
+          {event.severity}
+        </span>
+        <span>{event.event_text}</span>
+        {event.medication_title && (
+          <span style={{ color: "#5a6478" }}>· назначение: {event.medication_title}</span>
+        )}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginTop: 8 }}>
+        <button
+          className={decision === "confirmed" ? "active" : ""}
+          onClick={() => setDecision("confirmed")}
+        >
+          Подтвердить
+        </button>
+        <button
+          className={decision === "rejected" ? "active" : ""}
+          onClick={() => setDecision("rejected")}
+        >
+          Отклонить
+        </button>
+        <select aria-label="Тяжесть НЯ" value={severity} onChange={(e) => setSeverity(e.target.value as AdverseSeverity)}>
+          <option value="mild">лёгкое</option>
+          <option value="moderate">умеренное</option>
+          <option value="severe">тяжёлое</option>
+        </select>
+        <select aria-label="Связь с назначением" value={medId} onChange={(e) => setMedId(e.target.value)}>
+          <option value="">назначение не выбрано</option>
+          {medications.map((m) => (
+            <option key={m.id} value={m.id}>{m.title}</option>
+          ))}
+        </select>
+        <select aria-label="Препарат из справочника" value={drugId} onChange={(e) => setDrugId(e.target.value)}>
+          <option value="">справочник ГРЛС</option>
+          {drugs.map((d) => (
+            <option key={d.drug_id} value={d.drug_id}>{d.trade_name}</option>
+          ))}
+        </select>
+        <select aria-label="Действие при НЯ" value={action} onChange={(e) => setAction(e.target.value)}>
+          <option value="none">действий не требуется</option>
+          <option value="monitoring">наблюдение</option>
+          <option value="dose_reduced">доза снижена</option>
+          <option value="stopped">препарат отменён</option>
+          <option value="referred">направлен к врачу</option>
+        </select>
+        <input placeholder="Заметка врача" value={note} onChange={(e) => setNote(e.target.value)} style={{ maxWidth: 260 }} />
+        <button onClick={save} disabled={busy}>
+          {busy ? "Сохранение…" : "Сохранить проверку"}
+        </button>
+      </div>
+      {drug && (
+        <p style={{ fontSize: 12, color: "#5a6478", marginBottom: 0 }}>
+          В справочнике ГРЛС: {drug.adverse_events.slice(0, 240)}
+          {drug.adverse_events.length > 240 ? "…" : ""}{" "}
+          <a href="#library" onClick={onOpenLibrary} style={{ color: "#2f6fed" }}>
+            открыть справочник
+          </a>
+        </p>
+      )}
+      {err && <p className="error">{err}</p>}
+    </div>
+  );
+}
+
 // FR-25: блок «ЕМИАС» в карточке врача — только чтение (связка, назначения, приёмы).
 function EmiasBlock({ patientId }: { patientId: string }) {
   const [data, setData] = useState<EmiasSummary | null>(null);
@@ -1036,6 +1319,10 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
   const [dosage, setDosage] = useState("");
   const [startedOn, setStartedOn] = useState(new Date().toISOString().slice(0, 10));
   const [notes, setNotes] = useState("");
+  // FR-27: режим приёма — знаменатель приверженности (1..6 раз в день).
+  const [timesPerDay, setTimesPerDay] = useState(1);
+  const [editId, setEditId] = useState<string | null>(null);
+  const [editTimes, setEditTimes] = useState(1);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   // Защита от гонки: ответ устаревшего запроса не перезаписывает свежий список.
@@ -1063,11 +1350,13 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
         title: title.trim(),
         dosage: dosage.trim() || undefined,
         started_on: startedOn || undefined,
+        times_per_day: timesPerDay,
         notes: notes.trim() || undefined,
       });
       setTitle("");
       setDosage("");
       setNotes("");
+      setTimesPerDay(1);
       load();
     } catch (e) {
       setErr(e instanceof ApiError ? e.detail : String(e));
@@ -1097,6 +1386,16 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
     }
   };
 
+  const saveTimes = async (medId: string) => {
+    setErr("");
+    try {
+      await api.updateMedication(patientId, medId, { times_per_day: editTimes });
+      setEditId(null);
+      load();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.detail : String(e));
+    }
+  };
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <h3>Назначения (FR-23)</h3>
@@ -1104,7 +1403,7 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
         <div className="table-wrap">
           <table>
             <thead>
-              <tr><th>Препарат</th><th>Дозировка</th><th>С</th><th>По</th><th>Статус</th><th>Заметка</th><th></th></tr>
+              <tr><th>Препарат</th><th>Дозировка</th><th>Режим</th><th>С</th><th>По</th><th>Статус</th><th>Заметка</th><th></th></tr>
             </thead>
             <tbody>
               {items.map((m) => (
@@ -1119,6 +1418,26 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
                     )}
                   </td>
                   <td>{m.dosage ?? "—"}</td>
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    {editId === m.id ? (
+                      <>
+                        <select
+                          aria-label="Раз в день"
+                          value={editTimes}
+                          onChange={(e) => setEditTimes(Number(e.target.value))}
+                        >
+                          {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n}</option>)}
+                        </select>
+                        <button className="link" style={{ fontSize: 12 }} onClick={() => saveTimes(m.id)}>
+                          Сохранить
+                        </button>
+                      </>
+                    ) : m.times_per_day != null ? (
+                      `${m.times_per_day} р/день`
+                    ) : (
+                      <span style={{ color: "#5a6478", fontSize: 12 }}>не задан</span>
+                    )}
+                  </td>
                   <td>{m.started_on ?? "—"}</td>
                   <td>{m.ended_on ?? "—"}</td>
                   <td>{MED_STATUS_LABELS[m.status] ?? m.status}</td>
@@ -1130,6 +1449,13 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
                           <button className="link" style={{ fontSize: 12 }} onClick={() => stop(m.id)}>
                             Остановить
                           </button>
+                        )}
+                        {m.editable && editId !== m.id && m.source === "clinician" && (
+                          <button
+                            className="link"
+                            style={{ fontSize: 12, marginLeft: 8 }}
+                            onClick={() => { setEditId(m.id); setEditTimes(m.times_per_day ?? 1); }}
+                          >Режим</button>
                         )}
                         <button
                           className="link"
@@ -1153,6 +1479,12 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
         <input placeholder="Препарат" value={title} onChange={(e) => setTitle(e.target.value)} style={{ maxWidth: 200 }} />
         <input placeholder="Дозировка" value={dosage} onChange={(e) => setDosage(e.target.value)} style={{ maxWidth: 150 }} />
         <input type="date" aria-label="Дата начала" value={startedOn} onChange={(e) => setStartedOn(e.target.value)} />
+        <label style={{ fontSize: 13, color: "#3d4657" }}>
+          Раз в день:{" "}
+          <select aria-label="Раз в день" value={timesPerDay} onChange={(e) => setTimesPerDay(Number(e.target.value))}>
+            {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </label>
         <input placeholder="Заметка" value={notes} onChange={(e) => setNotes(e.target.value)} style={{ maxWidth: 240 }} />
         <button onClick={add} disabled={busy || !title.trim()}>Назначить</button>
       </div>

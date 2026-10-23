@@ -63,6 +63,7 @@ def _relevance_gate(query: str, hits: list[dict], limit: int) -> list[dict]:
 
 class AgentState(TypedDict, total=False):
     query: str
+    retrieval_query: str | None
     topic: str | None
     limit: int
     chunks: list[RAGChunk]
@@ -83,13 +84,19 @@ class AgentFactory:
         topic: str | None = None,
         limit: int = 5,
         exclude_ids: set[str] | None = None,
+        redline_query: str | None = None,
     ) -> list[RAGChunk]:
         """Инструмент doctor-search: гибридный поиск по Qdrant (docs/07 §7).
 
         Отдельный переиспользуемый tool — ядро RAG-модуля. Redline-запрос
         (диагноз/терапия) поиска не делает; отказ формируется в _answer.
+
+        redline_query: по какому тексту проверять red line. По умолчанию — сам
+        query; при LLM-переформулировке уточняющего вопроса (FR-21) сюда
+        передаётся исходный вопрос врача, чтобы redline-реплика из истории
+        диалога не глушила поиск.
         """
-        if detect_redline(query) is not None:
+        if detect_redline(redline_query if redline_query is not None else query) is not None:
             return []
         hits = kb_store.hybrid_search(
             self._client,
@@ -132,16 +139,18 @@ class AgentFactory:
         ]
 
     def _retrieve(self, state: AgentState) -> AgentState:
-        # Retrieval и red line — строго по текущему вопросу врача (FR-21):
-        # история треда хранится для врача, но поиск не расширяет.
+        # Retrieval — по retrieval_query (LLM-переформулировка уточняющего
+        # вопроса, FR-21), red line — строго по исходному вопросу врача:
+        # redline-реплика из истории треда не глушит поиск следующих ходов.
         if detect_redline(state["query"]) is not None:
             return {"chunks": []}
         return {
             "chunks": self.search_kb(
-                state["query"],
+                state.get("retrieval_query") or state["query"],
                 topic=state.get("topic"),
                 limit=state.get("limit", 5),
                 exclude_ids=state.get("exclude_ids"),
+                redline_query=state["query"],
             )
         }
 
@@ -191,17 +200,23 @@ class AgentFactory:
         patient_context: dict | None = None,
         patient_contexts: list[dict] | None = None,
         exclude_ids: set[str] | None = None,
+        retrieval_query: str | None = None,
     ) -> dict:
+        # Retrieval и роутинг раздела идут по retrieval_query (FR-21):
+        # assistant_chat подставляет сюда LLM-переформулировку уточняющего
+        # вопроса. Без неё (одиночный вопрос/LLM выключен) — сам query.
+        search_query = (retrieval_query or "").strip() or query
         # LLM-роутинг раздела (docs/04 FR-14): если клиент явно не задал topic и
         # LLM-роутер включён — топик выбирает LLM (тулза search_<раздел>).
         # Redline-запросы LLM не трогаем: отказ детерминирован и дешевле.
         if topic is None and detect_redline(query) is None:
             from app.services import llm_router  # lazy: config-зависимый импорт
 
-            topic = llm_router.route_topic(query)
+            topic = llm_router.route_topic(search_query)
         return self.build().invoke(
             {
                 "query": query,
+                "retrieval_query": search_query,
                 "topic": topic,
                 "limit": limit,
                 "patient_context": patient_context,

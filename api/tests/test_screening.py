@@ -31,6 +31,24 @@ def test_screening_flow_phq9(client):
     assert assessment["triage"] == "YELLOW"
 
 
+def test_questionnaires_expose_answer_anchors(client):
+    """Каталог шкал: у каждого варианта ответа есть подпись (docs/04 §3.1)."""
+    h, _ = patient_ctx(client, "anchors@test.ru")
+    catalog = client.get("/api/v1/questionnaires", headers=h).json()
+    assert catalog
+    for scale in catalog:
+        for item in scale["items"]:
+            assert len(item["anchors"]) == item["max_value"] + 1, (scale["code"], item["key"])
+            assert all(str(a).strip() for a in item["anchors"])
+    phq = next(s for s in catalog if s["code"] == "PHQ-9")
+    assert phq["items"][0]["anchors"] == [
+        "Совсем нет", "Несколько дней", "Более половины дней", "Почти каждый день",
+    ]
+    hcl = next(s for s in catalog if s["code"] == "HCL-32")
+    assert hcl["items"][0]["anchors"] == ["Нет", "Да"]
+
+
+
 def test_second_open_screening_conflict(client):
     h, _ = patient_ctx(client, "two@test.ru")
     assert client.post("/api/v1/screenings", json={}, headers=h).status_code == 201

@@ -1,9 +1,14 @@
 # E5: панель врача, roster, аудит доступа. Контракт: docs/04 §3.1; docs/06 §3.
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from app.models import AuditLog
 
 from .conftest import admin_ctx, auth_header, clinician_ctx, finish_screening, patient_ctx
 
 PHQ_ALL = {f"q{i}": 0 for i in range(1, 10)}
+
+MOSCOW = ZoneInfo("Europe/Moscow")
 
 HDRS_ALL_ZERO = {f"h{i}": 0 for i in range(1, 18)}
 
@@ -59,6 +64,23 @@ def test_report_after_roster_and_audit(client):
     # Аудит чтения отчёта
     audit = client.get("/api/v1/admin/audit", headers=a).json()["items"]
     assert any(e["action"] == "READ_REPORT" and e["object_id"] == str(pid) for e in audit)
+
+
+def test_report_exposes_scale_anchors(client):
+    """Карточка врача отдаёт подписи вариантов — HDRS-17 заполняется по якорям, не числами."""
+    _, pid = _with_patient(client, "anch@test.ru")
+    c, cid = clinician_ctx(client, "anchdoc@test.ru")
+    a, _ = admin_ctx(client, "anchadm@test.ru")
+    _grant(client, a, pid, cid)
+    body = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=c).json()
+    scales = {s["code"]: s for s in body["available_scales"]}
+    assert "HDRS-17" in scales
+    for scale in scales.values():
+        for item in scale["items"]:
+            assert len(item["anchors"]) == item["max_value"] + 1, (scale["code"], item["key"])
+    hdrs = {i["key"]: i for i in scales["HDRS-17"]["items"]}
+    assert len(hdrs["h1"]["anchors"]) == 5
+    assert len(hdrs["h4"]["anchors"]) == 3
 
 
 def test_clinician_patients_list_and_triage_filter(client):
@@ -174,24 +196,37 @@ def test_adverse_event_roster_gated(client):
 
 
 def test_adherence_patient_records_and_doctor_aggregate(client):
-    """задача кейса 7: пациент отмечает приверженность, врач видит агрегат % в карточке."""
+    """FR-27: врач видит weighted-процент от ожидаемых приёмов по режиму назначения."""
     h, pid = _with_patient(client, "ad@test.ru")
-    # Пациент отмечает 3 записи: 2 taken + 1 missed → pct = (2 + 0)/3*100 ≈ 66.7
-    for st in ("taken", "taken", "missed"):
-        r = client.post("/api/v1/me/adherence", json={"medication": "Авиандр", "status": st}, headers=h)
-        assert r.status_code == 201, r.text
-
     c, cid = clinician_ctx(client, "adc@test.ru")
     a, _ = admin_ctx(client, "ada@test.ru")
     _grant(client, a, pid, cid)
+    med = client.post(
+        f"/api/v1/clinician/patients/{pid}/medications",
+        json={"title": "Авиандр", "started_on": datetime.now(MOSCOW).date().isoformat(), "times_per_day": 2},
+        headers=c,
+    ).json()
+    # Назначение с сегодняшнего дня: ожидается 2 приёма. taken + partial = 1.5 → 75%.
+    for st in ("taken", "partial"):
+        r = client.post(
+            "/api/v1/me/adherence", json={"medication_id": med["id"], "status": st}, headers=h,
+        )
+        assert r.status_code == 201, r.text
+    # Историческая отметка без связи с назначением — вне знаменателя.
+    r = client.post("/api/v1/me/adherence", json={"medication": "Авиандр", "status": "missed"}, headers=h)
+    assert r.status_code == 201, r.text
 
     summ = client.get(f"/api/v1/clinician/patients/{pid}/adherence", headers=c).json()
-    assert summ["total"] == 3 and summ["taken"] == 2 and summ["missed"] == 1
-    assert summ["pct"] == 66.7
+    assert summ["expected"] == 2 and summ["score"] == 1.5
+    assert summ["pct"] == 75
+    assert summ["total"] == 3 and summ["taken"] == 1 and summ["partial"] == 1 and summ["missed"] == 1
+    assert summ["excluded_count"] == 1
+    assert summ["medications"][0]["title"] == "Авиандр"
 
     # Агрегат есть и в отчёте
     report = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=c).json()
-    assert report["adherence"]["pct"] == 66.7
+    assert report["adherence"]["pct"] == 75
+    assert report["adherence"]["expected"] == 2
     assert report["adherence"]["records"][0]["medication"] == "Авиандр"
 
 

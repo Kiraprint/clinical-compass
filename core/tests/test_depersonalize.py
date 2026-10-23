@@ -4,6 +4,7 @@ import pytest
 
 from compass.depersonalize import (
     ADDRESS,
+    DOB,
     DOC,
     EMAIL,
     FIO,
@@ -45,6 +46,21 @@ def test_document_numbers_masked():
         assert r.text.endswith("[ДОКУМЕНТ]"), text
         assert r.findings[-1].kind == DOC
 
+
+def test_date_of_birth_masked_with_marker():
+    """Дата рождения маскируется только с маркером (docs/12); клинические даты
+    без маркера не трогаем, чтобы не портить смысл запроса."""
+    for text in (
+        "дата рождения 12.03.1954",
+        "Дата рождения: 12-03-1954",
+        "д.р. 12.03.1954",
+        "род. 12/03/1954",
+    ):
+        r = depersonalize(text)
+        assert r.text.endswith("[ДАТА РОЖДЕНИЯ]"), text
+        assert r.findings[-1].kind == DOB
+    # Без маркера дата остаётся: это может быть дата приёма/начала симптомов.
+    assert depersonalize("приём 12.03.1954").text == "приём 12.03.1954"
 
 def test_fio_deny_list_variants():
     names = ["Иванов Иван Иванович"]

@@ -1,9 +1,11 @@
 """Сессии клинического ассистента врача (FR-21).
 
 Тред хранит контекст диалога между запросами и область пациентов (мультипациент).
-Ответ по-прежнему собирается детерминированным RAG-путём (services.agent):
-история диалога расширяет поисковый запрос, red line и ответ считаются по
-текущему вопросу врача.
+Ответ по-прежнему собирается детерминированным RAG-путём (services.agent), но
+уточняющий вопрос («а в каких дозах?») ищется по LLM-переформулировке последних
+реплик треда. История в embedding НЕ конкатенируется (ФИО/redline-реплики из
+истории сдвигали поиск): переформулировка используется только для retrieval и
+выбора раздела, red line, ответ и цитаты считаются по исходному вопросу (FR-21).
 
 ПДн: текст сообщений — спецкатегория (EncryptedText), карты пациентов попадают
 в контекст только через clinician.patient_context (roster-gate + согласие).
@@ -17,6 +19,8 @@ import uuid
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
+from compass.agent import detect_redline
+
 from app.enrichment import review as kb_review
 from app.errors import Problem
 from app.models import (
@@ -25,7 +29,7 @@ from app.models import (
     AssistantThreadPatient,
     ClinicianRoster,
 )
-from app.services import audit, clinician
+from app.services import audit, clinician, llm_router
 from app.services.agent import scrub_for_llm, shared_factory
 
 MAX_THREAD_PATIENTS = 10
@@ -198,6 +202,24 @@ def delete_thread(db: Session, clinician_id, thread_id) -> None:
     db.commit()
 
 
+def _history_for_llm(db: Session, thread_id, names: list[str]) -> list[dict]:
+    """Последние реплики треда, деперсонализированные, oldest → newest.
+
+    Для LLM-переформулировки уточняющего вопроса (FR-21): в промпт не должны
+    попасть ФИО пациента/врача и прочие ПДн, поэтому каждая реплика проходит
+    scrub_for_llm. Обрезку по количеству/длине делает llm_router.
+    """
+    rows = db.scalars(
+        select(AssistantMessage)
+        .where(AssistantMessage.thread_id == thread_id)
+        .order_by(AssistantMessage.created_at.desc(), AssistantMessage.id.desc())
+        .limit(llm_router.REWRITE_HISTORY_MESSAGES)
+    ).all()
+    return [
+        {"role": m.role, "content": scrub_for_llm(m.content, None, names)[0]}
+        for m in reversed(rows)
+    ]
+
 def answer_query(
     db: Session,
     clinician_id,
@@ -246,16 +268,19 @@ def post_message(
         thread.updated_at = func.now()
     ids = _patient_ids(db, thread.id)
 
-    # История треда хранится и показывается врачу, но в retrieval не идёт:
-    # конкатенация прошлых реплик сдвигала эмбеддинг (ФИО/redline-реплики из
-    # истории вытесняли релевантные чанки). Поиск — строго по текущему вопросу.
+    # Уточняющий вопрос («а в каких дозах?») сам по себе не ищется: retrieval и
+    # роутинг идут по LLM-переформулировке последних реплик треда. История в
+    # embedding НЕ конкатенируется (ФИО/redline-реплики сдвигали поиск), а в LLM
+    # уходит только после scrub_for_llm. Читаем её до вставки текущего вопроса —
+    # это прошлые реплики, не он сам.
+    names = clinician.roster_names(db, clinician_id)
+    history = _history_for_llm(db, thread.id, names)
+
     question = AssistantMessage(
         thread_id=thread.id, role="CLINICIAN", content=content, citations=[]
     )
     db.add(question)
     db.flush()
-
-    names = clinician.roster_names(db, clinician_id)
     contexts: list[dict] = []
     skipped: list[str] = []
     for pid in ids:
@@ -270,8 +295,19 @@ def post_message(
     scrubbed_query, _, _ = scrub_for_llm(content, None, names)
     scrubbed_contexts = [scrub_for_llm(content, ctx, names)[1] for ctx in contexts]
 
+    # Одиночный вопрос (истории нет) LLM не вызывает: переформулировать нечего.
+    search_query = scrubbed_query
+    rewritten = False
+    # Redline-вопрос не ищется вовсе (детерминированный отказ) — не тратим LLM
+    # и не отправляем такой текст в модель; red line считается по оригиналу.
+    if history and detect_redline(content) is None:
+        candidate = llm_router.rewrite_followup(history, scrubbed_query)
+        if candidate:
+            search_query, rewritten = candidate, True
+
     result = shared_factory().invoke(
         scrubbed_query,
+        retrieval_query=search_query if rewritten else None,
         limit=5,
         patient_contexts=scrubbed_contexts or None,
         exclude_ids=kb_review.excluded_ids(db, clinician_id),
@@ -313,4 +349,7 @@ def post_message(
         "refusal_code": result.get("refusal_code"),
         "skipped_patient_ids": skipped,
         "message_ids": [str(question.id), str(answer.id)],
+        # Основание поиска для врача: что реально искали и была ли LLM-переформулировка.
+        "retrieval_query": search_query,
+        "rewritten": rewritten,
     }
