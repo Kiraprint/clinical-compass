@@ -82,12 +82,6 @@ class RiskFlag:
 
 
 @dataclass(frozen=True)
-class Checkin:
-    scale_code: str
-    items: tuple[ScaleItem, ...]
-
-
-@dataclass(frozen=True)
 class Trend:
     moving_avg: tuple[float, ...]
     delta_7: float | None
@@ -105,6 +99,5 @@ __all__ = [
     "ScaleResult",
     "RiskFlag",
     "FlagKind",
-    "Checkin",
     "Trend",
 ]
