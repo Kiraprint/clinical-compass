@@ -332,8 +332,17 @@ def _patient_card(db: Session, patient_id) -> dict:
             "rules_version": checkins[0].rules_version if checkins else None,
             "recent": [_checkin_dict(c) for c in checkins],
         },
+        # FR-31: только принятые врачом факты; отзыв согласия удаляет строки.
+        "chat_insights": _accepted_chat_insights(db, patient_id) if has_consent else [],
         "contacts": contacts_payload(patient, masked=True) if has_consent else None,
     }
+
+
+def _accepted_chat_insights(db: Session, patient_id) -> list[dict]:
+    """Ленивый импорт: chat_insights зависит от roster/consent-гейтов этого модуля."""
+    from . import chat_insights as chat_insights_service
+
+    return chat_insights_service.accepted_for_report(db, patient_id)
 
 
 def report(db: Session, clinician_id, patient_id, ip: str | None = None) -> dict:

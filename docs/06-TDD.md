@@ -205,6 +205,15 @@
 | `test_patients_sorted_by_escalations_then_freshness` (FR-30) | два GREEN-пациента: открытая эскалация, затем состаренная оценка | выше тот, у кого больше открытых эскалаций; при равенстве — свежая оценка |
 | `test_clinician_chats_only_roster_sorted_with_preview` (FR-29) | `GET /clinician/chats` для двух roster-пациентов и одного вне roster | только roster; `last_at` desc; `preview` ≤120 с «…», дешифрован сервером; `message_count`/`last_sender` |
 | `test_clinician_chats_scoped_to_clinician_and_role` (FR-29) | второй врач и пациент | чужой врач видит пустой список; пациенту — 403 `ROLE_MISMATCH` |
+| `test_analyze_creates_pending_encrypted_and_dedupes` (FR-31) | fake `/chat/completions` вернул 2 факта; повторный `POST .../chat/analyze` | оба факта `pending`, `text` в БД — bytea, `source_message_ids` заполнены; повтор: `created=0`, `skipped=2`, строк по-прежнему 2 |
+| `test_prompt_masks_fio_and_limits` (FR-31) | в переписке ФИО пациента и врача, телефон | в теле запроса к LLM нет ФИО/телефона; есть `[ФИО]`; промпт ограничивает 10 фактов и 200 символов |
+| `test_disabled_returns_503_without_llm_call` (FR-31) | `CC_CHAT_INSIGHTS_ENABLED=false`, URL задан | `503 CHAT_INSIGHTS_DISABLED` (detail ссылается на docs/17); `urlopen` не вызван; list — тоже 503 |
+| `test_llm_error_and_garbage_write_nothing` (FR-31) | LLM бросает `URLError`/возвращает не-JSON | `503 CHAT_INSIGHTS_UNAVAILABLE`, в `chat_insights` 0 строк |
+| `test_empty_dialogue_409` (FR-31) | roster-пациент без сообщений | `409 CHAT_INSIGHTS_EMPTY`, LLM не вызвана |
+| `test_accept_in_report_reject_not_and_404` (FR-31) | accept одного, reject другого, повтор accept | accepted виден в `report.chat_insights` без `source_message_ids`; rejected — нет; повтор идемпотентен; неизвестный id → `404 INSIGHT_NOT_FOUND` |
+| `test_foreign_patient_and_insight_404` (FR-31) | второй врач вне ростера; факт чужого пациента через свой ростер | `403 NO_ROSTER`; `404 INSIGHT_NOT_FOUND` |
+| `test_patient_role_forbidden` (FR-31) | пациент на analyze/list/decide | `403 ROLE_MISMATCH` |
+| `test_consent_revoke_deletes_insights` (FR-31) | анализ → `POST /consent/revoke` | строк `chat_insights` пациента нет |
 | `test_worker_tick_creates_one_notification_idempotent` | два тика `deliver_due` по одному due-напоминанию | ровно один `Notification kind='REMINDER'`; `notified_at` заполнен; второй тик — 0 |
 | `test_worker_respects_advisory_lock` | лок удерживает другой коннект | тик возвращает 0 и не создаёт уведомление; после снятия лока — доставка |
 | `test_consent_revocation_destroys_reminders` | напоминание задано → POST /consent/revoke | строк пациента в `clinician_reminders` нет |

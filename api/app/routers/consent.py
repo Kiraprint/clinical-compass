@@ -83,6 +83,7 @@ def _destroy_patient_pdn(db: Session, patient_id) -> None:
         Answer,
         Assessment,
         CheckinSession,
+        ChatInsight,
         ChatMessage,
         DeviceToken,
         DiaryEntry,
@@ -114,6 +115,9 @@ def _destroy_patient_pdn(db: Session, patient_id) -> None:
     # независимые
     db.execute(sa_delete(DiaryEntry).where(DiaryEntry.patient_id == patient_id))
     db.execute(sa_delete(ChatMessage).where(ChatMessage.patient_id == patient_id))
+    # FR-31: факты из переписки — производная спецкатегория ПДн; без их удаления
+    # они пережили бы отзыв согласия (F2, 152-ФЗ ст.9 ч.2-3).
+    db.execute(sa_delete(ChatInsight).where(ChatInsight.patient_id == patient_id))
     db.execute(sa_delete(AdverseEvent).where(AdverseEvent.patient_id == patient_id))
     db.execute(sa_delete(AdherenceRecord).where(AdherenceRecord.patient_id == patient_id))
     # F2 (re-audit): каналы доставки push — уничтожаем, иначе отозванный пациент
