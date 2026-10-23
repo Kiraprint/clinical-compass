@@ -37,7 +37,10 @@ def list_questionnaires(user: User = Depends(require_consent), db: Session = Dep
         {
             "code": s.code,
             "title": s.title,
-            "items": [{"key": i.key, "text": i.text, "max_value": i.max_value} for i in s.items],
+            "items": [
+                {"key": i.key, "text": i.text, "max_value": i.max_value, "anchors": list(i.anchors)}
+                for i in s.items
+            ],
         }
         for s in patient_administered_scales()
     ]

@@ -61,6 +61,23 @@ def test_report_after_roster_and_audit(client):
     assert any(e["action"] == "READ_REPORT" and e["object_id"] == str(pid) for e in audit)
 
 
+def test_report_exposes_scale_anchors(client):
+    """Карточка врача отдаёт подписи вариантов — HDRS-17 заполняется по якорям, не числами."""
+    _, pid = _with_patient(client, "anch@test.ru")
+    c, cid = clinician_ctx(client, "anchdoc@test.ru")
+    a, _ = admin_ctx(client, "anchadm@test.ru")
+    _grant(client, a, pid, cid)
+    body = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=c).json()
+    scales = {s["code"]: s for s in body["available_scales"]}
+    assert "HDRS-17" in scales
+    for scale in scales.values():
+        for item in scale["items"]:
+            assert len(item["anchors"]) == item["max_value"] + 1, (scale["code"], item["key"])
+    hdrs = {i["key"]: i for i in scales["HDRS-17"]["items"]}
+    assert len(hdrs["h1"]["anchors"]) == 5
+    assert len(hdrs["h4"]["anchors"]) == 3
+
+
 def test_clinician_patients_list_and_triage_filter(client):
     _, pid = _with_patient(client, "pl@test.ru")  # GREEN (0)
     c, cid = clinician_ctx(client, "cl@test.ru")

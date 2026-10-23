@@ -43,10 +43,11 @@ test.describe("Врачебная оценка (HDRS-17)", () => {
     await expect(row).toBeVisible();
     await row.getByRole("button", { name: "Открыть" }).click();
 
-    // Форма врачебной оценки: шкала HDRS-17, пункт h3 (третий input) = 2 (суицидальные мысли).
-    await expect(page.getByRole("heading", { name: "Оценка врачом" })).toBeVisible();
+    // Форма врачебной оценки: шкала HDRS-17, пункт h3 = 2 (суицидальные мысли).
+    // Блок свёрнут/раскрыт через <details>; по умолчанию раскрыт.
+    await expect(page.locator("summary", { hasText: "Оценка врачом" })).toBeVisible();
     await expect(page.getByLabel("Шкала врачебной оценки")).toHaveValue("HDRS-17");
-    await page.locator('input[type="number"]').nth(2).fill("2");
+    await page.getByLabel("Суицидальные мысли").selectOption("2");
     await page.getByRole("button", { name: "Сохранить оценку" }).click();
 
     // Итог сразу в форме, а карточка перезагружается — появляется эскалация.

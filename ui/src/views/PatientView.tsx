@@ -104,7 +104,9 @@ function ScreeningTab() {
   const [assigned, setAssigned] = useState<{ code: string; title: string }[]>([]);
   const [chosenCode, setChosenCode] = useState<string | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
-  const [questions, setQuestions] = useState<{ key: string; text: string; max: number }[]>([]);
+  const [questions, setQuestions] = useState<
+    { key: string; text: string; max: number; anchors: string[] }[]
+  >([]);
   const [answers, setAnswers] = useState<Record<string, number>>({});
   const [result, setResult] = useState<Assessment | null>(null);
   const [error, setError] = useState("");
@@ -126,7 +128,11 @@ function ScreeningTab() {
       const run = await api.startScreening(chosenCode ?? undefined);
       const scale = catalog.find((s) => s.code === run.questionnaire_code);
       setRunId(run.run_id);
-      setQuestions((scale?.items ?? []).map((i) => ({ key: i.key, text: i.text, max: i.max_value })));
+      setQuestions(
+        (scale?.items ?? []).map((i) => ({
+          key: i.key, text: i.text, max: i.max_value, anchors: i.anchors ?? [],
+        })),
+      );
       setAnswers({});
       setResult(null);
     } catch (e) {
@@ -217,13 +223,15 @@ function ScreeningTab() {
             <div key={q.key} className="qa">
               <p>{q.text}</p>
               <div className="row">
-                {[0, 1, 2, 3].map((v) => (
+                {Array.from({ length: q.max + 1 }, (_, v) => v).map((v) => (
                   <button
                     key={v}
                     className={answers[q.key] === v ? "on" : ""}
+                    title={`${v} из ${q.max}`}
+                    style={{ fontSize: 13, flex: "1 1 auto" }}
                     onClick={() => pick(q.key, v)}
                   >
-                    {v}
+                    {q.anchors[v] ?? String(v)}
                   </button>
                 ))}
               </div>

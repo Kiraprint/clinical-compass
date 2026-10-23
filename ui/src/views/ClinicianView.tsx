@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api, ApiError, Assessment, ClinicianReminder, EmiasSummary, Escalation, HistoryType, ImportHistoryResult, PatientCard, PatientContacts, PatientHistoryItem, PatientMedication, RemindersResponse, Report, Visit } from "../api";
 import TrendChart from "../TrendChart";
 import AssistantTab from "./AssistantTab";
@@ -9,6 +9,47 @@ const MED_STATUS_LABELS: Record<string, string> = {
   completed: "завершено",
   stopped: "отменено",
 };
+
+
+// Сворачиваемый блок карточки врача: состояние раскрытия запоминаем в localStorage,
+// чтобы врач не терял привычный вид между визитами (отзыв эксперта: шкала Гамильтона
+// занимает весь экран).
+function Collapsible({
+  storageKey,
+  summary,
+  children,
+}: {
+  storageKey: string;
+  summary: ReactNode;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(() => {
+    try {
+      return localStorage.getItem(storageKey) !== "0";
+    } catch {
+      return true;
+    }
+  });
+  return (
+    <details
+      open={open}
+      onToggle={(e) => {
+        const next = e.currentTarget.open;
+        setOpen(next);
+        try {
+          localStorage.setItem(storageKey, next ? "1" : "0");
+        } catch {
+          // приватный режим — просто не запоминаем
+        }
+      }}
+    >
+      <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: 16, marginBottom: 8 }}>
+        {summary}
+      </summary>
+      {children}
+    </details>
+  );
+}
 
 const TRIAGE_FILTERS = ["", "GREEN", "YELLOW", "RED"] as const;
 
@@ -519,6 +560,14 @@ function ReportView({ report, error, onBack, onRefresh }: {
   if (!report) return <div className="card">Загрузка…</div>;
   const last = report.last_assessment;
   const assessScale = report.available_scales.find((s) => s.code === assessCode);
+  // Итог в summary свёрнутой карточки: свежая оценка из формы или последняя сохранённая.
+  const assessFmt = (score: number, sev: string, at: string) =>
+    `${score} · ${sev} · ${new Date(at).toLocaleDateString("ru-RU")}`;
+  const assessSummary = assessResult
+    ? assessFmt(assessResult.total_score, assessResult.severity, assessResult.computed_at)
+    : report.last_assessment
+      ? `последняя ${assessFmt(report.last_assessment.total_score, report.last_assessment.severity, report.last_assessment.computed_at)}`
+      : "";
   return (
     <div className="card">
       <button className="ghost" onClick={onBack}>
@@ -534,83 +583,103 @@ function ReportView({ report, error, onBack, onRefresh }: {
       <ContactsBlock patientId={report.patient_id} hasConsent={report.contacts !== null} />
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        <h3 style={{ margin: 0 }}>Шкалы скрининга</h3>
-        <table className="scale-table" style={{ fontSize: 14 }}>
-          <tbody>
-            {report.available_scales.filter((s) => s.audience === "PATIENT").map((s) => (
-              <tr key={s.code}>
-                <td style={{ textAlign: "left" }}>
-                  <label htmlFor={s.code}>{s.title}</label>
-                </td>
-                <td style={{ textAlign: "right", width: 44, whiteSpace: "nowrap" }}>
-                  <input
-                    id={s.code}
-                    type="checkbox"
-                    checked={picked.includes(s.code)}
-                    onChange={() =>
-                      setPicked((cur) =>
-                        cur.includes(s.code) ? cur.filter((c) => c !== s.code) : [...cur, s.code],
-                      )
-                    }
-                  />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, alignItems: "center" }}>
-          <button onClick={saveScale} disabled={picked.length === 0}>Назначить</button>
-          {scaleSaved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
-        </div>
+        <Collapsible storageKey="cc.clinician.screening-scales" summary="Шкалы скрининга">
+          <table className="scale-table" style={{ fontSize: 14 }}>
+            <tbody>
+              {report.available_scales.filter((s) => s.audience === "PATIENT").map((s) => (
+                <tr key={s.code}>
+                  <td style={{ textAlign: "left" }}>
+                    <label htmlFor={s.code}>{s.title}</label>
+                  </td>
+                  <td style={{ textAlign: "right", width: 44, whiteSpace: "nowrap" }}>
+                    <input
+                      id={s.code}
+                      type="checkbox"
+                      checked={picked.includes(s.code)}
+                      onChange={() =>
+                        setPicked((cur) =>
+                          cur.includes(s.code) ? cur.filter((c) => c !== s.code) : [...cur, s.code],
+                        )
+                      }
+                    />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, alignItems: "center" }}>
+            <button onClick={saveScale} disabled={picked.length === 0}>Назначить</button>
+            {scaleSaved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
+          </div>
+        </Collapsible>
       </div>
       {scaleError && <p className="error">{scaleError}</p>}
 
       {report.available_scales.some((s) => s.audience === "CLINICIAN") && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <h3 style={{ margin: 0 }}>Оценка врачом</h3>
-          <select
-            aria-label="Шкала врачебной оценки"
-            value={assessCode}
-            onChange={(e) => {
-              setAssessCode(e.target.value);
-              setAssessAnswers({});
-              setAssessResult(null);
-            }}
+          <Collapsible
+            storageKey="cc.clinician.assessment"
+            summary={
+              <>
+                Оценка врачом: {assessScale?.code ?? "—"}
+                {assessSummary && (
+                  <span style={{ color: "#5a6478", fontSize: 13, fontWeight: 400 }}>
+                    {" "}· {assessSummary}
+                  </span>
+                )}
+              </>
+            }
           >
-            {report.available_scales.filter((s) => s.audience === "CLINICIAN").map((s) => (
-              <option key={s.code} value={s.code}>{s.title}</option>
+            <select
+              aria-label="Шкала врачебной оценки"
+              value={assessCode}
+              onChange={(e) => {
+                setAssessCode(e.target.value);
+                setAssessAnswers({});
+                setAssessResult(null);
+              }}
+            >
+              {report.available_scales.filter((s) => s.audience === "CLINICIAN").map((s) => (
+                <option key={s.code} value={s.code}>{s.title}</option>
+              ))}
+            </select>
+            {assessScale?.items.map((i) => (
+              <label
+                key={i.key}
+                style={{
+                  display: "flex", flexWrap: "wrap", justifyContent: "space-between",
+                  alignItems: "center", gap: 8, fontSize: 14,
+                }}
+              >
+                <span style={{ flex: "1 1 260px" }}>{i.text}</span>
+                <select
+                  aria-label={i.text}
+                  value={assessAnswers[i.key] ?? 0}
+                  onChange={(e) =>
+                    setAssessAnswers((cur) => ({ ...cur, [i.key]: Number(e.target.value) }))
+                  }
+                  style={{ flex: "0 1 320px", maxWidth: "100%" }}
+                >
+                  {Array.from({ length: i.max_value + 1 }, (_, v) => v).map((v) => (
+                    <option key={v} value={v}>
+                      {i.anchors[v] ? `${v} — ${i.anchors[v]}` : String(v)}
+                    </option>
+                  ))}
+                </select>
+              </label>
             ))}
-          </select>
-          {assessScale?.items.map((i) => (
-            <label key={i.key} style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 14 }}>
-              <span>{i.text}</span>
-              <input
-                type="number"
-                min={0}
-                max={i.max_value}
-                value={assessAnswers[i.key] ?? 0}
-                onChange={(e) =>
-                  setAssessAnswers((cur) => ({
-                    ...cur,
-                    [i.key]: Math.max(0, Math.min(i.max_value, Number(e.target.value) || 0)),
-                  }))
-                }
-                style={{ width: 64 }}
-              />
-            </label>
-          ))}
-          <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8 }}>
-            <button onClick={submitAssessment} disabled={!assessScale}>Сохранить оценку</button>
-            {assessResult && (
-              <span style={{ fontSize: 13 }}>
-                {assessResult.total_score} · {assessResult.severity} · {assessResult.triage}
-              </span>
-            )}
-          </div>
-          {assessErr && <p className="error">{assessErr}</p>}
+            <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8 }}>
+              <button onClick={submitAssessment} disabled={!assessScale}>Сохранить оценку</button>
+              {assessResult && (
+                <span style={{ fontSize: 13 }}>
+                  {assessResult.total_score} · {assessResult.severity} · {assessResult.triage}
+                </span>
+              )}
+            </div>
+            {assessErr && <p className="error">{assessErr}</p>}
+          </Collapsible>
         </div>
       )}
-
 
       {report.checkin.recent.length > 0 && (
         <div className="card">

@@ -310,7 +310,10 @@ def _patient_card(db: Session, patient_id) -> dict:
         "available_scales": [
             {
                 "code": s.code, "title": s.title, "audience": s.audience,
-                "items": [{"key": i.key, "text": i.text, "max_value": i.max_value} for i in s.items],
+                "items": [
+                    {"key": i.key, "text": i.text, "max_value": i.max_value, "anchors": list(i.anchors)}
+                    for i in s.items
+                ],
             }
             for s in ALL_SCALES.values()
         ],

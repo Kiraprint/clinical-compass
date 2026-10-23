@@ -63,6 +63,10 @@
 | test_pss10_reverse_scoring_concrete_total | положительные пункты 4/5/7/8 | score(PSS10) | обратный подсчёт, конкретная сумма |
 | test_pss10_severity_boundaries | пороги 13/14 и 26/27 | severity_for() | NONE/MILD/MODERATE без SEVERE |
 | test_hdrs17_severity_boundaries / test_hdrs17_triage | HAM-D17 (8/17/24), h3 как суицидальный пункт | severity_for()/triage() | MODERATE и RED при h3≥1 |
+| test_every_item_has_anchors_for_all_values | все шкалы ALL_SCALES | ScaleItem.anchors | `len(anchors) == max_value+1`, строки непустые |
+| test_binary_scale_anchors_are_yes_no / test_questionnaire_frequency_anchors | HCL-32, PHQ-9, PSS-10 | anchors | HCL — («Нет», «Да»); PHQ-9 — («Совсем нет», «Несколько дней», «Более половины дней», «Почти каждый день»); PSS-10 — 5 подписей частоты |
+| test_hdrs17_anchors_follow_item_max_value | HDRS-17 (пункты 0–4 и 0–2) | anchors | число якорей 5/3 по пункту, h1 — 5 разных подписей |
+| test_anchors_length_mismatch_raises | anchors длиной ≠ max_value+1 | ScaleItem() | ValueError; пустые anchors допустимы |
 
 ### 2.4 trend
 
@@ -83,12 +87,14 @@
 | consent_gating | PATIENT без согласия → POST /screenings | 403 CONSENT_REQUIRED; после /consent → 201 |
 | screening_closes_run | finish → повторные answers | 409 RUN_CLOSED |
 | screening_one_open_only | 2-й screenings при открытом | 409 CONFLICT |
+| test_questionnaires_expose_answer_anchors | GET /questionnaires | каталог шкал | у каждого пункта `anchors` длиной `max_value+1`, PHQ-9 и HCL-32 — ожидаемые подписи |
 | escalation_under_1s | красный ответ → POST finish | 201; escalation создан; время полного ответа < 1 с |
 | escalation_notifies | RED с суицид. флагом | уведомление врачу в БД (escalations.row) + контакты помощи в ответе |
 | checkin_start_core_seven | POST /checkins (docs/16 §4) | `201`, status in_progress, шаг `core` из 7 пунктов, `progress {0,7}` |
 | checkin_start_idempotent | повторный POST /checkins в тот же день | `200`, тот же `session_id`, одна строка `checkin_sessions`, один `CHECKIN_START` в аудите |
 | checkin_once_per_day | POST /checkins и answers после завершения дня | `409 CHECKIN_ALREADY_DONE` |
 | roster_enforcement | врач без roster → GET patients/{id} | 403 NO_ROSTER; после /admin/roster → 200 |
+| test_report_exposes_scale_anchors | GET report при roster | карточка | `available_scales[].items[].anchors` длиной `max_value+1`, HDRS-17: h1 — 5 якорей, h4 — 3 |
 | patient_cannot_read_others | PATIENT → GET diary другого пациента / report | 403 |
 | diary_mood_scale | POST /diary с mood 0 и 5 | 0 → 201 (5-точечная шкала), 5 → 422 VALIDATION |
 | audit_append_only | прямой UPDATE/DELETE audit_log на уровне БД | ошибка БД-триггера (исключение) — отдельный БД-тест, вне HTTP-слоя (API не предоставляет UPDATE/DELETE-эндпоинтов для audit_log) |
