@@ -354,6 +354,12 @@ export const api = {
   },
   // Общая очередь открытых эскалаций (docs/16 §3): врач или администратор.
   openEscalations: () => req<{ items: Escalation[] }>("/api/v1/escalations"),
+  // Закрытие сигнала вручную (аудит на сервере). Повтор → 409 ESCALATION_ALREADY_RESOLVED,
+  // чужая/отсутствующая эскалация → 404; в обоих случаях строку из очереди убираем.
+  resolveEscalation: (id: string, resolution: string | null = null) =>
+    verb<Escalation>("POST")(`/api/v1/escalations/${encodeURIComponent(id)}/resolve`)({
+      resolution,
+    }),
   // FR-24: напоминания врача. Список — свои (roster/IDOR-гейт на сервере).
   clinicianReminders: (due?: "overdue" | "today" | "week") =>
     req<RemindersResponse>(
@@ -674,6 +680,10 @@ export interface Escalation {
   safety: "none" | "review" | "signal" | "unassessed" | null;
   checkin_session_id: string | null;
   notified_at: string | null;
+  /** Пациент закреплён за врачом: только тогда карточка открывается (иначе 403). */
+  in_roster: boolean;
+  /** Ответы риска из чек-ина: {"HR4":1,"RS1":0,...}; на которые не ответили — ключа нет. */
+  risk_answers: Record<string, number> | null;
   created_at: string | null;
 }
 export interface AuditEvent {

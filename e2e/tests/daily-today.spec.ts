@@ -106,8 +106,10 @@ test("полный чек-ин: шаги до «Чек-ин за сегодня 
   await completeCheckin(page, false);
 
   await expect(page.getByText("Чек-ин за сегодня выполнен")).toBeVisible();
-  // Пациент без закреплённого врача: обещания «вас видит врач» нет (clinician_notified=false).
-  await expect(page.getByText(/Закреплённого врача у вас нет/)).toBeVisible();
+  // Обычный чек-ин без риска (safety=none): нейтральный текст — ни обещания врача,
+  // ни ложного «закреплённого врача нет».
+  await expect(page.getByText(/Если за вами закреплён врач, он увидит их в карте/)).toBeVisible();
+  await expect(page.getByText(/Закреплённого врача у вас нет/)).toHaveCount(0);
   await expect(page.getByText(/видит врач/)).toHaveCount(0);
   await expect(page.locator(".qa")).toHaveCount(0);
 

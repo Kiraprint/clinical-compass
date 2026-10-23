@@ -19,8 +19,37 @@ const ESCALATION_KINDS: Record<string, string> = {
   SEVERE: "скрининг: тяжёлое состояние",
 };
 
+// Пункты риска, которые сервер кладёт в risk_answers (только отвеченные, 0/1).
+const RISK_ITEM_IDS = ["HR4", "RS1", "RS2", "RS3"] as const;
+
 // Общая очередь открытых эскалаций (docs/16 §3): сигнал виден даже без roster-врача.
-function EscalationsQueue({ items }: { items: Escalation[] }) {
+// Карточку открываем только для своего пациента (in_roster): иначе сервер отдаст 403.
+function EscalationsQueue({
+  items,
+  onResolved,
+}: {
+  items: Escalation[];
+  onResolved: (id: string) => void;
+}) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const closeSignal = async (id: string) => {
+    setBusyId(id);
+    setError("");
+    try {
+      await api.resolveEscalation(id);
+      onResolved(id);
+    } catch (err) {
+      // Уже закрыт другим врачом или строки больше нет — из очереди её всё равно убираем.
+      if (err instanceof ApiError && (err.code === "ESCALATION_ALREADY_RESOLVED" || err.status === 404)) {
+        onResolved(id);
+      } else {
+        setError(err instanceof ApiError ? err.message : "Не удалось закрыть сигнал");
+      }
+    } finally {
+      setBusyId(null);
+    }
+  };
   if (items.length === 0) return null;
   return (
     <div className="card">
@@ -28,6 +57,7 @@ function EscalationsQueue({ items }: { items: Escalation[] }) {
       <p style={{ color: "#5a6478", fontSize: 13 }}>
         Открытые сигналы чек-инов и скринингов, включая пациентов без закреплённого врача.
       </p>
+      {error && <p style={{ color: "#b3261e", fontSize: 13 }}>{error}</p>}
       <div className="table-wrap">
         <table>
           <thead>
@@ -36,19 +66,25 @@ function EscalationsQueue({ items }: { items: Escalation[] }) {
               <th>Пациент</th>
               <th>Тип</th>
               <th>Риск</th>
+              <th>Ответы риска</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
             {items.map((e) => (
-              <tr key={e.id}>
+              <tr key={e.id} data-escalation={e.id}>
                 <td>{e.created_at ? new Date(e.created_at).toLocaleString("ru-RU") : "—"}</td>
                 <td>
-                  <a
-                    href={"#patient=" + e.patient_id}
-                    style={{ color: "#2f6fed", textDecoration: "none", fontWeight: 600 }}
-                  >
-                    {e.patient_fio ?? "Пациент"}
-                  </a>
+                  {e.in_roster ? (
+                    <a
+                      href={"#patient=" + e.patient_id}
+                      style={{ color: "#2f6fed", textDecoration: "none", fontWeight: 600 }}
+                    >
+                      {e.patient_fio ?? "Пациент"}
+                    </a>
+                  ) : (
+                    <span style={{ fontWeight: 600 }}>{e.patient_fio ?? "Пациент"}</span>
+                  )}
                 </td>
                 <td>
                   <span
@@ -60,6 +96,20 @@ function EscalationsQueue({ items }: { items: Escalation[] }) {
                   </span>
                 </td>
                 <td>{e.safety ?? "—"}</td>
+                <td style={{ fontSize: 13 }}>
+                  {RISK_ITEM_IDS.filter((id) => e.risk_answers?.[id] != null)
+                    .map((id) => `${id} ${e.risk_answers?.[id] ? "Да" : "Нет"}`)
+                    .join(" · ") || "—"}
+                </td>
+                <td>
+                  <button
+                    onClick={() => closeSignal(e.id)}
+                    disabled={busyId === e.id}
+                    aria-label={`Закрыть сигнал ${e.patient_fio ?? e.patient_id}`}
+                  >
+                    {busyId === e.id ? "Закрываем…" : "Закрыть сигнал"}
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -226,7 +276,12 @@ export default function ClinicianView() {
       {showReminders && (
         <RemindersPanel cards={cards} onChanged={() => setReminderVersion((v) => v + 1)} />
       )}
-      {!selected && <EscalationsQueue items={escalations} />}
+      {!selected && (
+        <EscalationsQueue
+          items={escalations}
+          onResolved={(id) => setEscalations((prev) => prev.filter((e) => e.id !== id))}
+        />
+      )}
       {!selected ? (
         <div className="card">
           <h2>Мои пациенты ({cards.length})</h2>
