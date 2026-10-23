@@ -19,9 +19,7 @@ from app.config import settings
 from app.services.depersonalize import build_name_extractor, ner_backend
 
 from app.services import kb as kb_store
-from app.services.embeddings import build_embedder
-
-_embedder = build_embedder()  # по CC_EMBEDDER: hash (демо/тесты) | bge-m3 (прод)
+from app.services.embeddings import get_embedder
 
 # GATE: лексическое покрытие (docs/07 §5 — sparse ловит точные термины, dense —
 # смысл, но для демо-эмбеддера минимальный порог на точное совпадение терминов).
@@ -61,6 +59,52 @@ def _relevance_gate(query: str, hits: list[dict], limit: int) -> list[dict]:
     kept = [h for h in hits if _lexical_overlap(query, h.get("text", "")) >= _GATE_MIN_TOKENS]
     return kept[:limit]
 
+def _dense_top_gate(hits: list[dict], min_score: float) -> list[dict]:
+    """Отсечка «нет релевантного ответа» для нейросетевого dense-поиска.
+
+    У bge-m3 косинус калиброван: у релевантных чанков золотого набора лучший
+    score >=0.57, у офтоп-запросов <=0.43 (55 запросов, bench/eval_app_path.py),
+    поэтому порог 0.45 отделяет «в KB ничего нет» без лексических эвристик —
+    они отбрасывали бы кросс-языковые совпадения (RU-вопрос → EN-чанк).
+    """
+    if not hits or (min_score > 0 and hits[0]["score"] < min_score):
+        return []
+    return hits
+
+def _hash_rerank(
+    query: str,
+    hits: list[dict],
+    limit: int,
+    *,
+    topic: str | None,
+    exclude_ids: set[str] | None,
+) -> list[dict]:
+    """Лексический гейт + keyword-fallback для hash-профиля (демо/тесты).
+
+    Hash-dense шумит, поэтому гарантируем, что чанки с прямым лексическим
+    совпадением (напр. «Авиандр») всплывают независимо от dense-ранжирования.
+    """
+    hits = _relevance_gate(query, hits, limit)
+    if len(hits) >= limit:
+        return hits
+    from app.kb_seed import build_corpus  # lazy: избегаем циклического импорта
+    seen = {h.get("guideline_id") for h in hits}
+    kw = sorted(
+        ((_lexical_overlap(query, d["text"]), d) for d in build_corpus()
+         if (topic is None or d.get("topic") == topic)
+         and (not exclude_ids or d["guideline_id"] not in exclude_ids)),
+        key=lambda x: x[0],
+    )
+    for ov, d in reversed(kw):
+        if ov < _GATE_MIN_TOKENS or d["guideline_id"] in seen:
+            continue
+        d = {**d, "score": 0.5}
+        hits.append(d)
+        seen.add(d["guideline_id"])
+        if len(hits) >= limit:
+            break
+    return hits
+
 class AgentState(TypedDict, total=False):
     query: str
     retrieval_query: str | None
@@ -98,35 +142,19 @@ class AgentFactory:
         """
         if detect_redline(redline_query if redline_query is not None else query) is not None:
             return []
+        embedder = get_embedder()
         hits = kb_store.hybrid_search(
             self._client,
-            _embedder,
+            embedder,
             query,
             topic=topic,
             limit=limit,
             exclude_ids=exclude_ids,
         )
-        hits = _relevance_gate(query, hits, limit)
-        # Keyword-fallback по полному корпусу: hash-эмбеддер ненадёжен (косинус
-        # шумит), поэтому гарантируем, что чанки с прямым лексическим совпадением
-        # (напр. «Авиандр») всплывают независимо от качества dense-ранжирования.
-        if len(hits) < limit:
-            from app.kb_seed import build_corpus  # lazy: избегаем циклического импорта
-            seen = {h.get("guideline_id") for h in hits}
-            kw = sorted(
-                ((_lexical_overlap(query, d["text"]), d) for d in build_corpus()
-                 if (topic is None or d.get("topic") == topic)
-                 and (not exclude_ids or d["guideline_id"] not in exclude_ids)),
-                key=lambda x: x[0],
-            )
-            for ov, d in reversed(kw):
-                if ov < _GATE_MIN_TOKENS or d["guideline_id"] in seen:
-                    continue
-                d = {**d, "score": 0.5}
-                hits.append(d)
-                seen.add(d["guideline_id"])
-                if len(hits) >= limit:
-                    break
+        if getattr(embedder, "use_sparse", True):
+            hits = _hash_rerank(query, hits, limit, topic=topic, exclude_ids=exclude_ids)
+        else:
+            hits = _dense_top_gate(hits, settings.kb_min_score)
         return [
             RAGChunk(
                 text=h["text"],

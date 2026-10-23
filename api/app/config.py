@@ -27,7 +27,14 @@ class Settings(BaseSettings):
     bootstrap_password: str = ""  # CC_BOOTSTRAP_PASSWORD: для python -m app.bootstrap_user (оператор)
     qdrant_url: str = "http://127.0.0.1:6333"  # векторная БД ИИ-агента (docs/07)
     qdrant_collection: str = "kb"  # документы: открытый не-ПДн корпус (docs/08)
-    embedder: str = "hash"  # hash | bge-m3 (docs/08 §4; по умолчанию офлайн-демо)
+    # Профиль эмбеддера (docs/08 §4): hash — офлайн-демо/тесты (dense 512);
+    # bge-m3 — прод (dense 1024; нужен extra `embeddings` и переиндексация KB).
+    embedder: str = "hash"
+    embedder_model: str = ""  # CC_EMBEDDER_MODEL: id модели; пусто → дефолт профиля
+    embedder_device: str = "auto"  # CC_EMBEDDER_DEVICE: auto | cpu | cuda[:N]
+    embedder_batch_size: int = 8  # CC_EMBEDDER_BATCH_SIZE: батч энкодера
+    embedder_max_length: int = 2048  # CC_EMBEDDER_MAX_LENGTH: токенов на текст
+    kb_min_score: float = 0.45  # CC_KB_MIN_SCORE: порог score лучшего чанка (dense-only профиль)
     # CC_KB_CORPUS_TTL_SECONDS: TTL кеша корпуса KB (kb_seed.build_corpus) в
     # процессе API. In-process писателей drugs нет (seed — отдельный CLI, он
     # зовёт clear_corpus_cache), поэтому TTL — единственная runtime-инвалидация.
