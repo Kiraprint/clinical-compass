@@ -379,8 +379,11 @@ class AdherenceRecord(Base):
     """Приверженность лечению (задача кейса 7). Спецкатегория ПДн (152-ФЗ).
 
     Пациент ежедневно отмечает приём назначенного препарата: taken/partial/missed.
-    Врач видит агрегат (% приверженности за окно) в карточке. medication — свободная
-    строка (напр. «Авиандр»), без FK на модель назначения (YAGNI для демо).
+    Врач видит агрегат (% приверженности за окно) в карточке. medication_id —
+    FK на назначение (FR-27): по нему считается ожидаемое число приёмов из
+    режима (PatientMedication.times_per_day). medication — свободный текст
+    названия для отображения и для исторических записей без связи (backfill
+    не делался).
     """
 
     __tablename__ = "adherence_records"
@@ -388,6 +391,11 @@ class AdherenceRecord(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
     medication: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)  # F1: контекст лечения
+    # FR-27: связь с назначением. При удалении назначения отметка остаётся без
+    # связи (SET NULL) и выпадает из знаменателя — история пациента не теряется.
+    medication_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("patient_medications.id", ondelete="SET NULL"), index=True, nullable=True,
+    )
     status: Mapped[str] = mapped_column(String(16))   # taken | partial | missed
     note: Mapped[str | None] = mapped_column(EncryptedText())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)
@@ -648,6 +656,12 @@ class PatientMedication(Base):
             "ended_on is null or started_on is null or ended_on >= started_on",
             name="patient_medications_dates",
         ),
+        # FR-27: режим приёма — знаменатель приверженности. NULL — расписание
+        # неизвестно (все строки импорта ЕМИАС), процент не считается.
+        CheckConstraint(
+            "times_per_day is null or times_per_day between 1 and 6",
+            name="patient_medications_times_per_day",
+        ),
         # emias_id уникален только среди импортированных строк: у локальных
         # назначений его нет, NULL не должен блокировать вставку.
         Index(
@@ -670,7 +684,8 @@ class PatientMedication(Base):
     source: Mapped[str] = mapped_column(String(16), default="clinician", server_default=text("'clinician'"))
     emias_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
-
+    # FR-27: сколько раз в день принимать. NULL — режим не задан (ЕМИАС).
+    times_per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 class EmiasSyncRun(Base):
     """Прогон синхронизации с ЕМИАС (по образцу KBRun, docs/15 §4).

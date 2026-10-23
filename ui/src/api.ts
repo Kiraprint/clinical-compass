@@ -176,7 +176,7 @@ export const api = {
   postDiary: verb<DiaryEntry>("POST")("/api/v1/diary"),
   getDiary: () => req<{ items: DiaryEntry[] }>("/api/v1/diary"),
   getMyAdherence: (days = 14) =>
-    req<{ items: AdherenceRecord[]; today: AdherenceRecord | null }>(`/api/v1/me/adherence?days=${days}`),
+    req<AdherenceSummary>(`/api/v1/me/adherence?days=${days}`),
   postChat: (content: string) =>
     req<ChatReply>("/api/v1/chat/thread", { method: "POST", body: JSON.stringify({ content }) }),
   getChat: () => req<{ items: ChatMessage[] }>("/api/v1/chat/thread"),
@@ -280,7 +280,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  recordAdherence: (body: { medication?: string; status: "taken" | "partial" | "missed"; note?: string }) =>
+  recordAdherence: (body: {
+    medication_id?: string; medication?: string;
+    status: "taken" | "partial" | "missed"; note?: string;
+  }) =>
     req<Report["adherence"]["records"][number]>("/api/v1/me/adherence", {
       method: "POST",
       body: JSON.stringify(body),
@@ -324,7 +327,7 @@ export const api = {
   },
   createMedication: (patientId: string, body: {
     title: string; dosage?: string; started_on?: string; ended_on?: string;
-    status?: string; notes?: string;
+    status?: string; notes?: string; times_per_day?: number | null;
   }) =>
     req<PatientMedication>(`/api/v1/clinician/patients/${patientId}/medications`, {
       method: "POST",
@@ -332,6 +335,7 @@ export const api = {
     }),
   updateMedication: (patientId: string, medId: string, body: {
     dosage?: string | null; status?: string; ended_on?: string | null; notes?: string | null;
+    times_per_day?: number | null;
   }) =>
     req<PatientMedication>(`/api/v1/clinician/patients/${patientId}/medications/${medId}`, {
       method: "PATCH",
@@ -489,10 +493,45 @@ export interface DiaryEntry {
 }
 export interface AdherenceRecord {
   id: string;
+  medication_id: string | null;
   medication: string | null;
   status: string;
   note: string | null;
   created_at: string;
+}
+
+// FR-27: приверженность по назначению — знаменатель из режима (times_per_day).
+export interface AdherenceMedication {
+  id: string;
+  title: string;
+  status: string;
+  times_per_day: number | null;
+  started_on: string | null;
+  ended_on: string | null;
+  active_days: number;
+  expected: number;
+  taken: number;
+  partial: number;
+  missed: number;
+  score: number;
+  pct: number | null;
+}
+export interface AdherenceSummary {
+  days: number;
+  window: { from: string; to: string };
+  // Общий процент — weighted: сумма score / сумма expected (не среднее процентов).
+  summary: { pct: number | null; score: number; expected: number };
+  medications: AdherenceMedication[];
+  active_medications: {
+    id: string; title: string; times_per_day: number | null; started_on: string | null;
+  }[];
+  total: number;
+  taken: number;
+  partial: number;
+  missed: number;
+  excluded: { count: number; items: AdherenceRecord[] };
+  items: AdherenceRecord[];
+  today: AdherenceRecord | null;
 }
 export interface ChatMessage {
   id: string;
@@ -583,6 +622,7 @@ export interface PatientMedication {
   dosage: string | null;
   started_on: string | null;
   ended_on: string | null;
+  times_per_day: number | null;
   status: string;
   notes: string | null;
   source: MedicationSource;
@@ -645,7 +685,13 @@ export interface Report {
     reason: string;
   } | null;
   adherence: {
-    pct: number | null; total: number; taken: number; partial: number; missed: number;
+    days: number;
+    window: { from: string; to: string };
+    // weighted: сумма score / сумма expected по назначениям с режимом.
+    pct: number | null; score: number; expected: number;
+    total: number; taken: number; partial: number; missed: number;
+    medications: AdherenceMedication[];
+    excluded_count: number;
     records: AdherenceRecord[];
   };
   adverse_events: {

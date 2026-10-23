@@ -14,8 +14,9 @@ from compass.scales import ALL_SCALES
 from compass.trend import trends
 
 from app.errors import Problem
-from app.models import AdherenceRecord, AdverseEvent, Answer, Assessment, ChatMessage, CheckinSession, ClinicianRoster, Consent, DiaryEntry, Escalation, Prescription, Run, User, Visit
+from app.models import AdverseEvent, Answer, Assessment, ChatMessage, CheckinSession, ClinicianRoster, Consent, DiaryEntry, Escalation, Prescription, Run, User, Visit
 
+from . import adherence as adherence_service
 from . import diary as diary_service
 from .audit import record as audit_record
 from .contacts import contacts_payload
@@ -230,24 +231,9 @@ def _patient_card(db: Session, patient_id) -> dict:
         .limit(7)
     ).all()
 
-    # Приверженность лечению за 14 дней (задача кейса 7): агрегат без roster-проверки
-    # (роster/consent проверяют вызывающие report()/patient_context()).
-    since_adh = datetime.now(timezone.utc) - timedelta(days=14)
-    adh_rows = db.scalars(
-        select(AdherenceRecord)
-        .where(AdherenceRecord.patient_id == patient_id, AdherenceRecord.created_at >= since_adh)
-        .order_by(AdherenceRecord.created_at.desc())
-    ).all()
-    adh_taken = sum(1 for r in adh_rows if r.status == "taken")
-    adh_partial = sum(1 for r in adh_rows if r.status == "partial")
-    adh_total = len(adh_rows)
-    adh_pct = round(((adh_taken + 0.5 * adh_partial) / adh_total) * 100, 1) if adh_total else None
-    adherence = {
-        "pct": adh_pct, "total": adh_total,
-        "taken": adh_taken, "partial": adh_partial,
-        "missed": adh_total - adh_taken - adh_partial,
-        "records": [_adherence_dict(r) for r in adh_rows[:10]],
-    }
+    # Приверженность за 14 дней (FR-27): weighted-процент от ожидаемых приёмов по
+    # режиму назначения. Roster/consent проверяют вызывающие report()/patient_context().
+    adherence = adherence_service.summary_payload(adherence_service.compute(db, patient_id, 14))
 
     # Маршрутизация к психиатру (задача кейса 8, усл.6): детерминированная
     # рекомендация из последнего assessment + тренда. Категории обязат/желательно.
@@ -414,14 +400,6 @@ def _adverse_event_dict(e: AdverseEvent) -> dict:
     }
 
 
-def _adherence_dict(r: AdherenceRecord) -> dict:
-    return {
-        "id": str(r.id),
-        "medication": r.medication,
-        "status": r.status,
-        "note": r.note,
-        "created_at": r.created_at.isoformat(),
-    }
 
 
 def _checkin_dict(c: CheckinSession) -> dict:
@@ -498,64 +476,31 @@ def delete_visit(
 
 
 def create_adherence(
-    db: Session, patient_id, medication: str | None, status: str, note: str | None,
+    db: Session, patient_id, medication_id, medication: str | None, status: str, note: str | None,
 ) -> dict:
-    """Пациент отмечает приверженность лечению (задача кейса 7). consent-гейт у роутера."""
-    rec = AdherenceRecord(patient_id=patient_id, medication=medication, status=status, note=note)
-    db.add(rec)
-    db.commit()
-    return _adherence_dict(rec)
+    """Пациент отмечает приверженность лечению (FR-27). Consent-гейт у роутера."""
+    return adherence_service.create_record(
+        db, patient_id, medication_id=medication_id, medication=medication,
+        status=status, note=note,
+    )
 
 
 MOSCOW = ZoneInfo("Europe/Moscow")
 
 
 def my_adherence(db: Session, patient_id, days: int = 14) -> dict:
-    """Пациент читает свои отметки приверженности (экран «Сегодня»). Consent-гейт у роутера.
+    """Приверженность пациента (экран «Сегодня» и вкладка). Consent-гейт у роутера.
 
-    Возвращает записи за окно (свежие первыми) и отметку за текущие сутки по Москве,
-    чтобы экран показывал «сегодня уже отмечено».
+    Отдаёт отметки за окно, отметку за текущие сутки по Москве, активные
+    назначения для выбора и weighted-процент от ожидаемых приёмов (FR-27).
     """
-    since = datetime.now(timezone.utc) - timedelta(days=days)
-    rows = db.scalars(
-        select(AdherenceRecord)
-        .where(AdherenceRecord.patient_id == patient_id, AdherenceRecord.created_at >= since)
-        .order_by(AdherenceRecord.created_at.desc())
-    ).all()
-    today = datetime.now(MOSCOW).date()
-    today_rec = next(
-        (r for r in rows if r.created_at.astimezone(MOSCOW).date() == today), None
-    )
-    return {
-        "items": [_adherence_dict(r) for r in rows],
-        "today": _adherence_dict(today_rec) if today_rec is not None else None,
-    }
+    return adherence_service.compute(db, patient_id, days)
 
 
 def adherence_summary(db: Session, clinician_id, patient_id, days: int = 14) -> dict:
-    """Агрегат приверженности для карточки врача (задача кейса 7). Roster-гейт.
-
-    % приверженности = (taken*1 + partial*0.5) / всего записей за окно.
-    """
+    """Агрегат приверженности для карточки врача (FR-27). Roster-гейт."""
     _require_roster(db, clinician_id, patient_id)
-    since = datetime.now(timezone.utc) - timedelta(days=days)
-    rows = db.scalars(
-        select(AdherenceRecord)
-        .where(AdherenceRecord.patient_id == patient_id, AdherenceRecord.created_at >= since)
-        .order_by(AdherenceRecord.created_at.desc())
-    ).all()
-    taken = sum(1 for r in rows if r.status == "taken")
-    partial = sum(1 for r in rows if r.status == "partial")
-    missed = sum(1 for r in rows if r.status == "missed")
-    total = len(rows)
-    pct = round(((taken + 0.5 * partial) / total) * 100, 1) if total else None
-    return {
-        "days": days,
-        "total": total,
-        "taken": taken, "partial": partial, "missed": missed,
-        "pct": pct,
-        "records": [_adherence_dict(r) for r in rows[:20]],
-    }
+    return adherence_service.summary_payload(adherence_service.compute(db, patient_id, days))
 
 
 def _chat_dict(m: ChatMessage) -> dict:

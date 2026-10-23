@@ -199,6 +199,19 @@
 | `test_worker_tick_creates_one_notification_idempotent` | два тика `deliver_due` по одному due-напоминанию | ровно один `Notification kind='REMINDER'`; `notified_at` заполнен; второй тик — 0 |
 | `test_worker_respects_advisory_lock` | лок удерживает другой коннект | тик возвращает 0 и не создаёт уведомление; после снятия лока — доставка |
 | `test_consent_revocation_destroys_reminders` | напоминание задано → POST /consent/revoke | строк пациента в `clinician_reminders` нет |
+| `test_percentage_from_expected_doses` (`test_adherence.py`) | режим 2×день, назначение 7 дней назад, 5 отметок `taken` | `expected=14`, `score=5`, `pct=36` (а не 5/5 = 100%) |
+| `test_expected_is_calendar_days_not_weekdays` | тот же режим, окна 7 и 14 дней | знаменатель — все календарные дни активности; выходные не исключаются |
+| `test_ended_on_cuts_expected_days` | `started_on` = −9 дн, `ended_on` = −3 дн, окно 7 дней | `active_days=4`, `expected=4`, 2 `taken` → 50% |
+| `test_overall_pct_is_weighted_not_average` | препарат A 2/2, препарат B 0/1 | общий 67% (2/3), не среднее 50% |
+| `test_partial_counts_half` | 3 `partial` при режиме 2×день | `score=1.5`, `pct=75` |
+| `test_no_schedule_means_no_percent` | `times_per_day IS NULL`, отметка привязана | `pct=null`, `expected=0`, отметка в `excluded` |
+| `test_no_medications_gives_empty_aggregate` | нет назначений | `medications=[]`, `summary.pct=null` |
+| `test_legacy_records_are_outside_denominator` | отметка без `medication_id` рядом со связанной | 100% по назначению, legacy-отметка только в `excluded`/`total` |
+| `test_post_foreign_or_stopped_medication_422` | `POST /me/adherence` с чужим и остановленным назначением | 422 `MEDICATION_NOT_ACTIVE` |
+| `test_times_per_day_validation` | создание/правка `times_per_day` = 0 и 7; затем 4 | 422 `TIMES_PER_DAY_INVALID`; 4 сохраняется |
+| `test_consent_revoke_deletes_linked_records_and_medications` | отметка по назначению → POST /consent/revoke | `adherence_records` и `patient_medications` пациента пусты |
+| `test_adherence_patient_records_and_doctor_aggregate` (`test_clinician.py`, обновлён) | taken + partial по назначению 2×день + legacy-отметка | `pct=75`, `expected=2`, `excluded_count=1`, агрегат в `report.adherence` |
+
 
 ## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/`)
 
