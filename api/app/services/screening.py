@@ -6,15 +6,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Mapping
-from zoneinfo import ZoneInfo
-
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from compass.checkin import generate_checkin
-from compass.models import AUDIENCE_PATIENT, ScaleResult
+from compass.models import AUDIENCE_PATIENT
 from compass.scales import ALL_SCALES, PHQ9
 from compass.scoring import score, risk_flags
 from compass.triage import triage
@@ -24,8 +21,6 @@ from app.models import Answer, Assessment, Escalation, Prescription, Run, User
 
 from .audit import record as audit_record
 from . import push as push_service
-
-MOSCOW = ZoneInfo("Europe/Moscow")
 
 # Контакты помощи — показываются пациенту при эскалации RED
 HELP_RESOURCES = [
@@ -40,11 +35,6 @@ def _scale(code: str):
         raise Problem(404, "NOT_FOUND", f"Неизвестная шкала: {code}")
     return scale
 
-
-def _moscow_today() -> tuple[datetime, datetime]:
-    now = datetime.now(MOSCOW)
-    start = datetime(now.year, now.month, now.day, tzinfo=MOSCOW)
-    return start, start + timedelta(days=1)
 
 
 def _own_run(db: Session, run_id, patient_id) -> Run:
@@ -212,76 +202,4 @@ def abandon_open(db: Session, patient_id) -> dict:
     return {"abandoned": True, "run_id": str(run.id)}
 
 
-def _last_scale_result(db: Session, patient_id) -> tuple:
-    """Последние assessment+run пациента для генерации чек-ина (None, None если нет).
 
-    Врачебные оценки (mode=CLINICIAN) пропускаются: чек-ин всегда опирается
-    на шкалу, которую пациент заполняет сам.
-    """
-    row = db.execute(
-        select(Assessment, Run)
-        .join(Run, Run.id == Assessment.run_id)
-        .where(Assessment.patient_id == patient_id, Run.mode != "CLINICIAN")
-        .order_by(Assessment.computed_at.desc())
-        .limit(1)
-    ).first()
-    if row is None:
-        return None, None
-    assessment, run = row
-    rows = db.scalars(select(Answer).where(Answer.run_id == run.id)).all()
-    per_item = {a.item_key: a.value for a in rows}
-    result = ScaleResult(
-        code=run.questionnaire_code,
-        total_score=assessment.total_score,
-        severity=assessment.severity,
-        per_item=per_item,
-    )
-    return result, run.questionnaire_code
-
-
-def today_checkin(db: Session, patient_id) -> dict:
-    scale = _scale(_last_scale_result(db, patient_id)[1] or prescribed_scale(db, patient_id))
-    last_result, _ = _last_scale_result(db, patient_id)
-    checkin = generate_checkin(scale, last_result)
-    items = checkin.items
-    start, end = _moscow_today()
-    done = db.scalar(
-        select(Run).where(
-            Run.patient_id == patient_id, Run.mode == "CHECKIN", Run.started_at >= start, Run.started_at < end
-        )
-    )
-    return {
-        "items": [{"key": i.key, "text": i.text, "max_value": i.max_value} for i in items],
-        "done": done is not None,
-    }
-
-
-def complete_checkin(db: Session, patient_id, answers: Mapping[str, int]) -> dict:
-    start, end = _moscow_today()
-    existing = db.scalar(
-        select(Run).where(
-            Run.patient_id == patient_id, Run.mode == "CHECKIN", Run.started_at >= start, Run.started_at < end
-        )
-    )
-    if existing is not None:
-        raise Problem(409, "RUN_ALREADY_TODAY", "Чек-ин за сегодня уже выполнен")
-    scale = _scale(_last_scale_result(db, patient_id)[1] or prescribed_scale(db, patient_id))
-    last_result, _ = _last_scale_result(db, patient_id)
-    checkin = generate_checkin(scale, last_result)
-    items = checkin.items
-    item_keys = {i.key for i in items}
-    max_by_key = {i.key: i.max_value for i in items}
-    for key in answers:
-        if key not in item_keys:
-            raise Problem(422, "VALIDATION", f"Пункт {key} не входит в сегодняшний чек-ин")
-        value = answers[key]
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0 or value > max_by_key[key]:
-            raise Problem(422, "VALIDATION", f"Значение {value!r} для пункта {key} вне диапазона 0..{max_by_key[key]}")
-    run = Run(patient_id=patient_id, questionnaire_code=scale.code, mode="CHECKIN", finished_at=datetime.now(timezone.utc))
-    db.add(run)
-    db.flush()
-    for key, value in answers.items():
-        db.add(Answer(run_id=run.id, item_key=key, value=value))
-    audit_record(db, patient_id, "CHECKIN_COMPLETE", "run", str(run.id))
-    db.commit()
-    return {"run_id": str(run.id), "items": [i.key for i in items], "answered": sorted(answers)}

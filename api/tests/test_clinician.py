@@ -97,7 +97,7 @@ def test_foreign_run_hidden(client):
 def test_diary_in_report(client):
     h, pid = _with_patient(client, "dr@test.ru")
     assert client.post(
-        "/api/v1/diary", json={"content": "Сегодня получше", "mood": 7, "sleep_h": 6.5, "tags": ["сон"]}, headers=h
+        "/api/v1/diary", json={"content": "Сегодня получше", "mood": 3, "sleep_h": 6.5, "tags": ["сон"]}, headers=h
     ).status_code == 201
     c, cid = clinician_ctx(client, "dc@test.ru")
     a, _ = admin_ctx(client, "da@test.ru")

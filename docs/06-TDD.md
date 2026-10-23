@@ -79,16 +79,29 @@
 | screening_one_open_only | 2-й screenings при открытом | 409 CONFLICT |
 | escalation_under_1s | красный ответ → POST finish | 201; escalation создан; время полного ответа < 1 с |
 | escalation_notifies | RED с суицид. флагом | уведомление врачу в БД (escalations.row) + контакты помощи в ответе |
-| checkin_once_per_day | 2-й чек-ин в тот же день | 409 RUN_ALREADY_TODAY |
+| checkin_start_core_seven | POST /checkins (docs/16 §4) | `201`, status in_progress, шаг `core` из 7 пунктов, `progress {0,7}` |
+| checkin_start_idempotent | повторный POST /checkins в тот же день | `200`, тот же `session_id`, одна строка `checkin_sessions`, один `CHECKIN_START` в аудите |
+| checkin_once_per_day | POST /checkins и answers после завершения дня | `409 CHECKIN_ALREADY_DONE` |
 | roster_enforcement | врач без roster → GET patients/{id} | 403 NO_ROSTER; после /admin/roster → 200 |
 | patient_cannot_read_others | PATIENT → GET diary другого пациента / report | 403 |
+| diary_mood_scale | POST /diary с mood 0 и 5 | 0 → 201 (5-точечная шкала), 5 → 422 VALIDATION |
 | audit_append_only | прямой UPDATE/DELETE audit_log на уровне БД | ошибка БД-триггера (исключение) — отдельный БД-тест, вне HTTP-слоя (API не предоставляет UPDATE/DELETE-эндпоинтов для audit_log) |
 | audit_truncate_blocked | прямой TRUNCATE audit_log на уровне БД | ошибка БД-триггера (statement-уровень `trg_audit_no_truncate`) |
 | audit_records_access | чтение report | в audit_log появилась запись (actor, action='READ_REPORT') |
 | consent_revoke | revoke → повторное обращение к медданным | 403 CONSENT_REQUIRED |
 | questionnaire_catalog | GET /questionnaires (FR-2) | каталог шкал PHQ-9/GAD-7/HADS-A/HADS-D из core; тексты не дублируются в UI |
-| checkin_out_of_range | значение ответа чек-ина вне 0..max_value | 422 VALIDATION (не 500) |
-| checkin_daily_unique_index | 2 CHECKIN в один день МСК на уровне БД | уникальный индекс `runs_checkin_daily` отклоняет второй (TOCTOU-защита) |
+| checkin_partial_step | отправлена часть пунктов текущего шага | `422 CHECKIN_INCOMPLETE` |
+| checkin_unknown_item | неизвестный пункт или пункт другого шага | `422 CHECKIN_UNKNOWN_ITEM` |
+| checkin_out_of_range | 5 / −1 / `true` / `"2"` / 1.5 / null, HR4=2 | `422 CHECKIN_OUT_OF_RANGE` (не 500 и не VALIDATION) |
+| checkin_module_routing | MO1 ≥ 3 в шаге ядра | шаг `modules` = HR1–HR3 + MO2–MO3, причины модулей в ответе |
+| checkin_limit_12 | MO1=4, SL1=0 (много модулей) | предъявлено ≤ 12 пунктов, модули целиком, пропущенные — с причиной «лимит 12» |
+| checkin_gate_routes_safety | HR4=«Да» | шаг `safety` RS1–RS3, `planned 10`, симптоматические модули не предъявлены |
+| checkin_risk_signal_escalates | HR4=«Да» + RS1=«Да», врач в roster | `Escalation(kind=CHECKIN_RISK, checkin_session_id)` + `Notification` ростерному врачу + аудит `CHECKIN_RISK_SIGNAL` |
+| checkin_risk_no_roster | HR4=«Да» + RS2=«Да», ростера нет | `Escalation` создан, уведомлений нет (общая очередь) |
+| checkin_review_state | HR4=«Да», RS1/RS2=«Нет», RS3=«Да» | `safety=review`, `Escalation CHECKIN_RISK` |
+| checkin_foreign_session | чужой или несуществующий `session_id` | `404 CHECKIN_NOT_FOUND` |
+| checkin_answers_encrypted | raw `SELECT answers::text` из БД | bytea (`\x…`), идентификаторы пунктов в открытом виде отсутствуют; ORM расшифровывает обратно |
+| checkin_presented_steps | после шага ядра | `presented` хранит шаги, предъявленные пункты и основания модулей |
 | screening_abandon | открытый скрининг → POST /screenings (409) → /screenings/abandon → снова 201 | повторный старт возможен после abandon |
 | abandon_no_open_run | abandon при отсутствии открытого скрининга | 200 `{abandoned: false}` (идемпотентно) |
 | login_rate_limited | > rate_max попыток входа с (IP, email) | 429 TOO_MANY_REQUESTS |

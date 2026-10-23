@@ -179,8 +179,14 @@ def notify_escalation_clinicians(
     rows = db.scalars(
         select(ClinicianRoster.clinician_id).where(ClinicianRoster.patient_id == patient_id)
     ).all()
-    recipient_kind = "суицидальный риск" if escalation.kind == "SUICIDAL" else "тяжёлое состояние"
-    title = "RED-эскалация"
+    if escalation.kind == "SUICIDAL":
+        recipient_kind, title = "суицидальный риск", "RED-эскалация"
+    elif escalation.kind == "CHECKIN_RISK":
+        # docs/16 §3: gate/RS-сигнал чек-ина — очередь клинического рассмотрения,
+        # а не валидированная категория риска.
+        recipient_kind, title = "сигнал риска в ежедневном чек-ине", "Сигнал риска чек-ина"
+    else:
+        recipient_kind, title = "тяжёлое состояние", "RED-эскалация"
     body = f"{patient_name}: {recipient_kind} — см. карточку пациента"
     for clinician_id in rows:
         db.add(

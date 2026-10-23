@@ -13,8 +13,8 @@ from app.models import DiaryEntry
 
 
 def create(db: Session, patient_id, content: str, mood: int | None = None, sleep_h: float | None = None, tags: Sequence[str] = ()) -> DiaryEntry:
-    if mood is not None and not 1 <= mood <= 10:
-        raise Problem(422, "VALIDATION", "mood должен быть в диапазоне 1..10")
+    if mood is not None and not 0 <= mood <= 4:
+        raise Problem(422, "VALIDATION", "mood должен быть в диапазоне 0..4")
     if sleep_h is not None and not 0 <= sleep_h <= 12:
         raise Problem(422, "VALIDATION", "sleep_h должен быть в диапазоне 0..12")
     entry = DiaryEntry(patient_id=patient_id, content=content, mood=mood, sleep_h=sleep_h, tags=list(tags))
