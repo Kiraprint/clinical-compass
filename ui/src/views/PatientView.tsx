@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   AdherenceRecord,
+  AdherenceSummary,
   api,
   ApiError,
   Assessment,
@@ -451,7 +452,9 @@ function TodayTab() {
   const [status, setStatus] = useState<"taken" | "partial" | "missed" | null>(null);
   const [medication, setMedication] = useState("");
   const [adhNote, setAdhNote] = useState("");
-  const [adhToday, setAdhToday] = useState<AdherenceRecord | null>(null);
+  const [adhMeds, setAdhMeds] = useState<AdherenceSummary["active_medications"]>([]);
+  const [adhMedId, setAdhMedId] = useState("");
+  const [adhItems, setAdhItems] = useState<AdherenceRecord[]>([]);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState("");
   const [err, setErr] = useState("");
@@ -460,7 +463,9 @@ function TodayTab() {
     const [d, a] = await Promise.all([api.getDiary(), api.getMyAdherence()]);
     const ref = new Date();
     setEntriesToday(d.items.filter((e) => sameDay(e.created_at, ref)));
-    setAdhToday(a.today);
+    setAdhMeds(a.active_medications);
+    setAdhItems(a.items);
+    setAdhMedId((prev) => prev || a.active_medications[0]?.id || "");
   };
 
   useEffect(() => {
@@ -479,9 +484,14 @@ function TodayTab() {
         setMood(null);
         parts.push("дневник");
       }
-      if (!adhToday && status) {
+      const ref = new Date();
+      const markedToday = adhItems.some(
+        (r) => sameDay(r.created_at, ref) && (adhMedId ? r.medication_id === adhMedId : !r.medication_id),
+      );
+      if (!markedToday && status) {
         await api.recordAdherence({
-          medication: medication.trim() || undefined,
+          medication_id: adhMedId || undefined,
+          medication: adhMedId ? undefined : medication.trim() || undefined,
           status,
           note: adhNote.trim() || undefined,
         });
@@ -498,6 +508,10 @@ function TodayTab() {
     }
   };
 
+  const markedTodayForSelected = adhItems.find((r) => {
+    const ref = new Date();
+    return sameDay(r.created_at, ref) && (adhMedId ? r.medication_id === adhMedId : !r.medication_id);
+  });
   return (
     <div className="card">
       <h2>Сегодня</h2>
@@ -544,10 +558,20 @@ function TodayTab() {
       )}
 
       <h3>Приём лекарств</h3>
-      {adhToday ? (
+      {adhMeds.length > 0 && (
+        <select value={adhMedId} onChange={(e) => setAdhMedId(e.target.value)}>
+          {adhMeds.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.title}
+              {m.times_per_day != null ? ` (${doseWord(m.times_per_day)})` : " (режим не задан)"}
+            </option>
+          ))}
+        </select>
+      )}
+      {markedTodayForSelected ? (
         <p style={{ color: "#2e7d32", fontWeight: 600 }}>
-          За сегодня отмечено: {ADH_LABELS[adhToday.status] ?? adhToday.status}
-          {adhToday.medication ? ` (${adhToday.medication})` : ""}
+          За сегодня отмечено: {ADH_LABELS[markedTodayForSelected.status] ?? markedTodayForSelected.status}
+          {markedTodayForSelected.medication ? ` (${markedTodayForSelected.medication})` : ""}
         </p>
       ) : (
         <>
@@ -558,11 +582,13 @@ function TodayTab() {
               </button>
             ))}
           </div>
-          <input
-            placeholder="Препарат (напр. Авиандр) — необязательно"
-            value={medication}
-            onChange={(e) => setMedication(e.target.value)}
-          />
+          {adhMeds.length === 0 && (
+            <input
+              placeholder="Препарат (напр. Авиандр) — необязательно"
+              value={medication}
+              onChange={(e) => setMedication(e.target.value)}
+            />
+          )}
           <input placeholder="Заметка (необязательно)" value={adhNote} onChange={(e) => setAdhNote(e.target.value)} />
         </>
       )}
@@ -607,42 +633,160 @@ function DiaryTab() {
   );
 }
 
+// FR-27: процент — от ожидаемых приёмов по назначенному режиму, а не от числа отметок.
+const doseWord = (n: number) => `${n} ${n === 1 ? "раз" : "раза"} в день`;
+const fmtScore = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
+
 function AdherenceTab() {
-  const [data, setData] = useState<{ items: AdherenceRecord[]; today: AdherenceRecord | null } | null>(null);
+  const [data, setData] = useState<AdherenceSummary | null>(null);
+  const [days, setDays] = useState(30);
+  const [medId, setMedId] = useState("");
+  const [status, setStatus] = useState<"taken" | "partial" | "missed" | null>(null);
+  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [saved, setSaved] = useState("");
+
+  const load = async (n = days) => {
+    const d = await api.getMyAdherence(n);
+    setData(d);
+    setMedId((prev) => prev || d.active_medications[0]?.id || "");
+  };
 
   useEffect(() => {
-    api
-      .getMyAdherence(14)
-      .then(setData)
-      .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)));
-  }, []);
+    setErr("");
+    setMedId("");
+    load(days).catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [days]);
 
+  const mark = async () => {
+    if (!status) return;
+    setErr("");
+    setSaved("");
+    setBusy(true);
+    try {
+      await api.recordAdherence({
+        medication_id: medId || undefined,
+        status,
+      });
+      setStatus(null);
+      setSaved("Отметка сохранена");
+      await load();
+    } catch (e: unknown) {
+      setErr(e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const meds = data?.medications ?? [];
+  const active = data?.active_medications ?? [];
+  const selected = active.find((m) => m.id === medId);
+  const summary = data?.summary;
   const items = data?.items ?? [];
-  const total = items.length;
-  const score = items.reduce((acc, r) => acc + (r.status === "taken" ? 1 : r.status === "partial" ? 0.5 : 0), 0);
-  const pct = total > 0 ? Math.round((score / total) * 1000) / 10 : null;
 
   return (
     <div className="card">
       <h2>Приверженность лечению</h2>
       <p style={{ color: "#5a6478", fontSize: 14 }}>
-        Отметки за последние 14 дней. Сегодняшнюю отметку ставьте на вкладке «Сегодня».
+        Процент считается от ожидаемых приёмов по назначенному режиму (сколько раз в день
+        принимать), а не от числа отметок. Частичный приём = 0,5.
       </p>
-      <p>
-        <b>Приверженность: {pct != null ? `${pct}%` : "—"}</b>{" "}
-        <span style={{ color: "#5a6478", fontSize: 13 }}>({total} отметок за 14 дней)</span>
-      </p>
+      <div style={{ display: "flex", gap: 8, margin: "8px 0" }}>
+        {[7, 30].map((n) => (
+          <button key={n} className={days === n ? "active" : "ghost"} onClick={() => setDays(n)}>
+            {n} дней
+          </button>
+        ))}
+      </div>
+
       {err && <p className="error">{err}</p>}
-      {total === 0 && <p style={{ color: "#5a6478" }}>Отметок пока нет.</p>}
-      {items.map((r) => (
-        <div key={r.id} className="msg">
-          <b>{ADH_LABELS[r.status] ?? r.status}</b>
-          {r.medication ? ` · ${r.medication}` : ""}
-          {r.note ? ` · ${r.note}` : ""}
-          <div style={{ color: "#5a6478", fontSize: 12 }}>{new Date(r.created_at).toLocaleString("ru-RU")}</div>
+
+      {summary && summary.expected > 0 ? (
+        <p>
+          <b>Приверженность по режиму: {summary.pct}%</b>{" "}
+          <span style={{ color: "#5a6478", fontSize: 13 }}>
+            (принято {fmtScore(summary.score)} из {summary.expected} ожидаемых приёмов)
+          </span>
+        </p>
+      ) : (
+        <p style={{ color: "#5a6478" }}>
+          Расписание приёма не задано — процент не считается. Врач может указать режим
+          в назначении.
+        </p>
+      )}
+
+      {meds.map((m) => (
+        <div key={m.id} className="msg">
+          <b>{m.title}</b>
+          {m.times_per_day != null
+            ? ` · режим ${doseWord(m.times_per_day)}`
+            : " · расписание не задано, процент не считается"}
+          {m.times_per_day != null && (
+            <div style={{ color: "#3d4657", fontSize: 13 }}>
+              принято {fmtScore(m.score)} из {m.expected} ({m.pct}%) · режим {doseWord(m.times_per_day)}
+              <span style={{ color: "#5a6478" }}>
+                {" "}— принято {m.taken}, частично {m.partial}, пропущено {m.missed}
+              </span>
+            </div>
+          )}
         </div>
       ))}
+      {meds.length === 0 && active.length > 0 && (
+        <p style={{ color: "#5a6478" }}>По активным назначениям пока нет ожидаемых приёмов в окне.</p>
+      )}
+
+      <h3>Отметить приём</h3>
+      {active.length === 0 ? (
+        <p style={{ color: "#5a6478" }}>Активных назначений нет — врач ещё не назначил препарат.</p>
+      ) : (
+        <>
+          <select value={medId} onChange={(e) => setMedId(e.target.value)}>
+            {active.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.title}
+                {m.times_per_day != null ? ` (${doseWord(m.times_per_day)})` : " (режим не задан)"}
+              </option>
+            ))}
+          </select>
+          <div style={{ display: "flex", gap: 8, margin: "8px 0" }}>
+            {(["taken", "partial", "missed"] as const).map((s) => (
+              <button key={s} className={status === s ? "active" : "ghost"} onClick={() => setStatus(s)}>
+                {ADH_LABELS[s]}
+              </button>
+            ))}
+          </div>
+          {selected && selected.times_per_day == null && (
+            <p style={{ color: "#5a6478", fontSize: 13 }}>
+              У этого назначения режим не задан: отметка сохранится, но в процент не войдёт.
+            </p>
+          )}
+          <button onClick={mark} disabled={busy || !status}>
+            {busy ? "Сохраняем…" : "Сохранить отметку"}
+          </button>
+          {saved && <span style={{ color: "#2e7d32", fontSize: 13, marginLeft: 10 }}>{saved}</span>}
+        </>
+      )}
+
+      {data && data.excluded.count > 0 && (
+        <p style={{ color: "#5a6478", fontSize: 13, marginTop: 12 }}>
+          Вне расчёта: {data.excluded.count} отметок — старые записи без привязки к назначению
+          или назначения без заданного режима. Они видны в истории, но не входят в процент.
+        </p>
+      )}
+
+      <div style={{ marginTop: 12 }}>
+        {items.map((r) => (
+          <div key={r.id} className="msg">
+            <b>{ADH_LABELS[r.status] ?? r.status}</b>
+            {r.medication ? ` · ${r.medication}` : ""}
+            {r.medication_id ? "" : " · без привязки к назначению"}
+            {r.note ? ` · ${r.note}` : ""}
+            <div style={{ color: "#5a6478", fontSize: 12 }}>{new Date(r.created_at).toLocaleString("ru-RU")}</div>
+          </div>
+        ))}
+        {items.length === 0 && <p style={{ color: "#5a6478" }}>Отметок пока нет.</p>}
+      </div>
     </div>
   );
 }

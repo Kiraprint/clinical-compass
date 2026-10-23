@@ -751,19 +751,42 @@ function ReportView({ report, error, onBack, onRefresh }: {
         </div>
       )}
 
-      <h3>Приверженность лечению (задача кейса 7, 14 дней)</h3>
-      {report.adherence.pct !== null ? (
+      <h3>Приверженность лечению (FR-27, 14 дней)</h3>
+      {report.adherence.medications.length > 0 ? (
         <>
-          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
-            <div style={{ flex: 1, maxWidth: 320, height: 18, background: "#eef0f4", borderRadius: 9, overflow: "hidden" }}>
-              <div style={{ width: `${Math.round(report.adherence.pct)}%`, height: "100%",
-                background: report.adherence.pct >= 80 ? "#2e7d32" : report.adherence.pct >= 50 ? "#c9a227" : "#b3261e" }} />
-            </div>
-            <b>{report.adherence.pct}%</b>
-            <span style={{ color: "#5a6478", fontSize: 13 }}>
-              принят {report.adherence.taken} · частично {report.adherence.partial} · пропущен {report.adherence.missed}
-            </span>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Препарат</th><th>Режим</th><th>Принято</th><th>Частично</th>
+                  <th>Пропущено</th><th>Ожидалось</th><th>%</th>
+                </tr>
+              </thead>
+              <tbody>
+                {report.adherence.medications.map((m) => (
+                  <tr key={m.id}>
+                    <td>{m.title}</td>
+                    <td>{m.times_per_day != null ? `${m.times_per_day} р/день` : "не задан"}</td>
+                    <td>{m.taken}</td>
+                    <td>{m.partial}</td>
+                    <td>{m.missed}</td>
+                    <td>{m.expected}</td>
+                    <td>{m.pct != null ? `${m.pct}%` : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
+          <p style={{ fontSize: 13, marginTop: 6 }}>
+            <b>Общий процент: {report.adherence.pct}%</b>{" "}
+            <span style={{ color: "#5a6478" }}>
+              — это сумма (принято + 0,5 × частично) по назначениям с заданным режимом,
+              делённая на сумму ожидаемых приёмов; не среднее процентов по препаратам.
+              {report.adherence.excluded_count > 0
+                ? ` Вне расчёта ${report.adherence.excluded_count} отметок без привязки к назначению или у назначений без режима.`
+                : ""}
+            </span>
+          </p>
           {report.adherence.records.length > 0 && (
             <div className="table-wrap">
               <table>
@@ -783,7 +806,10 @@ function ReportView({ report, error, onBack, onRefresh }: {
           )}
         </>
       ) : (
-        <p style={{ color: "#5a6478", fontSize: 13 }}>Записей о приверженности за 14 дней нет.</p>
+        <p style={{ color: "#5a6478", fontSize: 13 }}>
+          Процент не считается: ни у одного назначения не задан режим приёма (сколько раз в день).
+          {report.adherence.total > 0 && ` Отметок за 14 дней: ${report.adherence.total}, все вне расчёта.`}
+        </p>
       )}
 
       <h3>Нежелательные явления (задача кейса 3)</h3>
@@ -1105,6 +1131,10 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
   const [dosage, setDosage] = useState("");
   const [startedOn, setStartedOn] = useState(new Date().toISOString().slice(0, 10));
   const [notes, setNotes] = useState("");
+  // FR-27: режим приёма — знаменатель приверженности (1..6 раз в день).
+  const [timesPerDay, setTimesPerDay] = useState(1);
+  const [editId, setEditId] = useState<string | null>(null);
+  const [editTimes, setEditTimes] = useState(1);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   // Защита от гонки: ответ устаревшего запроса не перезаписывает свежий список.
@@ -1132,11 +1162,13 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
         title: title.trim(),
         dosage: dosage.trim() || undefined,
         started_on: startedOn || undefined,
+        times_per_day: timesPerDay,
         notes: notes.trim() || undefined,
       });
       setTitle("");
       setDosage("");
       setNotes("");
+      setTimesPerDay(1);
       load();
     } catch (e) {
       setErr(e instanceof ApiError ? e.detail : String(e));
@@ -1166,6 +1198,16 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
     }
   };
 
+  const saveTimes = async (medId: string) => {
+    setErr("");
+    try {
+      await api.updateMedication(patientId, medId, { times_per_day: editTimes });
+      setEditId(null);
+      load();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.detail : String(e));
+    }
+  };
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <h3>Назначения (FR-23)</h3>
@@ -1173,7 +1215,7 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
         <div className="table-wrap">
           <table>
             <thead>
-              <tr><th>Препарат</th><th>Дозировка</th><th>С</th><th>По</th><th>Статус</th><th>Заметка</th><th></th></tr>
+              <tr><th>Препарат</th><th>Дозировка</th><th>Режим</th><th>С</th><th>По</th><th>Статус</th><th>Заметка</th><th></th></tr>
             </thead>
             <tbody>
               {items.map((m) => (
@@ -1188,6 +1230,26 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
                     )}
                   </td>
                   <td>{m.dosage ?? "—"}</td>
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    {editId === m.id ? (
+                      <>
+                        <select
+                          aria-label="Раз в день"
+                          value={editTimes}
+                          onChange={(e) => setEditTimes(Number(e.target.value))}
+                        >
+                          {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n}</option>)}
+                        </select>
+                        <button className="link" style={{ fontSize: 12 }} onClick={() => saveTimes(m.id)}>
+                          Сохранить
+                        </button>
+                      </>
+                    ) : m.times_per_day != null ? (
+                      `${m.times_per_day} р/день`
+                    ) : (
+                      <span style={{ color: "#5a6478", fontSize: 12 }}>не задан</span>
+                    )}
+                  </td>
                   <td>{m.started_on ?? "—"}</td>
                   <td>{m.ended_on ?? "—"}</td>
                   <td>{MED_STATUS_LABELS[m.status] ?? m.status}</td>
@@ -1199,6 +1261,13 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
                           <button className="link" style={{ fontSize: 12 }} onClick={() => stop(m.id)}>
                             Остановить
                           </button>
+                        )}
+                        {m.editable && editId !== m.id && m.source === "clinician" && (
+                          <button
+                            className="link"
+                            style={{ fontSize: 12, marginLeft: 8 }}
+                            onClick={() => { setEditId(m.id); setEditTimes(m.times_per_day ?? 1); }}
+                          >Режим</button>
                         )}
                         <button
                           className="link"
@@ -1222,6 +1291,12 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
         <input placeholder="Препарат" value={title} onChange={(e) => setTitle(e.target.value)} style={{ maxWidth: 200 }} />
         <input placeholder="Дозировка" value={dosage} onChange={(e) => setDosage(e.target.value)} style={{ maxWidth: 150 }} />
         <input type="date" aria-label="Дата начала" value={startedOn} onChange={(e) => setStartedOn(e.target.value)} />
+        <label style={{ fontSize: 13, color: "#3d4657" }}>
+          Раз в день:{" "}
+          <select aria-label="Раз в день" value={timesPerDay} onChange={(e) => setTimesPerDay(Number(e.target.value))}>
+            {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </label>
         <input placeholder="Заметка" value={notes} onChange={(e) => setNotes(e.target.value)} style={{ maxWidth: 240 }} />
         <button onClick={add} disabled={busy || !title.trim()}>Назначить</button>
       </div>
