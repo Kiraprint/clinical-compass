@@ -8,7 +8,8 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
@@ -21,6 +22,12 @@ from app.errors import Problem
 from app.models import User
 
 router = APIRouter(tags=["adverse"])
+
+MOSCOW = ZoneInfo("Europe/Moscow")
+
+def _moscow_today() -> date:
+    """Сегодня по МСК: сервер живёт в UTC, а пациент — в московской зоне."""
+    return datetime.now(MOSCOW).date()
 
 class PatientEventBody(BaseModel):
     event_text: str = Field(min_length=1, max_length=1000)
@@ -35,7 +42,7 @@ def report_adverse_event(
     user: User = Depends(require_consent), db: Session = Depends(get_db),
 ):
     """Пациент сообщает о НЯ → status=pending, аудит ADVERSE_REPORT без текста."""
-    if body.onset_date > datetime.now(timezone.utc).date():
+    if body.onset_date > _moscow_today():
         raise Problem(422, "VALIDATION", "Дата начала не может быть в будущем")
     ip = request.client.host if request.client else None
     return services.adverse.report_patient_event(

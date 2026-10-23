@@ -52,8 +52,19 @@ def _score(rows: list[AdherenceRecord]) -> float:
     return sum(1.0 if r.status == "taken" else 0.5 if r.status == "partial" else 0.0 for r in rows)
 
 def _expected_days(med: PatientMedication, start: date, end: date) -> int:
-    """Дни окна, когда назначение действовало. Неизвестная граница — весь край окна."""
-    first = max(med.started_on, start) if med.started_on else start
+    """Дни окна, когда назначение действовало.
+
+    Если дата начала не указана (назначение врача без стартовой даты, EMIAS без
+    authoredOn), берём дату создания записи по МСК: иначе назначение, заведённое
+    сегодня, требовало бы приёмов за весь период окна и занижало процент.
+    """
+    if med.started_on is not None:
+        first_date = med.started_on
+    elif med.created_at is not None:
+        first_date = med.created_at.astimezone(MOSCOW).date()
+    else:
+        first_date = start
+    first = max(first_date, start)
     last = min(med.ended_on, end) if med.ended_on else end
     return max(0, (last - first).days + 1)
 

@@ -218,6 +218,8 @@
 | `test_worker_respects_advisory_lock` | лок удерживает другой коннект | тик возвращает 0 и не создаёт уведомление; после снятия лока — доставка |
 | `test_consent_revocation_destroys_reminders` | напоминание задано → POST /consent/revoke | строк пациента в `clinician_reminders` нет |
 | `test_percentage_from_expected_doses` (`test_adherence.py`) | режим 2×день, назначение 7 дней назад, 5 отметок `taken` | `expected=14`, `score=5`, `pct=36` (а не 5/5 = 100%) |
+| `test_missing_start_date_counts_from_creation` (`test_adherence.py`) | назначение без `started_on` создано сегодня, режим 2×день, 1 `taken` | `expected=2` (с даты создания, не за всё окно), `pct=50` |
+| `test_onset_date_is_validated_by_moscow_calendar` (`test_adverse_events.py`) | граница «сегодня» подменена на 24.10 МСК | 24.10 → 201, 25.10 → 422 `VALIDATION` |
 | `test_expected_is_calendar_days_not_weekdays` | тот же режим, окна 7 и 14 дней | знаменатель — все календарные дни активности; выходные не исключаются |
 | `test_ended_on_cuts_expected_days` | `started_on` = −9 дн, `ended_on` = −3 дн, окно 7 дней | `active_days=4`, `expected=4`, 2 `taken` → 50% |
 | `test_overall_pct_is_weighted_not_average` | препарат A 2/2, препарат B 0/1 | общий 67% (2/3), не среднее 50% |

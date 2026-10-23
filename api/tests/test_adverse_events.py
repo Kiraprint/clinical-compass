@@ -365,3 +365,28 @@ def test_adverse_text_encrypted_at_rest(client, db_session):
     ).scalar_one()
     assert row.event_text == "Секретное описание явления"
     assert row.verification_note == "Секретная заметка врача"
+
+def test_onset_date_is_validated_by_moscow_calendar(client, monkeypatch):
+    """Граница «сегодня» считается по МСК, а не по UTC.
+
+    Регресс: сервер в UTC до 03:00 МСК считал сегодняшний день будущим и
+    отвечал 422 на корректное событие пациента.
+    """
+    from datetime import date as _date
+
+    from app.routers import adverse as adverse_router
+
+    monkeypatch.setattr(adverse_router, "_moscow_today", lambda: _date(2026, 10, 24))
+    h, _pid = patient_ctx(client, "ae-msk@test.ru")
+    ok = client.post(
+        "/api/v1/me/adverse-events",
+        json={"event_text": "Тошнота", "severity": "mild", "onset_date": "2026-10-24"},
+        headers=h,
+    )
+    assert ok.status_code == 201, ok.text
+    future = client.post(
+        "/api/v1/me/adverse-events",
+        json={"event_text": "Тошнота", "severity": "mild", "onset_date": "2026-10-25"},
+        headers=h,
+    )
+    assert future.status_code == 422, future.text
