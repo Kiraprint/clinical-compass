@@ -44,13 +44,13 @@ def seed_users_and_data() -> dict:
     from app import db, security
     from app.models import ClinicianRoster, Consent, DiaryEntry, User
 
-    assert db.SessionLocal is not None
+    assert db.SyncSessionLocal is not None
     password_hash = security.hash_password(common.PASSWORD)
 
     patients: list[User] = []
     clinicians: list[User] = []
 
-    with db.SessionLocal() as session:
+    with db.SyncSessionLocal() as session:
         for i in range(common.PATIENTS):
             patient = User(
                 id=uuid.uuid4(),
@@ -156,7 +156,7 @@ def seed_qdrant() -> dict:
         }
         for row in load_jsonl(bench_path)
     ]
-    docs = app_docs + bench_docs
+    docs = list(app_docs) + bench_docs
 
     embedder = build_embedder()
     client = QdrantClient(url=common.QDRANT_URL)

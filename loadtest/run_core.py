@@ -178,7 +178,7 @@ def run() -> dict:
     os.environ.update(common.setup_env())
     from app import db
 
-    if db.engine is None:
+    if db.sync_engine is None:
         db.setup(common.DB_URL)
     sizes = {
         "scoring.phq9": 60_000,
