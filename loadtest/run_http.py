@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 
 from . import common, serve
@@ -339,10 +340,16 @@ def run_cliff(credentials: dict, *, quick: bool = False, embedder: str = "hash",
     предыдущего уровня на пул соединений.
     """
     scenario = build_scenarios(credentials)["diary_read"]
+    default_pool = int(os.environ.get("CC_DB_POOL_SIZE", "20")) + int(
+        os.environ.get("CC_DB_MAX_OVERFLOW", "20")
+    )
     plan = (
-        [(0, 56), (0, 60), (80, 96)]
+        [(0, 60), (0, 96), (80, 96)]
         if quick
-        else [(0, 56), (0, 60), (0, 64), (80, 64), (80, 96), (80, 128)]
+        else [
+            (0, 56), (0, 60), (0, 64), (0, 96), (0, 128),
+            (80, 64), (80, 96),
+        ]
     )
     results = []
     for pool_size, concurrency in plan:
@@ -359,10 +366,10 @@ def run_cliff(credentials: dict, *, quick: bool = False, embedder: str = "hash",
             point = result.summary()
         finally:
             server.stop()
-        point["pool_size"] = pool_size or 15
+        point["pool_size"] = pool_size or default_pool
         results.append(point)
         print(
-            f"cliff pool={pool_size or 15:3d} C={concurrency:3d}  "
+            f"cliff pool={pool_size or default_pool:3d} C={concurrency:3d}  "
             f"rps={point['rps']:8.1f}  p50={point['latency_ms']['p50']:8.1f}ms  "
             f"err={point['error_rate']:.2%}"
         )

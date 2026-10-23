@@ -13,24 +13,10 @@ import uvicorn
 
 _pool_size = int(os.environ.get("CC_LOADTEST_POOL_SIZE", "0"))
 if _pool_size:
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-
-    import app.db as db
-    from app.config import settings
-
-    def _setup(database_url: str | None = None) -> None:
-        db.engine = create_engine(
-            database_url or settings.database_url,
-            pool_pre_ping=True,
-            pool_size=_pool_size,
-            max_overflow=max(1, _pool_size // 4),
-        )
-        db.SessionLocal = sessionmaker(
-            bind=db.engine, autoflush=False, expire_on_commit=False
-        )
-
-    db.setup = _setup
+    # Настройки читаются app.config при импорте app.main, поэтому пул задаётся
+    # env-переменными до старта uvicorn. Приложение само создаёт async-engine.
+    os.environ["CC_DB_POOL_SIZE"] = str(_pool_size)
+    os.environ["CC_DB_MAX_OVERFLOW"] = str(max(1, _pool_size // 4))
 
 uvicorn.run(
     "app.main:app",

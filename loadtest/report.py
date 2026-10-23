@@ -221,8 +221,9 @@ def build() -> Path:
                     f"{point['error_rate']:.2%} | {kinds} |")
             add("")
 
-            add("> `pool_size=80` даёт 80+20 соединений: C=128 превышает "
-                "их, поэтому ошибки на последней строке — ожидаемое насыщение.")
+            add("> `pool_size=80` даёт 80+20 = 100 соединений — ровно "
+                "`max_connections=100` без запаса, поэтому C≥96 упирается в лимит "
+                "Postgres, а не в приложение.")
             add("")
         add("На уровнях до C=48 включительно ошибок не было ни в одном сценарии.")
         add("")
@@ -251,24 +252,32 @@ def build() -> Path:
             add(f"- Полный скрининг PHQ-9 (3 HTTP-запроса, 9 ответов, запись + аудит): "
                 f"**{_num(flow_rate)} транзакций/с**.")
         if cliff.get("probes"):
-            broken = [
-                p for p in cliff["probes"]
-                if p.get("pool_size", 15) <= 15 and p["error_rate"] > 0.01
-            ]
-            fixed = [
-                p for p in cliff["probes"]
-                if p.get("pool_size", 15) > 15 and p["error_rate"] <= 0.01
-            ]
+            probes = sorted(cliff["probes"], key=lambda p: (p.get("pool_size", 0), p["concurrency"]))
+            default_pool = min(p.get("pool_size", 0) for p in probes)
+            default = [p for p in probes if p.get("pool_size") == default_pool]
+            broken = [p for p in default if p["error_rate"] > 0.01]
+            held = [p for p in default if p["error_rate"] <= 0.01]
             if broken:
-                add(f"- Дефолтный пул (5+10) обрывается при **C≈{broken[0]['concurrency']}**: "
-                    f"{broken[0]['error_rate']:.0%} ошибок, p50 "
-                    f"{_ms(broken[0]['latency_ms']['p50'])} мс "
-                    f"(15 соединений висят в `idle in transaction`).")
-            if fixed:
-                peak = max(fixed, key=lambda p: p["concurrency"])
-                add(f"- С пулом {peak['pool_size']} тот же сценарий держит "
-                    f"**C={peak['concurrency']}** без ошибок при {_num(peak['rps'])} RPS — "
-                    f"обрыв снимается размером пула, но не пропускной способностью БД.")
+                add(f"- Async-пул по умолчанию ({default_pool} соединений) обрывается при "
+                    f"**C≥{broken[0]['concurrency']}**: {broken[0]['error_rate']:.0%} ошибок, "
+                    f"p50 {_ms(broken[0]['latency_ms']['p50'])} мс.")
+            if held:
+                peak = max(held, key=lambda p: p["concurrency"])
+                add(f"- Async-пул по умолчанию ({default_pool} соединений) держит "
+                    f"**C={peak['concurrency']}** без ошибок при {_num(peak['rps'])} RPS "
+                    f"(p50 {_ms(peak['latency_ms']['p50'])} мс).")
+            enlarged = [p for p in probes if p.get("pool_size", 0) > default_pool]
+            peak_fixed = [p for p in enlarged if p["error_rate"] <= 0.01]
+            if peak_fixed:
+                peak = max(peak_fixed, key=lambda p: p["concurrency"])
+                add(f"- С пулом {peak['pool_size']} соединений тот же сценарий держит "
+                    f"**C={peak['concurrency']}** без ошибок при {_num(peak['rps'])} RPS.")
+            limited = [p for p in enlarged if p["error_rate"] > 0.01]
+            if limited:
+                worst = max(limited, key=lambda p: p["concurrency"])
+                add(f"- Ошибки на пуле {worst['pool_size']} при C={worst['concurrency']} — "
+                    f"упор в `max_connections=100` Postgres (пул 80+20 не оставляет запаса), "
+                    f"а не дефект приложения.")
         if ask_rps:
             add(f"- RAG-ответ врачу (Qdrant + аудит, детерминированная сборка): "
                 f"**{_num(ask_rps)} RPS**; время ответа p50 "
@@ -279,8 +288,8 @@ def build() -> Path:
         if roster.get("max_rps"):
             lat = roster.get("latency_at_max") or {}
             add(f"- Роспись врача: **{_num(roster['max_rps'])} RPS**, p50 "
-                f"{_ms(lat.get('p50'))} мс — N+1 в "
-                f"`clinician.list_patients` (3 запроса на пациента).")
+                f"{_ms(lat.get('p50'))} мс — батчинг из 4 запросов на весь список "
+                f"(было 1+3N запросов на пациента).")
         if ml:
             direct_p50 = ml.get("direct", {}).get("latency_ms", {}).get("p50")
             agent_p50 = ml.get("agent", {}).get("latency_ms", {}).get("p50")
@@ -300,24 +309,54 @@ def build() -> Path:
                 f"({red.get('accuracy', 0):.0%}).")
             missed = [row["query"] for row in red.get("results", []) if not row.get("refused")]
             if missed:
-                add(f"- **Red line пропускает**: {'; '.join(missed)} — "
-                    f"формулировка без глагола назначения/диагноза не матчится "
-                    f"`detect_redline`.")
+                add(f"- **Red line пропускает**: {'; '.join(missed)}.")
         corpus = core.get("functions", {}).get("kb_seed.build_corpus (на запрос агента)")
         if corpus:
-            add(f"- `build_corpus` при промахе лексического гейта: "
+            add(f"- `build_corpus` (кеш статических секций): "
                 f"{_num(corpus['ops_per_s'], 0)} вызовов в секунду "
-                f"(p50 {_num(corpus['us_p50'] / 1000, 2)} мс) — выполняется на каждый "
-                f"запрос агента, где поиск вернул меньше `limit` фрагментов.")
+                f"(p50 {_num(corpus['us_p50'], 1)} мкс); на request-path "
+                f"препараты приходят из async-сессии, без повторного запроса к БД.")
+        add("")
+        add("### 5.1 Эффект исправлений (базовый прогон 2026-10-23 → текущий)")
+        add("")
+        add("| Метрика | До | После |")
+        add("|---|---:|---:|")
+        add(f"| Чтение дневника, max RPS | 133.7 | {_num(db_rps)} |")
+        add(f"| Запись дневника, max RPS | 127.5 | {_num(write_rps)} |")
+        add(f"| Скрининг, транзакций/с | 33.8 | {_num(flow_rate)} |")
+        add(f"| Агент врачу, max RPS | 65.4 | {_num(ask_rps)} |")
+        add(f"| Роспись врача, max RPS | 44.2 | {_num(roster.get('max_rps', 0))} |")
+        add(f"| Mixed, max RPS | 97.1 | {_num(by_key.get('mixed', {}).get('max_rps', 0))} |")
+        if cliff.get("probes"):
+            probes = sorted(cliff["probes"], key=lambda p: (p.get("pool_size", 0), p["concurrency"]))
+            default_pool = min(p.get("pool_size", 0) for p in probes)
+            at64 = [p for p in probes if p.get("pool_size") == default_pool and p["concurrency"] == 64]
+            if at64:
+                add(f"| Дневник при C=64, RPS / ошибки | 2.8 / 75% | "
+                    f"{_num(at64[0]['rps'])} / {at64[0]['error_rate']:.0%} |")
+        add(f"| `build_corpus`, вызовов/с | 642 | {_num(corpus['ops_per_s'], 0) if corpus else 0} |")
+        if ml:
+            red = ml.get("agent", {}).get("redline", {})
+            add(f"| Red-line отказы | 5/6 (83%) | {red.get('refused_ok', 0)}/"
+                f"{red.get('queries', 0)} ({red.get('accuracy', 0):.0%}) |")
+            ru = (ml.get("agent", {}).get("by_lang") or {}).get("ru", {})
+            if ru:
+                add(f"| RU nDCG@3 (hash) | 0.142 | {ru.get('ndcg@3', 0):.3f} |")
+        add("")
+        add("Отдельный замер прод-профиля bge-m3 (RTX 5090, fp16, тот же путь "
+            "`hybrid_search` + Qdrant, 55 запросов): RU nDCG@3 **0.776**, R@3 0.819, "
+            "EN nDCG@3 0.723, p50 24.9 мс (индексация 126 чанков 3.7 с); "
+            "hash на том же стенде — RU 0.142.")
         add("")
         add("## 6. Ограничения")
         add("")
-        add("- Один процесс API, без nginx/TLS и без внешнего LLM.")
+        add("- Один процесс API, без nginx/TLS и без внешнего LLM; `WEB_CONCURRENCY` "
+            "поддержан, но в этом прогоне не измерялся.")
         add("- Postgres и Qdrant — локально в Docker; межсерверная сеть не моделируется.")
-        add("- Эмбеддер `hash` — демо-база; прод-качество поиска см. `bench/README.md` "
-            "(bge-m3: nDCG@10 0.815 на тех же 55 запросах).")
-        add("- Замкнутый контур: p95 на высоких C включает очередь к пулу БД "
-            "(SQLAlchemy: 5 + 10 overflow).")
+        add("- Эмбеддер `hash` — демо-база; bge-m3 включается `CC_EMBEDDER=bge-m3` "
+            "с extra `embeddings` и переиндексацией KB.")
+        add("- Замкнутый контур: p95 на высоких C включает очередь к async-пулу БД "
+            "(SQLAlchemy: 20 + 20 overflow на процесс).")
         add("")
 
     report_path = common.HERE / "REPORT.md"
