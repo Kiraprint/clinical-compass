@@ -43,8 +43,13 @@ th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eef1f6; 
 .qa { margin-bottom: 12px; }
 .qa p { margin: 0 0 4px; font-size: 14px; }
 .qa .row { gap: 6px; }
-.qa .row button { padding: 6px 10px; background: #e4e8f0; color: #2a3350; }
+.qa .row button { padding: 6px 10px; background: #e4e8f0; color: #2a3350; max-width: 100%; text-align: left; }
 .qa .row button.on { background: #2f6fed; color: #fff; }
+/* Ежедневный чек-ин: варианты ответа и спокойный блок безопасности (docs/16). */
+.row button.on { background: #2f6fed; color: #fff; }
+.safety { background: #f3f6fb; border: 1px solid #cfd9ea; border-left: 4px solid #2f6fed; border-radius: 10px; padding: 12px 16px; margin-top: 12px; }
+.safety h3 { margin: 0 0 6px; font-size: 16px; color: #1c2333; }
+.safety p { margin: 0 0 6px; font-size: 13px; color: #3d4861; }
 .msg { margin-bottom: 8px; }
 .msg.system { color: #5a6478; font-style: italic; }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }

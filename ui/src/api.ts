@@ -164,9 +164,14 @@ export const api = {
     req<Assessment>(`/api/v1/runs/${runId}/finish`, { method: "POST" }),
   abandonScreening: () =>
     req<{ abandoned: boolean }>("/api/v1/screenings/abandon", { method: "POST" }),
-  getTodayCheckin: () => req<CheckinToday>("/api/v1/checkins/today"),
-  completeCheckin: (answers: Record<string, number>) =>
-    req<{ run_id: string }>("/api/v1/checkins", { method: "POST", body: JSON.stringify({ answers }) }),
+  todayCheckin: () => req<CheckinState>("/api/v1/checkins/today"),
+  // Идемпотентно: если сеанс на сегодня уже есть, сервер вернёт его (docs/16 §4).
+  startCheckin: () => req<CheckinState>("/api/v1/checkins", { method: "POST", body: JSON.stringify({}) }),
+  submitCheckin: (sessionId: string, answers: Record<string, number>) =>
+    req<CheckinState>(`/api/v1/checkins/${encodeURIComponent(sessionId)}/answers`, {
+      method: "POST",
+      body: JSON.stringify({ answers }),
+    }),
   getTimeline: (days = 90) => req<Timeline>(`/api/v1/me/timeline?days=${days}`),
   postDiary: verb<DiaryEntry>("POST")("/api/v1/diary"),
   getDiary: () => req<{ items: DiaryEntry[] }>("/api/v1/diary"),
@@ -427,9 +432,35 @@ export interface Assessment {
     help_resources: { title: string; phone: string }[];
   };
 }
-export interface CheckinToday {
-  items: { key: string; text: string; max_value: number }[];
-  done: boolean;
+// Адаптивный чек-ин, docs/16 §4. Шаг — это один экран: ядро, безопасность или модули.
+export interface CheckinStepItem {
+  id: string;
+  domain: string;
+  text: string;
+  kind: string; // scale | binary | gate
+  anchors: string[];
+  emoji: string[];
+  max_value: number;
+}
+export interface CheckinModule {
+  code: string;
+  title: string;
+  included: boolean;
+  reason: string;
+}
+// phase: core | safety | modules | done; step.kind повторяет phase.
+export interface CheckinState {
+  date: string;
+  rules_version: string;
+  status: string; // not_started | in_progress | completed
+  session_id: string | null;
+  phase: string | null;
+  step: { kind: string | null; items: CheckinStepItem[] };
+  answers: Record<string, number>;
+  progress: { answered: number; planned: number };
+  safety: string; // none | review | signal | unassessed
+  modules: CheckinModule[];
+  completed_at: string | null;
 }
 export interface Timeline {
   runs: { total_score: number; severity: string; triage: string; computed_at: string }[];
@@ -438,7 +469,7 @@ export interface Timeline {
 export interface DiaryEntry {
   id: string;
   content: string;
-  mood: number | null;
+  mood: number | null; // 0..4, 5-точечная шкала с эмодзи (docs/16 §1)
   sleep_h: number | null;
   tags: string[];
   created_at: string;
@@ -608,7 +639,7 @@ export interface Report {
     id: string; event_text: string; severity: string; onset_date: string;
     suspected_drug: string | null; action_taken: string | null; created_at: string;
   }[];
-  diary: { id: string; content: string; mood: number | null; created_at: string }[];
+  diary: { id: string; content: string; mood: number | null /* 0..4 */; created_at: string }[];
   available_scales: {
     code: string; title: string; audience: "PATIENT" | "CLINICIAN";
     items: { key: string; text: string; max_value: number }[];

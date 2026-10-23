@@ -718,7 +718,7 @@ function ReportView({ report, error, onBack, onRefresh }: {
         <div key={d.id} className="msg">
           <b>{d.created_at.slice(0, 10)}: </b>
           {d.content}
-          {d.mood ? ` (настроение ${d.mood}/10)` : ""}
+          {d.mood != null ? ` (настроение ${d.mood <= 4 ? `${d.mood}/4` : d.mood})` : ""}
         </div>
       ))}
     </div>
