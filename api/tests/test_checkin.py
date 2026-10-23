@@ -91,6 +91,7 @@ def test_today_not_started(client):
     assert body["answers"] == {}
     assert body["progress"] == {"answered": 0, "planned": 7}
     assert body["modules"] == [] and body["safety"] == "none"
+    assert body["clinician_notified"] is False
     assert body["rules_version"] == "1.0.0"
     assert body["date"] == datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat()
 

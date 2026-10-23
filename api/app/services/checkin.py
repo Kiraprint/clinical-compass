@@ -70,6 +70,7 @@ def _not_started() -> dict:
         "safety": "none",
         "modules": [],
         "completed_at": None,
+        "clinician_notified": False,
     }
 
 
