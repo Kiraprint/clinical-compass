@@ -45,18 +45,24 @@
 | triage_green | severity NONE, флагов нет | triage() | GREEN |
 | triage_deterministic_input_output_table | таблица вход/выход по границам | triage() | GREEN/YELLOW/RED по таблице |
 
-### 2.3 checkin (генерация)
+### 2.3 checkin (адаптивный, docs/16)
 
 | Тест | Given | When | Then |
 |---|---|---|---|
-| checkin_len_2_5 | last = None / last = ScaleResult(MODERATE) | generate_checkin() | 2 ≤ items ≤ 5 |
-| test_checkin_can_reach_five_items | 5+ worst-пунктов + суицидальный | generate_checkin() | items == 5 (потолок достижим) |
+| test_core_is_first_step / test_core_step_returns_only_unanswered_items | пустые ответы, затем часть ядра | plan() | шаг `core` = 7 пунктов в фиксированном порядке, возвращаются только неотвеченные |
+| test_routing_is_deterministic | одинаковые ответы | plan() | одинаковая последовательность шага и модулей |
+| test_clean_day_has_no_modules | все симптомы 0, SL1 = 4, HR4 = 0 | plan() | `done`, модулей нет |
+| test_gate_yes_runs_safety_module_and_skips_symptoms | HR4 = 1 | plan() | шаг `safety` RS1–RS3, симптоматические модули не предъявлены |
+| test_gate_yes_finishes_after_safety_module | HR4 + RS1–RS3 | plan() | `done`, safety `signal`/`review` по RS |
+| test_urgent_signal | RS1/RS2 = 1 или RS3 = 0 | safety_level() | `signal` |
+| test_gate_unanswered_is_unassessed_not_negative | HR4 отсутствует | safety_level() | `unassessed`, а не `none` |
+| test_thresholds_are_inclusive | значения на границах правил | select_modules() | модуль включается при «≥»/«≤» включительно |
+| test_limit_is_twelve_and_modules_are_whole | много симптомов | select_modules() | итог ≤ 12, модули целиком, непоместившиеся — с причиной |
+| test_never_exceeds_limit_for_any_core_combination | перебор значений ядра | planned_items() | никогда > 12 |
+| test_validate_answers_rejects_bad_values | нецелое/bool/вне диапазона | validate_answers() | ValueError |
 | test_pss10_reverse_scoring_concrete_total | положительные пункты 4/5/7/8 | score(PSS10) | обратный подсчёт, конкретная сумма |
 | test_pss10_severity_boundaries | пороги 13/14 и 26/27 | severity_for() | NONE/MILD/MODERATE без SEVERE |
 | test_hdrs17_severity_boundaries / test_hdrs17_triage | HAM-D17 (8/17/24), h3 как суицидальный пункт | severity_for()/triage() | MODERATE и RED при h3≥1 |
-| checkin_focuses_worst | per_item имеет worst-пункт (макс балл) | generate_checkin() | worst-пункт входит в вопросы |
-| checkin_bounded | любой вход | generate_checkin() | item_keys ⊆ keys шкалы |
-| checkin_deterministic | last = None / worst q2 | generate_checkin() | конкретный набор: [q1,q2,q3] / [q2,q9] |
 
 ### 2.4 trend
 
