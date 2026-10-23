@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://127.0.0.1:6333"  # векторная БД ИИ-агента (docs/07)
     qdrant_collection: str = "kb"  # документы: открытый не-ПДн корпус (docs/08)
     embedder: str = "hash"  # hash | bge-m3 (docs/08 §4; по умолчанию офлайн-демо)
+    # CC_KB_CORPUS_TTL_SECONDS: TTL кеша корпуса KB (kb_seed.build_corpus) в
+    # процессе API. In-process писателей drugs нет (seed — отдельный CLI, он
+    # зовёт clear_corpus_cache), поэтому TTL — единственная runtime-инвалидация.
+    # 0 → кеш выключен.
+    kb_corpus_ttl_seconds: float = 60.0
     # CC_ASSISTANT_LLM_URL: OpenAI-совместимый /v1 (llama-server, vLLM, Ollama).
     # Пусто → LLM-роутинг топиков выключен (поиск по всем разделам). LLM получает
     # только очищенный от ПДн запрос и выбирает тулзу search_<раздел> (docs/12).

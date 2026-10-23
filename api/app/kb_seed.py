@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import threading
 import time
 from pathlib import Path
+from types import MappingProxyType
+from typing import Any, Mapping
 
 from qdrant_client import QdrantClient
 from sqlalchemy import select
@@ -268,12 +271,53 @@ def _article_docs() -> list[dict]:
     ]
 
 
-def build_corpus(with_guidelines: bool = False) -> list[dict]:
+def _build_uncached(with_guidelines: bool) -> list[dict]:
     return (
         _scale_docs() + _triage_docs() + _redlines_docs()
         + _drug_docs() + _guideline_docs(with_full_text=with_guidelines)
         + _article_docs()
     )
+
+
+# Кеш собранного корпуса. build_corpus() вызывается на запрос агента (лексический
+# fallback в search_kb) и каждый раз ходит в БД за препаратами — держим готовый
+# корпус в процессе. Записи неизменяемы (MappingProxyType), чтобы вызывающий не
+# мог испортить кеш. Инвалидация: TTL (CC_KB_CORPUS_TTL_SECONDS) и явная
+# clear_corpus_cache() из писателей справочника (seed CLI, тестовые фикстуры);
+# runtime-писателей drugs/КР в API нет, поэтому TTL — единственная инвалидация
+# на запросном пути.
+_corpus_lock = threading.Lock()
+_corpus_cache: dict[bool, tuple[float, tuple[Mapping[str, Any], ...]]] = {}
+
+
+def clear_corpus_cache() -> None:
+    """Сбросить кеш корпуса (после записи в drugs/КР, в CLI-сиде и тестах)."""
+    with _corpus_lock:
+        _corpus_cache.clear()
+
+
+def build_corpus(with_guidelines: bool = False) -> tuple[Mapping[str, Any], ...]:
+    """Чанки KB: шкалы, триаж, красные линии, препараты, КР, статьи (docs/08 §5).
+
+    Возвращает неизменяемый снимок, закешированный на
+    CC_KB_CORPUS_TTL_SECONDS (<= 0 — кеш выключен). Сборка идёт под локом:
+    промах кеша стоит один поход в БД даже при параллельных запросах.
+    Исключения не кешируются — при ошибке (напр. БД недоступна) следующий
+    вызов снова попытается собрать корпус.
+    """
+    ttl = settings.kb_corpus_ttl_seconds
+    now = time.monotonic()
+    with _corpus_lock:
+        if ttl > 0:
+            cached = _corpus_cache.get(with_guidelines)
+            if cached is not None and now - cached[0] < ttl:
+                return cached[1]
+        else:
+            _corpus_cache.pop(with_guidelines, None)
+        snapshot = tuple(MappingProxyType(dict(d)) for d in _build_uncached(with_guidelines))
+        if ttl > 0:
+            _corpus_cache[with_guidelines] = (now, snapshot)
+        return snapshot
 
 
 def main() -> None:
@@ -305,6 +349,8 @@ def main() -> None:
     if _db.engine is None:
         _db.setup(settings.database_url)
 
+    # Переиндексация всегда читает БД/файлы заново: не индексируем закешированный корпус.
+    clear_corpus_cache()
     docs = build_corpus(with_guidelines=args.with_guidelines)
     n = kb.upsert_documents(client, build_embedder(), docs)
     total = kb.count_points(client)

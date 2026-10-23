@@ -87,6 +87,11 @@ def _seed_drugs(s) -> None:
             special_notes=d["special_notes"],
         ))
     s.flush()
+    # drugs — источник чанков корпуса (kb_seed._drug_docs): сбрасываем кеш корпуса,
+    # иначе python -m app.kb_seed / тесты увидят старые чанки до истечения TTL.
+    from app.kb_seed import clear_corpus_cache
+
+    clear_corpus_cache()
     print(f"[seed] drugs: {len(data.get('drugs', []))} в таблице (источник для KB-чанков и /drugs)")
 
 
