@@ -54,6 +54,21 @@ def upgrade() -> None:
         ["checkin_session_id"],
         ["id"],
     )
+    # Одна эскалация на сеанс чек-ина (partial unique: только непустые ссылки).
+    op.create_index(
+        "escalations_checkin_session",
+        "escalations",
+        ["checkin_session_id"],
+        unique=True,
+        postgresql_where=sa.text("checkin_session_id IS NOT NULL"),
+    )
+    op.add_column(
+        "escalations",
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=True),
+    )
+
+    # Шкала настроения: '0-4' у новых записей; NULL — историчные 1..10 (не переинтерпретируем).
+    op.add_column("diary_entries", sa.Column("mood_scale", sa.String(length=8), nullable=True))
 
     op.drop_index(
         "runs_checkin_daily",
@@ -71,6 +86,16 @@ def downgrade() -> None:
         postgresql_where=sa.text("mode = 'CHECKIN'"),
     )
 
+    op.drop_column("diary_entries", "mood_scale")
+    op.drop_column("escalations", "created_at")
+    op.drop_index("escalations_checkin_session", table_name="escalations")
+
+    # notifications.escalation_id → escalations.id без ON DELETE: сначала снимаем
+    # уведомления, иначе DELETE эскалаций ниже упадёт на этом FK.
+    op.execute(
+        "DELETE FROM notifications WHERE escalation_id IN "
+        "(SELECT id FROM escalations WHERE assessment_id IS NULL)"
+    )
     op.drop_constraint("escalations_checkin_session_id_fkey", "escalations", type_="foreignkey")
     op.drop_column("escalations", "checkin_session_id")
     # NOT NULL восстанавливаем только если данных без assessment не осталось.

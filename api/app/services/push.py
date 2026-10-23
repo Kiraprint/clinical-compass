@@ -181,6 +181,9 @@ def notify_escalation_clinicians(
     ).all()
     if escalation.kind == "SUICIDAL":
         recipient_kind, title = "суицидальный риск", "RED-эскалация"
+    elif escalation.kind == "CHECKIN_RISK_URGENT":
+        # Срочный сигнал: HR4/RS требуют реакции сегодня (docs/16 §3).
+        recipient_kind, title = "срочный сигнал риска в чек-ине", "СРОЧНО: сигнал риска чек-ина"
     elif escalation.kind == "CHECKIN_RISK":
         # docs/16 §3: gate/RS-сигнал чек-ина — очередь клинического рассмотрения,
         # а не валидированная категория риска.

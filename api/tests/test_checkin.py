@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, text
@@ -14,7 +14,7 @@ from sqlalchemy import select, text
 from app import db
 from app.models import AuditLog, CheckinSession, ClinicianRoster, Escalation, Notification
 
-from .conftest import clinician_ctx, patient_ctx
+from .conftest import admin_ctx, clinician_ctx, patient_ctx
 
 CORE = {
     "MO1": 0,
@@ -281,15 +281,17 @@ def test_gate_yes_signal_escalates_to_roster_clinician(client):
     body = _answer(client, h, sid, {"RS1": 1, "RS2": 0, "RS3": 0})
     assert body["status"] == "completed"
     assert body["safety"] == "signal"
+    assert body["clinician_notified"] is True
 
-    (escalation,) = _escalations(pid)
-    assert escalation.kind == "CHECKIN_RISK"
+    (escalation,) = _escalations(pid)  # одна строка на сеанс, обновлена до срочной
+    assert escalation.kind == "CHECKIN_RISK_URGENT"
     assert str(escalation.checkin_session_id) == sid
     assert escalation.assessment_id is None
+    assert escalation.notified_clinician_at is not None
     notes = _notifications(cid)
-    assert len(notes) == 1
-    assert notes[0].escalation_id == escalation.id
-    assert "чек-ин" in notes[0].title
+    assert len(notes) == 2  # первый сигнал (HR4) + повторный срочный
+    assert all(n.escalation_id == escalation.id for n in notes)
+    assert any("СРОЧНО" in n.title for n in notes)
     actions = _audit_actions(pid)
     assert "CHECKIN_COMPLETE" in actions and "CHECKIN_RISK_SIGNAL" in actions
 
@@ -297,17 +299,38 @@ def test_gate_yes_signal_escalates_to_roster_clinician(client):
 def test_gate_yes_signal_without_roster_escalates_silently(client):
     h, pid = patient_ctx(client, "chk_noroster@test.ru")
     sid = _start(client, h)["session_id"]
-    _answer(client, h, sid, {**CORE, "HR4": 1})
+    body = _answer(client, h, sid, {**CORE, "HR4": 1})
+    assert body["clinician_notified"] is False
     body = _answer(client, h, sid, {"RS1": 0, "RS2": 1, "RS3": 0})
     assert body["safety"] == "signal"
+    assert body["clinician_notified"] is False
     (escalation,) = _escalations(pid)
-    assert escalation.kind == "CHECKIN_RISK"
+    assert escalation.kind == "CHECKIN_RISK_URGENT"
+    assert escalation.notified_clinician_at is None  # уведомлений не было
     with db.SessionLocal() as s:
         assert s.scalars(select(Notification).where(Notification.patient_id == uuid.UUID(pid))).all() == []
 
 
-def test_gate_yes_review_state_escalates_without_urgency(client):
+def test_gate_yes_without_rs_keeps_escalation_open(client):
+    """HR4 = «Да», RS не пройден: сигнал уже в очереди, сеанс не завершён."""
+    h, pid = patient_ctx(client, "chk_open@test.ru")
+    _, cid = clinician_ctx(client, "chk_open_doc@test.ru")
+    _add_roster(pid, cid)
+    sid = _start(client, h)["session_id"]
+    body = _answer(client, h, sid, {**CORE, "HR4": 1})
+    assert body["status"] == "in_progress"
+    assert body["phase"] == "safety"
+    assert body["clinician_notified"] is True
+    (escalation,) = _escalations(pid)
+    assert escalation.kind == "CHECKIN_RISK"
+    assert escalation.notified_clinician_at is not None
+    assert len(_notifications(cid)) == 1
+
+
+def test_gate_yes_review_state_keeps_primary_escalation(client):
     h, pid = patient_ctx(client, "chk_review@test.ru")
+    _, cid = clinician_ctx(client, "chk_review_doc@test.ru")
+    _add_roster(pid, cid)
     sid = _start(client, h)["session_id"]
     _answer(client, h, sid, {**CORE, "HR4": 1})
     body = _answer(client, h, sid, {"RS1": 0, "RS2": 0, "RS3": 1})
@@ -315,6 +338,7 @@ def test_gate_yes_review_state_escalates_without_urgency(client):
     (escalation,) = _escalations(pid)
     assert escalation.kind == "CHECKIN_RISK"
     assert escalation.checkin_session_id is not None
+    assert len(_notifications(cid)) == 1  # повторное уведомление только для signal
 
 
 def test_completed_session_rejects_answers(client):
@@ -394,5 +418,71 @@ def test_report_shows_checkin_answers_and_risk(client):
     assert today["safety"] == "signal"
     assert today["answers"]["HR4"] == 1 and today["answers"]["RS1"] == 1
     assert today["rules_version"] == body["checkin"]["rules_version"]
-    (escalation,) = [e for e in body["open_escalations"] if e["kind"] == "CHECKIN_RISK"]
+    (escalation,) = [e for e in body["open_escalations"] if e["kind"] == "CHECKIN_RISK_URGENT"]
     assert escalation["checkin_session_id"] == sid
+
+
+# --- Эскалации: уникальность и общая очередь ---------------------------------
+
+
+def test_repeat_submit_does_not_duplicate_escalation(client):
+    h, pid = patient_ctx(client, "chk_dup@test.ru")
+    _, cid = clinician_ctx(client, "chk_dup_doc@test.ru")
+    _add_roster(pid, cid)
+    sid = _start(client, h)["session_id"]
+    _answer(client, h, sid, {**CORE, "HR4": 1})
+    _answer(client, h, sid, {"RS1": 1, "RS2": 0, "RS3": 0})
+    assert len(_escalations(pid)) == 1
+
+    resp = client.post(
+        f"/api/v1/checkins/{sid}/answers",
+        json={"answers": {"RS1": 1, "RS2": 0, "RS3": 0}},
+        headers=h,
+    )
+    assert resp.status_code == 409
+    assert len(_escalations(pid)) == 1
+    assert len(_notifications(cid)) == 2  # без третьего «срочного» дубля
+
+
+def test_escalation_queue_visible_to_staff_only(client):
+    h, pid = patient_ctx(client, "chk_queue@test.ru")
+    sid = _start(client, h)["session_id"]
+    _answer(client, h, sid, {**CORE, "HR4": 1})
+    _answer(client, h, sid, {"RS1": 0, "RS2": 1, "RS3": 0})  # signal без roster
+
+    ch, _ = clinician_ctx(client, "chk_queue_doc@test.ru")
+    ah, _ = admin_ctx(client, "chk_queue_admin@test.ru")
+    for staff in (ch, ah):
+        resp = client.get("/api/v1/escalations", headers=staff)
+        assert resp.status_code == 200, resp.text
+        (item,) = resp.json()["items"]
+        assert item["patient_id"] == pid
+        assert item["kind"] == "CHECKIN_RISK_URGENT"
+        assert item["safety"] == "signal"
+        assert item["checkin_session_id"] == sid
+        assert item["created_at"] is not None
+    assert client.get("/api/v1/escalations", headers=h).status_code == 403
+
+    with db.SessionLocal() as s:
+        escalation = s.scalar(select(Escalation).where(Escalation.patient_id == uuid.UUID(pid)))
+        escalation.resolved_at = datetime.now(timezone.utc)
+        s.commit()
+    assert client.get("/api/v1/escalations", headers=ch).json()["items"] == []
+
+
+def test_consent_revoke_removes_checkin_and_escalations(client, db_session):
+    h, pid = patient_ctx(client, "chk_revoke@test.ru")
+    sid = _start(client, h)["session_id"]
+    _answer(client, h, sid, {**CORE, "HR4": 1})
+    _answer(client, h, sid, {"RS1": 1, "RS2": 0, "RS3": 0})
+    assert _escalations(pid)
+
+    assert client.post("/api/v1/consent/revoke", headers=h).status_code == 204
+    assert _escalations(pid) == []
+    with db.SessionLocal() as s:
+        assert s.scalar(
+            select(CheckinSession).where(CheckinSession.patient_id == uuid.UUID(pid))
+        ) is None
+        assert s.scalars(
+            select(Notification).where(Notification.patient_id == uuid.UUID(pid))
+        ).all() == []

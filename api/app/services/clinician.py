@@ -16,6 +16,7 @@ from compass.trend import trends
 from app.errors import Problem
 from app.models import AdherenceRecord, AdverseEvent, Answer, Assessment, ChatMessage, CheckinSession, ClinicianRoster, Consent, DiaryEntry, Escalation, Prescription, Run, User, Visit
 
+from . import diary as diary_service
 from .audit import record as audit_record
 from .contacts import contacts_payload
 from .history_extract import extract_history
@@ -299,7 +300,11 @@ def _patient_card(db: Session, patient_id) -> dict:
             ).all()
         ],
         "diary": [
-            {"id": str(e.id), "content": e.content, "mood": e.mood, "sleep_h": e.sleep_h, "created_at": e.created_at.isoformat()}
+            {
+                "id": str(e.id), "content": e.content, "mood": e.mood,
+                "mood_scale": diary_service.mood_scale_of(e),
+                "sleep_h": e.sleep_h, "created_at": e.created_at.isoformat(),
+            }
             for e in diary
         ],
         "available_scales": [

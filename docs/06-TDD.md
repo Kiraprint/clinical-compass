@@ -102,9 +102,14 @@
 | checkin_module_routing | MO1 ≥ 3 в шаге ядра | шаг `modules` = HR1–HR3 + MO2–MO3, причины модулей в ответе |
 | checkin_limit_12 | MO1=4, SL1=0 (много модулей) | предъявлено ≤ 12 пунктов, модули целиком, пропущенные — с причиной «лимит 12» |
 | checkin_gate_routes_safety | HR4=«Да» | шаг `safety` RS1–RS3, `planned 10`, симптоматические модули не предъявлены |
-| checkin_risk_signal_escalates | HR4=«Да» + RS1=«Да», врач в roster | `Escalation(kind=CHECKIN_RISK, checkin_session_id)` + `Notification` ростерному врачу + аудит `CHECKIN_RISK_SIGNAL` |
-| checkin_risk_no_roster | HR4=«Да» + RS2=«Да», ростера нет | `Escalation` создан, уведомлений нет (общая очередь) |
-| checkin_review_state | HR4=«Да», RS1/RS2=«Нет», RS3=«Да» | `safety=review`, `Escalation CHECKIN_RISK` |
+| checkin_risk_signal_escalates | HR4=«Да» + RS1=«Да», врач в roster | одна `Escalation` на сеанс: `CHECKIN_RISK` сразу после HR4 → `CHECKIN_RISK_URGENT` на `signal`, два `Notification` ростерному врачу, `notified_clinician_at` заполнен, `clinician_notified=true`, аудит `CHECKIN_RISK_SIGNAL` |
+| checkin_risk_no_roster | HR4=«Да» + RS2=«Да», ростера нет | `Escalation CHECKIN_RISK_URGENT` создана, `notified_clinician_at = NULL`, уведомлений нет, `clinician_notified=false` |
+| checkin_gate_open_signal | HR4=«Да», RS не отправлены | эскалация уже есть, `status=in_progress`, `phase=safety`, уведомление ростерному врачу создано |
+| checkin_review_state | HR4=«Да», RS1/RS2=«Нет», RS3=«Да» | `safety=review`, одна `Escalation CHECKIN_RISK`, повторного уведомления нет |
+| checkin_no_duplicate_escalation | повторная отправка ответов после завершения | `409`, эскалация одна (partial unique по `checkin_session_id`), уведомлений по-прежнему два |
+| escalations_queue_access | открытая эскалация; врач, админ, пациент | врач/админ — `200` с `{id, patient_id, patient_fio, kind, safety, checkin_session_id, notified_at, created_at}`; пациент — `403`; закрытая (`resolved_at`) не попадает |
+| consent_revoke_checkin | завершённый риск-чек-ин + эскалация + уведомление | после отзыва согласия нет сеансов, эскалаций и уведомлений |
+| diary_mood_scale | новая запись `mood=0`; историчная строка `mood=7, mood_scale=NULL` | `mood_scale="0-4"` / `"1-10"` в `/diary` и в карте врача; старые строки не переписываются; `mood=5` → `422` |
 | checkin_foreign_session | чужой или несуществующий `session_id` | `404 CHECKIN_NOT_FOUND` |
 | checkin_answers_encrypted | raw `SELECT answers::text` из БД | bytea (`\x…`), идентификаторы пунктов в открытом виде отсутствуют; ORM расшифровывает обратно |
 | checkin_presented_steps | после шага ядра | `presented` хранит шаги, предъявленные пункты и основания модулей |

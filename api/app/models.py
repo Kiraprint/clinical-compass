@@ -152,7 +152,16 @@ class CheckinSession(Base):
 
 class Escalation(Base):
     __tablename__ = "escalations"
-    __table_args__ = (Index("escalations_patient", "patient_id", "resolved_at"),)
+    __table_args__ = (
+        Index("escalations_patient", "patient_id", "resolved_at"),
+        # Одна эскалация на сеанс чек-ина: partial unique (docs/16 §3).
+        Index(
+            "escalations_checkin_session",
+            "checkin_session_id",
+            unique=True,
+            postgresql_where=text("checkin_session_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     # Либо скрининг, либо чек-ин: источник эскалации (CHECKIN_RISK идёт без assessment).
@@ -163,8 +172,12 @@ class Escalation(Base):
         ForeignKey("checkin_sessions.id"), nullable=True
     )
     patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
-    kind: Mapped[str] = mapped_column(String)  # SUICIDAL | SEVERE | CHECKIN_RISK
+    kind: Mapped[str] = mapped_column(String)  # SUICIDAL | SEVERE | CHECKIN_RISK | CHECKIN_RISK_URGENT
     notified_clinician_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # NULL у эскалаций, созданных до появления колонки (миграция c6d7e8f9a0b1).
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), nullable=True
+    )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolution: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
 
@@ -175,7 +188,9 @@ class DiaryEntry(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
     content: Mapped[str] = mapped_column(EncryptedText())
-    mood: Mapped[int | None] = mapped_column(nullable=True)  # 1..10
+    mood: Mapped[int | None] = mapped_column(nullable=True)  # 0..4 при mood_scale='0-4'; legacy NULL = 1..10
+    # Шкала настроения записи: '0-4' для новых, NULL — историчные 1..10 (не переинтерпретируем).
+    mood_scale: Mapped[str | None] = mapped_column(String(8), nullable=True)
     sleep_h: Mapped[float | None] = mapped_column(nullable=True)
     # NEW-2: теги — свободный текст пациента (ПДн). В БД лежит зашифрованная
     # JSON-строка; наружу отдаётся list[str] через property ниже.
