@@ -357,7 +357,7 @@ export const api = {
   // Закрытие сигнала вручную (аудит на сервере). Повтор → 409 ESCALATION_ALREADY_RESOLVED,
   // чужая/отсутствующая эскалация → 404; в обоих случаях строку из очереди убираем.
   resolveEscalation: (id: string, resolution: string | null = null) =>
-    verb<Escalation>("POST")(`/api/v1/escalations/${encodeURIComponent(id)}/resolve`)({
+    verb<EscalationResolved>("POST")(`/api/v1/escalations/${encodeURIComponent(id)}/resolve`)({
       resolution,
     }),
   // FR-24: напоминания врача. Список — свои (roster/IDOR-гейт на сервере).
@@ -685,6 +685,12 @@ export interface Escalation {
   /** Ответы риска из чек-ина: {"HR4":1,"RS1":0,...}; на которые не ответили — ключа нет. */
   risk_answers: Record<string, number> | null;
   created_at: string | null;
+}
+/** Ответ POST /escalations/{id}/resolve. */
+export interface EscalationResolved {
+  id: string;
+  resolved_at: string;
+  resolution: string | null;
 }
 export interface AuditEvent {
   id: number;

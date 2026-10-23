@@ -25,14 +25,18 @@ const apiAs = async (page: Page) =>
 
 // Логин без UI: нужен токен админа (ростер) и id врача из JWT (sub).
 const loginApi = async (email: string) => {
-  const ctx = await request.newContext({ baseURL: BASE });
-  const resp = await ctx.post("/api/v1/auth/login", {
+  const anon = await request.newContext({ baseURL: BASE });
+  const resp = await anon.post("/api/v1/auth/login", {
     data: { email, password: DEMO_PASSWORD, otp: totp(DEMO_TOTP) },
   });
   expect(resp.status()).toBe(200);
   const token: string = (await resp.json()).access_token;
-  await ctx.setExtraHTTPHeaders({ Authorization: `Bearer ${token}` });
-  const claims = JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+  await anon.dispose();
+  const ctx = await request.newContext({
+    baseURL: BASE,
+    extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+  });
+  const claims = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString());
   return { ctx, userId: claims.sub as string };
 };
 
@@ -151,7 +155,9 @@ test("ростерный пациент: имя в очереди ведёт в 
   await page.getByRole("button", { name: "← Назад к списку" }).click();
 
   // Убираем сигнал, чтобы очередь не засорялась прогонами; повторное закрытие — не ошибка.
-  const resolved = await doc.ctx.post(`/api/v1/escalations/${item.id}/resolve`);
+  const resolved = await doc.ctx.post(`/api/v1/escalations/${item.id}/resolve`, {
+    data: { resolution: null },
+  });
   expect([200, 409]).toContain(resolved.status());
   await admin.ctx.dispose();
   await doc.ctx.dispose();
