@@ -35,10 +35,14 @@ def test_core_step_returns_only_unanswered_items():
     assert result.items == tuple(i for i in CORE_ITEMS if i not in answers)
 
 
-def test_routing_is_deterministic():
-    answers = {**CORE_CLEAN, "MO1": 3}
-    assert plan(answers) == plan(answers)
-    assert [d.code for d in select_modules(answers)] == [d.code for d in select_modules(answers)]
+def test_routing_ignores_answer_order_and_repeats_identically():
+    # Порядок ответов и порядок ключей в словаре не влияют на маршрут,
+    # а приоритет правил даёт строго один и тот же список модулей.
+    forward = {**CORE_CLEAN, "MO1": 4, "SL1": 0, "TR1": 3, "FU1": 3}
+    backward = dict(reversed(list(forward.items())))
+    assert plan(forward) == plan(backward)
+    assert [d.code for d in select_modules(forward) if d.included] == ["HR", "SL"]
+    assert plan({**forward, "HR1": 1, "HR2": 1, "HR3": 1}).items == ("SL2", "SL3")
 
 
 def test_clean_day_has_no_modules():
