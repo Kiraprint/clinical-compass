@@ -29,6 +29,16 @@ class ScaleItem:
     text: str
     max_value: int = 3
     reverse: bool = False  # HADS: обратные пункты (raw 0 → max балл)
+    # Подписи вариантов ответа для значений 0..max_value (len == max_value + 1).
+    # Пусто — варианты без подписей (не используется в каталоге scales.py).
+    anchors: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.anchors and len(self.anchors) != self.max_value + 1:
+            raise ValueError(
+                f"{self.key}: anchors={len(self.anchors)} не соответствует "
+                f"max_value={self.max_value} (ожидается {self.max_value + 1})"
+            )
 
 
 @dataclass(frozen=True)

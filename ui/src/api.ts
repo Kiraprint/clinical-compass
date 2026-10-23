@@ -424,7 +424,7 @@ export interface Consent {
 export interface Questionnaire {
   code: string;
   title: string;
-  items: { key: string; text: string; max_value: number }[];
+  items: { key: string; text: string; max_value: number; anchors: string[] }[];
 }
 export interface Assessment {
   assessment_id: string;
@@ -655,7 +655,7 @@ export interface Report {
   diary: { id: string; content: string; mood: number | null; mood_scale: MoodScale; created_at: string }[];
   available_scales: {
     code: string; title: string; audience: "PATIENT" | "CLINICIAN";
-    items: { key: string; text: string; max_value: number }[];
+    items: { key: string; text: string; max_value: number; anchors: string[] }[];
   }[];
   open_escalations: { id: string; kind: string; notified_at: string | null; checkin_session_id?: string | null }[];
   // docs/16 §3: ответы чек-ина, состояние риска и основания включённых модулей.

@@ -1,8 +1,13 @@
 """Канонические шкалы: PSS-10, HDRS-17 и аудитория заполнения."""
 
-from compass.models import AUDIENCE_CLINICIAN, AUDIENCE_PATIENT, Severity, Triage
+import pytest
+
+from compass.models import AUDIENCE_CLINICIAN, AUDIENCE_PATIENT, ScaleItem, Severity, Triage
 from compass.scales import (
+    ALL_SCALES,
+    HCL32,
     HDRS17,
+    PHQ9,
     PSS10,
     clinician_administered_scales,
     patient_administered_scales,
@@ -115,3 +120,41 @@ def test_audience_filter_helpers():
     assert clinician_codes == ["HDRS-17"]
     assert HDRS17.audience == AUDIENCE_CLINICIAN
     assert PSS10.audience == AUDIENCE_PATIENT
+
+
+def test_every_item_has_anchors_for_all_values():
+    """У каждого варианта ответа есть подпись: len(anchors) == max_value + 1."""
+    for scale in ALL_SCALES.values():
+        for item in scale.items:
+            assert len(item.anchors) == item.max_value + 1, (scale.code, item.key)
+            assert all(a.strip() for a in item.anchors), (scale.code, item.key)
+
+
+def test_binary_scale_anchors_are_yes_no():
+    assert HCL32.items and all(i.max_value == 1 for i in HCL32.items)
+    assert all(i.anchors == ("Нет", "Да") for i in HCL32.items)
+
+
+def test_questionnaire_frequency_anchors():
+    """PHQ-9/GAD-7 — стандартные подписи «за последние 2 недели»."""
+    expected = ("Совсем нет", "Несколько дней", "Более половины дней", "Почти каждый день")
+    assert all(i.anchors == expected for i in PHQ9.items)
+    # PSS-10 — «за последний месяц», 5 вариантов.
+    assert all(
+        i.anchors == ("Никогда", "Почти никогда", "Иногда", "Довольно часто", "Очень часто")
+        for i in PSS10.items
+    )
+
+
+def test_hdrs17_anchors_follow_item_max_value():
+    """HDRS-17: клинические якоря по каждому пункту, число вариантов = max_value + 1."""
+    assert [len(i.anchors) for i in HDRS17.items] == [5, 5, 5, 3, 3, 3, 5, 5, 5, 5, 5, 3, 3, 3, 5, 3, 3]
+    assert HDRS17.item("h3").anchors[0] == "Нет"
+    assert len(set(HDRS17.item("h1").anchors)) == 5
+
+
+def test_anchors_length_mismatch_raises():
+    with pytest.raises(ValueError):
+        ScaleItem("x", "текст", max_value=4, anchors=("a", "b"))
+    # Пустые anchors — допустимо (пункт без подписей).
+    assert ScaleItem("y", "текст", max_value=4).anchors == ()

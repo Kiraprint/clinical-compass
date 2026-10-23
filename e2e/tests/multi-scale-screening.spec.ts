@@ -64,7 +64,8 @@ test.describe("Многошкальный скрининг", () => {
     const questions = page.locator(".qa");
     await expect(questions).toHaveCount(7);
     for (let i = 0; i < 7; i++) {
-      await questions.nth(i).getByRole("button", { name: "0" }).click();
+      // Варианты подписаны якорями шкалы, а не голыми числами.
+      await questions.nth(i).getByRole("button", { name: "Совсем нет" }).click();
     }
     await page.getByRole("button", { name: "Завершить" }).click();
 
