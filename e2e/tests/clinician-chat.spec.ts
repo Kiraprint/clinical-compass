@@ -42,10 +42,16 @@ test.describe("Чат врач ↔ пациент", () => {
     await expect(row).toBeVisible();
     await row.getByRole("button", { name: "Открыть" }).click();
 
+    // FR-29: отправка — на отдельном экране «Чаты»; карточка показывает превью.
+    await page.getByRole("button", { name: "Открыть в чатах" }).click();
+    await expect(
+      page.getByRole("heading", { name: "Переписка с пациентами" }),
+    ).toBeVisible();
+
     const docMsg = `Привет, как вы себя чувствуете? ${Date.now()}`;
-    await page.getByPlaceholder("Сообщение пациенту").fill(docMsg);
+    await page.getByLabel("Сообщение пациенту").fill(docMsg);
     await page.getByRole("button", { name: "Отправить" }).click();
-    await expect(page.locator(".msg", { hasText: docMsg })).toBeVisible();
+    await expect(page.locator(".bubble", { hasText: docMsg })).toBeVisible();
 
     // Пациент (отдельный контекст) видит сообщение врача и отвечает.
     const ctx2 = await browser.newContext();
@@ -62,9 +68,9 @@ test.describe("Чат врач ↔ пациент", () => {
     await page2.getByRole("button", { name: "Отправить" }).click();
     await expect(page2.locator(".msg", { hasText: patMsg })).toBeVisible();
 
-    // Врач перезагружает карточку и видит ответ пациента.
+    // Врач перезагружает страницу — hash #chats=patient:<id> возвращает в диалог.
     await page.reload();
-    await expect(page.locator(".msg", { hasText: patMsg })).toBeVisible();
+    await expect(page.locator(".bubble", { hasText: patMsg })).toBeVisible();
     await ctx2.close();
   });
 });

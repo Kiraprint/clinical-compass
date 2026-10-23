@@ -20,7 +20,7 @@ test.describe("Питч-сценарий", () => {
       const question = questions.nth(i);
       const text = await question.locator("p").innerText();
       const value = text.includes("умереть") ? 3 : 0;
-      await question.getByRole("button", { name: String(value) }).click();
+      await question.locator("button").nth(value).click();
     }
     await page.getByRole("button", { name: "Завершить" }).click();
 

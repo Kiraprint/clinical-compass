@@ -277,6 +277,13 @@ def clinician_chat_list(
     """История переписки врача с пациентом (задача кейса 6). Roster-гейт."""
     return {"items": services.clinician.clinician_list_chat(db, user.id, patient_id)}
 
+@router.get("/clinician/chats")
+def clinician_chats(
+    user: User = Depends(require_clinician), db: Session = Depends(get_db),
+):
+    """Список переписок врача (FR-29): только roster-пациенты, превью ≤120 символов."""
+    return {"items": services.clinician.list_patient_chats(db, user.id)}
+
 class HistoryBody(BaseModel):
     text: str = Field(min_length=1)
     template_name: str | None = None

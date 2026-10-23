@@ -314,15 +314,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  clinicianChats: () => req<{ items: PatientChat[] }>("/api/v1/clinician/chats"),
   clinicianChatList: (patientId: string) =>
-    req<{ items: { id: string; sender: string; kind: string; content: string; created_at: string }[] }>(
-      `/api/v1/clinician/patients/${patientId}/chat`),
+    req<{ items: PatientChatMessage[] }>(`/api/v1/clinician/patients/${patientId}/chat`),
   clinicianChatPost: (patientId: string, content: string) =>
-    req<{ id: string; sender: string; kind: string; content: string; created_at: string }>(
-      `/api/v1/clinician/patients/${patientId}/chat`, {
-        method: "POST",
-        body: JSON.stringify({ content }),
-      }),
+    req<PatientChatMessage>(`/api/v1/clinician/patients/${patientId}/chat`, {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    }),
   importHistory: (patientId: string, text: string, templateName?: string) =>
     req<ImportHistoryResult>(`/api/v1/clinician/patients/${patientId}/import-history`, {
       method: "POST",
@@ -620,6 +619,25 @@ export interface ReminderPatch {
   due_at?: string;
   kind?: ClinicianReminder["kind"];
 }
+
+// FR-29: сводка переписки врача с пациентом для списка на экране «Чаты».
+// preview — уже расшифрованная сервером обрезка (≤120 символов), не для логов.
+export interface PatientChat {
+  patient_id: string;
+  fio: string | null;
+  last_at: string;
+  last_sender: "PATIENT" | "SYSTEM" | "CLINICIAN" | null;
+  preview: string;
+  message_count: number;
+}
+export interface PatientChatMessage {
+  id: string;
+  sender: string;
+  kind: string;
+  content: string;
+  created_at: string;
+}
+
 export interface ImportHistoryResult {
   template: string;
   fields_found: number;

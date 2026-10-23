@@ -4,11 +4,12 @@ import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import { DEMO_PASSWORD, DEMO_TOTP, login } from "./helpers";
 
-/** Открывает вкладку «Ассистент» и заводит новый диалог (он выбирается сразу). */
+/** Открывает «Чаты → Ассистент» и заводит новый диалог (он выбирается сразу). */
 async function openNewThread(page: Page) {
-  await page.getByRole("button", { name: "Ассистент" }).click();
+  await page.getByRole("button", { name: "Чаты" }).click();
+  await page.getByRole("tab", { name: "Ассистент" }).click();
   await expect(page.getByRole("heading", { name: "Ассистент врача" })).toBeVisible();
-  await page.getByRole("button", { name: "+ Новый диалог" }).click();
+  await page.locator('.icon-btn[title="Новый диалог"]').click();
   await expect(page.getByLabel("Вопрос")).toBeVisible();
 }
 
