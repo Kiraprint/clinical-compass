@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.orm import Session
 
 from compass.models import AUDIENCE_CLINICIAN, AUDIENCE_PATIENT, RiskFlag, ScaleResult
@@ -127,37 +128,64 @@ def create_clinician_assessment(
 
 
 def list_patients(db: Session, clinician_id, triage: str | None = None) -> list[dict]:
-    rows = db.scalars(select(ClinicianRoster).where(ClinicianRoster.clinician_id == clinician_id)).all()
+    """Roster-список врача: 4 запроса независимо от числа пациентов (было N+1).
+
+    Порядок карточек — порядок строк clinician_roster; за пациентов без
+    assessment/escalation отдаём None/0, а не отбрасываем.
+    """
+    patient_ids = db.scalars(
+        select(ClinicianRoster.patient_id).where(ClinicianRoster.clinician_id == clinician_id)
+    ).all()
+    if not patient_ids:
+        return []
+
+    patients = {p.id: p for p in db.scalars(select(User).where(User.id.in_(patient_ids)))}
+    # DISTINCT ON (patient_id) + ORDER BY computed_at DESC — ровно та же «последняя»
+    # оценка, что давал прежний запрос с order_by(...).sqlalchemy first.
+    latest = {
+        r.patient_id: r
+        for r in db.execute(
+            select(
+                Assessment.patient_id,
+                Assessment.total_score,
+                Assessment.severity,
+                Assessment.triage,
+                Assessment.computed_at,
+            )
+            .where(Assessment.patient_id.in_(patient_ids))
+            .ext(distinct_on(Assessment.patient_id))
+            .order_by(Assessment.patient_id, Assessment.computed_at.desc(), Assessment.id.desc())
+        )
+    }
+    open_esc = dict(
+        db.execute(
+            select(Escalation.patient_id, func.count())
+            .where(Escalation.patient_id.in_(patient_ids), Escalation.resolved_at.is_(None))
+            .group_by(Escalation.patient_id)
+        ).all()
+    )
+
     cards = []
-    for row in rows:
-        patient = db.get(User, row.patient_id)
+    for patient_id in patient_ids:
+        patient = patients.get(patient_id)
         if patient is None:
             continue
-        last = db.scalar(
-            select(Assessment)
-            .where(Assessment.patient_id == row.patient_id)
-            .order_by(Assessment.computed_at.desc())
-        )
+        last = latest.get(patient_id)
 
         last_triage = last.triage if last else None
         if triage is not None and last_triage != triage:
             continue  # игнорируем, если фильтр не совпадает
 
-        open_esc = db.scalar(
-            select(func.count())
-            .select_from(Escalation)
-            .where(Escalation.patient_id == row.patient_id, Escalation.resolved_at.is_(None))
-        )
         contacts = contacts_payload(patient, masked=True)  # FR-22: телефон — только маска
         cards.append({
-            "patient_id": str(row.patient_id),
+            "patient_id": str(patient_id),
             "email": patient.email,
             "fio": patient.fio,
             "last_triage": last_triage,
             "last_score": last.total_score if last else None,
             "last_severity": last.severity if last else None,
             "last_assessment_at": last.computed_at.isoformat() if last else None,
-            "open_escalations": open_esc or 0,
+            "open_escalations": open_esc.get(patient_id) or 0,
             "phone": contacts["phone"],
             "birth_date": contacts["birth_date"],
             "age": contacts["age"],
