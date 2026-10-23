@@ -10,6 +10,17 @@ const MED_STATUS_LABELS: Record<string, string> = {
   stopped: "отменено",
 };
 
+// FR-31: подписи видов фактов из переписки (в карточку попадают только accepted).
+const INSIGHT_KIND_LABELS: Record<string, string> = {
+  symptom: "Симптом",
+  medication: "Препарат",
+  adherence: "Приверженность",
+  sleep: "Сон",
+  substance: "ПАВ",
+  risk: "Риск",
+  other: "Другое",
+};
+
 
 // Сворачиваемый блок карточки врача: состояние раскрытия запоминаем в localStorage,
 // чтобы врач не терял привычный вид между визитами (отзыв эксперта: шкала Гамильтона
@@ -953,6 +964,27 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
           Открыть в чатах
         </button>
       </div>
+
+      {report.chat_insights.length > 0 && (
+        <>
+          <h3>Из переписки</h3>
+          <ul className="insight-report">
+            {report.chat_insights.map((i) => (
+              <li key={i.id}>
+                <span className="insight-kind">{INSIGHT_KIND_LABELS[i.kind] ?? i.kind}</span>{" "}
+                {i.text}
+              </li>
+            ))}
+          </ul>
+          <p className="muted small">
+            Это черновик из переписки, не диагноз; проверено врачом{" "}
+            {new Date(
+              report.chat_insights[0].reviewed_at ?? report.chat_insights[0].created_at,
+            ).toLocaleDateString("ru-RU")}
+            .
+          </p>
+        </>
+      )}
 
       <h3>Приёмы (запись беседы врач-пациент)</h3>
       <div style={{ display: "flex", flexDirection: "column", gap: 6, maxWidth: 560, marginTop: 8 }}>

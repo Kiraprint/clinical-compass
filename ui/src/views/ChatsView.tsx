@@ -1,11 +1,21 @@
 import { useEffect, useState } from "react";
-import { api, PatientChat, PatientChatMessage } from "../api";
+import { api, ApiError, ChatInsight, PatientChat, PatientChatMessage } from "../api";
 import AssistantTab from "./AssistantTab";
 
 const SENDER_LABELS: Record<string, string> = {
   CLINICIAN: "Врач",
   PATIENT: "Пациент",
   SYSTEM: "Помощник",
+};
+
+const KIND_LABELS: Record<ChatInsight["kind"], string> = {
+  symptom: "Симптом",
+  medication: "Препарат",
+  adherence: "Приверженность",
+  sleep: "Сон",
+  substance: "ПАВ",
+  risk: "Риск",
+  other: "Другое",
 };
 
 function fmtTime(iso: string): string {
@@ -80,6 +90,11 @@ function PatientChats({
   const [loaded, setLoaded] = useState(false);
   // На узком экране список пациентов сворачивается в кнопку над диалогом.
   const [listOpen, setListOpen] = useState(false);
+  // FR-31: черновики фактов из переписки и состояние фичи (локальная модель).
+  const [insights, setInsights] = useState<ChatInsight[]>([]);
+  const [insightsOff, setInsightsOff] = useState(false);
+  const [insightsBusy, setInsightsBusy] = useState(false);
+  const [insightsNote, setInsightsNote] = useState("");
 
   const loadChats = async (): Promise<PatientChat[]> => {
     try {
@@ -114,6 +129,42 @@ function PatientChats({
     }
   };
 
+  const analyzeChat = async () => {
+    if (!selected) return;
+    setInsightsBusy(true);
+    setInsightsNote("");
+    try {
+      const r = await api.analyzeChat(selected);
+      setInsightsNote(
+        `Добавлено: ${r.created}${r.skipped ? `, уже было: ${r.skipped}` : ""}`,
+      );
+      const list = await api.chatInsights(selected, "pending");
+      setInsights(list.items);
+      setInsightsOff(false);
+    } catch (e: unknown) {
+      if (e instanceof ApiError && e.code === "CHAT_INSIGHTS_DISABLED") {
+        setInsightsOff(true);
+        setInsights([]);
+      } else if (e instanceof ApiError && e.code === "CHAT_INSIGHTS_EMPTY") {
+        setInsightsNote("В переписке пока нет сообщений — анализировать нечего.");
+      } else {
+        setInsightsNote(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setInsightsBusy(false);
+    }
+  };
+
+  const decideInsight = async (id: string, status: "accepted" | "rejected") => {
+    if (!selected) return;
+    try {
+      await api.decideChatInsight(selected, id, status);
+      setInsights((cur) => cur.filter((i) => i.id !== id));
+    } catch (e: unknown) {
+      setInsightsNote(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   useEffect(() => {
     if (!selected) {
       setMessages([]);
@@ -129,6 +180,33 @@ function PatientChats({
         if (cancelled) return;
         setMessages([]);
         setError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected]);
+
+  // FR-31: черновики фактов выбранного пациента; выключенная фича — не ошибка.
+  useEffect(() => {
+    setInsightsNote("");
+    setInsightsBusy(false);
+    if (!selected) {
+      setInsights([]);
+      setInsightsOff(false);
+      return;
+    }
+    let cancelled = false;
+    api
+      .chatInsights(selected, "pending")
+      .then((r) => {
+        if (cancelled) return;
+        setInsights(r.items);
+        setInsightsOff(false);
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setInsights([]);
+        setInsightsOff(e instanceof ApiError && e.code === "CHAT_INSIGHTS_DISABLED");
       });
     return () => {
       cancelled = true;
@@ -223,7 +301,53 @@ function PatientChats({
                 >
                   ↻
                 </button>
+                {!insightsOff && (
+                  <button
+                    className="icon-btn ghost"
+                    aria-label="Анализ переписки"
+                    title="Анализ переписки"
+                    disabled={insightsBusy}
+                    onClick={() => void analyzeChat()}
+                  >
+                    ✨
+                  </button>
+                )}
               </div>
+
+              {insightsOff ? (
+                <p className="muted small">
+                  Анализ переписки выключен (нужна локальная модель, docs/17).
+                </p>
+              ) : (
+                <div className="insight-panel">
+                  <div className="insight-head">
+                    <strong>
+                      Факты из переписки{insights.length > 0 ? ` (${insights.length})` : ""}
+                    </strong>
+                  </div>
+                  {insightsNote && <p className="muted small">{insightsNote}</p>}
+                  {insights.length === 0 ? (
+                    <p className="muted small">
+                      Новых черновиков нет — запустите анализ кнопкой «Анализ переписки».
+                    </p>
+                  ) : (
+                    insights.map((i) => (
+                      <div className="insight-item" key={i.id}>
+                        <span className="insight-kind">{KIND_LABELS[i.kind]}</span>
+                        <span className="insight-text">{i.text}</span>
+                        <span className="insight-actions">
+                          <button className="ghost" onClick={() => void decideInsight(i.id, "accepted")}>
+                            Принять
+                          </button>
+                          <button className="ghost" onClick={() => void decideInsight(i.id, "rejected")}>
+                            Отклонить
+                          </button>
+                        </span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
 
               <div className="chat-messages">
                 {messages.length === 0 && (

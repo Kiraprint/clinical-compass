@@ -196,6 +196,39 @@ small { color: #8a94a8; }
 .chat-compose input, .chat-compose textarea { flex: 1; min-width: 0; }
 .chat-mini { max-height: 180px; overflow-y: auto; margin-bottom: 8px; }
 
+/* FR-31: панель фактов из переписки (черновики до решения врача). */
+.insight-panel {
+  border: 1px solid #dbe2ee;
+  border-radius: 10px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.insight-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.insight-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+  font-size: 14px;
+}
+.insight-kind {
+  flex-shrink: 0;
+  padding: 1px 8px;
+  border-radius: 12px;
+  background: #eef2ff;
+  color: #2f4fa8;
+  font-size: 12px;
+  font-weight: 600;
+}
+.insight-text { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
+.insight-actions { display: flex; gap: 6px; flex-shrink: 0; flex-wrap: wrap; }
+.insight-actions button { padding: 4px 10px; font-size: 13px; }
+.insight-report { margin: 6px 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+
 /* FR-24: напоминания внутри карточки пациента. */
 .reminders-block { margin: 4px 0 10px; }
 .reminder-form { display: grid; grid-template-columns: 160px 190px 1fr auto; gap: 8px; margin: 8px 0; }
