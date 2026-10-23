@@ -41,7 +41,7 @@ test.describe("Нежелательные явления", () => {
     const row = page.locator("tbody tr", { hasText: patReg.email }).first();
     await expect(row).toBeVisible();
     await row.getByRole("button", { name: "Открыть" }).click();
-    await expect(page.getByRole("heading", { name: "Нежелательные явления (задача кейса 3)" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Нежелательные явления", exact: true })).toBeVisible();
 
     // Пустое описание → кнопка неактивна.
     await expect(page.getByRole("button", { name: "Зарегистрировать НЯ" })).toBeDisabled();

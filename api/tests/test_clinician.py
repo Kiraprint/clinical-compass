@@ -568,8 +568,13 @@ def test_list_patients_batches_queries(db_session):
     assert red_count <= 4, statements
     assert full_count == red_count  # фильтр не добавляет запросов на пациента
 
-    # Порядок показываем как порядок roster; никого не теряем.
-    assert [c["patient_id"] for c in cards] == patient_ids
+    # FR-30: порядок задаёт триаж, а не roster — RED, больше открытых
+    # эскалаций, свежее оценка, ФИО; никого не теряем.
+    red_order = [10, 11, 18, 12, 13, 19, 20, 21, 22, 23]
+    expected_order = [
+        patient_ids[i] for i in [*red_order, 14, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 16, 17]
+    ]
+    assert [c["patient_id"] for c in cards] == expected_order
     assert len(cards) == len(patient_ids)
     assert set(cards[0]) == {
         "patient_id", "email", "fio", "last_triage", "last_score", "last_severity",
@@ -601,8 +606,100 @@ def test_list_patients_batches_queries(db_session):
     assert by_id[patient_ids[12]]["open_escalations"] == 0  # только закрытая
     assert by_id[patient_ids[13]]["open_escalations"] == 0
 
-    assert [c["patient_id"] for c in red_cards] == [
-        pid for pid in patient_ids if by_id[pid]["last_triage"] == "RED"
-    ]
+    assert [c["patient_id"] for c in red_cards] == [patient_ids[i] for i in red_order]
     assert all(c["last_triage"] == "RED" for c in red_cards)
     assert len(red_cards) == len(patient_ids) - 10 - 1 - 3  # не GREEN/YELLOW/без оценки
+# --- FR-30: порядок карточек врача (красные всегда сверху) ---
+
+
+def test_patients_sorted_red_first_without_assessment_last(client):
+    _, pid_green = _with_patient(client, "sort-g@test.ru", PHQ_ALL)  # 0 → GREEN
+    _, pid_yellow = _with_patient(client, "sort-y@test.ru", {**PHQ_ALL, "q1": 3, "q2": 3})  # 6 → YELLOW
+    _, pid_red = _with_patient(client, "sort-r@test.ru", {**PHQ_ALL, "q9": 2})  # флаг → RED
+    _, pid_none = patient_ctx(client, "sort-n@test.ru")  # в ростере, без оценки
+    c, cid = clinician_ctx(client, "sortc@test.ru")
+    a, _ = admin_ctx(client, "sorta@test.ru")
+    for pid in (pid_green, pid_yellow, pid_red, pid_none):
+        _grant(client, a, pid, cid)
+
+    cards = client.get("/api/v1/clinician/patients", headers=c).json()["items"]
+    assert [card["patient_id"] for card in cards] == [pid_red, pid_yellow, pid_green, pid_none]
+    assert [card["last_triage"] for card in cards] == ["RED", "YELLOW", "GREEN", None]
+
+    # ?triage= по-прежнему фильтрует и не пересортировывает.
+    red_only = client.get("/api/v1/clinician/patients?triage=RED", headers=c).json()["items"]
+    assert [card["patient_id"] for card in red_only] == [pid_red]
+
+
+def test_patients_sorted_by_escalations_then_freshness(client, db_session):
+    _, pid_quiet = _with_patient(client, "ord-a@test.ru", PHQ_ALL)
+    _, pid_esc = _with_patient(client, "ord-b@test.ru", PHQ_ALL)
+    c, cid = clinician_ctx(client, "ordc@test.ru")
+    a, _ = admin_ctx(client, "orda@test.ru")
+    _grant(client, a, pid_quiet, cid)
+    _grant(client, a, pid_esc, cid)
+
+    # Одинаковый триаж GREEN: впереди тот, у кого больше открытых эскалаций.
+    db_session.add(Escalation(patient_id=uuid.UUID(pid_esc), kind="CHECKIN_RISK"))
+    db_session.commit()
+    cards = client.get("/api/v1/clinician/patients", headers=c).json()["items"]
+    assert [card["patient_id"] for card in cards] == [pid_esc, pid_quiet]
+
+    # Эскалации равны (0): впереди свежая оценка; старую состарили явно.
+    db_session.query(Escalation).filter(Escalation.patient_id == uuid.UUID(pid_esc)).delete()
+    db_session.query(Assessment).filter(Assessment.patient_id == uuid.UUID(pid_quiet)).update(
+        {"computed_at": datetime(2020, 1, 1, tzinfo=timezone.utc)}
+    )
+    db_session.commit()
+    cards = client.get("/api/v1/clinician/patients", headers=c).json()["items"]
+    assert [card["patient_id"] for card in cards] == [pid_esc, pid_quiet]
+
+
+# --- FR-29: список переписок врача ---
+
+
+def test_clinician_chats_only_roster_sorted_with_preview(client):
+    _, pid_first = patient_ctx(client, "chatf@test.ru")
+    _, pid_last = patient_ctx(client, "chatl@test.ru")
+    _, pid_foreign = patient_ctx(client, "chatx@test.ru")  # не в ростере
+    c, cid = clinician_ctx(client, "chatsc@test.ru")
+    a, _ = admin_ctx(client, "chatsa@test.ru")
+    _grant(client, a, pid_first, cid)
+    _grant(client, a, pid_last, cid)
+
+    long_text = "тревога " * 40  # > 120 символов
+    assert client.post(
+        f"/api/v1/clinician/patients/{pid_first}/chat", json={"content": "короткое"}, headers=c
+    ).status_code == 201
+    assert client.post(
+        f"/api/v1/clinician/patients/{pid_last}/chat", json={"content": long_text}, headers=c
+    ).status_code == 201
+
+    items = client.get("/api/v1/clinician/chats", headers=c).json()["items"]
+    assert [item["patient_id"] for item in items] == [pid_last, pid_first]
+    assert all(item["patient_id"] != pid_foreign for item in items)
+
+    head = items[0]
+    assert head["last_sender"] == "CLINICIAN"
+    assert head["message_count"] == 1
+    assert len(head["preview"]) <= 120
+    assert head["preview"].endswith("…")
+    assert head["preview"].startswith("тревога")  # дешифровано сервером
+    assert items[1]["preview"] == "короткое"
+
+
+def test_clinician_chats_scoped_to_clinician_and_role(client):
+    _, pid = patient_ctx(client, "chatscope@test.ru")
+    c1, cid1 = clinician_ctx(client, "chatd1@test.ru")
+    c2, _ = clinician_ctx(client, "chatd2@test.ru")
+    a, _ = admin_ctx(client, "chatda@test.ru")
+    _grant(client, a, pid, cid1)
+    client.post(f"/api/v1/clinician/patients/{pid}/chat", json={"content": "привет"}, headers=c1)
+
+    assert len(client.get("/api/v1/clinician/chats", headers=c1).json()["items"]) == 1
+    assert client.get("/api/v1/clinician/chats", headers=c2).json()["items"] == []
+
+    h, _ = patient_ctx(client, "chatrole@test.ru")
+    resp = client.get("/api/v1/clinician/chats", headers=h)
+    assert resp.status_code == 403
+    assert resp.json()["code"] == "ROLE_MISMATCH"

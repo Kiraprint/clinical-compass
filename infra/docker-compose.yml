@@ -62,6 +62,9 @@ services:
       CC_ASSISTANT_LLM_MODEL: "${CC_ASSISTANT_LLM_MODEL:-local}"
       CC_ASSISTANT_LLM_API_KEY: "${CC_ASSISTANT_LLM_API_KEY:-}"
       CC_ASSISTANT_LLM_TIMEOUT: "${CC_ASSISTANT_LLM_TIMEOUT:-10}"
+      # FR-31: анализ переписки (факты-черновики). Требует и LLM URL выше, и флаг;
+      # по умолчанию выключен — ПДн переписки в LLM не уходят (docs/10 R23, docs/17).
+      CC_CHAT_INSIGHTS_ENABLED: "${CC_CHAT_INSIGHTS_ENABLED:-false}"
       <<: *vapid
       CC_QDRANT_URL: http://qdrant:6333
       # FR-25: ЕМИАС. Egress по умолчанию ВЫКЛЮЧЕН (docs/10 R17); включается

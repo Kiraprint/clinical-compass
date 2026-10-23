@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     # CC_ASSISTANT_LLM_API_KEY: Bearer-токен OpenAI-совместимого шлюза (omniroute).
     # Пусто → заголовок Authorization не отправляется (llama-server без ключа).
     assistant_llm_api_key: str = ""
+    # FR-31: анализ переписки с пациентом (факты-черновики). Выключен по умолчанию.
+    # Требует и этот флаг, и CC_ASSISTANT_LLM_URL: текст переписки уходит в LLM
+    # только при явном включении и (рекомендуется) локальной модели — docs/17, docs/10.
+    chat_insights_enabled: bool = False  # CC_CHAT_INSIGHTS_ENABLED
     # CC_DEPERSONALIZE_NER: off | natasha | rubert (docs/12). true/1 = natasha
     # (обратная совместимость). rubert — redmadrobot-rnd/rubert-base-pii-ner:
     # Apache-2.0, FIO F1 0.933 на redmadrobot-rnd/pii_benchmark (bench/ner).

@@ -126,6 +126,7 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | E12 | История приёма и назначений: `patient_medications` для назначений врача (`source`, `clinician_id`, `ended_on`, `notes`; импорт ЕМИАС read-only), CRUD назначений и остановка приёма, единая лента карточки (приёмы/назначения/скрининги/НЯ) с курсором и фильтром типов, блоки «Назначения» и «История пациента» в UI | FR-23 | `test_patient_medications.py`, `test_patient_history.py` (roster/IDOR, шифрование, EMIAS read-only, валидация, курсор, аудит, отзыв согласия) + `npm run build` |
 | E13 | Напоминания врача по пациентам: `clinician_reminders` (kind/note/sha), roster-скоуп, фильтры срока, done/cancel, доставка воркером `python -m app.reminders_worker` (advisory-lock, `notifications.reminder_id`), панель «Напоминания» и бейдж просроченных в UI | FR-24 | `test_reminders.py` (RBAC/IDOR, фильтры срока, переходы, шифрование note, тик воркера + идемпотентность, advisory-lock, отзыв согласия) + `docker compose config` + `npm run build` |
 | E14 | НЯ от пациента и проверка врачом: `adverse_events` (`reported_by`, `status`, `verified_by/at`, `verification_note`, `drug_id` → справочник ГРЛС, `medication_id` → назначение), очередь врача и PATCH проверки, уведомление ростерных врачей о серьёзном НЯ без ПДн, UI пациента (форма + статусы + 112 при severe) и карточки врача (плашка «НЯ на проверке», форма проверки, фрагмент справочника) | FR-28 | `test_adverse_events.py` (pending/confirm/reject, идемпотентность и 409, 404/422, уведомление без ПДн, шифрование, отзыв согласия) + `npm run build` |
+| E15 | Экран чатов врача и порядок пациентов: раздел «Чаты» с сегментами «Ассистент» (переиспользует треды E9) и «Пациенты», сводка `GET /clinician/chats` (roster-скоуп, превью ≤120 дешифруется сервером), deep-link `#chats=patient:<id>`, стабильная сортировка карточек `(rank(триаж), -эскалации, -свежесть, ФИО)`, напоминания внутри карточки, мобильная вёрстка (иконки-кнопки 36×36, сворачиваемый список диалогов, `overflow-x: hidden`) | FR-29, FR-30 | `test_clinician.py` (сортировка по триажу/эскалациям/свежести, `/clinician/chats` roster-скоуп и превью, RBAC) + `chats.spec.ts`/`assistant.spec.ts` + `npm run build` |
 
 ## 5. DoD (Definition of Done) эпика
 
@@ -166,6 +167,8 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | FR-24 | E13 | `test_reminders.py` (RBAC/IDOR, фильтры overdue/today/week, done/cancel, шифрование note, тик воркера и идемпотентность, advisory-lock, отзыв согласия) |
 | FR-25 | E10 | `test_emias_mock.py`, `test_emias_client.py`, `test_emias_mapping.py`, `test_emias_sync.py`, `test_emias_api.py` |
 | FR-28 | E14 | `test_adverse_events.py` (pending/confirm/reject, 409 `ADVERSE_ALREADY_VERIFIED`, 404 `ADVERSE_NOT_FOUND`/`DRUG_NOT_FOUND`, 422 `MEDICATION_NOT_FOUND`, уведомление без ПДн, шифрование `event_text`/`verification_note`, отзыв согласия) |
+| FR-29 | E15 | `test_clinician.py` (`/clinician/chats`: roster-скоуп, порядок `last_at` desc, превью ≤120, RBAC) + `chats.spec.ts`, `assistant.spec.ts`, `clinician-chat.spec.ts` |
+| FR-30 | E15 | `test_clinician.py` (`test_patients_sorted_*`: RED→YELLOW→GREEN→без оценки, эскалации, свежесть, фильтр `?triage=`) |
 
 ## 7. Границы инкремента
 

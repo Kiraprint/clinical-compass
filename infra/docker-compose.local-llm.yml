@@ -19,6 +19,7 @@
 #   CC_ASSISTANT_LLM_URL=http://local-llm:8080/v1
 #   CC_ASSISTANT_LLM_MODEL=<alias модели, см. CC_ASSISTANT_LLM_MODEL ниже>
 #   CC_ASSISTANT_LLM_API_KEY=            # llama-server без ключа
+#   CC_CHAT_INSIGHTS_ENABLED=true     # FR-31: анализ переписки фактами-черновиками
 # и перезапуска api: docker compose -f docker-compose.yml up -d api
 #
 # Ресурсы (ориентиры для GGUF, не жёсткие лимиты):

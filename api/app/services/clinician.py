@@ -127,10 +127,15 @@ async def create_clinician_assessment(
     return await finish_screening(db, run.id, patient_id, audit_action="CLINICIAN_ASSESSMENT", ip=ip)
 
 
+# FR-30: порядок карточек — красные всегда сверху. Внутри ранга: больше
+# открытых эскалаций, затем более свежая оценка, затем ФИО/email (стабильно).
+TRIAGE_RANK = {"RED": 0, "YELLOW": 1, "GREEN": 2}
+
 async def list_patients(db: AsyncSession, clinician_id, triage: str | None = None) -> list[dict]:
     """Roster-список врача: 4 запроса независимо от числа пациентов (было N+1).
 
-    Порядок карточек — порядок строк clinician_roster; за пациентов без
+    Сортировка FR-30: RED → YELLOW → GREEN; внутри ранга больше открытых
+    эскалаций, затем свежее оценка, затем ФИО/email. За пациентов без
     assessment/escalation отдаём None/0, а не отбрасываем.
     """
     patient_ids = (await db.scalars(
@@ -165,7 +170,7 @@ async def list_patients(db: AsyncSession, clinician_id, triage: str | None = Non
         )).all()
     )
 
-    cards = []
+    entries: list[tuple[tuple, dict]] = []
     for patient_id in patient_ids:
         patient = patients.get(patient_id)
         if patient is None:
@@ -176,9 +181,8 @@ async def list_patients(db: AsyncSession, clinician_id, triage: str | None = Non
         if triage is not None and last_triage != triage:
             continue  # игнорируем, если фильтр не совпадает
 
-
         contacts = contacts_payload(patient, masked=True)  # FR-22: телефон — только маска
-        cards.append({
+        card = {
             "patient_id": str(patient_id),
             "email": patient.email,
             "fio": patient.fio,
@@ -190,8 +194,18 @@ async def list_patients(db: AsyncSession, clinician_id, triage: str | None = Non
             "phone": contacts["phone"],
             "birth_date": contacts["birth_date"],
             "age": contacts["age"],
-        })
-    return cards
+        }
+        entries.append((
+            (
+                TRIAGE_RANK.get(last_triage, 3),
+                -(open_esc.get(patient_id) or 0),
+                -last.computed_at.timestamp() if last else float("inf"),
+                (patient.fio or patient.email or "").lower(),
+            ),
+            card,
+        ))
+    entries.sort(key=lambda e: e[0])
+    return [card for _, card in entries]
 
 
 async def patient_timeline(db: AsyncSession, patient_id, days: int) -> dict:
@@ -346,8 +360,17 @@ async def _patient_card(db: AsyncSession, patient_id) -> dict:
             "rules_version": checkins[0].rules_version if checkins else None,
             "recent": [_checkin_dict(c) for c in checkins],
         },
+        # FR-31: только принятые врачом факты; отзыв согласия удаляет строки.
+        "chat_insights": await _accepted_chat_insights(db, patient_id) if has_consent else [],
         "contacts": contacts_payload(patient, masked=True) if has_consent else None,
     }
+
+
+async def _accepted_chat_insights(db: AsyncSession, patient_id) -> list[dict]:
+    """Ленивый импорт: chat_insights зависит от roster/consent-гейтов этого модуля."""
+    from . import chat_insights as chat_insights_service
+
+    return await chat_insights_service.accepted_for_report(db, patient_id)
 
 
 async def report(db: AsyncSession, clinician_id, patient_id, ip: str | None = None) -> dict:
@@ -561,6 +584,69 @@ async def clinician_list_chat(db: AsyncSession, clinician_id, patient_id) -> lis
     # вернуть в хронологическом порядке (последние 50)
     return [_chat_dict(m) for m in reversed(rows)]
 
+
+# FR-29: превью последнего сообщения в списке переписок — обрезка, не лог.
+CHAT_PREVIEW_MAX = 120
+
+async def list_patient_chats(db: AsyncSession, clinician_id) -> list[dict]:
+    """Переписки врача с roster-пациентами (FR-29): последнее сообщение и счётчик.
+
+    Превью дешифруется сервером (content — EncryptedText) и обрезается до
+    CHAT_PREVIEW_MAX; в логи не попадает. Аудит не пишем: сводка для списка —
+    чтение внутри уже разрешённой roster-переписки.
+    """
+    patient_ids = list((await db.scalars(
+        select(ClinicianRoster.patient_id).where(ClinicianRoster.clinician_id == clinician_id)
+    )).all())
+    if not patient_ids:
+        return []
+
+    stats = {
+        pid: (int(cnt), last_at)
+        for pid, cnt, last_at in (await db.execute(
+            select(ChatMessage.patient_id, func.count(), func.max(ChatMessage.created_at))
+            .where(ChatMessage.patient_id.in_(patient_ids))
+            .group_by(ChatMessage.patient_id)
+        )).all()
+    }
+    if not stats:
+        return []
+
+    # Последнее сообщение каждого пациента: оконная функция выбирает id, сами
+    # сообщения грузим ORM-сущностью — иначе TypeDecorator не расшифрует content.
+    rn = func.row_number().over(
+        partition_by=ChatMessage.patient_id,
+        order_by=ChatMessage.created_at.desc(),
+    ).label("rn")
+    last_ids = select(ChatMessage.id, rn).where(
+        ChatMessage.patient_id.in_(list(stats))
+    ).subquery()
+    ids = list((await db.scalars(select(last_ids.c.id).where(last_ids.c.rn == 1))).all())
+    last_messages = {
+        m.patient_id: m
+        for m in (await db.scalars(select(ChatMessage).where(ChatMessage.id.in_(ids)))).all()
+    }
+    fios = {
+        u.id: (u.fio or u.email)
+        for u in (await db.scalars(select(User).where(User.id.in_(list(stats))))).all()
+    }
+
+    items = []
+    for pid, (count, last_at) in stats.items():
+        msg = last_messages.get(pid)
+        preview = (msg.content or "").strip() if msg is not None else ""
+        if len(preview) > CHAT_PREVIEW_MAX:
+            preview = preview[: CHAT_PREVIEW_MAX - 1].rstrip() + "…"
+        items.append({
+            "patient_id": str(pid),
+            "fio": fios.get(pid),
+            "last_at": (msg.created_at if msg is not None else last_at).isoformat(),
+            "last_sender": msg.sender if msg is not None else None,
+            "preview": preview,
+            "message_count": count,
+        })
+    items.sort(key=lambda i: i["last_at"], reverse=True)
+    return items
 
 async def import_history(db: AsyncSession, clinician_id, patient_id, text: str, template_name: str | None, ip: str | None = None) -> dict:
     """Разбор клинической истории (метрика кейса 2). Roster + аудит IMPORT_HISTORY.

@@ -314,15 +314,28 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  clinicianChats: () => req<{ items: PatientChat[] }>("/api/v1/clinician/chats"),
   clinicianChatList: (patientId: string) =>
-    req<{ items: { id: string; sender: string; kind: string; content: string; created_at: string }[] }>(
-      `/api/v1/clinician/patients/${patientId}/chat`),
+    req<{ items: PatientChatMessage[] }>(`/api/v1/clinician/patients/${patientId}/chat`),
   clinicianChatPost: (patientId: string, content: string) =>
-    req<{ id: string; sender: string; kind: string; content: string; created_at: string }>(
-      `/api/v1/clinician/patients/${patientId}/chat`, {
-        method: "POST",
-        body: JSON.stringify({ content }),
-      }),
+    req<PatientChatMessage>(`/api/v1/clinician/patients/${patientId}/chat`, {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    }),
+  // FR-31: анализ переписки с пациентом. 503 CHAT_INSIGHTS_DISABLED — фича выключена.
+  chatInsights: (patientId: string, status?: ChatInsight["status"]) =>
+    req<{ items: ChatInsight[] }>(
+      `/api/v1/clinician/patients/${patientId}/chat/insights${status ? `?status=${status}` : ""}`,
+    ),
+  analyzeChat: (patientId: string) =>
+    req<ChatInsightRun>(`/api/v1/clinician/patients/${patientId}/chat/analyze`, {
+      method: "POST",
+    }),
+  decideChatInsight: (patientId: string, insightId: string, status: "accepted" | "rejected") =>
+    req<ChatInsight>(`/api/v1/clinician/patients/${patientId}/chat/insights/${insightId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status }),
+    }),
   importHistory: (patientId: string, text: string, templateName?: string) =>
     req<ImportHistoryResult>(`/api/v1/clinician/patients/${patientId}/import-history`, {
       method: "POST",
@@ -620,6 +633,51 @@ export interface ReminderPatch {
   due_at?: string;
   kind?: ClinicianReminder["kind"];
 }
+
+// FR-29: сводка переписки врача с пациентом для списка на экране «Чаты».
+// preview — уже расшифрованная сервером обрезка (≤120 символов), не для логов.
+export interface PatientChat {
+  patient_id: string;
+  fio: string | null;
+  last_at: string;
+  last_sender: "PATIENT" | "SYSTEM" | "CLINICIAN" | null;
+  preview: string;
+  message_count: number;
+}
+export interface PatientChatMessage {
+  id: string;
+  sender: string;
+  kind: string;
+  content: string;
+  created_at: string;
+}
+
+/** FR-31: факт из переписки — черновик до решения врача. */
+export interface ChatInsight {
+  id: string;
+  patient_id: string;
+  kind: "symptom" | "medication" | "adherence" | "sleep" | "substance" | "risk" | "other";
+  text: string;
+  confidence: number | null;
+  source_message_ids: string[];
+  status: "pending" | "accepted" | "rejected";
+  created_at: string;
+  reviewed_at: string | null;
+}
+export interface ChatInsightRun {
+  created: number;
+  skipped: number;
+  items: ChatInsight[];
+}
+/** В карточке — только принятые факты, без source_message_ids. */
+export interface AcceptedChatInsight {
+  id: string;
+  kind: ChatInsight["kind"];
+  text: string;
+  created_at: string;
+  reviewed_at: string | null;
+}
+
 export interface ImportHistoryResult {
   template: string;
   fields_found: number;
@@ -738,6 +796,8 @@ export interface Report {
       completed_at: string | null;
     }[];
   };
+  // FR-31: подтверждённые врачом факты из переписки (черновики, не диагноз).
+  chat_insights: AcceptedChatInsight[];
   // FR-22: null, если у пациента нет активного согласия (152-ФЗ).
   contacts: { phone: string | null; birth_date: string | null; age: number | null; adult: boolean | null } | null;
 }

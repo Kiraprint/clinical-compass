@@ -277,6 +277,49 @@ async def clinician_chat_list(
     """История переписки врача с пациентом (задача кейса 6). Roster-гейт."""
     return {"items": await services.clinician.clinician_list_chat(db, user.id, patient_id)}
 
+class InsightPatchBody(BaseModel):
+    status: str = Field(pattern="^(accepted|rejected)$")
+
+@router.post("/clinician/patients/{patient_id}/chat/analyze")
+async def chat_insights_analyze(
+    patient_id: uuid.UUID, request: Request,
+    user: User = Depends(require_clinician), db: AsyncSession = Depends(get_db),
+):
+    """FR-31: анализ переписки врачом → черновики фактов. Roster + consent + аудит.
+
+    503 CHAT_INSIGHTS_DISABLED (нет флага/локальной модели), 409 CHAT_INSIGHTS_EMPTY,
+    503 CHAT_INSIGHTS_UNAVAILABLE (LLM недоступна/мусор — ничего не сохранено).
+    """
+    ip = request.client.host if request.client else None
+    return await services.chat_insights.analyze(db, user.id, patient_id, ip=ip)
+
+@router.get("/clinician/patients/{patient_id}/chat/insights")
+async def chat_insights_list(
+    patient_id: uuid.UUID,
+    status: str | None = Query(default=None, pattern="^(pending|accepted|rejected)$"),
+    user: User = Depends(require_clinician), db: AsyncSession = Depends(get_db),
+):
+    """Факты из переписки (FR-31): панель запрашивает pending, карточка — accepted."""
+    return {"items": await services.chat_insights.list_insights(db, user.id, patient_id, status=status)}
+
+@router.patch("/clinician/patients/{patient_id}/chat/insights/{insight_id}")
+async def chat_insights_decide(
+    patient_id: uuid.UUID, insight_id: uuid.UUID, body: InsightPatchBody, request: Request,
+    user: User = Depends(require_clinician), db: AsyncSession = Depends(get_db),
+):
+    """Решение врача по факту: accepted/rejected. Чужой/неизвестный → 404 INSIGHT_NOT_FOUND."""
+    ip = request.client.host if request.client else None
+    return await services.chat_insights.decide(
+        db, user.id, patient_id, insight_id, body.status, ip=ip
+    )
+
+@router.get("/clinician/chats")
+async def clinician_chats(
+    user: User = Depends(require_clinician), db: AsyncSession = Depends(get_db),
+):
+    """Список переписок врача (FR-29): только roster-пациенты, превью ≤120 символов."""
+    return {"items": await services.clinician.list_patient_chats(db, user.id)}
+
 class HistoryBody(BaseModel):
     text: str = Field(min_length=1)
     template_name: str | None = None

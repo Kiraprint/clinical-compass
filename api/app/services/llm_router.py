@@ -112,6 +112,21 @@ def _request(payload: dict) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def chat_completion(messages: list[dict], *, temperature: float = 0.0) -> dict:
+    """Сырой POST /chat/completions для других LLM-задач (FR-31, docs/17).
+
+    Транспорт общий с роутером топиков: таймаут/ключ/URL берутся из settings.
+    Ошибки транспорта и невалидный JSON не ловим — их обрабатывает вызывающий.
+    """
+    return _request(
+        {
+            "model": settings.assistant_llm_model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+    )
+
+
 def route_topic(query: str) -> str | None:
     """Выбирает topic (ШКАЛЫ/ТРИАЖ/РЕКОМЕНДАЦИИ/ЛЕКАРСТВА) через LLM.
 

@@ -6,7 +6,7 @@ import json
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import BigInteger, CheckConstraint, Date, DateTime, ForeignKey, Identity, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, CheckConstraint, Date, DateTime, ForeignKey, Float, Identity, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -730,3 +730,42 @@ class EmiasSyncRun(Base):
     stats: Mapped[dict] = mapped_column(JSONB, default=dict)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ChatInsight(Base):
+    """FR-31: факт из переписки врача с пациентом — черновик до решения врача.
+
+    Источник — явные высказывания пациента (LLM извлекает только их, docs/17).
+    text — спецкатегория ПДн, поэтому EncryptedText (pgcrypto, F1). Строка живёт
+    только пока пациент дал согласие: отзыв уничтожает её (consent router, F2).
+    dedupe_hash = sha256(patient_id|kind|normalized text) — повторный анализ не
+    плодит дубликаты; source_message_ids — id сообщений-оснований (без текста).
+    """
+
+    __tablename__ = "chat_insights"
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('symptom','medication','adherence','sleep','substance','risk','other')",
+            name="chat_insights_kind",
+        ),
+        CheckConstraint(
+            "status in ('pending','accepted','rejected')", name="chat_insights_status"
+        ),
+        UniqueConstraint("patient_id", "dedupe_hash", name="chat_insights_patient_dedupe"),
+        Index("ix_chat_insights_patient_status", "patient_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    kind: Mapped[str] = mapped_column(String(16))
+    text: Mapped[str] = mapped_column(EncryptedText())
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source_message_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    dedupe_hash: Mapped[str] = mapped_column(String(64))
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

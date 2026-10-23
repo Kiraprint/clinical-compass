@@ -201,10 +201,25 @@
 | `test_idor_other_clinician_cannot_see_or_touch` | PATCH/done/cancel чужого напоминания, список другого врача | 404 на чужое (не подтверждаем существование), свой список пуст; пациенту — 403 |
 | `test_patch_and_transitions` | PATCH note/kind/due_at; done → done; cancel; повтор | значения применены; `status`/`done_at` выставлены; повтор → 409 `REMINDER_CLOSED` |
 | `test_note_encrypted_at_rest` | note с ФИО/состоянием | в БД bytea без plaintext; через API текст расшифрован |
+| `test_patients_sorted_red_first_without_assessment_last` (FR-30) | список карточек: GREEN/YELLOW/RED/без оценки, фильтр `?triage=` | порядок RED→YELLOW→GREEN→без оценки; фильтр возвращает только RED |
+| `test_patients_sorted_by_escalations_then_freshness` (FR-30) | два GREEN-пациента: открытая эскалация, затем состаренная оценка | выше тот, у кого больше открытых эскалаций; при равенстве — свежая оценка |
+| `test_clinician_chats_only_roster_sorted_with_preview` (FR-29) | `GET /clinician/chats` для двух roster-пациентов и одного вне roster | только roster; `last_at` desc; `preview` ≤120 с «…», дешифрован сервером; `message_count`/`last_sender` |
+| `test_clinician_chats_scoped_to_clinician_and_role` (FR-29) | второй врач и пациент | чужой врач видит пустой список; пациенту — 403 `ROLE_MISMATCH` |
+| `test_analyze_creates_pending_encrypted_and_dedupes` (FR-31) | fake `/chat/completions` вернул 2 факта; повторный `POST .../chat/analyze` | оба факта `pending`, `text` в БД — bytea, `source_message_ids` заполнены; повтор: `created=0`, `skipped=2`, строк по-прежнему 2 |
+| `test_prompt_masks_fio_and_limits` (FR-31) | в переписке ФИО пациента и врача, телефон | в теле запроса к LLM нет ФИО/телефона; есть `[ФИО]`; промпт ограничивает 10 фактов и 200 символов |
+| `test_disabled_returns_503_without_llm_call` (FR-31) | `CC_CHAT_INSIGHTS_ENABLED=false`, URL задан | `503 CHAT_INSIGHTS_DISABLED` (detail ссылается на docs/17); `urlopen` не вызван; list — тоже 503 |
+| `test_llm_error_and_garbage_write_nothing` (FR-31) | LLM бросает `URLError`/возвращает не-JSON | `503 CHAT_INSIGHTS_UNAVAILABLE`, в `chat_insights` 0 строк |
+| `test_empty_dialogue_409` (FR-31) | roster-пациент без сообщений | `409 CHAT_INSIGHTS_EMPTY`, LLM не вызвана |
+| `test_accept_in_report_reject_not_and_404` (FR-31) | accept одного, reject другого, повтор accept | accepted виден в `report.chat_insights` без `source_message_ids`; rejected — нет; повтор идемпотентен; неизвестный id → `404 INSIGHT_NOT_FOUND` |
+| `test_foreign_patient_and_insight_404` (FR-31) | второй врач вне ростера; факт чужого пациента через свой ростер | `403 NO_ROSTER`; `404 INSIGHT_NOT_FOUND` |
+| `test_patient_role_forbidden` (FR-31) | пациент на analyze/list/decide | `403 ROLE_MISMATCH` |
+| `test_consent_revoke_deletes_insights` (FR-31) | анализ → `POST /consent/revoke` | строк `chat_insights` пациента нет |
 | `test_worker_tick_creates_one_notification_idempotent` | два тика `deliver_due` по одному due-напоминанию | ровно один `Notification kind='REMINDER'`; `notified_at` заполнен; второй тик — 0 |
 | `test_worker_respects_advisory_lock` | лок удерживает другой коннект | тик возвращает 0 и не создаёт уведомление; после снятия лока — доставка |
 | `test_consent_revocation_destroys_reminders` | напоминание задано → POST /consent/revoke | строк пациента в `clinician_reminders` нет |
 | `test_percentage_from_expected_doses` (`test_adherence.py`) | режим 2×день, назначение 7 дней назад, 5 отметок `taken` | `expected=14`, `score=5`, `pct=36` (а не 5/5 = 100%) |
+| `test_missing_start_date_counts_from_creation` (`test_adherence.py`) | назначение без `started_on` создано сегодня, режим 2×день, 1 `taken` | `expected=2` (с даты создания, не за всё окно), `pct=50` |
+| `test_onset_date_is_validated_by_moscow_calendar` (`test_adverse_events.py`) | граница «сегодня» подменена на 24.10 МСК | 24.10 → 201, 25.10 → 422 `VALIDATION` |
 | `test_expected_is_calendar_days_not_weekdays` | тот же режим, окна 7 и 14 дней | знаменатель — все календарные дни активности; выходные не исключаются |
 | `test_ended_on_cuts_expected_days` | `started_on` = −9 дн, `ended_on` = −3 дн, окно 7 дней | `active_days=4`, `expected=4`, 2 `taken` → 50% |
 | `test_overall_pct_is_weighted_not_average` | препарат A 2/2, препарат B 0/1 | общий 67% (2/3), не среднее 50% |
@@ -255,7 +270,9 @@
 
 `clinician-links.spec.ts` — адресуемость карточки пациента (#patient=<id>): имя в таблице и кнопка «Открыть» дают ссылку, прямая ссылка открывает ту же карточку в новой загрузке, «Назад к списку» снимает hash, клик по уведомлению об эскалации открывает карточку именно этого пациента.
 
-`assistant.spec.ts` — ИИ-ассистент врача (3 теста): тред отвечает с источниками по KB, отказ на диагноз (red line), справка по препарату Авиандр, пациент в контексте треда подмешивает карту в ответ.
+`assistant.spec.ts` — ИИ-ассистент врача (3 теста): путь «Чаты → Ассистент», тред отвечает с источниками по KB, отказ на диагноз (red line), справка по препарату Авиандр, пациент в контексте треда подмешивает карту в ответ.
+
+`chats.spec.ts` — единый экран «Чаты» (FR-29): сегмент «Ассистент» создаёт диалог и получает ответ с цитатами (в CI без LLM допустим NO_KB_DATA); сегмент «Пациенты» показывает roster-переписку с превью последнего сообщения и отправляет ответ врача; старые разделы «Пациенты»/«Библиотека»/«Напоминания» остаются доступны, в списке видна подпись «Сначала красные».
 
 Расширение покрытия (8 файлов, 12 тестов; P0/P1 из плана расширения e2e):
 
@@ -266,7 +283,7 @@
 `auth-refresh-rotation.spec.ts` — повторное использование отозванного refresh → 401; logout отзывает новый токен.
 `multi-scale-screening.spec.ts` — многошкальный режим: врач назначает набор шкал, пациент выбирает GAD-7 из двух и завершает скрининг.
 `clinician-adverse-event.spec.ts` — врач регистрирует НЯ (нежелательное явление) в карточке пациента.
-`clinician-chat.spec.ts` — чат врач ↔ пациент: обе стороны видят переписку.
+`clinician-chat.spec.ts` — чат врач ↔ пациент: врач открывает карточку → «Открыть в чатах», пишет из раздела «Чаты → Пациенты», пациент видит сообщение в своём чате и отвечает; после перезагрузки hash `#chats=patient:<id>` возвращает врача в диалог с ответом.
 `clinician-assessment.spec.ts` — врачебная шкала HDRS-17: врач заполняет её в карточке, отчёт сразу показывает RED-эскалацию; каталог пациента клиницистскую шкалу не содержит.
 `drug-library.spec.ts` — библиотека препаратов: поиск по ГРЛС, разделы НЯ и противопоказаний, пустой результат.
 `clinician-visit.spec.ts` — запись приёма: сохранение, формат/длительность, запись видна после перезагрузки.
