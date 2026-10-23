@@ -273,6 +273,7 @@ async def execute(
     today = today or dt.date.today()
     embedder = build_embedder()
     run: KBRun | None = None
+    run_id: str | None = None
     if not dry_run:
         run = KBRun(
             trigger=trigger,
@@ -284,6 +285,9 @@ async def execute(
         )
         db.add(run)
         await db.flush()
+        # PK снимаем сразу: rollback в обработчике документа экспирит атрибуты,
+        # и ленивая догрузка run.id в async-сессии дала бы MissingGreenlet.
+        run_id = str(run.id)
         # Журнал прогона фиксируется сразу: откат отдельного документа
         # (rollback в обработчике) не должен лишать прогон записи в kb_runs.
         await db.commit()
@@ -450,7 +454,6 @@ async def execute(
         run.status = "partial"
     else:
         run.status = "ok"
-    run_id = str(run.id)
     # Прогон фиксируется здесь: вызывающий код (CLI/сервис) не обязан помнить
     # про commit, иначе запись журнала терялась бы при его сбое.
     await db.commit()

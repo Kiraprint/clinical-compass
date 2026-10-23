@@ -20,7 +20,7 @@ from app.models import KBRun, KBWork
 from app.services import kb as kb_store
 from app.services.embeddings import HashEmbedder
 
-from .conftest import run_async
+from .conftest import run_async, run_async_commit
 from .enrichment_fixtures import make_doc, make_guideline
 
 
@@ -163,7 +163,7 @@ def test_reject_records_reason_and_removes_chunks(db_session, qdrant, cfg):
     db_session.expire_all()
     assert _points(qdrant, work) > 0
 
-    run_async(review.reject, work.id, None, "Выборка не соответствует популяции", client=qdrant)
+    run_async_commit(review.reject, work.id, None, "Выборка не соответствует популяции", client=qdrant)
     db_session.expire_all()
     assert work.status == "rejected"
     assert work.reject_reason.startswith("Выборка")
@@ -176,7 +176,7 @@ def test_reject_requires_reason(db_session, qdrant, cfg):
     db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
     with pytest.raises(review.ReviewError):
-        run_async(review.reject, work.id, None, "  ")
+        run_async_commit(review.reject, work.id, None, "  ")
         db_session.expire_all()
 
 
@@ -315,7 +315,7 @@ def test_rerun_keeps_rejected_article_rejected(db_session, qdrant, cfg):
     run_async(pipeline.execute, qdrant, cfg, documents=[doc])
     db_session.expire_all()
     work = db_session.scalar(select(KBWork).where(KBWork.guideline_id == doc.guideline_id))
-    run_async(review.reject, work.id, None, "Не подходит по выборке")
+    run_async_commit(review.reject, work.id, None, "Не подходит по выборке")
     db_session.expire_all()
 
     run_async(pipeline.execute, qdrant, cfg, documents=[doc])
@@ -429,25 +429,32 @@ def test_commit_failure_never_publishes_uncommitted_content(db_session, qdrant, 
     """Реестр коммитится до индексации: сбой коммита не оставляет чанков без work."""
     doc = make_guideline()
 
-    original_commit = db_session.commit
-    calls = {"n": 0}
+    import asyncio
 
-    def flaky_commit():
-        calls["n"] += 1
-        # 1-й commit — журнал прогона, 2-й — документ (падает), дальше — итог.
-        if calls["n"] == 2:
-            raise RuntimeError("commit failed")
-        return original_commit()
+    from app import db as db_module
 
-    monkeypatch.setattr(db_session, "commit", flaky_commit)
-    summary = run_async(pipeline.execute, qdrant, cfg, documents=[doc])
+    from sqlalchemy import event
+
+    async def flow():
+        async with db_module.AsyncSessionLocal() as session:
+            calls = {"n": 0}
+
+            @event.listens_for(session.sync_session, "before_commit")
+            def flaky_commit(_sess):
+                calls["n"] += 1
+                # 1-й commit — журнал прогона, 2-й — документ (падает), дальше — итог.
+                if calls["n"] == 2:
+                    raise RuntimeError("commit failed")
+
+            return await pipeline.execute(session, qdrant, cfg, documents=[doc])
+
+    summary = asyncio.run(flow())
     db_session.expire_all()
 
     assert summary.stats["published"] == 0
     assert summary.stats["failed_documents"] == 1
     assert any("commit failed" in error for error in summary.errors)
     assert _guideline_points(qdrant, doc.guideline_id) == 0
-    monkeypatch.undo()
     assert db_session.scalar(
         select(KBWork).where(KBWork.guideline_id == doc.guideline_id)
     ) is None

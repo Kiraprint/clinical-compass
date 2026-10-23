@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -515,23 +517,29 @@ def test_ensure_escalation_is_single_row_and_upgrades(client):
     _add_roster(pid, cid)
     sid = _start(client, h)["session_id"]
 
-    with db.SyncSessionLocal() as s:
-        session = s.get(CheckinSession, uuid.UUID(sid))
-        first, recipients = _ensure_escalation(s, session, urgent=False)
-        s.commit()
-        assert first.kind == "CHECKIN_RISK"
-        assert recipients == [uuid.UUID(cid)]
+    async def flow():
+        async with db.AsyncSessionLocal() as s:
+            session = await s.get(CheckinSession, uuid.UUID(sid))
+            first, rec1 = await _ensure_escalation(s, session, urgent=False)
+            await s.commit()
+            first_kind = first.kind
+            again, rec2 = await _ensure_escalation(s, session, urgent=False)
+            await s.commit()
+            urgent, rec3 = await _ensure_escalation(s, session, urgent=True)
+            await s.commit()
+            # Строки поднимаются в одной сессии, объект мутирует: снимаем снимок.
+            return first.id, first_kind, rec1, again.id, rec2, urgent.id, urgent.kind, rec3
 
-        again, recipients = _ensure_escalation(s, session, urgent=False)
-        s.commit()
-        assert again.id == first.id
-        assert recipients == []  # без повышения повторно не уведомляем
-
-        urgent, recipients = _ensure_escalation(s, session, urgent=True)
-        s.commit()
-        assert urgent.id == first.id
-        assert urgent.kind == "CHECKIN_RISK_URGENT"
-        assert recipients == [uuid.UUID(cid)]
+    first_id, first_kind, recipients, again_id, recipients_again, urgent_id, urgent_kind, recipients_urgent = (
+        asyncio.run(flow())
+    )
+    assert first_kind == "CHECKIN_RISK"
+    assert recipients == [uuid.UUID(cid)]
+    assert again_id == first_id
+    assert recipients_again == []  # без повышения повторно не уведомляем
+    assert urgent_id == first_id
+    assert urgent_kind == "CHECKIN_RISK_URGENT"
+    assert recipients_urgent == [uuid.UUID(cid)]
 
     assert len(_escalations(pid)) == 1
     assert len(_notifications(cid)) == 2

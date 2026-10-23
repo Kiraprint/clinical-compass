@@ -71,6 +71,18 @@ def run_async(fn, *args, **kwargs):
     return asyncio.run(_run())
 
 
+def run_async_commit(fn, *args, **kwargs):
+    """run_async + commit: для сервисов, которые коммитит вызывающий (review.reject)."""
+
+    async def _run():
+        async with db.AsyncSessionLocal() as session:
+            result = await fn(session, *args, **kwargs)
+            await session.commit()
+            return result
+
+    return asyncio.run(_run())
+
+
 @pytest.fixture()
 def acall(engine):
     """Вызов async-сервиса из sync-теста: своя async-сессия (и свой loop) на вызов.

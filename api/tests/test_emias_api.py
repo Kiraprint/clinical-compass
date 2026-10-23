@@ -56,10 +56,10 @@ def test_sync_returns_503_when_disabled(client, db_session, monkeypatch):
 def test_sync_runs_and_is_audited(client, db_session, monkeypatch):
     _enable(monkeypatch)
     admin, admin_id = admin_ctx(client, "a-emias-3@test.ru")
-    monkeypatch.setattr(
-        emias_sync, "sync_patients",
-        lambda db, **kwargs: SyncStats(mode="patients", fetched=1, created=2),
-    )
+    async def fake_sync_patients(db, **kwargs):
+        return SyncStats(mode="patients", fetched=1, created=2)
+
+    monkeypatch.setattr(emias_sync, "sync_patients", fake_sync_patients)
 
     resp = client.post("/api/v1/admin/emias/sync", json={"mode": "patients"}, headers=admin)
     assert resp.status_code == 202, resp.text
