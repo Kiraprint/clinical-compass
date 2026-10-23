@@ -480,6 +480,49 @@ function ReportView({ report, error, onBack, onRefresh }: {
         </div>
       )}
 
+
+      {report.checkin.recent.length > 0 && (
+        <div className="card">
+          <b>Чек-ины</b>{" "}
+          <span style={{ color: "#5a6478", fontSize: 12 }}>
+            правила {report.checkin.rules_version ?? "—"}
+          </span>
+          {report.checkin.recent.map((c) => {
+            const safety =
+              c.safety === "signal"
+                ? "срочный сигнал"
+                : c.safety === "review"
+                  ? "требует рассмотрения"
+                  : c.safety === "unassessed"
+                    ? "риск не оценён"
+                    : "нет";
+            const answers = Object.entries(c.answers)
+              .map(([k, v]) => `${k} ${v}`)
+              .join(" · ");
+            const included = c.modules.filter((m) => m.included);
+            return (
+              <div key={c.session_id} style={{ marginTop: 10, fontSize: 13 }}>
+                <div>
+                  <b>{c.date}</b> · {c.status === "completed" ? "завершён" : "в процессе"} · риск:{" "}
+                  <span style={{ color: c.safety === "none" ? "#2f7a4b" : "#a3282d", fontWeight: 600 }}>
+                    {safety}
+                  </span>
+                </div>
+                {answers && <div style={{ color: "#3d4657" }}>{answers}</div>}
+                {included.length > 0 && (
+                  <div style={{ color: "#5a6478" }}>
+                    Модули: {included.map((m) => m.code).join(", ")} —{" "}
+                    {included.map((m) => m.reason).join("; ")}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <div style={{ color: "#5a6478", fontSize: 12, marginTop: 8 }}>
+            Ответы не суммируются и не являются диагнозом: это черновик для пилота.
+          </div>
+        </div>
+      )}
       {report.open_escalations.length > 0 && (
         <div className="alert-danger">
           <b>Открытые эскалации:</b>{" "}

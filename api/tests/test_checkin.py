@@ -375,3 +375,24 @@ def test_presented_keeps_steps_and_module_reasons(client, db_session):
     reasons = {m["code"]: m["reason"] for m in session.presented["modules"]}
     assert reasons["HR"].startswith("MO1 ≥ 3")
     assert session.phase == "modules" and session.status == "in_progress"
+
+
+def test_report_shows_checkin_answers_and_risk(client):
+    """docs/16 §3: врач в карте видит ответы чек-ина, риск и основание эскалации."""
+    h, pid = patient_ctx(client, "chk_report@test.ru")
+    ch, cid = clinician_ctx(client, "chk_report_doc@test.ru")
+    _add_roster(pid, cid)
+    sid = _start(client, h)["session_id"]
+    _answer(client, h, sid, {**RISKY_CORE, "HR4": 1})
+    _answer(client, h, sid, {"RS1": 1, "RS2": 0, "RS3": 0})
+
+    report = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=ch)
+    assert report.status_code == 200, report.text
+    body = report.json()
+    (today,) = body["checkin"]["recent"]
+    assert today["session_id"] == sid
+    assert today["safety"] == "signal"
+    assert today["answers"]["HR4"] == 1 and today["answers"]["RS1"] == 1
+    assert today["rules_version"] == body["checkin"]["rules_version"]
+    (escalation,) = [e for e in body["open_escalations"] if e["kind"] == "CHECKIN_RISK"]
+    assert escalation["checkin_session_id"] == sid

@@ -14,7 +14,7 @@ from compass.scales import ALL_SCALES
 from compass.trend import trends
 
 from app.errors import Problem
-from app.models import AdherenceRecord, AdverseEvent, Answer, Assessment, ChatMessage, ClinicianRoster, Consent, DiaryEntry, Escalation, Prescription, Run, User, Visit
+from app.models import AdherenceRecord, AdverseEvent, Answer, Assessment, ChatMessage, CheckinSession, ClinicianRoster, Consent, DiaryEntry, Escalation, Prescription, Run, User, Visit
 
 from .audit import record as audit_record
 from .contacts import contacts_payload
@@ -222,6 +222,12 @@ def _patient_card(db: Session, patient_id) -> dict:
         .order_by(Escalation.notified_clinician_at.desc().nulls_last())
     ).all()
     timeline = patient_timeline(db, patient_id, 90)
+    checkins = db.scalars(
+        select(CheckinSession)
+        .where(CheckinSession.patient_id == patient_id)
+        .order_by(CheckinSession.checkin_date.desc())
+        .limit(7)
+    ).all()
 
     # Приверженность лечению за 14 дней (задача кейса 7): агрегат без roster-проверки
     # (роster/consent проверяют вызывающие report()/patient_context()).
@@ -304,9 +310,19 @@ def _patient_card(db: Session, patient_id) -> dict:
             for s in ALL_SCALES.values()
         ],
         "open_escalations": [
-            {"id": str(e.id), "kind": e.kind, "notified_at": e.notified_clinician_at.isoformat() if e.notified_clinician_at else None}
+            {
+                "id": str(e.id),
+                "kind": e.kind,
+                "notified_at": e.notified_clinician_at.isoformat() if e.notified_clinician_at else None,
+                "checkin_session_id": str(e.checkin_session_id) if e.checkin_session_id else None,
+            }
             for e in escalations
         ],
+        # docs/16 §3: что видит клиницист — ответы, состояние риска и основания модулей.
+        "checkin": {
+            "rules_version": checkins[0].rules_version if checkins else None,
+            "recent": [_checkin_dict(c) for c in checkins],
+        },
         "contacts": contacts_payload(patient, masked=True) if has_consent else None,
     }
 
@@ -397,6 +413,25 @@ def _adherence_dict(r: AdherenceRecord) -> dict:
         "status": r.status,
         "note": r.note,
         "created_at": r.created_at.isoformat(),
+    }
+
+
+def _checkin_dict(c: CheckinSession) -> dict:
+    """Сеанс чек-ина для врача: ответы, риск, включённые модули и их основания."""
+    presented = c.presented or {}
+    return {
+        "session_id": str(c.id),
+        "date": c.checkin_date.isoformat(),
+        "status": c.status,
+        "phase": c.phase,
+        "safety": c.safety,
+        "rules_version": c.rules_version,
+        "answers": c.answers or {},
+        "modules": [
+            {"code": m.get("code"), "included": m.get("included"), "reason": m.get("reason")}
+            for m in presented.get("modules", [])
+        ],
+        "completed_at": c.completed_at.isoformat() if c.completed_at else None,
     }
 
 

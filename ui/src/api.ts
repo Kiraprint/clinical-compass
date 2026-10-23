@@ -644,7 +644,18 @@ export interface Report {
     code: string; title: string; audience: "PATIENT" | "CLINICIAN";
     items: { key: string; text: string; max_value: number }[];
   }[];
-  open_escalations: { id: string; kind: string; notified_at: string | null }[];
+  open_escalations: { id: string; kind: string; notified_at: string | null; checkin_session_id?: string | null }[];
+  // docs/16 §3: ответы чек-ина, состояние риска и основания включённых модулей.
+  checkin: {
+    rules_version: string | null;
+    recent: {
+      session_id: string; date: string; status: string; phase: string | null;
+      safety: "none" | "review" | "signal" | "unassessed"; rules_version: string;
+      answers: Record<string, number>;
+      modules: { code: string; included: boolean; reason: string }[];
+      completed_at: string | null;
+    }[];
+  };
   // FR-22: null, если у пациента нет активного согласия (152-ФЗ).
   contacts: { phone: string | null; birth_date: string | null; age: number | null; adult: boolean | null } | null;
 }
