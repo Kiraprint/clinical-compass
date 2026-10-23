@@ -102,6 +102,7 @@
 | push_subscribe_unsubscribe | VAPID-ключ, подписка/отписка по endpoint | подписка апсерт по endpoint; чужая подписка не удаляется; без токена 401 |
 | fcm_device_token_register_delete | POST/DELETE /push/device-token | апсерт по токену; чужой токен не удаляется; без токена 401 |
 | `test_compose_vapid_key_is_valid_p256`, `test_vapid_public_key_matches_private`, `test_invalid_vapid_key_raises` | разбор дефолтного VAPID-ключа из `infra/docker-compose.yml`; ключ из env; мусорный ключ | дефолтный ключ — валидный EC P-256; публичный ключ выводится (87 симв., uncompressed point); невалидный → `ValueError` (422 на `/push/vapid-public-key`) |
+| `test_push_to_clinicians_signs_request` | подписка врача на loopback-push-сервер; `push_to_clinicians` | запрос ушёл, `Authorization: vapid t=…`, `Content-Encoding: aes128gcm`, тело зашифровано (на старом коде запросов 0) |
 | fcm_upgrade_then_cooldown | POST /push/fcm/upgrade дважды | первый 200 `{upgraded}`; второй 429 `FCM_COOLDOWN`; /push/fcm/status окно активно |
 | `test_guideline_with_confirmed_license_is_auto_published` / `…without_license_waits_for_human` | гайдлайн с CC BY-NC-SA в тексте и без лицензии | авто `approved` только при подтверждённой лицензии; иначе `candidate` |
 | `test_article_is_candidate_until_approved`, `test_article_without_psychiatry_is_excluded` | статья PubMed проходит/не проходит жёсткие критерии | `candidate` до approve; непсихиатрическая тема → `excluded`, в индексе нет |

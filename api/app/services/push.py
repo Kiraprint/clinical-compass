@@ -38,11 +38,11 @@ FCM_COOLDOWN_SECONDS = 3600  # окно «попробуйте через час
 
 # --- VAPID-ключи -------------------------------------------------------------
 
-_vapid_cache: dict[str, str] | None = None
+_vapid_cache: dict[str, object] | None = None
 
 
-def _load_vapid() -> dict[str, str]:
-    """Возвращает {private_pem, public_b64} (env или сгенерированные)."""
+def _load_vapid() -> dict[str, object]:
+    """Возвращает {private_pem, public_b64, vapid} (env или сгенерированные)."""
     global _vapid_cache
     if _vapid_cache is not None:
         return _vapid_cache
@@ -66,9 +66,14 @@ def _load_vapid() -> dict[str, str]:
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
     ).decode()
     raw = sk.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+    # pywebpush трактует строку в vapid_private_key как ПУТЬ К ФАЙЛУ, а не как PEM:
+    # передаём готовый объект Vapid, иначе подпись падает на разборе ключа.
+    from py_vapid import Vapid
+
     _vapid_cache = {
         "private_pem": private_pem,
         "public_b64": base64.urlsafe_b64encode(raw).rstrip(b"=").decode(),
+        "vapid": Vapid.from_pem(private_pem.encode()),
     }
     if not settings.vapid_private_key:
         log.warning("VAPID-ключи не заданы env — сгенерированы в памяти (демо)")
@@ -76,7 +81,7 @@ def _load_vapid() -> dict[str, str]:
 
 
 def vapid_public_key() -> str:
-    return _load_vapid()["public_b64"]
+    return str(_load_vapid()["public_b64"])
 
 
 # --- Подписки -----------------------------------------------------------------
@@ -348,7 +353,7 @@ def push_to_clinicians(
                 webpush(
                     {"endpoint": s.endpoint, "keys": {"p256dh": s.p256dh, "auth": s.auth}},
                     data=payload,
-                    vapid_private_key=keys["private_pem"],
+                    vapid_private_key=keys["vapid"],
                     vapid_claims={"sub": "mailto:admin@compass.demo"},
                     timeout=5,
                 )
