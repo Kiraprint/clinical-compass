@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, ApiError, Assessment, ClinicianReminder, EmiasSummary, HistoryType, ImportHistoryResult, PatientCard, PatientContacts, PatientHistoryItem, PatientMedication, RemindersResponse, Report, Visit } from "../api";
+import { api, ApiError, Assessment, ClinicianReminder, EmiasSummary, Escalation, HistoryType, ImportHistoryResult, PatientCard, PatientContacts, PatientHistoryItem, PatientMedication, RemindersResponse, Report, Visit } from "../api";
 import TrendChart from "../TrendChart";
 import AssistantTab from "./AssistantTab";
 import DrugLibraryTab from "./DrugLibraryTab";
@@ -11,6 +11,64 @@ const MED_STATUS_LABELS: Record<string, string> = {
 };
 
 const TRIAGE_FILTERS = ["", "GREEN", "YELLOW", "RED"] as const;
+
+const ESCALATION_KINDS: Record<string, string> = {
+  CHECKIN_RISK: "чек-ин: риск",
+  CHECKIN_RISK_URGENT: "чек-ин: срочный сигнал",
+  SUICIDAL: "скрининг: суицидальный риск",
+  SEVERE: "скрининг: тяжёлое состояние",
+};
+
+// Общая очередь открытых эскалаций (docs/16 §3): сигнал виден даже без roster-врача.
+function EscalationsQueue({ items }: { items: Escalation[] }) {
+  if (items.length === 0) return null;
+  return (
+    <div className="card">
+      <h2>Очередь эскалаций ({items.length})</h2>
+      <p style={{ color: "#5a6478", fontSize: 13 }}>
+        Открытые сигналы чек-инов и скринингов, включая пациентов без закреплённого врача.
+      </p>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Дата</th>
+              <th>Пациент</th>
+              <th>Тип</th>
+              <th>Риск</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((e) => (
+              <tr key={e.id}>
+                <td>{e.created_at ? new Date(e.created_at).toLocaleString("ru-RU") : "—"}</td>
+                <td>
+                  <a
+                    href={"#patient=" + e.patient_id}
+                    style={{ color: "#2f6fed", textDecoration: "none", fontWeight: 600 }}
+                  >
+                    {e.patient_fio ?? "Пациент"}
+                  </a>
+                </td>
+                <td>
+                  <span
+                    className={`badge ${
+                      e.kind === "CHECKIN_RISK_URGENT" || e.kind === "SUICIDAL" ? "RED" : "YELLOW"
+                    }`}
+                  >
+                    {ESCALATION_KINDS[e.kind] ?? e.kind}
+                  </span>
+                </td>
+                <td>{e.safety ?? "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 
 export default function ClinicianView() {
   const [section, setSection] = useState<"patients" | "assistant" | "library">("patients");
@@ -26,13 +84,30 @@ export default function ClinicianView() {
   const [showReminders, setShowReminders] = useState(false);
   const [overdueCount, setOverdueCount] = useState(0);
   const [reminderVersion, setReminderVersion] = useState(0);
-
+  // Общая очередь эскалаций — не только свои пациенты (docs/16 §3).
+  const [escalations, setEscalations] = useState<Escalation[]>([]);
   useEffect(() => {
     api
       .clinicianReminders()
       .then((r) => setOverdueCount(r.overdue))
       .catch(() => setOverdueCount(0));
   }, [reminderVersion, reportVersion]);
+
+  useEffect(() => {
+    if (selected) return;
+    let cancelled = false;
+    api
+      .openEscalations()
+      .then((r) => {
+        if (!cancelled) setEscalations(r.items);
+      })
+      .catch(() => {
+        if (!cancelled) setEscalations([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected, reportVersion]);
 
   const load = async (f: string) => {
     const data = await api.clinicianPatients(f || undefined);
@@ -151,12 +226,13 @@ export default function ClinicianView() {
       {showReminders && (
         <RemindersPanel cards={cards} onChanged={() => setReminderVersion((v) => v + 1)} />
       )}
+      {!selected && <EscalationsQueue items={escalations} />}
       {!selected ? (
         <div className="card">
           <h2>Мои пациенты ({cards.length})</h2>
           {cards.length === 0 && <p style={{ color: "#5a6478" }}>Нет пациентов в выбранном фильтре.</p>}
           <div className="table-wrap">
-            <table>
+            <table className="patients">
               <thead>
                 <tr>
                   <th>Пациент</th>
@@ -761,7 +837,9 @@ function ReportView({ report, error, onBack, onRefresh }: {
         <div key={d.id} className="msg">
           <b>{d.created_at.slice(0, 10)}: </b>
           {d.content}
-          {d.mood != null ? ` (настроение ${d.mood <= 4 ? `${d.mood}/4` : d.mood})` : ""}
+          {d.mood != null
+            ? ` (настроение ${d.mood}/${d.mood_scale === "0-4" ? 4 : 10})`
+            : ""}
         </div>
       ))}
     </div>

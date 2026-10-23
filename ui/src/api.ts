@@ -352,6 +352,8 @@ export const api = {
     const suffix = qs.toString() ? `?${qs}` : "";
     return req<PatientHistory>(`/api/v1/clinician/patients/${patientId}/history${suffix}`);
   },
+  // Общая очередь открытых эскалаций (docs/16 §3): врач или администратор.
+  openEscalations: () => req<{ items: Escalation[] }>("/api/v1/escalations"),
   // FR-24: напоминания врача. Список — свои (roster/IDOR-гейт на сервере).
   clinicianReminders: (due?: "overdue" | "today" | "week") =>
     req<RemindersResponse>(
@@ -461,15 +463,20 @@ export interface CheckinState {
   safety: string; // none | review | signal | unassessed
   modules: CheckinModule[];
   completed_at: string | null;
+  // true — сигнал ушёл закреплённому врачу; false — врача нет (docs/16 §3).
+  clinician_notified: boolean;
 }
 export interface Timeline {
   runs: { total_score: number; severity: string; triage: string; computed_at: string }[];
   trend: { moving_avg: number[]; delta_7: number | null; delta_30: number | null; slope: number | null };
 }
+
+export type MoodScale = "0-4" | "1-10" | null;
 export interface DiaryEntry {
   id: string;
   content: string;
-  mood: number | null; // 0..4, 5-точечная шкала с эмодзи (docs/16 §1)
+  mood_scale: MoodScale;
+  mood: number | null; // 0..4 при mood_scale="0-4"; историчные записи — 1..10
   sleep_h: number | null;
   tags: string[];
   created_at: string;
@@ -639,7 +646,7 @@ export interface Report {
     id: string; event_text: string; severity: string; onset_date: string;
     suspected_drug: string | null; action_taken: string | null; created_at: string;
   }[];
-  diary: { id: string; content: string; mood: number | null /* 0..4 */; created_at: string }[];
+  diary: { id: string; content: string; mood: number | null; mood_scale: MoodScale; created_at: string }[];
   available_scales: {
     code: string; title: string; audience: "PATIENT" | "CLINICIAN";
     items: { key: string; text: string; max_value: number }[];
@@ -658,6 +665,16 @@ export interface Report {
   };
   // FR-22: null, если у пациента нет активного согласия (152-ФЗ).
   contacts: { phone: string | null; birth_date: string | null; age: number | null; adult: boolean | null } | null;
+}
+export interface Escalation {
+  id: string;
+  patient_id: string;
+  patient_fio: string | null;
+  kind: "CHECKIN_RISK" | "CHECKIN_RISK_URGENT" | "SUICIDAL" | "SEVERE" | string;
+  safety: "none" | "review" | "signal" | "unassessed" | null;
+  checkin_session_id: string | null;
+  notified_at: string | null;
+  created_at: string | null;
 }
 export interface AuditEvent {
   id: number;

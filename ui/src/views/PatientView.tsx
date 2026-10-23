@@ -8,6 +8,7 @@ import {
   ChatMessage,
   Consent,
   DiaryEntry,
+  MoodScale,
   Questionnaire,
   Timeline,
 } from "../api";
@@ -249,47 +250,70 @@ const MOOD_OPTIONS = [
   { emoji: "😄", label: "Отлично" },
 ];
 
-const moodText = (mood: number | null) => {
+// mood_scale = "1-10" у историчных записей: показываем значение как есть, без эмодзи.
+const moodText = (mood: number | null, scale: MoodScale) => {
   if (mood == null) return "";
+  if (scale !== "0-4") return `настроение ${mood}/10`;
   const option = MOOD_OPTIONS[mood];
-  return option ? `${option.emoji} ${option.label}` : `Настроение ${mood}`;
+  return option ? `${option.emoji} ${option.label}` : `настроение ${mood}`;
 };
 
 // Спокойный текст без обвинения и без обещания мгновенного контакта (docs/16 §3).
-const SAFETY_BLOCKS: Record<string, { title: string; paragraphs: string[] }> = {
+// Последняя строка зависит только от того, что сервер подтвердил: дошёл ли сигнал врачу
+// (clinician_notified). Без врача обещать «вас видит врач» нельзя.
+const SAFETY_BLOCKS: Record<
+  string,
+  { title: string; paragraphs: string[]; last: { notified: string; notNotified: string } }
+> = {
   signal: {
     title: "Ваша безопасность важнее всего",
     paragraphs: [
       "Спасибо, что ответили честно. Пожалуйста, постарайтесь оставаться в безопасности и, если есть возможность, будьте рядом с кем-то, кому вы доверяете.",
       "Если у вас есть намерение действовать или вам трудно оставаться в безопасности, обратитесь за экстренной помощью по местному номеру — 112 (единый номер экстренных служб) или в ближайшее отделение скорой помощи.",
-      "Ваш ответ видит врач, но просмотр сообщений командой может быть не мгновенным: этот экран не линия экстренной помощи и не заменяет обращение к врачу.",
     ],
+    last: {
+      notified:
+        "Ваш ответ видит врач, но просмотр сообщений командой может быть не мгновенным: этот экран не линия экстренной помощи и не заменяет обращение к врачу.",
+      notNotified:
+        "Ответ сохранён. Закреплённого врача у вас нет — если помощь нужна сейчас, обратитесь за экстренной помощью (112) или к близким.",
+    },
   },
   review: {
     title: "Спасибо за ваш ответ",
     paragraphs: [
       "Спасибо, что ответили. Пожалуйста, оставайтесь в безопасности и позаботьтесь о себе сегодня.",
       "Если станет тяжелее или появятся мысли о том, чтобы причинить себе вред, обратитесь за экстренной помощью по местному номеру — 112.",
-      "Ответы видит ваш врач в карте. Просмотр сообщений командой может быть не мгновенным — это не обещание срочного контакта.",
     ],
+    last: {
+      notified:
+        "Ответы видит ваш врач в карте. Просмотр сообщений командой может быть не мгновенным — это не обещание срочного контакта.",
+      notNotified:
+        "Ответ сохранён. Закреплённого врача у вас нет — если станет тяжелее, обратитесь за экстренной помощью (112) или к близким.",
+    },
   },
   unassessed: {
     title: "Риск не оценён",
     paragraphs: [
       "Вы не ответили на вопрос о мыслях о самоубийстве, поэтому риск сегодня не оценён. Пропуск не означает «нет».",
-      "Пожалуйста, свяжитесь со своим специалистом — врачом или лечащим специалистом, — чтобы обсудить состояние.",
       "Если есть мысли о том, чтобы причинить себе вред, обратитесь за экстренной помощью по местному номеру — 112.",
     ],
+    last: {
+      notified:
+        "Ответ видит ваш врач в карте — обсудите с ним состояние. Просмотр может быть не мгновенным: это не линия экстренной помощи.",
+      notNotified:
+        "Ответ сохранён. Закреплённого врача у вас нет — пожалуйста, обсудите состояние с близкими или обратитесь к специалисту.",
+    },
   },
 };
 
-function SafetyBlock({ safety }: { safety: string }) {
+function SafetyBlock({ safety, notified }: { safety: string; notified: boolean }) {
   const info = SAFETY_BLOCKS[safety];
   if (!info) return null;
+  const last = notified ? info.last.notified : info.last.notNotified;
   return (
     <div className="safety" role="status">
       <h3>{info.title}</h3>
-      {info.paragraphs.map((p) => (
+      {[...info.paragraphs, last].map((p) => (
         <p key={p}>{p}</p>
       ))}
     </div>
@@ -353,8 +377,9 @@ function CheckinCard() {
         <>
           <p style={{ color: "#2e7d32", fontWeight: 600 }}>Чек-ин за сегодня выполнен</p>
           <p style={{ color: "#5a6478", fontSize: 13 }}>
-            Ваши ответы за сегодня видит врач в карте. Это отдельные наблюдения и их динамика, а не
-            диагноз.
+            {state.clinician_notified
+              ? "Ваши ответы за сегодня видит врач в карте. Это отдельные наблюдения и их динамика, а не диагноз."
+              : "Ответы сохранены. Закреплённого врача у вас нет — при необходимости обратитесь к специалисту или по номеру 112."}
           </p>
         </>
       ) : state.status !== "in_progress" ? (
@@ -403,7 +428,7 @@ function CheckinCard() {
         </>
       )}
       {err && <p className="error">{err}</p>}
-      <SafetyBlock safety={state.safety} />
+      <SafetyBlock safety={state.safety} notified={state.clinician_notified} />
     </>
   );
 }
@@ -502,7 +527,7 @@ function TodayTab() {
         <div style={{ marginTop: 8 }}>
           {entriesToday.map((e) => (
             <div key={e.id} className="msg">
-              <b>{moodText(e.mood)}</b> {e.content}
+              <b>{moodText(e.mood, e.mood_scale)}</b> {e.content}
             </div>
           ))}
         </div>
@@ -561,7 +586,7 @@ function DiaryTab() {
       {items.length === 0 && <p style={{ color: "#5a6478" }}>Пока пусто.</p>}
       {items.map((entry) => (
         <div key={entry.id} className="msg">
-          <b>{moodText(entry.mood)}</b> {entry.content}
+          <b>{moodText(entry.mood, entry.mood_scale)}</b> {entry.content}
           <div style={{ color: "#5a6478", fontSize: 12 }}>
             {new Date(entry.created_at).toLocaleString("ru-RU")}
             {entry.sleep_h != null ? ` · сон ${entry.sleep_h} ч` : ""}

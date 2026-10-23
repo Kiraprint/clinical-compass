@@ -8,12 +8,12 @@ test.describe("Врач и администратор", () => {
     await expect(page.getByRole("button", { name: "Все" })).toBeVisible();
 
     await page.getByRole("button", { name: "GREEN", exact: true }).click();
-    const green = page.locator("tbody tr").first();
+    const green = page.locator(".patients tbody tr").first();
     await expect(green).toBeVisible();
     await expect(green.locator(".badge.GREEN")).toBeVisible();
 
     await page.getByRole("button", { name: "YELLOW", exact: true }).click();
-    const yellow = page.locator("tbody tr").first();
+    const yellow = page.locator(".patients tbody tr").first();
     await expect(yellow).toBeVisible();
     await expect(yellow.locator(".badge.YELLOW")).toBeVisible();
   });
@@ -21,13 +21,13 @@ test.describe("Врач и администратор", () => {
   test("врач: отчёт RED-пациента показывает эскалации, историю и дневник", async ({ page }) => {
     await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
     await page.getByRole("button", { name: "RED", exact: true }).click();
-    const cards = page.locator("tbody tr");
+    const cards = page.locator(".patients tbody tr");
     await expect(cards.first()).toBeVisible();
 
     // Игорь К. (p2) — сеяный RED с открытыми эскалациями и записями дневника.
     // Берём конкретную строку, а не first(): параллельные тесты добавляют новых
     // RED-пациентов, и порядок не детерминирован.
-    const row = page.locator("tbody tr", { hasText: "Игорь" }).first();
+    const row = page.locator(".patients tbody tr", { hasText: "Игорь" }).first();
     await expect(row).toBeVisible();
     await row.getByRole("button", { name: "Открыть" }).click();
     await expect(page.getByText("Открытые эскалации:")).toBeVisible();

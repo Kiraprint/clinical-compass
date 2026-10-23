@@ -106,7 +106,9 @@ test("полный чек-ин: шаги до «Чек-ин за сегодня 
   await completeCheckin(page, false);
 
   await expect(page.getByText("Чек-ин за сегодня выполнен")).toBeVisible();
-  await expect(page.getByText(/видит врач в карте/)).toBeVisible();
+  // Пациент без закреплённого врача: обещания «вас видит врач» нет (clinician_notified=false).
+  await expect(page.getByText(/Закреплённого врача у вас нет/)).toBeVisible();
+  await expect(page.getByText(/видит врач/)).toHaveCount(0);
   await expect(page.locator(".qa")).toHaveCount(0);
 
   await page.reload();
@@ -131,8 +133,12 @@ test("ответ «Да» на HR4 ведёт на шаг безопасност
   await nextStep(page);
 
   await expect(page.getByText("Чек-ин за сегодня выполнен")).toBeVisible();
-  await expect(page.getByText("Ваша безопасность важнее всего")).toBeVisible();
-  await expect(page.getByText(/обратитесь за экстренной помощью/)).toBeVisible();
+  const safety = page.locator(".safety");
+  await expect(safety.getByText("Ваша безопасность важнее всего")).toBeVisible();
+  await expect(safety.getByText(/обратитесь за экстренной помощью/).first()).toBeVisible();
+  // Без закреплённого врача сигнал не обещает просмотр: только сохранение и совет.
+  await expect(safety.getByText(/Закреплённого врача у вас нет/)).toBeVisible();
+  await expect(safety.getByText(/видит врач/)).toHaveCount(0);
 
   // Блок безопасности виден и после перезагрузки.
   await page.reload();
