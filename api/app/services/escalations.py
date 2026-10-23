@@ -103,7 +103,10 @@ def resolve(
     ip: str | None = None,
 ) -> dict:
     """Закрыть сигнал: resolved_at + комментарий (шифруется EncryptedText)."""
-    escalation = db.get(Escalation, escalation_id)
+    # FOR UPDATE: два врача одновременно не закроют сигнал дважды (409 у второго).
+    escalation = db.scalar(
+        select(Escalation).where(Escalation.id == escalation_id).with_for_update()
+    )
     if escalation is None:
         raise Problem(404, "ESCALATION_NOT_FOUND", "Эскалация не найдена")
     if escalation.resolved_at is not None:

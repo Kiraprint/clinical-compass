@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Union
 
+import sqlalchemy as sa
 from alembic import op
 
 revision: str = "d7e8f9a0b1c2"
@@ -24,9 +25,9 @@ def upgrade() -> None:
     op.create_index(
         "escalations_open_queue",
         "escalations",
-        ["resolved_at", "created_at"],
+        [sa.text("created_at DESC")],
         unique=False,
-        postgresql_where="resolved_at IS NULL",
+        postgresql_where=sa.text("resolved_at IS NULL"),
     )
 
 
