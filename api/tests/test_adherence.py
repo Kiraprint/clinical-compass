@@ -203,3 +203,18 @@ def test_consent_revoke_deletes_linked_records_and_medications(client, db_sessio
     assert db_session.execute(
         select(func.count()).select_from(PatientMedication).where(PatientMedication.patient_id == pid)
     ).scalar_one() == 0
+
+def test_missing_start_date_counts_from_creation(client):
+    """Назначение без started_on: знаменатель с даты создания, а не за всё окно.
+
+    Регресс: назначение, заведённое сегодня, требовало приёмов за все 7 дней
+    (expected=14 вместо 2) и занижало процент.
+    """
+    ph, pid, c = _setup(client, "adh-nostart@test.ru")
+    med = _med(client, c, pid, times_per_day=2, started_on=None)
+    _mark(client, ph, "taken", med["id"])
+    stats = _stats(client, ph, days=7)
+    (row,) = stats["medications"]
+    assert row["expected"] == 2
+    assert row["pct"] == 50
+    assert stats["summary"]["expected"] == 2

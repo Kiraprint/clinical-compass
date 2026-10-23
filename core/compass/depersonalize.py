@@ -147,7 +147,7 @@ def _fio_patterns(name: str) -> list[re.Pattern[str]]:
         variants.append(f"{re.escape(stem)}[а-яё]{{0,3}}")
         if len(esc) >= 2:
             initials = " ".join(f"{w[0]}." for w in esc[1:])
-            variants.append(f"{re.escape(stem)}[а-яё]{{0,3}}\s+{re.escape(initials)}")
+            variants.append(rf"{re.escape(stem)}[а-яё]{{0,3}}\s+{re.escape(initials)}")
     return [re.compile(v, re.IGNORECASE) for v in variants]
 
 
