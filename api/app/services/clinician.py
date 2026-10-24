@@ -311,6 +311,13 @@ async def _patient_card(db: AsyncSession, patient_id) -> dict:
                 "total_score": last.total_score,
                 "severity": last.severity,
                 "triage": last.triage,
+                # FR-34: NOT_ASSESSED означает, что пункт 9 пациенту не задавался,
+                # то есть риск не оценён, а не отрицателен.
+                "risk_flags": last.risk_flags or [],
+                "omitted_items": [
+                    f.get("item_key") for f in (last.risk_flags or [])
+                    if f.get("kind") == "NOT_ASSESSED" and f.get("item_key")
+                ],
                 "computed_at": last.computed_at.isoformat(),
             }
             if last

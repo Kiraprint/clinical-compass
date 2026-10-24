@@ -784,6 +784,9 @@ export interface Report {
     total_score: number;
     severity: string;
     triage: string;
+    // FR-34: kind="NOT_ASSESSED" — пункт 9 не задавался, риск не оценён.
+    risk_flags?: { kind: string; item_key: string | null }[];
+    omitted_items?: string[];
     computed_at: string;
   } | null;
   history: { total_score: number; severity: string; triage: string; computed_at: string }[];

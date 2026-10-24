@@ -5,38 +5,47 @@ import {
   api,
   ApiError,
   Assessment,
+  CheckinHistoryPoint,
   CheckinState,
   ChatMessage,
   Consent,
   DiaryEntry,
   MoodScale,
+  MyAdverseEvent,
+  MyDrugReference,
+  NotificationItem,
   PartialKind,
+  PatientContacts,
   Questionnaire,
   Timeline,
-  MyAdverseEvent,
-  AdverseSeverity,
 } from "../api";
 import TrendChart from "../TrendChart";
 
-type Tab = "today" | "screening" | "diary" | "chat" | "trend" | "adherence" | "adverse" | "contacts";
+type Tab =
+  | "today"
+  | "screening"
+  | "diary"
+  | "trend"
+  | "adherence"
+  | "adverse"
+  | "drugs"
+  | "account";
 
-// «Сегодня» — один ежедневный экран: чек-ин + дневник + приём лекарств.
-// Дневник и Приверженность остаются как история, запись идёт только из «Сегодня».
-const TABS: { id: Tab; label: string }[] = [
+// FR-33: «Сегодня» — домашний экран (чек-ин + дневник + приём лекарств).
+// Меню «3 полоски»: четыре пункта из ТЗ плюс возврат на главную.
+const MENU: { id: Tab; label: string }[] = [
   { id: "today", label: "Сегодня" },
-  { id: "screening", label: "Скрининг" },
   { id: "diary", label: "Дневник" },
-  { id: "adherence", label: "Приверженность" },
-  { id: "chat", label: "Чат поддержки" },
   { id: "trend", label: "Мой тренд" },
   { id: "adverse", label: "Побочные эффекты" },
-  { id: "contacts", label: "Контакты" },
+  { id: "drugs", label: "Справочник" },
 ];
 
-export default function PatientView() {
+export default function PatientView({ onLogout }: { onLogout?: () => void }) {
   const [consent, setConsent] = useState<Consent | null>(null);
   const [consentChecked, setConsentChecked] = useState(false);
   const [tab, setTab] = useState<Tab>("today");
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const loadConsent = useCallback(async () => {
     try {
@@ -78,29 +87,63 @@ export default function PatientView() {
     );
   }
 
+  const go = (id: Tab) => {
+    setTab(id);
+    setMenuOpen(false);
+  };
+
   return (
     <>
-      <div className="alert-info row">
-        <span style={{ fontSize: 13 }}>Согласие активно (v{consent.version}, от {consent.signed_at.slice(0, 10)})</span>
-        <button className="ghost" onClick={revokeConsent}>
-          Отозвать
+      <div className="patient-bar">
+        <button
+          className="ghost patient-burger"
+          aria-label="Меню"
+          aria-expanded={menuOpen}
+          aria-controls="patient-menu"
+          onClick={() => setMenuOpen((open) => !open)}
+        >
+          <span aria-hidden="true">☰</span> Меню
+        </button>
+        <span className="patient-bar-spacer" />
+        <button className="ghost" aria-pressed={tab === "account"} onClick={() => go("account")}>
+          Личный кабинет
         </button>
       </div>
-      <div className="tabs">
-        {TABS.map((t) => (
-          <button key={t.id} className={tab === t.id ? "active" : ""} onClick={() => setTab(t.id)}>
-            {t.label}
-          </button>
-        ))}
-      </div>
-      {tab === "today" && <TodayTab />}
+      {menuOpen && (
+        <nav id="patient-menu" className="patient-menu" aria-label="Меню пациента">
+          {MENU.map((item) => (
+            <button
+              key={item.id}
+              className={tab === item.id ? "active" : ""}
+              aria-current={tab === item.id ? "page" : undefined}
+              onClick={() => go(item.id)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </nav>
+      )}
+      {tab === "today" && (
+        <>
+          <div className="alert-info row">
+            <span style={{ fontSize: 13 }}>Согласие активно (v{consent.version}, от {consent.signed_at.slice(0, 10)})</span>
+            <button className="ghost" onClick={revokeConsent}>
+              Отозвать
+            </button>
+          </div>
+          <TodayTab onOpen={go} />
+        </>
+      )}
       {tab === "screening" && <ScreeningTab />}
       {tab === "diary" && <DiaryTab />}
       {tab === "adherence" && <AdherenceTab />}
-      {tab === "chat" && <ChatTab />}
       {tab === "trend" && <TrendTab />}
       {tab === "adverse" && <AdverseTab />}
-      {tab === "contacts" && <ContactsTab />}
+      {tab === "drugs" && <DrugReferenceTab />}
+      {tab === "account" && (
+        <AccountScreen consent={consent} onRevoke={revokeConsent} onLogout={onLogout} />
+      )}
+      <ChatPanel />
     </>
   );
 }
@@ -164,6 +207,9 @@ function ScreeningTab() {
     }
   };
 
+  // FR-34: пункт 9 пациенту не задаётся — помечаем, что риск по нему не оценён.
+  const notAssessed = (result?.risk_flags ?? []).filter((f) => f.kind === "NOT_ASSESSED");
+
   if (result) {
     return (
       <div className="card">
@@ -174,9 +220,17 @@ function ScreeningTab() {
             Балл {result.total_score} · {result.severity}
           </span>
         </div>
+        {notAssessed.length > 0 && (
+          <div className="alert-info" style={{ marginTop: 12 }} role="status">
+            <b>Пункт 9 не задавался.</b> Сумма посчитана по 8 пунктам, пороги те же, что у полной
+            шкалы (5 / 10 / 15 / 20), максимум — 24. Риск по этому пункту <b>не оценён</b>: это не
+            значит, что его нет. О риске спрашивает врач и ежедневный чек-ин.
+          </div>
+        )}
         {result.escalation && (
           <div className="alert-danger" style={{ marginTop: 12 }}>
-            <b>Требуется внимание.</b> Наши специалисты уведомлены. Если вам сейчас тяжело — позвоните:
+            <b>Спасибо, что ответили.</b> Результат сохранён — врач увидит его в вашей карте. Если
+            вам сейчас тяжело, позвоните:
             {result.escalation.help_resources.map((r) => (
               <div key={r.phone}>
                 {r.title}: <b>{r.phone}</b>
@@ -524,7 +578,7 @@ function CheckinCard() {
   );
 }
 
-function TodayTab() {
+function TodayTab({ onOpen }: { onOpen: (tab: Tab) => void }) {
   const [content, setContent] = useState("");
   const [mood, setMood] = useState<number | null>(null);
   const [sleep, setSleep] = useState(7);
@@ -566,7 +620,7 @@ function TodayTab() {
       if (content.trim()) {
         await api.postDiary({ content, mood: mood ?? undefined, sleep_h: sleep, tags: [] });
         setContent("");
-        setMood(null);
+        // Выбор настроения оставляем: пользователь видит, что именно сохранилось.
         parts.push("дневник");
       }
       const ref = new Date();
@@ -601,7 +655,9 @@ function TodayTab() {
     return sameDay(r.created_at, ref) && (adhMedId ? r.medication_id === adhMedId : !r.medication_id);
   });
   return (
-    <div className="card">
+    <>
+      <HomeHead onOpen={onOpen} />
+      <div className="card">
       <h2>Сегодня</h2>
       <p style={{ color: "#5a6478", fontSize: 14 }}>
         {new Date().toLocaleDateString("ru-RU", { weekday: "long", day: "numeric", month: "long" })} — чек-ин,
@@ -618,12 +674,13 @@ function TodayTab() {
         <div>
           <label>Настроение</label>
           <div className="row mood">
+            {/* FR-33: повторный клик снимает выбор — настроение необязательно. */}
             {MOOD_OPTIONS.map((option, v) => (
               <button
                 key={v}
                 className={mood === v ? "on" : ""}
                 aria-pressed={mood === v}
-                onClick={() => setMood(v)}
+                onClick={() => setMood((current) => (current === v ? null : v))}
               >
                 {option.emoji} {option.label}
               </button>
@@ -645,7 +702,12 @@ function TodayTab() {
         </div>
       )}
 
-      <h3>Приём лекарств</h3>
+      <div className="row" style={{ alignItems: "baseline" }}>
+        <h3 style={{ marginRight: 8 }}>Приём лекарств</h3>
+        <button className="ghost" onClick={() => onOpen("adherence")}>
+          История приёма
+        </button>
+      </div>
       {adhMeds.length > 0 && (
         <select value={adhMedId} onChange={(e) => setAdhMedId(e.target.value)}>
           {adhMeds.map((m) => (
@@ -705,7 +767,8 @@ function TodayTab() {
         {saved && <span style={{ color: "#2e7d32", fontSize: 13 }}>{saved}</span>}
       </div>
       {err && <p className="error">{err}</p>}
-    </div>
+      </div>
+    </>
   );
 }
 
@@ -809,7 +872,7 @@ function AdherenceTab() {
       <div style={{ display: "flex", gap: 8, margin: "8px 0" }}>
         {[7, 30].map((n) => (
           <button key={n} className={days === n ? "active" : "ghost"} onClick={() => setDays(n)}>
-            {n} дней
+            за последние {n} дней
           </button>
         ))}
       </div>
@@ -921,31 +984,46 @@ function AdherenceTab() {
   );
 }
 
+// FR-34 C: чат с врачом — пассивная плашка в правом нижнем углу, не отдельный раздел.
 function ChatTab() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
-  const [alert, setAlert] = useState<string | null>(null);
+  const [alert, setAlert] = useState(false);
+  const [quiet, setQuiet] = useState(false);
+  const [error, setError] = useState("");
 
   const load = async () => {
     setMessages((await api.getChat()).items);
   };
   useEffect(() => {
-    load();
+    load().catch((e: unknown) => setError(e instanceof ApiError ? e.detail : String(e)));
   }, []);
 
   const send = async () => {
     if (!input.trim()) return;
-    const reply = await api.postChat(input);
-    setInput("");
-    // FR-34: помощник отвечает не чаще одного раза в сутки — reply может быть null.
-    setAlert(reply.reply?.help_resources.length ? "Рекомендуем связаться со специалистом" : null);
-    await load();
+    setError("");
+    setQuiet(false);
+    try {
+      const reply = await api.postChat(input);
+      setInput("");
+      setAlert(Boolean(reply.reply?.help_resources.length));
+      // Помощник отвечает не чаще раза в день: второе сообщение просто сохраняется.
+      setQuiet(reply.reply === null);
+      await load();
+    } catch (e: unknown) {
+      setError(e instanceof ApiError ? e.detail : String(e));
+    }
   };
 
   return (
-    <div className="card">
-      <h2>Чат поддержки</h2>
-      <div style={{ maxHeight: 320, overflowY: "auto", marginBottom: 10 }}>
+    <div className="patient-chat-inner">
+      <h2>Чат с врачом</h2>
+      <div className="chat-messages" style={{ maxHeight: 260, overflowY: "auto", marginBottom: 10 }}>
+        {messages.length === 0 && (
+          <p style={{ color: "#5a6478", fontSize: 13 }}>
+            Здесь можно написать врачу о самочувствии. Сообщение увидит врач в вашей карте.
+          </p>
+        )}
         {messages.map((m) => (
           <div key={m.id} className={`msg ${m.sender === "SYSTEM" ? "system" : ""}`}>
             <b>{m.sender === "SYSTEM" ? "Помощник: " : m.sender === "CLINICIAN" ? "Врач: " : "Вы: "}</b>
@@ -953,26 +1031,166 @@ function ChatTab() {
           </div>
         ))}
       </div>
-      {alert && <div className="alert-danger">{alert}: единый телефон доверия 8-800-2000-122, экстренная служба 112</div>}
+      {alert && (
+        <div className="alert-danger">
+          Если сейчас тяжело — позвоните: 8-800-2000-122 (телефон доверия), 112 (экстренная помощь).
+        </div>
+      )}
+      {quiet && (
+        <p className="alert-info" style={{ fontSize: 13 }}>
+          Помощник отвечает не чаще одного раза в день. Ваше сообщение сохранено — врач увидит его в карте.
+        </p>
+      )}
+      {error && <p className="error">{error}</p>}
       <div className="row">
-        <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} />
-        <button onClick={send}>Отправить</button>
+        <input
+          aria-label="Сообщение врачу"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && send()}
+        />
+        <button onClick={send} disabled={!input.trim()}>
+          Отправить
+        </button>
       </div>
     </div>
   );
 }
 
+// FR-33 E: «Мой тренд» — три SVG-графика без зависимостей: скрининги по шкалам,
+// благополучие по чек-инам и процент приверженности по дням.
 function TrendTab() {
   const [timeline, setTimeline] = useState<Timeline | null>(null);
+  const [checkins, setCheckins] = useState<CheckinHistoryPoint[]>([]);
+  const [adherence, setAdherence] = useState<AdherenceSummary | null>(null);
+  const [error, setError] = useState("");
+
   useEffect(() => {
-    api.getTimeline(90).then(setTimeline);
+    Promise.all([api.getTimeline(90), api.getCheckinHistory(90), api.getMyAdherence(90)])
+      .then(([t, c, a]) => {
+        setTimeline(t);
+        setCheckins(c.items);
+        setAdherence(a);
+      })
+      .catch((e: unknown) => setError(e instanceof ApiError ? e.detail : String(e)));
   }, []);
-  if (!timeline) return <div className="card">Загрузка…</div>;
+
+  if (error) return <div className="card"><p className="error">{error}</p></div>;
+  if (!timeline || !adherence) return <div className="card">Загрузка…</div>;
+
+  // Одна линия на шкалу: у PHQ-8 и GAD-7 разные максимумы.
+  const byScale = new Map<string, { label: string; value: number }[]>();
+  timeline.runs.forEach((run) => {
+    const code = run.questionnaire_code ?? "шкала";
+    const list = byScale.get(code) ?? [];
+    list.push({ label: run.computed_at.slice(0, 10), value: run.total_score });
+    byScale.set(code, list);
+  });
+  const scaleCharts = [...byScale.entries()].map(([code, points]) => {
+    const max = code === "PHQ-9" ? 24 : 21;
+    return { code, points, max };
+  });
+
+  const adherenceByDay = new Map<string, { score: number; total: number }>();
+  adherence.items.forEach((record) => {
+    if (record.status === "not_scheduled") return;
+    const day = record.created_at.slice(0, 10);
+    const bucket = adherenceByDay.get(day) ?? { score: 0, total: 0 };
+    bucket.total += 1;
+    if (record.status === "taken") bucket.score += 1;
+    else if (record.status === "partial") bucket.score += 0.5;
+    adherenceByDay.set(day, bucket);
+  });
+  const adherencePoints = [...adherenceByDay.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([day, b]) => ({ label: day, value: Math.round((100 * b.score) / b.total) }));
+
   return (
-    <div className="card">
-      <h2>Динамика за 90 дней</h2>
-      <TrendChart timeline={timeline} />
-      {timeline.runs.length === 0 && <p style={{ color: "#5a6478" }}>Пройдите первый скрининг, чтобы увидеть тренд.</p>}
+    <>
+      <div className="card">
+        <h2>Динамика за 90 дней</h2>
+        <TrendChart timeline={timeline} />
+        {timeline.runs.length === 0 && <p style={{ color: "#5a6478" }}>Пройдите первый скрининг, чтобы увидеть тренд.</p>}
+        {scaleCharts.map((chart) => (
+          <LineChart
+            key={chart.code}
+            title={`Скрининг ${chart.code}`}
+            points={chart.points}
+            max={chart.max}
+            unit=" б."
+            color="#2f6fed"
+          />
+        ))}
+      </div>
+      <div className="card">
+        <h2>Чек-ины</h2>
+        <p style={{ color: "#5a6478", fontSize: 13 }}>
+          Средняя оценка благополучия по пунктам чек-ина: 0 — тяжело, 4 — хорошо. Это не диагноз,
+          а динамика самонаблюдения.
+        </p>
+        <LineChart title="Благополучие по дням" points={checkins.map((c) => ({ label: c.date, value: c.wellbeing }))} max={4} unit="" color="#2e7d32" />
+      </div>
+      <div className="card">
+        <h2>Приверженность</h2>
+        <p style={{ color: "#5a6478", fontSize: 13 }}>
+          Процент принятых лекарств среди отмеченных за день: принято — 100%, частично — 50%,
+          пропущено — 0%. Дни без отметок и приёмы «вне расписания» не входят в расчёт.
+        </p>
+        <LineChart title="Приём лекарств, %" points={adherencePoints} max={100} unit="%" color="#7b5cd6" />
+      </div>
+    </>
+  );
+}
+
+// Простая полилиния с точками и подписями: один компонент на все три графика.
+function LineChart({
+  title,
+  points,
+  max,
+  unit,
+  color,
+}: {
+  title: string;
+  points: { label: string; value: number }[];
+  max: number;
+  unit: string;
+  color: string;
+}) {
+  if (points.length < 2) {
+    return (
+      <div style={{ marginTop: 12 }}>
+        <h3>{title}</h3>
+        <small>Недостаточно данных (нужно 2+ точки).</small>
+      </div>
+    );
+  }
+  const w = 560;
+  const h = 150;
+  const pad = 30;
+  const px = (i: number) => pad + (i * (w - pad * 2)) / (points.length - 1);
+  const py = (v: number) => h - pad - (Math.max(0, Math.min(max, v)) * (h - pad * 2)) / max;
+  const line = points.map((p, i) => `${px(i).toFixed(1)},${py(p.value).toFixed(1)}`).join(" ");
+  const last = points[points.length - 1];
+  return (
+    <div style={{ marginTop: 12 }}>
+      <h3>{title}</h3>
+      <svg viewBox={`0 0 ${w} ${h}`} style={{ width: "100%", height: "auto" }} role="img" aria-label={`${title}: ${points.length} точек`}>
+        <line x1={pad} y1={py(0)} x2={w - pad} y2={py(0)} stroke="#e2e6ee" />
+        <line x1={pad} y1={py(max)} x2={w - pad} y2={py(max)} stroke="#e2e6ee" />
+        <text x={4} y={py(max) + 4} fontSize={10} fill="#5a6478">{max}</text>
+        <text x={4} y={py(0) + 4} fontSize={10} fill="#5a6478">0</text>
+        <text x={pad} y={h - 6} fontSize={10} fill="#5a6478">{points[0].label}</text>
+        <text x={w - pad} y={h - 6} fontSize={10} fill="#5a6478" textAnchor="end">{last.label}</text>
+        <polyline points={line} fill="none" stroke={color} strokeWidth={2.5} strokeLinejoin="round" />
+        {points.map((p, i) => (
+          <circle key={`${p.label}-${i}`} cx={px(i)} cy={py(p.value)} r={3} fill={color}>
+            <title>{`${p.label}: ${p.value}${unit}`}</title>
+          </circle>
+        ))}
+      </svg>
+      <small>
+        Последнее: {last.value}{unit} · {last.label}
+      </small>
     </div>
   );
 }
@@ -1046,14 +1264,20 @@ function ContactsTab() {
   );
 }
 
-// FR-28: пациент сообщает о нежелательном явлении, врач проверяет его в карточке.
-// Статус виден пациенту, врачебные заметки — нет. При тяжёлом явлении форма
-// не обещает мгновенного ответа, а прямо направляет в экстренную помощь.
+// FR-34: пациент видит оценку врача по-русски; NULL — «не оценена» (бейдж не выводим).
+const ADVERSE_SEVERITY_LABELS: Record<string, string> = {
+  mild: "лёгкое",
+  moderate: "умеренное",
+  severe: "тяжёлое",
+};
+
+// FR-28/FR-34: пациент сообщает о нежелательном явлении, врач проверяет его в карточке.
+// Тяжесть — врачебная оценка (в форме её нет), статус виден пациенту,
+// врачебные заметки — нет. Форма не обещает мгновенного ответа.
 function AdverseTab() {
   const [items, setItems] = useState<MyAdverseEvent[]>([]);
   const [active, setActive] = useState<{ id: string; title: string }[]>([]);
   const [text, setText] = useState("");
-  const [severity, setSeverity] = useState<AdverseSeverity>("mild");
   const [onsetDate, setOnsetDate] = useState(new Date().toISOString().slice(0, 10));
   const [medId, setMedId] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1081,13 +1305,11 @@ function AdverseTab() {
     try {
       await api.reportAdverseEvent({
         event_text: text.trim(),
-        severity,
         onset_date: onsetDate,
         medication_id: medId || undefined,
       });
       setText("");
       setMedId("");
-      setSeverity("mild");
       setSaved(true);
       await load();
     } catch (e: unknown) {
@@ -1114,14 +1336,6 @@ function AdverseTab() {
           style={{ flex: "1 1 260px", minWidth: 220 }}
         />
         <label style={{ fontSize: 13 }}>
-          Тяжесть
-          <select value={severity} onChange={(e) => setSeverity(e.target.value as AdverseSeverity)}>
-            <option value="mild">лёгкое</option>
-            <option value="moderate">умеренное</option>
-            <option value="severe">тяжёлое</option>
-          </select>
-        </label>
-        <label style={{ fontSize: 13 }}>
           Дата
           <input
             type="date"
@@ -1143,11 +1357,9 @@ function AdverseTab() {
           {busy ? "Отправка…" : "Сообщить"}
         </button>
       </div>
-      {severity === "severe" && (
-        <p className="error" style={{ fontWeight: 600 }}>
-          Срочно обратитесь за помощью: 112
-        </p>
-      )}
+      <p style={{ color: "#5a6478", fontSize: 13 }}>
+        Тяжесть оценит врач при проверке. Если помощь нужна срочно, звоните 112.
+      </p>
       {saved && <p style={{ color: "#2e7d32", fontSize: 13 }}>Сообщение отправлено врачу</p>}
       {error && <p className="error">{error}</p>}
 
@@ -1165,13 +1377,19 @@ function AdverseTab() {
                   <td>{e.onset_date}</td>
                   <td>{e.event_text}</td>
                   <td>
-                    <span className={`badge ${e.severity === "severe" ? "RED" : e.severity === "moderate" ? "YELLOW" : "GREEN"}`}>
-                      {e.severity}
-                    </span>
-                    {e.severity === "severe" && (
-                      <div style={{ color: "#b00020", fontSize: 12, marginTop: 4 }}>
-                        Срочно обратитесь за помощью: 112
-                      </div>
+                    {e.severity ? (
+                      <>
+                        <span className={`badge ${e.severity === "severe" ? "RED" : e.severity === "moderate" ? "YELLOW" : "GREEN"}`}>
+                          {ADVERSE_SEVERITY_LABELS[e.severity]}
+                        </span>
+                        {e.severity === "severe" && (
+                          <div style={{ color: "#b00020", fontSize: 12, marginTop: 4 }}>
+                            Срочно обратитесь за помощью: 112
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <span style={{ color: "#5a6478", fontSize: 13 }}>не оценена</span>
                     )}
                   </td>
                   <td>
@@ -1183,6 +1401,295 @@ function AdverseTab() {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// FR-33: маска телефона для личного кабинета — полное значение показываем
+// только в режиме правки (сервер отдаёт своё значение без маски).
+function maskPhone(phone: string | null): string {
+  if (!phone) return "не указан";
+  const digits = phone.replace(/\D/g, "");
+  if (digits.length < 7) return "•••";
+  const rest = digits.slice(-7);
+  return `+${digits[0]}•••${rest.slice(0, 3)}-${rest.slice(3, 5)}-${rest.slice(5)}`;
+}
+
+// Главный экран (FR-33 A): приветствие, дата и время, напоминания и баннер
+// назначенного врачом скрининга. Ниже — чек-ин, дневник и приём лекарств.
+function HomeHead({ onOpen }: { onOpen: (tab: Tab) => void }) {
+  const [contacts, setContacts] = useState<PatientContacts | null>(null);
+  const [scales, setScales] = useState<{ code: string; title: string }[]>([]);
+  const [checkinDone, setCheckinDone] = useState<boolean | null>(null);
+  const [medsMarked, setMedsMarked] = useState<boolean | null>(null);
+  const [unread, setUnread] = useState<NotificationItem[]>([]);
+
+  useEffect(() => {
+    api.myContacts().then(setContacts).catch(() => undefined);
+    api
+      .prescribedScales()
+      .then((p) => setScales(p.scales))
+      .catch(() => undefined);
+    api
+      .todayCheckin()
+      .then((s) => setCheckinDone(s.status === "completed"))
+      .catch(() => setCheckinDone(null));
+    api
+      .getMyAdherence(1)
+      .then((a) => {
+        const today = new Date();
+        const marked = a.items.some((r) => sameDay(r.created_at, today));
+        setMedsMarked(a.active_medications.length === 0 ? true : marked);
+      })
+      .catch(() => setMedsMarked(null));
+    api
+      .getNotifications()
+      .then((n) => setUnread(n.items.filter((item) => !item.read).slice(0, 3)))
+      .catch(() => undefined);
+  }, []);
+
+  const now = new Date();
+  const reminders: string[] = [];
+  if (checkinDone === false) reminders.push("Чек-ин на сегодня ещё не выполнен.");
+  if (medsMarked === false) reminders.push("Приём лекарств на сегодня не отмечен.");
+  if (scales.length > 0) reminders.push(`Назначен скрининг: ${scales.map((s) => s.title).join(", ")}.`);
+  unread.forEach((n) => reminders.push(n.title));
+
+  return (
+    <section className="card patient-home">
+      <h2>Здравствуйте{contacts?.fio ? `, ${contacts.fio}` : ""}!</h2>
+      <p className="patient-now">
+        {now.toLocaleDateString("ru-RU", { weekday: "long", day: "numeric", month: "long" })} ·{" "}
+        {now.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}
+      </p>
+      {scales.length > 0 && (
+        <div className="patient-banner">
+          <b>Скрининг, назначенный врачом</b>
+          <p>{scales.map((s) => s.title).join(", ")}</p>
+          <button onClick={() => onOpen("screening")}>Перейти к скринингу</button>
+        </div>
+      )}
+      <h3>Напоминания</h3>
+      {reminders.length === 0 ? (
+        <p style={{ color: "#5a6478", fontSize: 14 }}>На сегодня всё отмечено.</p>
+      ) : (
+        <ul className="patient-reminders">
+          {reminders.map((text) => (
+            <li key={text}>{text}</li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+// FR-33 D: «Справочник» — только препараты из назначений пациента плюс
+// карточка ГРЛС, если название нашлось в справочнике.
+function DrugReferenceTab() {
+  const [items, setItems] = useState<MyDrugReference[]>([]);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api
+      .getMyDrugs()
+      .then((r) => setItems(r.items))
+      .catch((e: unknown) => setError(e instanceof ApiError ? e.detail : String(e)))
+      .finally(() => setLoading(false));
+  }, []);
+
+  return (
+    <div className="card">
+      <h2>Справочник</h2>
+      <p style={{ color: "#5a6478", fontSize: 14 }}>
+        Карточки препаратов, которые назначил врач. Это справочная информация, а не назначение:
+        дозу и схему не меняйте без врача.
+      </p>
+      {loading && <p>Загрузка…</p>}
+      {error && <p className="error">{error}</p>}
+      {!loading && items.length === 0 && <p style={{ color: "#5a6478" }}>Назначенных препаратов пока нет.</p>}
+      {items.map((item) => (
+        <section key={item.medication_id} className="patient-drug">
+          <h3>{item.title}</h3>
+          <p style={{ fontSize: 13, color: "#5a6478" }}>
+            {item.dosage ? `${item.dosage} · ` : ""}
+            {item.times_per_day ? `${item.times_per_day} раз(а) в день · ` : ""}
+            {item.status_label}
+          </p>
+          {item.drug ? (
+            <>
+              <p>
+                <b>{item.drug.trade_name}</b>
+                {item.drug.inn ? ` · ${item.drug.inn}` : ""}
+                {item.drug.form ? ` · ${item.drug.form}` : ""}
+              </p>
+              {item.drug.indications && <p><b>Показания.</b> {item.drug.indications}</p>}
+              {item.drug.pharmacology && <p><b>Как действует.</b> {item.drug.pharmacology}</p>}
+              {item.drug.contraindications && <p><b>Противопоказания.</b> {item.drug.contraindications}</p>}
+              {item.drug.adverse_events && <p><b>Нежелательные явления.</b> {item.drug.adverse_events}</p>}
+              {item.drug.special_notes && <p><b>Особые указания.</b> {item.drug.special_notes}</p>}
+              {item.drug.source_urls.length > 0 && (
+                <p style={{ fontSize: 13 }}>
+                  Источники:{" "}
+                  {item.drug.source_urls.map((url) => (
+                    <a key={url} href={url} target="_blank" rel="noreferrer" style={{ marginRight: 8 }}>
+                      ссылка
+                    </a>
+                  ))}
+                </p>
+              )}
+            </>
+          ) : (
+            <p style={{ color: "#5a6478", fontSize: 13 }}>
+              Карточки в справочнике нет — уточните информацию у врача или в инструкции к препарату.
+            </p>
+          )}
+        </section>
+      ))}
+    </div>
+  );
+}
+
+// FR-33 B: личный кабинет — ФИО, e-mail, телефон маской с правкой, дата рождения,
+// правовые документы и выход.
+function AccountScreen({
+  consent,
+  onRevoke,
+  onLogout,
+}: {
+  consent: Consent;
+  onRevoke: () => Promise<void>;
+  onLogout?: () => void;
+}) {
+  const [contacts, setContacts] = useState<PatientContacts | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [phone, setPhone] = useState("");
+  const [birthDate, setBirthDate] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState("");
+
+  const apply = (next: PatientContacts) => {
+    setContacts(next);
+    setPhone(next.phone ?? "");
+    setBirthDate(next.birth_date ?? "");
+  };
+
+  useEffect(() => {
+    api
+      .myContacts()
+      .then(apply)
+      .catch((e: unknown) => setError(e instanceof ApiError ? e.detail : String(e)));
+  }, []);
+
+  const save = async () => {
+    setError("");
+    setBusy(true);
+    try {
+      apply(await api.myContactsUpdate({ phone: phone.trim() || null, birth_date: birthDate || null }));
+      setEditing(false);
+      setSaved("Контактные данные сохранены");
+    } catch (e: unknown) {
+      setError(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card">
+      <h2>Личный кабинет</h2>
+      {contacts ? (
+        <dl className="patient-account">
+          <dt>ФИО</dt>
+          <dd>{contacts.fio || "не указано"}</dd>
+          <dt>E-mail</dt>
+          <dd>{contacts.email || "не указан"}</dd>
+          <dt>Телефон</dt>
+          <dd>
+            {editing ? (
+              <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+7 900 000-00-00" />
+            ) : (
+              <>
+                {maskPhone(contacts.phone)}{" "}
+                <button className="ghost" onClick={() => setEditing(true)}>
+                  Изменить
+                </button>
+              </>
+            )}
+          </dd>
+          <dt>Дата рождения</dt>
+          <dd>
+            {editing ? (
+              <input type="date" value={birthDate} onChange={(e) => setBirthDate(e.target.value)} />
+            ) : (
+              contacts.birth_date || "не указана"
+            )}
+          </dd>
+        </dl>
+      ) : (
+        !error && <p>Загрузка…</p>
+      )}
+      {editing && (
+        <div className="row" style={{ marginTop: 10 }}>
+          <button onClick={save} disabled={busy}>
+            {busy ? "Сохраняем…" : "Сохранить"}
+          </button>
+          <button className="ghost" onClick={() => setEditing(false)} disabled={busy}>
+            Отмена
+          </button>
+        </div>
+      )}
+      {saved && <p style={{ color: "#2e7d32", fontSize: 13 }}>{saved}</p>}
+      {error && <p className="error">{error}</p>}
+      <p style={{ color: "#5a6478", fontSize: 13 }}>
+        Телефон хранится в зашифрованном виде и показывается врачу только маской.
+      </p>
+      <h3>Документы</h3>
+      <ul>
+        <li>
+          <a href="/legal/terms">Пользовательское соглашение</a>
+        </li>
+        <li>
+          <a href="/legal/consent">Согласие на обработку персональных данных</a>
+        </li>
+      </ul>
+      <h3>Согласие</h3>
+      <p style={{ fontSize: 13 }}>
+        Активно с {consent.signed_at.slice(0, 10)} (версия {consent.version}).
+      </p>
+      <div className="row">
+        <button className="ghost" onClick={onRevoke}>
+          Отозвать согласие
+        </button>
+        {onLogout && (
+          <button className="ghost" onClick={onLogout}>
+            Выйти
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Плашка чата: свёрнута в кнопку, разворачивается поверх контента и не мешает чтению.
+function ChatPanel() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={`patient-chat ${open ? "open" : ""}`}>
+      <button
+        className="patient-chat-toggle"
+        aria-expanded={open}
+        aria-controls="patient-chat-body"
+        onClick={() => setOpen((v) => !v)}
+      >
+        {open ? "Свернуть чат" : "Чат с врачом"}
+      </button>
+      {open && (
+        <div id="patient-chat-body" className="patient-chat-body" role="dialog" aria-label="Чат с врачом">
+          <ChatTab />
         </div>
       )}
     </div>
