@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.deps import require_consent
@@ -23,26 +23,26 @@ class AnswersBody(BaseModel):
 
 
 @router.get("/checkins/today")
-def today(user: User = Depends(require_consent), db: Session = Depends(get_db)):
-    return checkin_service.today(db, user.id)
+async def today(user: User = Depends(require_consent), db: AsyncSession = Depends(get_db)):
+    return await checkin_service.today(db, user.id)
 
 
 @router.post("/checkins")
-def start(
+async def start(
     response: Response,
     user: User = Depends(require_consent),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
-    body, created = checkin_service.start(db, user.id)
+    body, created = await checkin_service.start(db, user.id)
     response.status_code = 201 if created else 200
     return body
 
 
 @router.post("/checkins/{session_id}/answers")
-def submit(
+async def submit(
     session_id: uuid.UUID,
     body: AnswersBody,
     user: User = Depends(require_consent),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
-    return checkin_service.submit(db, user.id, session_id, body.answers)
+    return await checkin_service.submit(db, user.id, session_id, body.answers)

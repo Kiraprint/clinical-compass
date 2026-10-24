@@ -250,8 +250,8 @@ def test_login_without_otp_when_requirement_off(client, monkeypatch):
     # достаём сохранённый totp_secret из БД и входим с верным кодом
     from sqlalchemy import select
     from app.models import User
-    from app.db import SessionLocal
-    with SessionLocal() as db:
+    from app.db import SyncSessionLocal
+    with SyncSessionLocal() as db:
         secret = db.scalar(select(User.totp_secret).where(User.email == email))
     assert secret  # секрет не был стёрт при отключённом флаге
     r = client.post("/api/v1/auth/login",

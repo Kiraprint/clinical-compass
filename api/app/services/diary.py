@@ -6,13 +6,13 @@ from datetime import datetime
 from typing import Sequence
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import Problem
 from app.models import DiaryEntry
 
 
-def create(db: Session, patient_id, content: str, mood: int | None = None, sleep_h: float | None = None, tags: Sequence[str] = ()) -> DiaryEntry:
+async def create(db: AsyncSession, patient_id, content: str, mood: int | None = None, sleep_h: float | None = None, tags: Sequence[str] = ()) -> DiaryEntry:
     if mood is not None and not 0 <= mood <= 4:
         raise Problem(422, "VALIDATION", "mood должен быть в диапазоне 0..4")
     if sleep_h is not None and not 0 <= sleep_h <= 12:
@@ -26,15 +26,15 @@ def create(db: Session, patient_id, content: str, mood: int | None = None, sleep
         tags=list(tags),
     )
     db.add(entry)
-    db.commit()
-    db.refresh(entry)
+    await db.commit()
+    await db.refresh(entry)
     return entry
 
 
-def list_for_patient(db: Session, patient_id, limit: int = 50) -> list[DiaryEntry]:
-    rows = db.scalars(
+async def list_for_patient(db: AsyncSession, patient_id, limit: int = 50) -> list[DiaryEntry]:
+    rows = (await db.scalars(
         select(DiaryEntry).where(DiaryEntry.patient_id == patient_id).order_by(DiaryEntry.created_at.desc()).limit(limit)
-    ).all()
+    )).all()
     return list(rows)
 
 

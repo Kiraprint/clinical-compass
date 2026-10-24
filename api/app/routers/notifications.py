@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.deps import require_consent_if_patient
@@ -18,17 +18,17 @@ class ReadBody(BaseModel):
 
 
 @router.get("/me/notifications")
-def my_notifications(
+async def my_notifications(
     limit: int = Query(default=50, ge=1, le=200),
     user: User = Depends(require_consent_if_patient),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
-    return push.list_notifications(db, user.id, limit)
+    return await push.list_notifications(db, user.id, limit)
 
 
 @router.post("/me/notifications/read")
-def read_notifications(
-    body: ReadBody, user: User = Depends(require_consent_if_patient), db: Session = Depends(get_db)
+async def read_notifications(
+    body: ReadBody, user: User = Depends(require_consent_if_patient), db: AsyncSession = Depends(get_db)
 ):
-    push.mark_read(db, user.id, body.ids)
+    await push.mark_read(db, user.id, body.ids)
     return {"read": True}

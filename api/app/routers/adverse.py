@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import services
 from app.db import get_db
@@ -37,33 +37,33 @@ class PatientEventBody(BaseModel):
     # Справочный препарат пациент не выбирает: связь ставит врач при проверке.
 
 @router.post("/me/adverse-events", status_code=201)
-def report_adverse_event(
+async def report_adverse_event(
     body: PatientEventBody, request: Request,
-    user: User = Depends(require_consent), db: Session = Depends(get_db),
+    user: User = Depends(require_consent), db: AsyncSession = Depends(get_db),
 ):
     """Пациент сообщает о НЯ → status=pending, аудит ADVERSE_REPORT без текста."""
     if body.onset_date > _moscow_today():
         raise Problem(422, "VALIDATION", "Дата начала не может быть в будущем")
     ip = request.client.host if request.client else None
-    return services.adverse.report_patient_event(
+    return await services.adverse.report_patient_event(
         db, user, event_text=body.event_text, severity=body.severity,
         onset_date=body.onset_date, medication_id=body.medication_id, ip=ip,
     )
 
 @router.get("/me/adverse-events")
-def my_adverse_events(
-    user: User = Depends(require_consent), db: Session = Depends(get_db),
+async def my_adverse_events(
+    user: User = Depends(require_consent), db: AsyncSession = Depends(get_db),
 ):
     """Свои НЯ со статусом проверки: проверено врачом / на проверке / отклонено."""
-    return {"items": services.adverse.list_patient_events(db, user.id)}
+    return {"items": await services.adverse.list_patient_events(db, user.id)}
 
 @router.get("/clinician/adverse-events")
-def adverse_queue(
+async def adverse_queue(
     status: str | None = Query(default=None, pattern="^(pending|confirmed|rejected)$"),
-    user: User = Depends(require_clinician), db: Session = Depends(get_db),
+    user: User = Depends(require_clinician), db: AsyncSession = Depends(get_db),
 ):
     """Очередь НЯ по пациентам ростера врача (по умолчанию все статусы)."""
-    return {"items": services.adverse.list_queue(db, user.id, status)}
+    return {"items": await services.adverse.list_queue(db, user.id, status)}
 
 class VerifyBody(BaseModel):
     status: str = Field(pattern="^(confirmed|rejected)$")
@@ -75,9 +75,9 @@ class VerifyBody(BaseModel):
     verification_note: str | None = Field(default=None, max_length=2000)
 
 @router.patch("/clinician/patients/{patient_id}/adverse-events/{event_id}")
-def verify_adverse_event(
+async def verify_adverse_event(
     patient_id: uuid.UUID, event_id: uuid.UUID, body: VerifyBody, request: Request,
-    user: User = Depends(require_clinician), db: Session = Depends(get_db),
+    user: User = Depends(require_clinician), db: AsyncSession = Depends(get_db),
 ):
     """Проверка НЯ: подтвердить/отклонить, уточнить тяжесть и связь с препаратом.
 
@@ -85,7 +85,7 @@ def verify_adverse_event(
     ADVERSE_ALREADY_VERIFIED. Чужой пациент/событие → 404 ADVERSE_NOT_FOUND.
     """
     ip = request.client.host if request.client else None
-    return services.adverse.verify_event(
+    return await services.adverse.verify_event(
         db, user.id, patient_id, event_id,
         status=body.status, severity=body.severity, suspected_drug=body.suspected_drug,
         medication_id=body.medication_id, drug_id=body.drug_id,

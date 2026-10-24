@@ -5,7 +5,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import services
 from app.db import get_db
@@ -26,7 +26,7 @@ class AnswersBody(BaseModel):
 
 
 @router.get("/questionnaires")
-def list_questionnaires(user: User = Depends(require_consent), db: Session = Depends(get_db)):
+async def list_questionnaires(user: User = Depends(require_consent), db: AsyncSession = Depends(get_db)):
     """Каталог шкал для пациента (FR-2). Единый источник текстов — core/compass/scales.py.
 
     Клиницистские шкалы (HDRS-17) пациенту недоступны: их заполняет только врач.
@@ -47,7 +47,7 @@ def list_questionnaires(user: User = Depends(require_consent), db: Session = Dep
 
 
 @router.get("/me/prescribed-scales")
-def my_prescribed_scales(request: Request, user: User = Depends(require_consent), db: Session = Depends(get_db)):
+async def my_prescribed_scales(request: Request, user: User = Depends(require_consent), db: AsyncSession = Depends(get_db)):
     """Шкалы, назначенные пациенту врачом (item 1, multi-scale). Без назначения — дефолт [PHQ-9].
 
     F6: чтение назначенных шкал раскрывает контекст лечения — аудируется.
@@ -55,14 +55,14 @@ def my_prescribed_scales(request: Request, user: User = Depends(require_consent)
     from compass.scales import ALL_SCALES
 
     ip = request.client.host if request.client else None
-    services.audit.record(db, user.id, "READ_PRESCRIBED_SCALES", "patient", ip=ip)
-    db.commit()
-    codes = services.screening.prescribed_scales(db, user.id)
+    await services.audit.record(db, user.id, "READ_PRESCRIBED_SCALES", "patient", ip=ip)
+    await db.commit()
+    codes = await services.screening.prescribed_scales(db, user.id)
     return {"scales": [{"code": c, "title": ALL_SCALES[c].title} for c in codes]}
 
 @router.post("/screenings", status_code=201)
-def create_screening(body: ScreeningBody, user: User = Depends(require_consent), db: Session = Depends(get_db)):
-    run = services.screening.start_screening(db, user.id, body.questionnaire_code)
+async def create_screening(body: ScreeningBody, user: User = Depends(require_consent), db: AsyncSession = Depends(get_db)):
+    run = await services.screening.start_screening(db, user.id, body.questionnaire_code)
     return {
         "run_id": str(run.id),
         "questionnaire_code": run.questionnaire_code,
@@ -72,17 +72,17 @@ def create_screening(body: ScreeningBody, user: User = Depends(require_consent),
 
 
 @router.post("/runs/{run_id}/answers", status_code=204)
-def submit_answers(
-    run_id: uuid.UUID, body: AnswersBody, user: User = Depends(require_consent), db: Session = Depends(get_db)
+async def submit_answers(
+    run_id: uuid.UUID, body: AnswersBody, user: User = Depends(require_consent), db: AsyncSession = Depends(get_db)
 ):
-    services.screening.add_answers(db, run_id, user.id, body.answers)
+    await services.screening.add_answers(db, run_id, user.id, body.answers)
 
 
 @router.post("/runs/{run_id}/finish", status_code=201)
-def finish_run(run_id: uuid.UUID, user: User = Depends(require_consent), db: Session = Depends(get_db)):
-    return services.screening.finish_screening(db, run_id, user.id)
+async def finish_run(run_id: uuid.UUID, user: User = Depends(require_consent), db: AsyncSession = Depends(get_db)):
+    return await services.screening.finish_screening(db, run_id, user.id)
 
 @router.post("/screenings/abandon", status_code=200)
-def abandon_open(user: User = Depends(require_consent), db: Session = Depends(get_db)):
+async def abandon_open(user: User = Depends(require_consent), db: AsyncSession = Depends(get_db)):
     """Закрывает брошенный открытый скрининг пациента (иначе новый /screenings → 409)."""
-    return services.screening.abandon_open(db, user.id)
+    return await services.screening.abandon_open(db, user.id)

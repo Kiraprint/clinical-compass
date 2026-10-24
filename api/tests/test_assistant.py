@@ -103,6 +103,20 @@ def test_assistant_refuses_treatment(client, kb_collection):
     assert body["refused"] is True and body["refusal_code"] == "TREATMENT_REDLINE"
 
 
+def test_assistant_refuses_dosage_request(client, kb_collection):
+    """Запрос дозы (loadtest red-line) — назначение терапии, оффлайн до поиска."""
+    h, _ = clinician_ctx(client, "c-assist-dosage@test.ru")
+    resp = client.post(
+        "/api/v1/assistant/ask",
+        json={"query": "Сколько мг эсциталопрама принимать?"},
+        headers=h,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["refused"] is True and body["refusal_code"] == "TREATMENT_REDLINE"
+    assert body["grounded"] is False and body["citations"] == []
+
+
 def test_assistant_offtopic_returns_no_kb_data(client, kb_collection):
     h, _ = clinician_ctx(client, "c-assist4@test.ru")
     resp = client.post("/api/v1/assistant/ask", json={"query": "Какая погода в Москве сегодня?"}, headers=h)

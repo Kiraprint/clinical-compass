@@ -7,7 +7,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import services
 from app.config import settings
@@ -27,11 +27,11 @@ class AskBody(BaseModel):
     patient_id: uuid.UUID | None = Field(default=None)  # @-упоминание пациента → контекст в агент
 
 @router.post("/assistant/ask")
-def ask(
+async def ask(
     body: AskBody,
     request: Request,
     user: User = Depends(require_clinician),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """Справочный ответ врачу по базе знаний. Только CLINICIAN (roster не нужен:
     корпус — открытый не-ПДн контент).
@@ -44,7 +44,7 @@ def ask(
     """
     ip = request.client.host if request.client else None
     patient_ids = [body.patient_id] if body.patient_id is not None else []
-    result = assistant_chat.answer_query(
+    result = await assistant_chat.answer_query(
         db,
         user.id,
         body.query,
@@ -54,8 +54,8 @@ def ask(
         ip=ip,
     )
     if not patient_ids:
-        services.audit.record(db, user.id, "ASK_ASSISTANT", "kb", object_id=None, ip=ip)
-        db.commit()
+        await services.audit.record(db, user.id, "ASK_ASSISTANT", "kb", object_id=None, ip=ip)
+        await db.commit()
     return result
 
 @router.get("/assistant/status")
@@ -84,62 +84,62 @@ def _ip(request: Request) -> str | None:
     return request.client.host if request.client else None
 
 @router.post("/assistant/threads", status_code=201)
-def create_thread(
+async def create_thread(
     body: ThreadBody,
     user: User = Depends(require_clinician),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """Новый диалог: title + область пациентов (roster-гейт, ≤10)."""
-    return assistant_chat.create_thread(db, user.id, body.title, body.patient_ids)
+    return await assistant_chat.create_thread(db, user.id, body.title, body.patient_ids)
 
 @router.get("/assistant/threads")
-def list_threads(user: User = Depends(require_clinician), db: Session = Depends(get_db)):
+async def list_threads(user: User = Depends(require_clinician), db: AsyncSession = Depends(get_db)):
     """Свои диалоги: id, title, patient_ids, updated_at, message_count."""
-    return {"items": assistant_chat.list_threads(db, user.id)}
+    return {"items": await assistant_chat.list_threads(db, user.id)}
 
 @router.get("/assistant/threads/{thread_id}")
-def get_thread(
+async def get_thread(
     thread_id: uuid.UUID,
     request: Request,
     user: User = Depends(require_clinician),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """Тред с историей сообщений и цитатами. Чужой → 404 THREAD_NOT_FOUND."""
-    return assistant_chat.get_thread_detail(db, user.id, thread_id, ip=_ip(request))
+    return await assistant_chat.get_thread_detail(db, user.id, thread_id, ip=_ip(request))
 
 @router.patch("/assistant/threads/{thread_id}")
-def update_thread(
+async def update_thread(
     thread_id: uuid.UUID,
     body: ThreadPatchBody,
     user: User = Depends(require_clinician),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """Переименование и/или замена области пациентов треда."""
-    return assistant_chat.update_thread(
+    return await assistant_chat.update_thread(
         db, user.id, thread_id, title=body.title, patient_ids=body.patient_ids
     )
 
 @router.delete("/assistant/threads/{thread_id}", status_code=204)
-def delete_thread(
+async def delete_thread(
     thread_id: uuid.UUID,
     user: User = Depends(require_clinician),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """Удаление треда; сообщения и привязки удаляются каскадом."""
-    assistant_chat.delete_thread(db, user.id, thread_id)
+    await assistant_chat.delete_thread(db, user.id, thread_id)
     return Response(status_code=204)
 
 @router.post("/assistant/threads/{thread_id}/messages")
-def post_message(
+async def post_message(
     thread_id: uuid.UUID,
     body: ThreadMessageBody,
     request: Request,
     user: User = Depends(require_clinician),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """Вопрос врача в тред → ответ ассистента; история и карты пациентов
     учитываются, оба сообщения персистируются."""
-    return assistant_chat.post_message(
+    return await assistant_chat.post_message(
         db,
         user.id,
         thread_id,
@@ -154,10 +154,10 @@ class SourceExclusionBody(BaseModel):
     excluded: bool = True
 
 @router.get("/assistant/sources")
-def sources(user: User = Depends(require_clinician), db: Session = Depends(get_db)):
+async def sources(user: User = Depends(require_clinician), db: AsyncSession = Depends(get_db)):
     """Опубликованные источники КБ + персональные исключения врача (docs/15 §6)."""
-    works = kb_review.list_works(db, status="approved", limit=200)
-    excluded = kb_review.excluded_ids(db, user.id)
+    works = await kb_review.list_works(db, status="approved", limit=200)
+    excluded = await kb_review.excluded_ids(db, user.id)
     return {
         "sources": [
             kb_review.serialize(work, excluded=work.guideline_id in excluded) for work in works
@@ -166,11 +166,11 @@ def sources(user: User = Depends(require_clinician), db: Session = Depends(get_d
     }
 
 @router.post("/assistant/sources/{guideline_id}/exclude")
-def exclude_source(
+async def exclude_source(
     guideline_id: str,
     body: SourceExclusionBody,
     user: User = Depends(require_clinician),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """Скрыть/вернуть источник в выдаче этого врача.
 
@@ -178,9 +178,9 @@ def exclude_source(
     """
     if not guideline_id or len(guideline_id) > 96:
         raise Problem(400, "BAD_GUIDELINE_ID", "Некорректный идентификатор источника.")
-    work = kb_review.get_work_by_guideline(db, guideline_id)
+    work = await kb_review.get_work_by_guideline(db, guideline_id)
     if work is None or work.status != "approved":
         raise Problem(404, "SOURCE_NOT_FOUND", "Источник не найден в КБ.")
-    excluded = kb_review.set_exclusion(db, user.id, guideline_id, body.excluded)
-    db.commit()
+    excluded = await kb_review.set_exclusion(db, user.id, guideline_id, body.excluded)
+    await db.commit()
     return {"excluded_guideline_ids": excluded}

@@ -4,10 +4,11 @@ from __future__ import annotations
 import uuid
 
 from datetime import datetime, timezone
+import anyio
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import security
 from app.config import settings
@@ -52,7 +53,7 @@ def _clear_auth_cookies(response: Response) -> None:
     response.delete_cookie("cc_access", path="/api/v1")
     response.delete_cookie("cc_refresh", path="/api/v1/auth")
 
-def _privileged_registration_allowed(request: Request, db: Session) -> bool:
+async def _privileged_registration_allowed(request: Request, db: AsyncSession) -> bool:
     """NEW-1: привилегированные роли — только демо-режим или действующий ADMIN."""
     if settings.allow_demo_secrets:
         return True
@@ -65,12 +66,12 @@ def _privileged_registration_allowed(request: Request, db: Session) -> bool:
         return False
     if payload.get("type") != "access":
         return False
-    actor = db.get(User, uuid.UUID(payload["sub"]))
+    actor = await db.get(User, uuid.UUID(payload["sub"]))
     return actor is not None and actor.role == "ADMIN"
 
 
 @router.post("/register", status_code=201)
-def register(body: RegisterBody, request: Request, db: Session = Depends(get_db)):
+async def register(body: RegisterBody, request: Request, db: AsyncSession = Depends(get_db)):
     """Регистрация пользователя.
 
     NEW-1 (HIGH): публичная регистрация привилегированных ролей (CLINICIAN/ADMIN)
@@ -80,44 +81,50 @@ def register(body: RegisterBody, request: Request, db: Session = Depends(get_db)
     создания привилегированных ролей аутентифицированным ADMIN.
     """
     email = body.email.strip().lower()
-    exists = db.scalar(select(User).where(User.email == email))
+    exists = await db.scalar(select(User).where(User.email == email))
     if exists:
         raise Problem(409, "CONFLICT", "Пользователь с таким email уже зарегистрирован")
-    if body.role != "PATIENT" and not _privileged_registration_allowed(request, db):
+    if body.role != "PATIENT" and not await _privileged_registration_allowed(request, db):
         raise Problem(
             403, "REGISTRATION_FORBIDDEN",
             "Создание роли CLINICIAN/ADMIN требует аутентифицированного администратора",
         )
-    user = User(email=email, password_hash=security.hash_password(body.password), role=body.role)
+    # argon2id — десятки миллисекунд CPU и 64 МиБ памяти: на event loop это
+    # стопор для всех запросов воркера, поэтому хешируем в потоке.
+    password_hash = await anyio.to_thread.run_sync(security.hash_password, body.password)
+    user = User(email=email, password_hash=password_hash, role=body.role)
     totp_secret: str | None = None
     if body.role != "PATIENT":
         totp_secret = security.generate_totp_secret()
         user.totp_secret = totp_secret
     db.add(user)
-    db.commit()
+    await db.commit()
     resp: dict = {"id": str(user.id), "email": user.email, "role": user.role}
     if totp_secret:
         resp["totp_secret"] = totp_secret
     return resp
 
 @router.post("/login")
-def login(body: LoginBody, request: Request, response: Response, db: Session = Depends(get_db)):
+async def login(body: LoginBody, request: Request, response: Response, db: AsyncSession = Depends(get_db)):
     email = body.email.strip().lower()
     client = request.client.host if request.client else "unknown"
     allowed, retry_after = check_rate((client, email))
     if not allowed:
         raise Problem(429, "TOO_MANY_REQUESTS",
                       f"Слишком много попыток входа, повторите через {retry_after} с")
-    user = db.scalar(select(User).where(User.email == email))
-    if user is None or not security.verify_password(body.password, user.password_hash):
+    user = await db.scalar(select(User).where(User.email == email))
+    password_ok = user is not None and await anyio.to_thread.run_sync(
+        security.verify_password, body.password, user.password_hash
+    )
+    if not password_ok:
         record_rate_hit((client, email))
         raise Problem(401, "UNAUTHORIZED", "Неверный email или пароль")
     if user.role != "PATIENT" and settings.require_otp:
         if not user.totp_secret or not body.otp or not security.verify_totp(user.totp_secret, body.otp):
             record_rate_hit((client, email))
             raise Problem(401, "UNAUTHORIZED", "Требуется корректный код 2FA")
-    jti = _issue_jti(db, user.id)
-    db.commit()
+    jti = await _issue_jti(db, user.id)
+    await db.commit()
     access = security.create_access_token(user.id, user.role)
     refresh = security.create_refresh_token(user.id, jti)
     _set_auth_cookies(response, access, refresh)  # F9: httpOnly cookies
@@ -127,16 +134,16 @@ def _refresh_delta():
     from datetime import timedelta
     return timedelta(days=settings.refresh_ttl_days)
 
-def _issue_jti(db: Session, user_id) -> str:
+async def _issue_jti(db: AsyncSession, user_id) -> str:
     """Создать строку RefreshToken и вернуть jti для JWT."""
     jti = uuid.uuid4().hex
     db.add(RefreshToken(jti=jti, user_id=user_id,
                         expires_at=datetime.now(timezone.utc) + _refresh_delta()))
-    db.flush()
+    await db.flush()
     return jti
 
 @router.post("/refresh")
-def refresh(body: RefreshBody | None = None, request: Request = None, response: Response = None, db: Session = Depends(get_db)):
+async def refresh(body: RefreshBody | None = None, request: Request = None, response: Response = None, db: AsyncSession = Depends(get_db)):
     """F4: ротация — проверяем jti в сторе, отзываем старый, выдаём новый.
     F9: refresh_token принимается из body ИЛИ из cc_refresh cookie."""
     rt_token = (body.refresh_token if body else None) or (request.cookies.get("cc_refresh", "") if request else "")
@@ -153,7 +160,7 @@ def refresh(body: RefreshBody | None = None, request: Request = None, response: 
         raise Problem(401, "UNAUTHORIZED", "Refresh-токен без jti")
     # F4: with_for_update сериализует конкурентные /refresh с одинаковым jti —
     # вторая транзакция ждёт, видит revoked_at и получает 401 (no double-issue).
-    rt = db.scalar(
+    rt = await db.scalar(
         select(RefreshToken).where(RefreshToken.jti == jti).with_for_update()
     )
     if rt is None:
@@ -162,20 +169,20 @@ def refresh(body: RefreshBody | None = None, request: Request = None, response: 
         raise Problem(401, "TOKEN_EXPIRED", "Refresh-токен отозван")
     if rt.expires_at < datetime.now(timezone.utc):
         raise Problem(401, "TOKEN_EXPIRED", "Refresh-токен истёк")
-    user = db.get(User, rt.user_id)
+    user = await db.get(User, rt.user_id)
     if user is None:
         raise Problem(401, "UNAUTHORIZED", "Пользователь не найден")
     # ротация: отозвать старый, создать новый
     rt.revoked_at = datetime.now(timezone.utc)
-    new_jti = _issue_jti(db, user.id)
-    db.commit()
+    new_jti = await _issue_jti(db, user.id)
+    await db.commit()
     access = security.create_access_token(user.id, user.role)
     new_refresh = security.create_refresh_token(user.id, new_jti)
     _set_auth_cookies(response, access, new_refresh)  # F9: rotate cookies
     return {"access_token": access, "refresh_token": new_refresh}
 
 @router.post("/logout", status_code=204)
-def logout(body: RefreshBody | None = None, request: Request = None, response: Response = None, db: Session = Depends(get_db)):
+async def logout(body: RefreshBody | None = None, request: Request = None, response: Response = None, db: AsyncSession = Depends(get_db)):
     """F4: отзыв refresh-токена (явный выход). Idempotent.
     F9: очищает httpOnly cookies; refresh_token из body или cookie."""
     rt_token = (body.refresh_token if body else None) or (request.cookies.get("cc_refresh", "") if request else "")
@@ -189,7 +196,7 @@ def logout(body: RefreshBody | None = None, request: Request = None, response: R
         return  # токен уже невалиден — выход idempotent
     jti = payload.get("jti")
     if jti:
-        rt = db.scalar(select(RefreshToken).where(RefreshToken.jti == jti))
+        rt = await db.scalar(select(RefreshToken).where(RefreshToken.jti == jti))
         if rt and rt.revoked_at is None:
             rt.revoked_at = datetime.now(timezone.utc)
-            db.commit()
+            await db.commit()

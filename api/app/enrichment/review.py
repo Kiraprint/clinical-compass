@@ -7,25 +7,27 @@
 
 from __future__ import annotations
 
+import anyio
+
 import datetime as dt
 import uuid
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.enrichment import criteria as criteria_mod
 from app.enrichment import index as index_mod
 from app.enrichment.config import EnrichmentConfig
 from app.models import KBExclusion, KBWork
 from app.services import audit
-from app.services.embeddings import build_embedder
+from app.services.embeddings import get_embedder
 
 
 class ReviewError(ValueError):
     """Недопустимый переход статуса (например, approve уже отклонённого)."""
 
 
-def get_work(db: Session, work_id: uuid.UUID, *, for_update: bool = False) -> KBWork | None:
+async def get_work(db: AsyncSession, work_id: uuid.UUID, *, for_update: bool = False) -> KBWork | None:
     # for_update: два админа (или админ + прогон) не должны решать судьбу одной
     # записи параллельно — иначе approve и reject перетирают друг друга.
     stmt = select(KBWork).where(KBWork.id == work_id)
@@ -33,15 +35,15 @@ def get_work(db: Session, work_id: uuid.UUID, *, for_update: bool = False) -> KB
         # Явный FOR UPDATE: db.get() отдаёт объект из identity map, и блокировка
         # строки может не примениться, если объект уже загружен в сессию.
         stmt = stmt.with_for_update().execution_options(populate_existing=True)
-    return db.scalar(stmt)
+    return await db.scalar(stmt)
 
 
-def get_work_by_guideline(db: Session, guideline_id: str) -> KBWork | None:
-    return db.scalar(select(KBWork).where(KBWork.guideline_id == guideline_id))
+async def get_work_by_guideline(db: AsyncSession, guideline_id: str) -> KBWork | None:
+    return await db.scalar(select(KBWork).where(KBWork.guideline_id == guideline_id))
 
 
-def list_works(
-    db: Session,
+async def list_works(
+    db: AsyncSession,
     *,
     status: str | None = None,
     kind: str | None = None,
@@ -53,11 +55,11 @@ def list_works(
         query = query.where(KBWork.status == status)
     if kind:
         query = query.where(KBWork.kind == kind)
-    return list(db.scalars(query))
+    return list(await db.scalars(query))
 
 
-def approve(
-    db: Session,
+async def approve(
+    db: AsyncSession,
     client,
     work_id: uuid.UUID,
     actor_id: uuid.UUID | None,
@@ -65,7 +67,7 @@ def approve(
     *,
     embedder=None,
 ) -> KBWork:
-    work = get_work(db, work_id, for_update=True)
+    work = await get_work(db, work_id, for_update=True)
     if work is None:
         raise ReviewError("Источник не найден.")
     if work.status != "candidate":
@@ -86,7 +88,7 @@ def approve(
             f"{item.get('label')}: {item.get('explanation')}" for item in blocking
         )
         raise ReviewError(f"Жёсткие критерии не выполнены, approve запрещён. {labels}")
-    embedder = embedder or build_embedder()
+    embedder = embedder or get_embedder()
     now = dt.datetime.now(dt.timezone.utc)
     # Хэш версии снимается в значение: после индексации объект перечитывается
     # под блокировкой (populate_existing обновляет тот же instance), и сравнение
@@ -102,20 +104,23 @@ def approve(
     work.approved_by = actor_id
     work.approved_at = now
     work.reject_reason = None
-    db.commit()
+    await db.commit()
     try:
-        chunks = index_mod.index_work(
-            client, embedder, work, chunk_chars=cfg.chunk_chars, chunk_overlap=cfg.chunk_overlap
+        chunks = await anyio.to_thread.run_sync(
+            lambda: index_mod.index_work(
+                client, embedder, work,
+                chunk_chars=cfg.chunk_chars, chunk_overlap=cfg.chunk_overlap,
+            )
         )
     except Exception:
         # Индексация не удалась: точки (если успели записаться) снимаем, работу
         # возвращаем в очередь — но только если параллельное решение её не
         # успело изменить (иначе затрём reject/новую версию).
         try:
-            index_mod.remove_work(client, work)
+            await anyio.to_thread.run_sync(index_mod.remove_work, client, work)
         except Exception:  # noqa: BLE001 — уборка не должна маскировать исходную ошибку
             pass
-        current = get_work(db, work.id, for_update=True)
+        current = await get_work(db, work.id, for_update=True)
         if (
             current is not None
             and current.status == "approved"
@@ -127,70 +132,70 @@ def approve(
             current.published_at = None
             current.chunk_count = 0
             current.indexed_hash = None
-            db.commit()
+            await db.commit()
         else:
-            db.rollback()
+            await db.rollback()
         raise
     # Индексация шла без блокировки строки: подтверждаем под блокировкой, что
     # работа всё ещё approved и той же версии, иначе точки принадлежат уже
     # отклонённой/замещённой версии и индекс надо очистить.
-    current = get_work(db, work.id, for_update=True)
+    current = await get_work(db, work.id, for_update=True)
     if (
         current is None
         or current.status != "approved"
         or current.content_hash != version_hash
     ):
         try:
-            index_mod.remove_work_id(client, work.id)
+            await anyio.to_thread.run_sync(index_mod.remove_work_id, client, work.id)
         except Exception:  # noqa: BLE001
             pass
-        db.rollback()
+        await db.rollback()
         raise ReviewError("Работа изменена параллельным решением; индексация отменена.")
     current.chunk_count = chunks
     current.indexed_hash = current.content_hash
     current.published_at = now
-    audit.record(db, actor_id, "KB_SOURCE_APPROVE", "kb_work", str(current.id))
-    db.commit()
+    await audit.record(db, actor_id, "KB_SOURCE_APPROVE", "kb_work", str(current.id))
+    await db.commit()
     return current
 
 
-def reject(
-    db: Session,
+async def reject(
+    db: AsyncSession,
     work_id: uuid.UUID,
     actor_id: uuid.UUID | None,
     reason: str,
     *,
     client=None,
 ) -> KBWork:
-    work = get_work(db, work_id, for_update=True)
+    work = await get_work(db, work_id, for_update=True)
     if work is None:
         raise ReviewError("Источник не найден.")
     reason = (reason or "").strip()
     if len(reason) < 3:
         raise ReviewError("Нужна причина отклонения (≥ 3 символов).")
     if work.status == "approved" and client is not None:
-        index_mod.remove_work(client, work)
+        await anyio.to_thread.run_sync(index_mod.remove_work, client, work)
         work.indexed_hash = None
         work.chunk_count = 0
     work.status = "rejected"
     work.reject_reason = reason[:2000]
     work.approved_by = actor_id
     work.approved_at = dt.datetime.now(dt.timezone.utc)
-    audit.record(db, actor_id, "KB_SOURCE_REJECT", "kb_work", str(work.id))
-    db.flush()
+    await audit.record(db, actor_id, "KB_SOURCE_REJECT", "kb_work", str(work.id))
+    await db.flush()
     return work
 
 
-def excluded_ids(db: Session, user_id: uuid.UUID) -> set[str]:
+async def excluded_ids(db: AsyncSession, user_id: uuid.UUID) -> set[str]:
     """guideline_id, которые врач скрыл персонально (фильтр retrieval)."""
-    rows = db.scalars(select(KBExclusion.guideline_id).where(KBExclusion.user_id == user_id))
+    rows = await db.scalars(select(KBExclusion.guideline_id).where(KBExclusion.user_id == user_id))
     return set(rows)
 
 
-def set_exclusion(
-    db: Session, user_id: uuid.UUID, guideline_id: str, excluded: bool
+async def set_exclusion(
+    db: AsyncSession, user_id: uuid.UUID, guideline_id: str, excluded: bool
 ) -> list[str]:
-    existing = db.scalar(
+    existing = await db.scalar(
         select(KBExclusion).where(
             KBExclusion.user_id == user_id, KBExclusion.guideline_id == guideline_id
         )
@@ -198,16 +203,16 @@ def set_exclusion(
     if excluded and existing is None:
         db.add(KBExclusion(user_id=user_id, guideline_id=guideline_id))
     elif not excluded and existing is not None:
-        db.delete(existing)
-    audit.record(
+        await db.delete(existing)
+    await audit.record(
         db,
         user_id,
         "KB_SOURCE_EXCLUDE" if excluded else "KB_SOURCE_INCLUDE",
         "kb_guideline",
         guideline_id,
     )
-    db.flush()
-    return sorted(excluded_ids(db, user_id))
+    await db.flush()
+    return sorted(await excluded_ids(db, user_id))
 
 
 def serialize(work: KBWork, *, excluded: bool = False) -> dict:

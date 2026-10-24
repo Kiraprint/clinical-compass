@@ -227,16 +227,13 @@ def test_llm_markdown_and_validation(client, monkeypatch):
     assert by_kind["symptom"]["confidence"] is None  # вне [0,1] → null
 
 
-def test_empty_dialogue_409(client, monkeypatch):
+def test_empty_dialogue_409(client, monkeypatch, db_session):
     _enable(monkeypatch)
     captured = _fake_llm(monkeypatch, "[]")
     _, pid, c, _ = _setup(client, "pe@test.ru", "ce@test.ru")
     # Чистим переписку: анализировать нечего.
-    from app import db as app_db
-
-    with app_db.SessionLocal() as s:
-        s.execute(text("delete from chat_messages where patient_id=:p"), {"p": pid})
-        s.commit()
+    db_session.execute(text("delete from chat_messages where patient_id=:p"), {"p": pid})
+    db_session.commit()
 
     resp = _analyze(client, c, pid)
     assert resp.status_code == 409

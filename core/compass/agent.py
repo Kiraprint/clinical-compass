@@ -45,6 +45,61 @@ _TREATMENT_PATTERNS = (
     r"уменьши\s+доз",
     r"поменяй\s+(препарат|терап)",
 )
+# Дозирование как клиническое решение (подбор дозы/режима приёма) — тоже
+# назначение терапии, поэтому кодируется TREATMENT_REDLINE.
+# Граница: справочный вопрос «какая дозировка <препарат>?» / «сколько мг в
+# таблетке?» остаётся РАЗРЕШЁН (test_redline_none_for_reference_query, e2e
+# «Какая дозировка Авиандра?»): red line требует интента «сколько мне/пациенту
+# принимать» — глагола приёма/подбора дозы, а не запроса к инструкции.
+_DOSAGE_PATTERNS = (
+    # «сколько мг/мкг/таблеток … принимать/пить/нужно/в день»
+    r"сколько\s+(?:мг|мкг|мл|г|капель|капли|таблет\w*|доз\w*|единиц|ме)\b"
+    r"[^.;!?]{0,80}?(?:принима\w*|приня\w*|пить|выпить|давать|в\s+день|"
+    r"за\s+раз|на\s+при[её]м|нужн\w*)",
+    # «(какую) дозу/дозировку давать/принимать/подобрать»
+    r"(?:дозу|дозировку|дозы|дозировки)\b[^.;!?]{0,60}?"
+    r"(?:принима\w*|нужн\w*|надо|следует|давать|выбрать|подобра\w*|"
+    r"рассчита\w*|посчита\w*|определи\w*|увеличи\w*|уменьши\w*)",
+    # «какая доза/дозировка … нужна/принимать/пациенту»
+    r"как(?:ая|ой|ую|ие)\s+(?:доза|дозировка|дозу|дозировку|дозы|дозировки)\b"
+    r"[^.;!?]{0,60}?(?:принима\w*|нужн\w*|надо|следует|давать|выбрать|"
+    r"подобра\w*|в\s+день|пациент\w*|больн\w*)",
+    # «в какой дозе/дозировке … принимать» (но не «а в каких дозах?» — это
+    # уточнение к справке из треда, docs/06 §3)
+    r"в\s+как(?:ой|их|ую)\s+(?:дозе|дозах|дозировке|дозировках)\b"
+    r"[^.;!?]{0,60}?(?:принима\w*|пить|давать|нужн\w*|надо|следует)",
+    # «подбери/рассчитай/скорректируй дозу»
+    r"(?:подбери\w*|подобрать|рассчита\w*|посчита\w*|скорректиру\w*|"
+    r"определи\w*|увеличь|уменьши)\s+(?:разов\w*\s+)?(?:доз\w*|дозиров\w*)",
+    # «как принимать/пить/дозировать <препарат>» (не «как принимать по инструкции»)
+    r"\bкак\s+(?:правильно\s+)?(?:принимать|пить|дозировать|титровать)\b\s+"
+    r"(?!по\b|в\b|во\b|с\b|со\b|на\b|при\b|и\b|или\b|если\b|когда\b|"
+    r"дольше\b|долго\b|курс\w*|сколько\b|зачем\b)\S",
+    # EN: «how much/many mg … should I take / per day»
+    r"\bhow\s+(?:much|many)\s+(?:mg|mcg|µg|ml|g|units?|tablets?|pills?|doses?)\b"
+    r"[^.;!?]{0,80}?(?:should\s+(?:i|we|the\s+patient)\s+(?:take|use|give|start)|"
+    r"do\s+(?:i|we)\s+take|to\s+take|per\s+day|a\s+day|daily)",
+    # EN: «how much X should I take»
+    r"\bhow\s+(?:much|many)\b[^.;!?]{0,60}?"
+    r"\b(?:should\s+(?:i|we|the\s+patient)\s+(?:take|use|give)|do\s+(?:i|we)\s+take)\b",
+    # EN: «what dose of X»
+    r"\bwhat\s+(?:dose|dosage)\b[^.;!?]{0,60}?\bof\b",
+    # EN: «what/which dose … should I take / per day»
+    r"\b(?:what|which)\s+(?:dose|dosage)\b[^.;!?]{0,80}?"
+    r"(?:should\s+(?:i|we|the\s+patient)\s+(?:take|use|give)|do\s+(?:i|we)\s+take|"
+    r"to\s+take|per\s+day|daily)",
+    # EN: «adjust/titrate/calculate/pick the dose»
+    r"\b(?:adjust|titrat\w*|increas\w*|decreas\w*|calculat\w*|pick|choose|"
+    r"select|recommend)\w*\s+(?:the\s+|a\s+)?(?:dose|dosage|dosing)\b",
+)
+# Компилируются один раз при импорте: detect_redline вызывается на каждом ходу
+# ассистента и в каждом поиске KB (горячий путь, docs/03 §1.3).
+_DIAGNOSIS_RE = tuple(re.compile(p) for p in _DIAGNOSIS_PATTERNS)
+_TREATMENT_RE = tuple(re.compile(p) for p in _TREATMENT_PATTERNS)
+_DOSAGE_RE = tuple(re.compile(p) for p in _DOSAGE_PATTERNS)
+# Предфильтр: каждый паттерн дозы содержит одну из этих подстрок, поэтому без
+# них 11 regex по длинному тексту не гоняем (подстрока в разы дешевле).
+_DOSAGE_CUES = ("сколько", "доз", "принима", "пить", "титр", "how much", "how many", "dos")
 
 
 @dataclass(frozen=True)
@@ -79,14 +134,23 @@ def _normalize(text: str) -> str:
 
 
 def detect_redline(query: str) -> str | None:
-    """Возвращает код красной линии, если запрос требует диагноз/терапию."""
+    """Возвращает код красной линии, если запрос требует диагноз/терапию.
+
+    Дозирование (подбор дозы/режима приёма) — часть назначения терапии,
+    поэтому отдаёт TREATMENT_REDLINE; справочные вопросы по инструкции
+    («какая дозировка Авиандра?») остаются разрешёнными.
+    """
     q = _normalize(query)
-    for pattern in _DIAGNOSIS_PATTERNS:
-        if re.search(pattern, q):
+    for pattern in _DIAGNOSIS_RE:
+        if pattern.search(q):
             return REDLINE_DIAGNOSIS
-    for pattern in _TREATMENT_PATTERNS:
-        if re.search(pattern, q):
+    for pattern in _TREATMENT_RE:
+        if pattern.search(q):
             return REDLINE_TREATMENT
+    if any(cue in q for cue in _DOSAGE_CUES):
+        for pattern in _DOSAGE_RE:
+            if pattern.search(q):
+                return REDLINE_TREATMENT
     return None
 
 

@@ -10,11 +10,13 @@
 from __future__ import annotations
 
 import argparse
+import anyio
+import asyncio
 import json
 import sys
 import time
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from app import db as db_module
 from app.config import settings
@@ -23,10 +25,19 @@ from app.enrichment.config import EnrichmentConfig
 from app.models import KBRun, KBWork
 
 
-def _session():
+def _setup() -> None:
     if db_module.engine is None:
-        db_module.setup(settings.database_url)
-    return db_module.SessionLocal()
+        db_module.setup(settings.database_url, profile="background")
+
+
+def _session():
+    _setup()
+    return db_module.AsyncSessionLocal()
+
+
+def _engine():
+    _setup()
+    return db_module.engine
 
 
 def _client():
@@ -34,22 +45,20 @@ def _client():
 
     return QdrantClient(url=settings.qdrant_url)
 
-
 def _print(payload, as_json: bool) -> None:
     if as_json:
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
         return
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
 
-
-def _cmd_run(args) -> int:
+async def _cmd_run(args) -> int:
     cfg = EnrichmentConfig.from_env()
     if args.source == "pubmed":
         cfg = _with_enabled(cfg, pubmed=True, who=False)
     elif args.source == "who":
         cfg = _with_enabled(cfg, pubmed=False, who=True)
-    with _session() as session:
-        summary = pipeline.execute(
+    async with _session() as session:
+        summary = await pipeline.execute(
             session,
             None if args.dry_run else _client(),
             cfg,
@@ -57,10 +66,9 @@ def _cmd_run(args) -> int:
             dry_run=args.dry_run,
         )
         if not args.dry_run:
-            session.commit()
+            await session.commit()
     _print(summary.as_dict(), args.json)
     return 0 if summary.status in {"ok", "partial"} else 1
-
 
 def _with_enabled(cfg: EnrichmentConfig, *, pubmed: bool, who: bool) -> EnrichmentConfig:
     from dataclasses import replace
@@ -71,47 +79,58 @@ def _with_enabled(cfg: EnrichmentConfig, *, pubmed: bool, who: bool) -> Enrichme
         who=replace(cfg.who, enabled=who),
     )
 
-
-def _cmd_serve(args) -> int:
+async def _cmd_serve(args) -> int:
     cfg = EnrichmentConfig.from_env()
     interval = max(cfg.interval_hours, 0.05) * 3600
     if not cfg.run_on_start:
-        time.sleep(interval)
+        await asyncio.sleep(interval)
     while True:
-        with _session() as session:
+        # Advisory-лок живёт на соединении, а не на транзакции: async-сессия
+        # после commit возвращает соединение в пул, поэтому держим отдельное.
+        async with _engine().connect() as lock_conn:
             locked = bool(
-                session.execute(text("SELECT pg_try_advisory_lock(hashtext('kb-enrichment'))")).scalar()
+                (await lock_conn.execute(
+                    text("SELECT pg_try_advisory_lock(hashtext('kb-enrichment'))")
+                )).scalar()
             )
             if not locked:
                 print("kb-enrichment: другой прогон уже идёт, пропуск", flush=True)
             else:
                 try:
-                    summary = pipeline.execute(session, _client(), cfg, trigger="schedule")
-                    session.commit()
-                    print(
-                        f"kb-enrichment: run {summary.run_id} {summary.status} "
-                        f"{summary.stats} errors={len(summary.errors)}",
-                        flush=True,
-                    )
+                    async with _session() as session:
+                        summary = await pipeline.execute(session, _client(), cfg, trigger="schedule")
+                        await session.commit()
+                        print(
+                            f"kb-enrichment: run {summary.run_id} {summary.status} "
+                            f"{summary.stats} errors={len(summary.errors)}",
+                            flush=True,
+                        )
                 except Exception as exc:  # noqa: BLE001 — сервис не должен падать на одном прогоне
-                    session.rollback()
+                    # сессия закрывается в context manager выше → неявный rollback
                     print(f"kb-enrichment: прогон упал: {exc}", flush=True)
                 finally:
-                    session.execute(text("SELECT pg_advisory_unlock(hashtext('kb-enrichment'))"))
-                    session.commit()
-        time.sleep(interval)
+                    # Shield: отмена посреди прогона не должна оставить
+                    # session-level лок на соединении из пула.
+                    with anyio.CancelScope(shield=True):
+                        try:
+                            await lock_conn.execute(
+                                text("SELECT pg_advisory_unlock(hashtext('kb-enrichment'))")
+                            )
+                            await lock_conn.commit()
+                        except Exception:  # noqa: BLE001 — разрыв соединения снимет лок сам
+                            print("kb-enrichment: не удалось снять advisory-лок", flush=True)
+        await asyncio.sleep(interval)
 
-
-def _cmd_review(args) -> int:
+async def _cmd_review(args) -> int:
     cfg = EnrichmentConfig.from_env()
-    with _session() as session:
+    async with _session() as session:
         if args.action == "list":
-            works = review.list_works(
+            works = await review.list_works(
                 session, status=args.status, kind=args.kind, limit=args.limit
             )
             payload = [review.serialize(w) for w in works]
         elif args.action == "show":
-            work = review.get_work(session, _uuid(args.id))
+            work = await review.get_work(session, _uuid(args.id))
             if work is None:
                 print("не найдено", file=sys.stderr)
                 return 2
@@ -120,23 +139,24 @@ def _cmd_review(args) -> int:
             work_id = _uuid(args.id)
             # review.approve сам коммитит статус до индексации и откатывает его
             # при сбое публикации — компенсация в CLI больше не нужна.
-            work = review.approve(session, _client(), work_id, None, cfg)
+            work = await review.approve(session, _client(), work_id, None, cfg)
             payload = review.serialize(work)
         elif args.action == "reject":
-            work = review.reject(
+            work = await review.reject(
                 session, _uuid(args.id), None, args.reason, client=_client()
             )
-            session.commit()
+            await session.commit()
             payload = review.serialize(work)
         else:  # pragma: no cover - argparse ограничивает выбор
             raise SystemExit(f"неизвестное действие {args.action}")
     _print(payload, args.json)
     return 0
 
-
-def _cmd_runs(args) -> int:
-    with _session() as session:
-        rows = session.query(KBRun).order_by(KBRun.started_at.desc()).limit(args.limit).all()
+async def _cmd_runs(args) -> int:
+    async with _session() as session:
+        rows = (await session.scalars(
+            select(KBRun).order_by(KBRun.started_at.desc()).limit(args.limit)
+        )).all()
         payload = [
             {
                 "id": str(run.id),
@@ -153,7 +173,6 @@ def _cmd_runs(args) -> int:
         ]
     _print(payload, args.json)
     return 0
-
 
 def _uuid(value: str):
     import uuid
@@ -194,11 +213,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+async def _run_and_dispose(func, args) -> int:
+    """Выполнить команду и закрыть пул в том же event loop (иначе dispose из
+    другого цикла получает соединения, привязанные к чужому loop)."""
+    try:
+        return await func(args)
+    finally:
+        # Shield: при отмене (SIGTERM) закрытие пула всё равно должно выполниться.
+        with anyio.CancelScope(shield=True):
+            if db_module.engine is not None:
+                await db_module.engine.dispose()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        return args.func(args)
+        return asyncio.run(_run_and_dispose(args.func, args))
     except review.ReviewError as exc:
         print(f"ошибка ревью: {exc}", file=sys.stderr)
         return 2

@@ -13,7 +13,7 @@ import uuid
 from datetime import date, datetime, timezone
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import Problem
 from app.models import AdverseEvent, ClinicianRoster, Drug, PatientMedication, User
@@ -31,23 +31,23 @@ PATIENT_STATUS_LABELS = {
 ACTION_TAKEN = ("none", "monitoring", "dose_reduced", "stopped", "referred")
 
 
-def _medication_title(db: Session, medication_id: uuid.UUID | None) -> str | None:
+async def _medication_title(db: AsyncSession, medication_id: uuid.UUID | None) -> str | None:
     if medication_id is None:
         return None
-    med = db.get(PatientMedication, medication_id)
+    med = await db.get(PatientMedication, medication_id)
     return med.title if med is not None else None
 
 
-def _drug_ref(db: Session, drug_id: str | None) -> dict | None:
+async def _drug_ref(db: AsyncSession, drug_id: str | None) -> dict | None:
     if drug_id is None:
         return None
-    drug = db.execute(select(Drug).where(Drug.drug_id == drug_id)).scalar_one_or_none()
+    drug = (await db.scalars(select(Drug).where(Drug.drug_id == drug_id))).one_or_none()
     if drug is None:
         return None
     return {"drug_id": drug.drug_id, "trade_name": drug.trade_name, "adverse_events": drug.adverse_events}
 
 
-def _patient_dict(db: Session, e: AdverseEvent) -> dict:
+async def _patient_dict(db: AsyncSession, e: AdverseEvent) -> dict:
     """Событие глазами пациента: без врачебных заметок и справочных текстов."""
     return {
         "id": str(e.id),
@@ -57,15 +57,15 @@ def _patient_dict(db: Session, e: AdverseEvent) -> dict:
         "status": e.status,
         "status_label": PATIENT_STATUS_LABELS[e.status],
         "medication_id": str(e.medication_id) if e.medication_id else None,
-        "medication_title": _medication_title(db, e.medication_id),
+        "medication_title": await _medication_title(db, e.medication_id),
         "verified_at": e.verified_at.isoformat() if e.verified_at else None,
         "created_at": e.created_at.isoformat(),
     }
 
 
-def event_dict(db: Session, e: AdverseEvent, patient_fio: str | None = None) -> dict:
+async def event_dict(db: AsyncSession, e: AdverseEvent, patient_fio: str | None = None) -> dict:
     """Событие для врача: проверка, связь с назначением и справочником ГРЛС."""
-    drug = _drug_ref(db, e.drug_id)
+    drug = await _drug_ref(db, e.drug_id)
     return {
         "id": str(e.id),
         "patient_id": str(e.patient_id),
@@ -78,7 +78,7 @@ def event_dict(db: Session, e: AdverseEvent, patient_fio: str | None = None) -> 
         "suspected_drug": e.suspected_drug,
         "action_taken": e.action_taken,
         "medication_id": str(e.medication_id) if e.medication_id else None,
-        "medication_title": _medication_title(db, e.medication_id),
+        "medication_title": await _medication_title(db, e.medication_id),
         "drug_id": e.drug_id,
         "drug_trade_name": drug["trade_name"] if drug else None,
         "reference": drug,
@@ -89,26 +89,28 @@ def event_dict(db: Session, e: AdverseEvent, patient_fio: str | None = None) -> 
     }
 
 
-def _validate_medication(db: Session, patient_id: uuid.UUID, medication_id: uuid.UUID | None) -> None:
+async def _validate_medication(
+    db: AsyncSession, patient_id: uuid.UUID, medication_id: uuid.UUID | None
+) -> None:
     """Назначение должно быть активным назначением этого пациента."""
     if medication_id is None:
         return
-    med = db.get(PatientMedication, medication_id)
+    med = await db.get(PatientMedication, medication_id)
     # Чужое назначение неотличимо от несуществующего (IDOR).
     if med is None or med.patient_id != patient_id:
         raise Problem(422, "MEDICATION_NOT_FOUND", "Назначение не найдено у пациента")
 
 
-def _validate_drug(db: Session, drug_id: str | None) -> None:
+async def _validate_drug(db: AsyncSession, drug_id: str | None) -> None:
     if drug_id is None:
         return
-    exists = db.scalar(select(Drug.drug_id).where(Drug.drug_id == drug_id))
+    exists = await db.scalar(select(Drug.drug_id).where(Drug.drug_id == drug_id))
     if exists is None:
         raise Problem(404, "DRUG_NOT_FOUND", "Препарат не найден в справочнике ГРЛС")
 
 
-def report_patient_event(
-    db: Session,
+async def report_patient_event(
+    db: AsyncSession,
     patient: User,
     *,
     event_text: str,
@@ -118,32 +120,32 @@ def report_patient_event(
     ip: str | None = None,
 ) -> dict:
     """Пациент сообщает о НЯ: status='pending', проверки ещё не было."""
-    _validate_medication(db, patient.id, medication_id)
+    await _validate_medication(db, patient.id, medication_id)
     ev = AdverseEvent(
         patient_id=patient.id, clinician_id=None,
         event_text=event_text, severity=severity, onset_date=onset_date,
         medication_id=medication_id, reported_by="patient", status="pending",
     )
     db.add(ev)
-    db.flush()
-    audit_record(db, patient.id, "ADVERSE_REPORT", "patient", str(patient.id), ip=ip)
+    await db.flush()
+    await audit_record(db, patient.id, "ADVERSE_REPORT", "patient", str(patient.id), ip=ip)
     if severity == "severe":
         # Текст без ПДн: ни имени, ни описания события.
-        push.notify_adverse_event_clinicians(db, patient.id)
-    db.commit()
-    return _patient_dict(db, ev)
+        await push.notify_adverse_event_clinicians(db, patient.id)
+    await db.commit()
+    return await _patient_dict(db, ev)
 
 
-def list_patient_events(db: Session, patient_id: uuid.UUID) -> list[dict]:
-    rows = db.scalars(
+async def list_patient_events(db: AsyncSession, patient_id: uuid.UUID) -> list[dict]:
+    rows = (await db.scalars(
         select(AdverseEvent)
         .where(AdverseEvent.patient_id == patient_id)
         .order_by(AdverseEvent.created_at.desc(), AdverseEvent.id.desc())
-    ).all()
-    return [_patient_dict(db, e) for e in rows]
+    )).all()
+    return [await _patient_dict(db, e) for e in rows]
 
 
-def list_queue(db: Session, clinician_id: uuid.UUID, status: str | None = None) -> list[dict]:
+async def list_queue(db: AsyncSession, clinician_id: uuid.UUID, status: str | None = None) -> list[dict]:
     """Очередь НЯ по пациентам ростера врача, новые сверху."""
     if status is not None and status not in STATUSES:
         raise Problem(422, "VALIDATION", f"Неизвестный статус: {status}")
@@ -156,25 +158,25 @@ def list_queue(db: Session, clinician_id: uuid.UUID, status: str | None = None) 
     )
     if status is not None:
         q = q.where(AdverseEvent.status == status)
-    return [event_dict(db, e, fio) for e, fio in db.execute(q).all()]
+    return [await event_dict(db, e, fio) for e, fio in (await db.execute(q)).all()]
 
 
-def _get_for_clinician(
-    db: Session, clinician_id: uuid.UUID, patient_id: uuid.UUID, event_id: uuid.UUID
+async def _get_for_clinician(
+    db: AsyncSession, clinician_id: uuid.UUID, patient_id: uuid.UUID, event_id: uuid.UUID
 ) -> AdverseEvent:
     """404 для чужого пациента и чужого события — без утечки существования."""
-    roster = db.get(ClinicianRoster, (clinician_id, patient_id))
+    roster = await db.get(ClinicianRoster, (clinician_id, patient_id))
     if roster is None:
         raise Problem(404, "ADVERSE_NOT_FOUND", "Нежелательное явление не найдено")
-    ev = db.get(AdverseEvent, event_id)
+    ev = await db.get(AdverseEvent, event_id)
     if ev is None or ev.patient_id != patient_id:
         raise Problem(404, "ADVERSE_NOT_FOUND", "Нежелательное явление не найдено")
-    require_patient_consent(db, patient_id)
+    await require_patient_consent(db, patient_id)
     return ev
 
 
-def verify_event(
-    db: Session,
+async def verify_event(
+    db: AsyncSession,
     clinician_id: uuid.UUID,
     patient_id: uuid.UUID,
     event_id: uuid.UUID,
@@ -193,18 +195,18 @@ def verify_event(
     Повтор с тем же решением идемпотентен (возвращается текущая строка без
     изменений и без новой записи аудита); смена уже принятого решения → 409.
     """
-    ev = _get_for_clinician(db, clinician_id, patient_id, event_id)
+    ev = await _get_for_clinician(db, clinician_id, patient_id, event_id)
     if severity is not None and severity not in ("mild", "moderate", "severe"):
         raise Problem(422, "VALIDATION", "Неизвестная тяжесть")
     if action_taken is not None and action_taken not in ACTION_TAKEN:
         raise Problem(422, "VALIDATION", "Неизвестное действие")
-    _validate_drug(db, drug_id)
-    _validate_medication(db, patient_id, medication_id)
+    await _validate_drug(db, drug_id)
+    await _validate_medication(db, patient_id, medication_id)
 
-    patient = db.get(User, patient_id)
+    patient = await db.get(User, patient_id)
     if ev.status != "pending":
         if ev.status == status:
-            return event_dict(db, ev, patient.fio if patient else None)
+            return await event_dict(db, ev, patient.fio if patient else None)
         raise Problem(409, "ADVERSE_ALREADY_VERIFIED", "Нежелательное явление уже проверено")
 
     ev.status = status
@@ -222,6 +224,6 @@ def verify_event(
         ev.action_taken = action_taken
     if verification_note is not None:
         ev.verification_note = verification_note
-    audit_record(db, clinician_id, "ADVERSE_VERIFY", "adverse_event", str(ev.id), ip=ip)
-    db.commit()
-    return event_dict(db, ev, patient.fio if patient else None)
+    await audit_record(db, clinician_id, "ADVERSE_VERIFY", "adverse_event", str(ev.id), ip=ip)
+    await db.commit()
+    return await event_dict(db, ev, patient.fio if patient else None)

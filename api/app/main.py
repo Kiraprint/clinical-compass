@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -10,13 +12,49 @@ from . import db
 from .config import settings
 from .errors import register_handlers
 
+log = logging.getLogger(__name__)
+
+
+def _validate_kb_index() -> None:
+    """Fail-fast при старте: профиль эмбеддера и совместимость с индексом KB.
+
+    Нет опциональных зависимостей (CC_EMBEDDER=bge-m3 без extra `embeddings`)
+    или dense-размерность коллекции не та — это ошибка конфигурации: падаем
+    сразу с инструкцией, а не 500 на первом запросе к ассистенту (docs/08 §4).
+    Недоступный Qdrant ошибкой конфигурации не считаем.
+    """
+    from .services import kb
+    from .services.agent import qdrant_client
+    from .services.embeddings import get_embedder
+
+    embedder = get_embedder()
+    try:
+        kb.check_embedder_compatibility(qdrant_client(), embedder.dense_size)
+    except kb.IndexConfigError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — связь с Qdrant, а не конфиг
+        log.warning("Проверка KB-индекса пропущена (Qdrant недоступен): %s", exc)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if db.engine is None:  # dev-запуск: uvicorn app.main:app
         db.setup(settings.database_url)
-        db.init_db()
-    yield
+        # Alembic/DDL — синхронно и блокирующе: в loop нельзя, поэтому в поток.
+        await asyncio.to_thread(db.init_db)
+    try:
+        # Fail-fast: суммарный пул воркеров и фоновых сервисов влезает в max_connections.
+        db.validate_pool_budget()
+        # Оффлоадим в поток: сборка эмбеддера (torch) и запрос к Qdrant — не в loop.
+        await asyncio.to_thread(_validate_kb_index)
+        yield
+    finally:
+        # Закрываем пулы явно: иначе при рестарте/перезагрузке процесса воркеры
+        # (uvicorn --reload, тесты) оставляют серверные соединения в Postgres.
+        if db.engine is not None:
+            await db.engine.dispose()
+        if db.sync_engine is not None:
+            await asyncio.to_thread(db.sync_engine.dispose)
 
 
 def create_app() -> FastAPI:

@@ -20,7 +20,7 @@ import re
 from datetime import date, datetime, timezone
 
 from sqlalchemy import exists, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import EmiasLink, User
 
@@ -81,12 +81,12 @@ def patient_display_name(patient: dict) -> str:
 def normalize_fio(value: str | None) -> str:
     return re.sub(r"\s+", " ", (value or "").strip()).lower()
 
-def find_local_patient(
-    db: Session, *, snils_hash_value: str | None, fio: str | None
+async def find_local_patient(
+    db: AsyncSession, *, snils_hash_value: str | None, fio: str | None
 ) -> tuple[User | None, str | None]:
     """Локальный пациент для ресурса FHIR. Возвращает (user, 'snils'|'fio'|None)."""
     if snils_hash_value:
-        linked = db.scalar(
+        linked = await db.scalar(
             select(User)
             .join(EmiasLink, EmiasLink.patient_id == User.id)
             .where(EmiasLink.snils_hash == snils_hash_value)
@@ -95,13 +95,13 @@ def find_local_patient(
             return linked, "snils"
     normalized = normalize_fio(fio)
     if normalized:
-        rows = db.scalars(
+        rows = (await db.scalars(
             select(User).where(
                 User.role == "PATIENT",
                 func.lower(func.trim(User.fio)) == normalized,
                 ~exists().where(EmiasLink.patient_id == User.id),
             )
-        ).all()
+        )).all()
         if len(rows) == 1:
             return rows[0], "fio"
     return None, None

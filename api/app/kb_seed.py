@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import threading
 import time
 from pathlib import Path
+from types import MappingProxyType
+from typing import Any, Mapping
 
 from qdrant_client import QdrantClient
 from sqlalchemy import select
@@ -145,22 +148,25 @@ def _guideline_docs(with_full_text: bool = False) -> list[dict]:
     return docs
 
 
-def _drug_docs() -> list[dict]:
+def _drug_docs(rows: list | None = None) -> list[dict]:
     """Чанки по препаратам из таблицы drugs (источник — ГРЛС, усл.7 кейса).
 
     Таблица — единственный источник правды: seed.py грузит api/app/data/drugs.json
     в drugs, отсюда же строятся чанки для Qdrant. На препарат — основной чанк
     (показания/дозировка/механизм) + отдельный чанк НЯ/противопоказаний, чтобы
     retrieval по «побочные эффекты <препарат>» попадал точно. Тема ЛЕКАРСТВА.
+
+    В request-path строки передаёт `load_drug_docs` (async-сессия запроса);
+    sync-фолбэк ниже — только CLI/тесты (build_corpus без аргумента).
     """
-    from app.db import SessionLocal
-    from app.models import Drug
+    if rows is None:
+        from app.db import SyncSessionLocal
+        from app.models import Drug
+
+        with SyncSessionLocal() as s:
+            rows = list(s.execute(select(Drug).order_by(Drug.drug_id)).scalars().all())
 
     docs: list[dict] = []
-    with SessionLocal() as s:
-        rows = s.execute(
-            select(Drug).order_by(Drug.drug_id)
-        ).scalars().all()
     for d in rows:
         title = f"{d.trade_name} ({d.inn})"
         ru = f"РУ {d.reg_certificate} от {d.reg_date}"
@@ -268,12 +274,109 @@ def _article_docs() -> list[dict]:
     ]
 
 
-def build_corpus(with_guidelines: bool = False) -> list[dict]:
+async def load_drug_docs(db) -> list[dict]:
+    """drug-чанки через async-сессию запроса (без sync Session в request-path)."""
+    from app.models import Drug
+
+    rows = (await db.scalars(select(Drug).order_by(Drug.drug_id))).all()
+    return _drug_docs(list(rows))
+
+
+def _head_chunks() -> list[dict]:
+    """Статические секции корпуса, не зависящие от with_guidelines."""
+    return _scale_docs() + _triage_docs() + _redlines_docs()
+
+
+def _tail_chunks(with_guidelines: bool) -> list[dict]:
+    return _guideline_docs(with_full_text=with_guidelines) + _article_docs()
+
+
+# Кеш собранного корпуса. build_corpus() вызывается на запрос агента (лексический
+# fallback в search_kb) и без кеша каждый раз ходит в БД за препаратами — держим
+# готовый корпус в процессе. Записи неизменяемы (MappingProxyType), чтобы
+# вызывающий не мог испортить кеш. Инвалидация: TTL (CC_KB_CORPUS_TTL_SECONDS) и
+# явная clear_corpus_cache() из писателей справочника (seed CLI, тестовые
+# фикстуры); runtime-писателей drugs/КР в API нет, поэтому TTL — единственная
+# инвалидация на запросном пути.
+#
+# Ключи: ("corpus", with_guidelines) — полный снимок для CLI/лексического
+# fallback (препараты в нём читаются из БД через sync-сессию); ("head",) и
+# ("tail", with_guidelines) — статика без препаратов. Request-path передаёт
+# препараты из сессии запроса (build_corpus(drug_docs=...)): такой список НЕ
+# кешируется — он принадлежит запросу.
+_corpus_lock = threading.Lock()
+_corpus_cache: dict[tuple, tuple[float, tuple[Mapping[str, Any], ...]]] = {}
+_corpus_generation = 0  # растёт при каждой инвалидации: сборка «в полёте» не должна кешироваться
+
+
+def clear_corpus_cache() -> None:
+    """Сбросить кеш корпуса (после записи в drugs/КР, в CLI-сиде и тестах)."""
+    global _corpus_generation
+    with _corpus_lock:
+        _corpus_cache.clear()
+        _corpus_generation += 1
+
+
+def _cached(key: tuple, build) -> tuple[Mapping[str, Any], ...]:
+    """Снимок по ключу с TTL. Сборка — ВНЕ лока.
+
+    Под локом был бы «один промах на всех», но сборка полного корпуса читает
+    drugs из БД sync-сессией: если БД притормозила, лок держал бы все потоки
+    keyword-fallback. Поэтому допускаем редкие дубли сборки на холодном старте,
+    а под локом только читаем/пишем кеш. Исключения не кешируются — при ошибке
+    следующий вызов попытается собрать снимок снова.
+    """
+    ttl = settings.kb_corpus_ttl_seconds
+    with _corpus_lock:
+        generation = _corpus_generation
+        cached = _corpus_cache.get(key) if ttl > 0 else None
+        if cached is not None and time.monotonic() - cached[0] < ttl:
+            return cached[1]
+    snapshot = tuple(MappingProxyType(dict(d)) for d in build())
+    with _corpus_lock:
+        # Пока собирали, могла пройти clear_corpus_cache() (seed/тест/будущий
+        # писатель): тогда наш снимок уже устарел и класть его в кеш нельзя.
+        if generation != _corpus_generation:
+            return snapshot
+        if ttl > 0:
+            cached = _corpus_cache.get(key)
+            if cached is not None and time.monotonic() - cached[0] < ttl:
+                return cached[1]
+            _corpus_cache[key] = (time.monotonic(), snapshot)
+        else:
+            _corpus_cache.pop(key, None)
+    return snapshot
+
+
+def _immutable(docs: list[dict]) -> list[Mapping[str, Any]]:
+    return [MappingProxyType(dict(d)) for d in docs]
+
+
+def _assemble(with_guidelines: bool, drugs: list[dict]) -> list[dict]:
     return (
-        _scale_docs() + _triage_docs() + _redlines_docs()
-        + _drug_docs() + _guideline_docs(with_full_text=with_guidelines)
-        + _article_docs()
+        _head_chunks() + list(drugs) + _tail_chunks(with_guidelines)
     )
+
+
+def build_corpus(
+    with_guidelines: bool = False, drug_docs: list[dict] | None = None
+) -> tuple[Mapping[str, Any], ...]:
+    """Чанки KB: шкалы, триаж, красные линии, препараты, КР, статьи (docs/08 §5).
+
+    Без drug_docs возвращается закешированный на CC_KB_CORPUS_TTL_SECONDS
+    снимок (<= 0 — кеш выключен), препараты в него читаются из БД.
+    С drug_docs (request-path, см. load_drug_docs) кешируется только
+    статическая часть, а переданный список оборачивается в неизменяемые
+    копии — он принадлежит запросу и не должен попадать в кеш.
+    """
+    if drug_docs is None:
+        return _cached(
+            ("corpus", with_guidelines),
+            lambda: _assemble(with_guidelines, _drug_docs()),
+        )
+    head = _cached(("head",), _head_chunks)
+    tail = _cached(("tail", with_guidelines), lambda: _tail_chunks(with_guidelines))
+    return head + tuple(_immutable(drug_docs)) + tail
 
 
 def main() -> None:
@@ -305,6 +408,8 @@ def main() -> None:
     if _db.engine is None:
         _db.setup(settings.database_url)
 
+    # Переиндексация всегда читает БД/файлы заново: не индексируем закешированный корпус.
+    clear_corpus_cache()
     docs = build_corpus(with_guidelines=args.with_guidelines)
     n = kb.upsert_documents(client, build_embedder(), docs)
     total = kb.count_points(client)

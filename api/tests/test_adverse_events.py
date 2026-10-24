@@ -15,12 +15,12 @@ from app.models import AdverseEvent, ClinicianRoster, Notification, PatientMedic
 from .conftest import clinician_ctx, patient_ctx
 
 def _roster(pid: str, cid: str) -> None:
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         s.add(ClinicianRoster(patient_id=uuid.UUID(pid), clinician_id=uuid.UUID(cid)))
         s.commit()
 
 def _medication(pid: str, title: str = "Авиандр") -> str:
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         med = PatientMedication(
             patient_id=uuid.UUID(pid), title=title, status="active", source="clinician",
         )
@@ -41,7 +41,7 @@ def test_patient_reports_pending_event(client):
     assert body["status_label"] == "на проверке"
     assert body["verified_at"] is None
 
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         ev = s.execute(select(AdverseEvent).where(AdverseEvent.id == uuid.UUID(body["id"]))).scalar_one()
         assert ev.reported_by == "patient"
         assert ev.clinician_id is None
@@ -107,7 +107,7 @@ def test_severe_report_notifies_roster_without_pdn(client):
     )
     assert resp.status_code == 201, resp.text
 
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         notes = s.scalars(
             select(Notification).where(Notification.user_id == uuid.UUID(cid))
         ).all()
@@ -127,7 +127,7 @@ def test_mild_report_does_not_notify(client):
         json={"event_text": "Лёгкая тошнота", "severity": "mild", "onset_date": "2026-10-20"},
         headers=h,
     ).status_code == 201
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         assert s.scalars(select(Notification).where(Notification.user_id == uuid.UUID(cid))).all() == []
 
 def test_clinician_queue_contains_pending(client):
@@ -325,7 +325,7 @@ def test_consent_revoke_deletes_patient_events(client):
         headers=h,
     )
     assert client.post("/api/v1/consent/revoke", headers=h).status_code == 204
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         assert s.scalars(
             select(AdverseEvent).where(AdverseEvent.patient_id == uuid.UUID(pid))
         ).all() == []

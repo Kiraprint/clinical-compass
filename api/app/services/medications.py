@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import Problem
 from app.models import PatientMedication
@@ -28,24 +28,24 @@ EDITABLE_FIELDS = ("dosage", "status", "ended_on", "notes", "times_per_day")
 def _today() -> date:
     return datetime.now(MOSCOW).date()
 
-def _require_access(db: Session, clinician_id, patient_id) -> None:
-    require_roster(db, clinician_id, patient_id)
-    require_patient_consent(db, patient_id)
+async def _require_access(db: AsyncSession, clinician_id, patient_id) -> None:
+    await require_roster(db, clinician_id, patient_id)
+    await require_patient_consent(db, patient_id)
 
-def _get(db: Session, patient_id, med_id) -> PatientMedication:
-    med = db.get(PatientMedication, med_id)
+async def _get(db: AsyncSession, patient_id, med_id) -> PatientMedication:
+    med = await db.get(PatientMedication, med_id)
     # IDOR: назначение другого пациента неотличимо от несуществующего.
     if med is None or med.patient_id != patient_id:
         raise Problem(404, "NOT_FOUND", "Назначение не найдено")
     return med
 
-def _get_mutable(db: Session, clinician_id, patient_id, med_id) -> PatientMedication:
+async def _get_mutable(db: AsyncSession, clinician_id, patient_id, med_id) -> PatientMedication:
     """Строка, которую врач вправе менять: своя локальная.
 
     Импорт ЕМИАС read-only → 409 MEDICATION_IMPORTED; локальное назначение
     другого врача → 403 NOT_OWNER (карточка может быть закреплена за несколькими).
     """
-    med = _get(db, patient_id, med_id)
+    med = await _get(db, patient_id, med_id)
     if med.source != "clinician":
         raise Problem(409, "MEDICATION_IMPORTED", "Назначение импортировано из ЕМИАС — только чтение")
     if med.clinician_id != clinician_id:
@@ -91,11 +91,11 @@ def medication_dict(med: PatientMedication, actor_id=None) -> dict:
         "created_at": med.created_at.isoformat(),
     }
 
-def list_medications(
-    db: Session, clinician_id, patient_id, status: str | None = None, active_only: bool = False,
+async def list_medications(
+    db: AsyncSession, clinician_id, patient_id, status: str | None = None, active_only: bool = False,
 ) -> list[dict]:
     """Назначения пациента (новые первыми). Roster + consent."""
-    _require_access(db, clinician_id, patient_id)
+    await _require_access(db, clinician_id, patient_id)
     if status is not None and status not in ALL_STATUSES:
         raise Problem(422, "VALIDATION", f"Неизвестный статус: {status}")
     query = select(PatientMedication).where(PatientMedication.patient_id == patient_id)
@@ -108,16 +108,16 @@ def list_medications(
         PatientMedication.created_at.desc(),
         PatientMedication.id.desc(),
     )
-    return [medication_dict(m, clinician_id) for m in db.scalars(query).all()]
+    return [medication_dict(m, clinician_id) for m in (await db.scalars(query)).all()]
 
-def create_medication(
-    db: Session, clinician_id, patient_id, *,
+async def create_medication(
+    db: AsyncSession, clinician_id, patient_id, *,
     title: str, dosage: str | None = None, started_on: date | None = None,
     ended_on: date | None = None, status: str = "active", notes: str | None = None,
     times_per_day: int | None = None, ip: str | None = None,
 ) -> dict:
     """Назначение препарата врачом. Roster + consent + аудит PRESCRIBE_MEDICATION."""
-    _require_access(db, clinician_id, patient_id)
+    await _require_access(db, clinician_id, patient_id)
     title, started_on, ended_on = _validate(title, status, started_on, ended_on)
     times_per_day = _validate_times_per_day(times_per_day)
     med = PatientMedication(
@@ -127,17 +127,17 @@ def create_medication(
         times_per_day=times_per_day,
     )
     db.add(med)
-    db.flush()
-    audit_record(db, clinician_id, "PRESCRIBE_MEDICATION", "patient", str(patient_id), ip=ip)
-    db.commit()
+    await db.flush()
+    await audit_record(db, clinician_id, "PRESCRIBE_MEDICATION", "patient", str(patient_id), ip=ip)
+    await db.commit()
     return medication_dict(med, clinician_id)
 
-def update_medication(
-    db: Session, clinician_id, patient_id, med_id, changes: dict, ip: str | None = None,
+async def update_medication(
+    db: AsyncSession, clinician_id, patient_id, med_id, changes: dict, ip: str | None = None,
 ) -> dict:
     """Правка дозировки/режима/статуса/даты окончания/заметки. Аудит UPDATE_MEDICATION."""
-    _require_access(db, clinician_id, patient_id)
-    med = _get_mutable(db, clinician_id, patient_id, med_id)
+    await _require_access(db, clinician_id, patient_id)
+    med = await _get_mutable(db, clinician_id, patient_id, med_id)
     unknown = set(changes) - set(EDITABLE_FIELDS)
     if unknown:
         raise Problem(422, "VALIDATION", f"Поля не редактируются: {', '.join(sorted(unknown))}")
@@ -152,32 +152,32 @@ def update_medication(
     if "times_per_day" in changes:
         med.times_per_day = _validate_times_per_day(changes["times_per_day"])
     med.ended_on = ended_on
-    audit_record(db, clinician_id, "UPDATE_MEDICATION", "patient", str(patient_id), ip=ip)
-    db.commit()
+    await audit_record(db, clinician_id, "UPDATE_MEDICATION", "patient", str(patient_id), ip=ip)
+    await db.commit()
     return medication_dict(med, clinician_id)
 
-def stop_medication(
-    db: Session, clinician_id, patient_id, med_id, ended_on: date | None = None,
+async def stop_medication(
+    db: AsyncSession, clinician_id, patient_id, med_id, ended_on: date | None = None,
     ip: str | None = None,
 ) -> dict:
     """Остановка приёма: status='stopped', ended_on по умолчанию — сегодня."""
-    _require_access(db, clinician_id, patient_id)
-    med = _get_mutable(db, clinician_id, patient_id, med_id)
+    await _require_access(db, clinician_id, patient_id)
+    med = await _get_mutable(db, clinician_id, patient_id, med_id)
     ended = ended_on or _today()
     if med.started_on is not None and ended < med.started_on:
         raise Problem(422, "VALIDATION", "Дата окончания раньше даты начала")
     med.status = "stopped"
     med.ended_on = ended
-    audit_record(db, clinician_id, "STOP_MEDICATION", "patient", str(patient_id), ip=ip)
-    db.commit()
+    await audit_record(db, clinician_id, "STOP_MEDICATION", "patient", str(patient_id), ip=ip)
+    await db.commit()
     return medication_dict(med, clinician_id)
 
-def delete_medication(
-    db: Session, clinician_id, patient_id, med_id, ip: str | None = None,
+async def delete_medication(
+    db: AsyncSession, clinician_id, patient_id, med_id, ip: str | None = None,
 ) -> None:
     """Удаление ошибочного назначения. Только своя локальная строка."""
-    _require_access(db, clinician_id, patient_id)
-    med = _get_mutable(db, clinician_id, patient_id, med_id)
-    db.delete(med)
-    audit_record(db, clinician_id, "DELETE_MEDICATION", "patient", str(patient_id), ip=ip)
-    db.commit()
+    await _require_access(db, clinician_id, patient_id)
+    med = await _get_mutable(db, clinician_id, patient_id, med_id)
+    await db.delete(med)
+    await audit_record(db, clinician_id, "DELETE_MEDICATION", "patient", str(patient_id), ip=ip)
+    await db.commit()

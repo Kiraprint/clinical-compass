@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -25,7 +26,7 @@ from app.config import settings
 def _session():
     if db_module.engine is None:
         db_module.setup(settings.database_url)
-    return db_module.SessionLocal()
+    return db_module.AsyncSessionLocal()
 
 def _print(payload) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
@@ -34,13 +35,13 @@ def _disabled() -> int:
     _print({"error": "emias_disabled", "hint": "CC_EMIAS_ENABLED=true"})
     return 2
 
-def _cmd_health(_args) -> int:
+async def _cmd_health(_args) -> int:
     from app.emias.config import current_config
     from app.models import EmiasSyncRun
 
     cfg = current_config()
-    with _session() as session:
-        last = session.scalar(select(EmiasSyncRun).order_by(EmiasSyncRun.started_at.desc()).limit(1))
+    async with _session() as session:
+        last = await session.scalar(select(EmiasSyncRun).order_by(EmiasSyncRun.started_at.desc()).limit(1))
         payload = {
             "enabled": cfg.enabled,
             "base_url_scheme": cfg.base_url.split(":", 1)[0],
@@ -52,27 +53,27 @@ def _cmd_health(_args) -> int:
     _print(payload)
     return 0
 
-def _cmd_sync_patients(_args) -> int:
+async def _cmd_sync_patients(_args) -> int:
     if not settings.emias_enabled:
         return _disabled()
     from app.emias.sync import execute_sync
 
-    with _session() as session:
-        run = execute_sync(session, mode="patients", trigger="cli")
+    async with _session() as session:
+        run = await execute_sync(session, mode="patients", trigger="cli")
         _print({"run_id": str(run.id), "status": run.status, "stats": run.stats})
     return 0 if run.status in ("ok", "partial") else 1
 
-def _cmd_sync_patient(args) -> int:
+async def _cmd_sync_patient(args) -> int:
     if not settings.emias_enabled:
         return _disabled()
     from app.emias.sync import execute_sync
 
-    with _session() as session:
-        run = execute_sync(session, mode="one", patient_id=args.patient_id, trigger="cli")
+    async with _session() as session:
+        run = await execute_sync(session, mode="one", patient_id=args.patient_id, trigger="cli")
         _print({"run_id": str(run.id), "status": run.status, "stats": run.stats})
     return 0 if run.status in ("ok", "partial") else 1
 
-def _cmd_link(args) -> int:
+async def _cmd_link(args) -> int:
     if not settings.emias_enabled:
         return _disabled()
     from app.emias.sync import link_patient
@@ -86,21 +87,21 @@ def _cmd_link(args) -> int:
         return 2
 
     try:
-        with _session() as session:
-            result = link_patient(session, args.patient_id, snils)
+        async with _session() as session:
+            result = await link_patient(session, args.patient_id, snils)
     except Problem as exc:
         _print({"error": exc.code, "detail": exc.detail})
         return 1
     _print(result)
     return 0
 
-def _cmd_runs(args) -> int:
+async def _cmd_runs(args) -> int:
     from app.models import EmiasSyncRun
 
-    with _session() as session:
-        rows = session.scalars(
+    async with _session() as session:
+        rows = (await session.scalars(
             select(EmiasSyncRun).order_by(EmiasSyncRun.started_at.desc()).limit(args.limit)
-        ).all()
+        )).all()
         _print({"items": [
             {"id": str(r.id), "trigger": r.trigger, "mode": r.mode, "status": r.status,
              "stats": r.stats, "started_at": r.started_at, "finished_at": r.finished_at}
@@ -130,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
         "health": _cmd_health,
         "runs": _cmd_runs,
     }
-    return handlers[args.command](args)
+    return asyncio.run(handlers[args.command](args))
 
 if __name__ == "__main__":
     sys.exit(main())

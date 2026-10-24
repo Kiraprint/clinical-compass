@@ -14,11 +14,14 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from urllib.parse import urlparse
 import uuid
+
+import anyio
 from datetime import datetime, timezone
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.errors import Problem
@@ -87,8 +90,8 @@ def vapid_public_key() -> str:
 # --- Подписки -----------------------------------------------------------------
 
 
-def upsert_subscription(db: Session, user_id: uuid.UUID, endpoint: str, p256dh: str, auth: str) -> None:
-    sub = db.scalar(select(PushSubscription).where(PushSubscription.endpoint == endpoint))
+async def upsert_subscription(db: AsyncSession, user_id: uuid.UUID, endpoint: str, p256dh: str, auth: str) -> None:
+    sub = await db.scalar(select(PushSubscription).where(PushSubscription.endpoint == endpoint))
     if sub is None:
         sub = PushSubscription(user_id=user_id, endpoint=endpoint, p256dh=p256dh, auth=auth)
         db.add(sub)
@@ -96,89 +99,89 @@ def upsert_subscription(db: Session, user_id: uuid.UUID, endpoint: str, p256dh: 
         sub.user_id = user_id
         sub.p256dh = p256dh
         sub.auth = auth
-    db.commit()
+    await db.commit()
 
 
-def delete_subscription(db: Session, user_id: uuid.UUID, endpoint: str) -> None:
-    sub = db.scalar(
+async def delete_subscription(db: AsyncSession, user_id: uuid.UUID, endpoint: str) -> None:
+    sub = await db.scalar(
         select(PushSubscription).where(PushSubscription.endpoint == endpoint, PushSubscription.user_id == user_id)
     )
     if sub is not None:
-        db.delete(sub)
-        db.commit()
+        await db.delete(sub)
+        await db.commit()
 
 # --- FCM-токены нативного приложения (item 4) --------------------------------
 
-def upsert_device_token(db: Session, user_id: uuid.UUID, token: str, platform: str) -> None:
+async def upsert_device_token(db: AsyncSession, user_id: uuid.UUID, token: str, platform: str) -> None:
     """Регистрация FCM-токена (один на устройство, апсерт по токену)."""
-    row = db.scalar(select(DeviceToken).where(DeviceToken.token == token))
+    row = await db.scalar(select(DeviceToken).where(DeviceToken.token == token))
     if row is None:
         db.add(DeviceToken(user_id=user_id, token=token, platform=platform))
     else:
         row.user_id = user_id
         row.platform = platform
-    db.commit()
+    await db.commit()
 
-def delete_device_token(db: Session, user_id: uuid.UUID, token: str) -> None:
-    row = db.scalar(
+async def delete_device_token(db: AsyncSession, user_id: uuid.UUID, token: str) -> None:
+    row = await db.scalar(
         select(DeviceToken).where(DeviceToken.token == token, DeviceToken.user_id == user_id)
     )
     if row is not None:
-        db.delete(row)
-        db.commit()
+        await db.delete(row)
+        await db.commit()
 
-def _fcm_remaining(db: Session, user_id: uuid.UUID) -> int:
+async def _fcm_remaining(db: AsyncSession, user_id: uuid.UUID) -> int:
     """Оставшиеся секунды cooldown-окна (0 = можно апгрейдить)."""
-    state = db.get(FcmState, user_id)
+    state = await db.get(FcmState, user_id)
     if state is None or state.last_upgraded_at is None:
         return 0
     delta = datetime.now(timezone.utc) - state.last_upgraded_at
     return max(0, FCM_COOLDOWN_SECONDS - int(delta.total_seconds()))
 
-def fcm_status(db: Session, user_id: uuid.UUID) -> dict:
+async def fcm_status(db: AsyncSession, user_id: uuid.UUID) -> dict:
     """Статус окна перехода на FCM: активное окно + сколько осталось секунд."""
-    remaining = _fcm_remaining(db, user_id)
+    remaining = await _fcm_remaining(db, user_id)
     return {"window_active": remaining > 0, "remaining_seconds": remaining}
 
-def upgrade_to_fcm(db: Session, user_id: uuid.UUID, token: str, platform: str) -> None:
+async def upgrade_to_fcm(db: AsyncSession, user_id: uuid.UUID, token: str, platform: str) -> None:
     """Одноразовый переход на FCM-канал (item 4).
 
     Внутри окна (60 мин после успешного апгрейда) — 429 FCM_COOLDOWN.
     Апгрейд идемпотентен по токену (апсерт), поэтому повторная подписка
     на то же устройство после окна не создаёт дублей.
     """
-    state = db.get(FcmState, user_id, with_for_update=True)
-    remaining = _fcm_remaining(db, user_id)
+    state = await db.get(FcmState, user_id, with_for_update=True)
+    remaining = await _fcm_remaining(db, user_id)
     if remaining > 0:
         raise Problem(429, "FCM_COOLDOWN", f"Попробуйте через {remaining // 60 + 1} мин")
     if state is None:
         state = FcmState(user_id=user_id)
         db.add(state)
     state.last_upgraded_at = datetime.now(timezone.utc)
-    row = db.scalar(select(DeviceToken).where(DeviceToken.token == token))
+    row = await db.scalar(select(DeviceToken).where(DeviceToken.token == token))
     if row is None:
         db.add(DeviceToken(user_id=user_id, token=token, platform=platform))
     else:
         row.user_id = user_id
         row.platform = platform
-    db.commit()
+    await db.commit()
 
 
 # --- Уведомления -------------------------------------------------------------
 
 
-def notify_escalation_clinicians(
-    db: Session, patient_id: uuid.UUID, escalation: Escalation
+async def notify_escalation_clinicians(
+    db: AsyncSession, patient_id: uuid.UUID, escalation: Escalation
 ) -> list[uuid.UUID]:
     """Создаёт Notification для врачей из roster пациента и возвращает их user_id.
 
     Вызывается внутри транзакции финиша скрининга; коммитит внешний код.
     """
-    patient = db.get(User, patient_id)
+    patient = await db.get(User, patient_id)
     patient_name = patient.fio or patient.email if patient else "пациент"
-    rows = db.scalars(
+    rows = (await db.scalars(
         select(ClinicianRoster.clinician_id).where(ClinicianRoster.patient_id == patient_id)
-    ).all()
+    )).all()
     if escalation.kind == "SUICIDAL":
         recipient_kind, title = "суицидальный риск", "RED-эскалация"
     elif escalation.kind == "CHECKIN_RISK_URGENT":
@@ -205,15 +208,15 @@ def notify_escalation_clinicians(
     return list(rows)
 
 
-def notify_adverse_event_clinicians(db: Session, patient_id: uuid.UUID) -> list[uuid.UUID]:
+async def notify_adverse_event_clinicians(db: AsyncSession, patient_id: uuid.UUID) -> list[uuid.UUID]:
     """FR-28: серьёзное НЯ, о котором сообщил пациент. Один Notification на врача ростера.
 
     Текст без ПДн: ни имени пациента, ни описания события (152-ФЗ, спецкатегория).
     Коммитит внешний код.
     """
-    rows = db.scalars(
+    rows = (await db.scalars(
         select(ClinicianRoster.clinician_id).where(ClinicianRoster.patient_id == patient_id)
-    ).all()
+    )).all()
     for clinician_id in rows:
         db.add(
             Notification(
@@ -227,15 +230,14 @@ def notify_adverse_event_clinicians(db: Session, patient_id: uuid.UUID) -> list[
     return list(rows)
 
 
-
-def list_notifications(db: Session, user_id: uuid.UUID, limit: int = 50) -> dict:
-    rows = db.scalars(
+async def list_notifications(db: AsyncSession, user_id: uuid.UUID, limit: int = 50) -> dict:
+    rows = (await db.scalars(
         select(Notification)
         .where(Notification.user_id == user_id)
         .order_by(Notification.created_at.desc(), Notification.id.desc())
         .limit(limit)
-    ).all()
-    unread = db.scalar(
+    )).all()
+    unread = await db.scalar(
         select(Notification.id)
         .where(Notification.user_id == user_id, Notification.read_at.is_(None))
         .limit(1)
@@ -258,7 +260,7 @@ def list_notifications(db: Session, user_id: uuid.UUID, limit: int = 50) -> dict
     }
 
 
-def mark_read(db: Session, user_id: uuid.UUID, ids: list[str] | None) -> None:
+async def mark_read(db: AsyncSession, user_id: uuid.UUID, ids: list[str] | None) -> None:
     now = datetime.now(timezone.utc)
     q = select(Notification).where(Notification.user_id == user_id)
     if ids:
@@ -271,9 +273,9 @@ def mark_read(db: Session, user_id: uuid.UUID, ids: list[str] | None) -> None:
         q = q.where(Notification.id.in_(parsed))
     else:
         q = q.where(Notification.read_at.is_(None))
-    for n in db.scalars(q):
+    for n in await db.scalars(q):
         n.read_at = now
-    db.commit()
+    await db.commit()
 
 
 # --- Доставка push (best-effort) ---------------------------------------------
@@ -361,44 +363,61 @@ def _fcm_send(token: str, title: str, body: str) -> bool:
         with urllib.request.urlopen(req, timeout=5) as resp:
             return resp.status == 200
     except urllib.error.HTTPError as exc:  # noqa: BLE001
-        log.warning("FCM send error %s (token %s...): %s", exc.code, token[:40], exc.read()[:200])
+        log.warning("FCM send error %s (token %s…): %s", exc.code, token[:8], exc.read()[:200])
     except Exception as exc:  # noqa: BLE001
-        log.warning("FCM send сбой (token %s...): %s", token[:40], exc)
+        log.warning("FCM send сбой (token %s…): %s", token[:8], exc)
     return False
 
-def push_to_clinicians(
-    db: Session, clinician_ids: list[uuid.UUID], title: str, body: str
+def _log_push_failure(endpoint: str, exc: BaseException) -> None:
+    """В лог — только хост: endpoint веб-пуша содержит capability-токен."""
+    log.warning("push не доставлен (%s): %s", _endpoint_host(endpoint), exc)
+
+
+def _endpoint_host(endpoint: str) -> str:
+    """Хост подписки для логов: сам endpoint — capability-токен, его логировать нельзя."""
+    try:
+        return urlparse(endpoint).netloc or "?"
+    except ValueError:
+        return "?"
+
+
+async def push_to_clinicians(
+    db: AsyncSession, clinician_ids: list[uuid.UUID], title: str, body: str
 ) -> None:
     """Расслылка pushes врачам (Web Push + FCM). Сбои не пробрасываются (best-effort)."""
     if not settings.push_enabled or not clinician_ids:
         return
     try:
         keys = _load_vapid()
-        subs = db.scalars(
+        subs = (await db.scalars(
             select(PushSubscription).where(PushSubscription.user_id.in_(clinician_ids))
-        ).all()
+        )).all()
         payload = json.dumps({"title": title, "body": body})
-        from pywebpush import WebPushException, webpush
+        from pywebpush import webpush
 
-        for s in subs:
+
+        def _send(endpoint: str, p256dh: str, auth: str) -> None:  # sync: pywebpush блокирует → в потоке
+            # В поток передаём только примитивы: ORM-объект живёт в сессии loop'а,
+            # а endpoint — capability-токен, поэтому в лог идёт лишь хост.
             try:
                 webpush(
-                    {"endpoint": s.endpoint, "keys": {"p256dh": s.p256dh, "auth": s.auth}},
+                    {"endpoint": endpoint, "keys": {"p256dh": p256dh, "auth": auth}},
                     data=payload,
                     vapid_private_key=keys["vapid"],
                     vapid_claims={"sub": "mailto:admin@compass.demo"},
                     timeout=5,
                 )
-            except WebPushException as exc:
-                log.warning("push не доставлен (%s): %s", s.endpoint[:60], exc)
             except Exception as exc:  # noqa: BLE001 — одна плохая подписка не валит остальные
-                log.warning("push error %s: %s", s.endpoint[:60], exc)
+                _log_push_failure(endpoint, exc)
+
+        for s in subs:
+            await anyio.to_thread.run_sync(_send, s.endpoint, s.p256dh, s.auth)
 
         # Нативные FCM-токены (Android APK).
-        devices = db.scalars(
+        devices = (await db.scalars(
             select(DeviceToken).where(DeviceToken.user_id.in_(clinician_ids))
-        ).all()
+        )).all()
         for d in devices:
-            _fcm_send(d.token, title, body)
+            await anyio.to_thread.run_sync(_fcm_send, d.token, title, body)
     except Exception as exc:  # noqa: BLE001
         log.warning("push_to_clinicians сбой: %s", exc)

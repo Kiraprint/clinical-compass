@@ -11,7 +11,7 @@ import re
 import unicodedata
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.enrichment.types import SourceDocument
 from app.models import KBWork
@@ -76,14 +76,14 @@ def _identity_conflict(work: KBWork, doc: SourceDocument) -> bool:
     return False
 
 
-def find_existing(db: Session, doc: SourceDocument) -> KBWork | None:
+async def find_existing(db: AsyncSession, doc: SourceDocument) -> KBWork | None:
     """Ищет уже известную работу: источник+id → DOI → title_key.
 
     title_key — последний резерв и только в пределах одного источника:
     DOI/PMID сравниваются явно, совпавший заголовок с другими идентификаторами
     считается другой работой (иначе возможно слияние разных статей).
     """
-    same = db.scalar(
+    same = await db.scalar(
         select(KBWork).where(
             KBWork.source == doc.source,
             KBWork.external_id == doc.external_id,
@@ -94,12 +94,12 @@ def find_existing(db: Session, doc: SourceDocument) -> KBWork | None:
 
     doi = normalize_doi(doc.doi)
     if doi:
-        by_doi = db.scalar(select(KBWork).where(KBWork.meta["doi"].astext == doi))
+        by_doi = await db.scalar(select(KBWork).where(KBWork.meta["doi"].astext == doi))
         if by_doi is not None:
             return by_doi
 
     if doc.title:
-        by_title = db.scalar(
+        by_title = await db.scalar(
             select(KBWork).where(
                 KBWork.meta["title_key"].astext == title_key(doc.title, doc.year),
                 KBWork.source == doc.source,

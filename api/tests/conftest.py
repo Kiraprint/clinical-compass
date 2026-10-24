@@ -13,9 +13,12 @@ os.environ.setdefault("CC_QDRANT_COLLECTION", "kb_test")  # не затирае�
 os.environ.setdefault("CC_DATA_KEY", "test-data-key-0123456789abcdef0123456789abcdef")  # F1: pgcrypto ключ для тестов
 os.environ.setdefault("CC_ALLOW_DEMO_SECRETS", "true")  # F3: тесты используют демо-секреты
 
+import asyncio
+
 import pyotp
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.pool import NullPool
 
 from app import db
 
@@ -29,15 +32,19 @@ def engine():
     from app import models  # noqa: F401 — регистрирует таблицы в Base.metadata
     from sqlalchemy import text
 
-    db.setup(TEST_URL)
+    # NullPool: async-engine создаётся один раз на прогон, а TestClient даёт
+    # каждому тесту свой event loop — пулированные соединения из чужого цикла
+    # использовать нельзя (MissingGreenlet / cross-loop).
+    db.setup(TEST_URL, poolclass=NullPool)
     # Полный сброс схемы: модельные таблицы + alembic_version (иначе upgrade head
     # увидит версию 'head' и не создаст таблицы, оставив БД пустой).
-    with db.engine.begin() as conn:
+    with db.sync_engine.begin() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE"))
         conn.execute(text("CREATE SCHEMA public"))
     db.init_db()  # alembic upgrade head + триггер аудита
-    yield db.engine
-    db.engine.dispose()
+    yield db.sync_engine
+    db.sync_engine.dispose()
+    asyncio.run(db.engine.dispose())
 
 
 @pytest.fixture()
@@ -48,10 +55,56 @@ def client(engine):
     with TestClient(app) as c:
         yield c
 
+def run_async(fn, *args, **kwargs):
+    """Вызов async-сервиса из sync-теста: своя async-сессия (и свой loop) на вызов.
+
+    NullPool из engine-фикстуры делает такое переиспользование безопасным:
+    соединение создаётся и закрывается внутри loop текущего вызова. Результат
+    коммитится сервисом, поэтому после вызова читающие проверки через sync
+    `db_session` обязаны сделать expire_all().
+    """
+
+    async def _run():
+        async with db.AsyncSessionLocal() as session:
+            return await fn(session, *args, **kwargs)
+
+    return asyncio.run(_run())
+
+
+def run_async_commit(fn, *args, **kwargs):
+    """run_async + commit: для сервисов, которые коммитит вызывающий (review.reject)."""
+
+    async def _run():
+        async with db.AsyncSessionLocal() as session:
+            result = await fn(session, *args, **kwargs)
+            await session.commit()
+            return result
+
+    return asyncio.run(_run())
+
+
+@pytest.fixture()
+def acall(engine):
+    """Вызов async-сервиса из sync-теста: своя async-сессия (и свой loop) на вызов.
+
+    NullPool из engine-фикстуры делает такое переиспользование безопасным:
+    соединение создаётся и закрывается внутри loop текущего вызова.
+    """
+
+    def _call(fn, *args, **kwargs):
+        async def _run():
+            async with db.AsyncSessionLocal() as session:
+                return await fn(session, *args, **kwargs)
+
+        return asyncio.run(_run())
+
+    return _call
+
+
 @pytest.fixture()
 def db_session(engine):
     """Сессия БД для прямых запросов в обход ORM (проверки шифрования в покое)."""
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         yield s
         s.rollback()
 
@@ -60,13 +113,18 @@ def db_session(engine):
 def clean(engine):
     # Справочник препаратов нужен build_corpus()/KB-тестам (kb_seed._drug_docs
     # читает из таблицы drugs). Сеем перед каждым тестом, т.к. teardown тронкает.
+    from app.kb_seed import clear_corpus_cache
     from app.seed import _seed_drugs
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         _seed_drugs(s)
         s.commit()
+    # Кеш корпуса живёт в процессе тестов: после пересева/тронка он устарел.
+    clear_corpus_cache()
     yield
     from app.ratelimit import reset_rate_limits
+
     reset_rate_limits()
+    clear_corpus_cache()
     db.truncate_all()
 
 

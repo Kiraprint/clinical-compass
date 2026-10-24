@@ -16,18 +16,45 @@ _DEMO_EMIAS_SECRETS = {"compass-secret"}
 
 class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://compass:compass@127.0.0.1:5432/compass"
+    # Пул async-соединений на процесс API (см. app.db.validate_pool_budget).
+    # Спрос процесса = pool_size + max_overflow; бюджет всей инсталляции —
+    # CC_DB_MAX_CONNECTIONS (max_connections Postgres делят все воркеры, CLI и psql).
+    # Дефолты 20+20 рассчитаны максимум на 2 воркера в бюджете 100.
+    db_pool_size: int = 20  # CC_DB_POOL_SIZE: постоянных соединений на процесс
+    db_max_overflow: int = 20  # CC_DB_MAX_OVERFLOW: пиковых сверх pool_size
+    db_pool_timeout: int = 30  # CC_DB_POOL_TIMEOUT: сек ожидания свободного соединения
+    db_max_connections: int = 100  # CC_DB_MAX_CONNECTIONS: потолок Postgres для инсталляции
+    # Фоновые процессы (reminders-worker, kb-enrichment) держат свой маленький
+    # пул: им не нужен веер соединений под HTTP-нагрузку, но их спрос обязан
+    # попадать в тот же бюджет max_connections (см. db.validate_pool_budget).
+    db_bg_pool_size: int = 2  # CC_DB_BG_POOL_SIZE: соединений на фоновый процесс
+    db_bg_max_overflow: int = 1  # CC_DB_BG_MAX_OVERFLOW: пиковых сверх пула (тик держит лок-соединение + сессию)
+    db_background_processes: int = 2  # CC_DB_BACKGROUND_PROCESSES: их число в инсталляции
     jwt_secret: str = "dev-secret-change-me-0123456789abcdef"  # >= 32 байт (RFC 7518)
     access_ttl_minutes: int = 15
     refresh_ttl_days: int = 7
     rate_max: int = 5  # попыток захода на /auth/login за окно (перебор 2FA)
     rate_window: int = 60  # сек
+    rate_ip_max: int = 30  # CC_RATE_IP_MAX: неудачных попыток на IP за окно (любые email)
     push_enabled: bool = True
     vapid_private_key: str = ""  # base64(PKCS8 PEM); пусто → генерируется в памяти (демо)
     fcm_service_account_b64: str = ""  # base64(JSON service account Firebase); пусто → FCM выключен
     bootstrap_password: str = ""  # CC_BOOTSTRAP_PASSWORD: для python -m app.bootstrap_user (оператор)
     qdrant_url: str = "http://127.0.0.1:6333"  # векторная БД ИИ-агента (docs/07)
     qdrant_collection: str = "kb"  # документы: открытый не-ПДн корпус (docs/08)
-    embedder: str = "hash"  # hash | bge-m3 (docs/08 §4; по умолчанию офлайн-демо)
+    # Профиль эмбеддера (docs/08 §4): hash — офлайн-демо/тесты (dense 512);
+    # bge-m3 — прод (dense 1024; нужен extra `embeddings` и переиндексация KB).
+    embedder: str = "hash"
+    embedder_model: str = ""  # CC_EMBEDDER_MODEL: id модели; пусто → дефолт профиля
+    embedder_device: str = "auto"  # CC_EMBEDDER_DEVICE: auto | cpu | cuda[:N]
+    embedder_batch_size: int = 8  # CC_EMBEDDER_BATCH_SIZE: батч энкодера
+    embedder_max_length: int = 2048  # CC_EMBEDDER_MAX_LENGTH: токенов на текст
+    kb_min_score: float = 0.45  # CC_KB_MIN_SCORE: порог score лучшего чанка (dense-only профиль)
+    # CC_KB_CORPUS_TTL_SECONDS: TTL кеша корпуса KB (kb_seed.build_corpus) в
+    # процессе API. In-process писателей drugs нет (seed — отдельный CLI, он
+    # зовёт clear_corpus_cache), поэтому TTL — единственная runtime-инвалидация.
+    # 0 → кеш выключен.
+    kb_corpus_ttl_seconds: float = 60.0
     # CC_ASSISTANT_LLM_URL: OpenAI-совместимый /v1 (llama-server, vLLM, Ollama).
     # Пусто → LLM-роутинг топиков выключен (поиск по всем разделам). LLM получает
     # только очищенный от ПДн запрос и выбирает тулзу search_<раздел> (docs/12).

@@ -10,7 +10,7 @@ from .conftest import auth_header, login, register
 
 
 def test_audit_log_append_only(engine):
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         user = User(email="au@test.ru", password_hash="x", role="ADMIN", totp_secret="ABCDEFGHIJKLMNOP")
         s.add(user)
         s.flush()
@@ -24,7 +24,7 @@ def test_audit_log_append_only(engine):
 
 def test_audit_log_truncate_blocked(engine):
     # docs/04 §5: append-only — TRUNCATE audit_log запрещён на уровне БД (statement-триггер)
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         user = User(email="au2@test.ru", password_hash="x", role="ADMIN", totp_secret="ABCDEFGHIJKLMNOP")
         s.add(user)
         s.flush()
@@ -40,7 +40,7 @@ def test_admin_audit_list(client):
     data = login(client, "adm@test.ru", otp=pyotp.TOTP(reg["totp_secret"]).now())
     h = auth_header(data["access_token"])
 
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         admin = s.query(User).filter_by(email="adm@test.ru").one()
         s.add(AuditLog(actor_id=admin.id, action="TEST_EVENT", object_type="user", object_id=str(admin.id)))
         s.commit()

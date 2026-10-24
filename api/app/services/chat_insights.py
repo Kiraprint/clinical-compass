@@ -17,8 +17,9 @@ import math
 import re
 from datetime import datetime, timedelta, timezone
 
+import anyio
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.errors import Problem
@@ -89,14 +90,14 @@ def _insight_dict(i: ChatInsight) -> dict:
     }
 
 
-def _recent_messages(db: Session, patient_id) -> list[ChatMessage]:
+async def _recent_messages(db: AsyncSession, patient_id) -> list[ChatMessage]:
     since = datetime.now(timezone.utc) - timedelta(days=WINDOW_DAYS)
-    rows = db.scalars(
+    rows = (await db.scalars(
         select(ChatMessage)
         .where(ChatMessage.patient_id == patient_id, ChatMessage.created_at >= since)
         .order_by(ChatMessage.created_at.desc(), ChatMessage.no.desc())
         .limit(MAX_MESSAGES)
-    ).all()
+    )).all()
     return list(reversed(rows))
 
 
@@ -121,11 +122,11 @@ def _dialogue_text(messages: list[ChatMessage]) -> str:
     return "\n".join(reversed(kept))
 
 
-def _deny_names(db: Session, clinician_id, patient_id) -> list[str]:
+async def _deny_names(db: AsyncSession, clinician_id, patient_id) -> list[str]:
     """ФИО пациента и врача + ростер врача — deny-list деперсонализации."""
-    names = roster_names(db, clinician_id)
+    names = await roster_names(db, clinician_id)
     for uid in (patient_id, clinician_id):
-        fio = db.scalar(select(User.fio).where(User.id == uid))
+        fio = await db.scalar(select(User.fio).where(User.id == uid))
         if fio and fio.strip() and fio not in names:
             names.append(fio)
     return names
@@ -197,24 +198,30 @@ def _ask_llm(dialogue: str) -> list[dict]:
     return _parse_facts(content)
 
 
-def analyze(db: Session, clinician_id, patient_id, ip: str | None = None) -> dict:
+async def analyze(db: AsyncSession, clinician_id, patient_id, ip: str | None = None) -> dict:
     """Запуск анализа переписки врачом. Roster + consent + enabled-гейты."""
     _require_enabled()
-    require_roster(db, clinician_id, patient_id)
-    require_patient_consent(db, patient_id)
+    await require_roster(db, clinician_id, patient_id)
+    await require_patient_consent(db, patient_id)
 
-    messages = _recent_messages(db, patient_id)
+    messages = await _recent_messages(db, patient_id)
     if not messages:
         raise Problem(409, "CHAT_INSIGHTS_EMPTY", "Переписки с пациентом нет — анализировать нечего")
 
     dialogue = _dialogue_text(messages)
     # Сырое ФИО в LLM не уходит: маскируем пациента, врача и остальной ростер.
-    dialogue, _, _ = scrub_for_llm(dialogue, None, names=_deny_names(db, clinician_id, patient_id))
-
-    facts = _ask_llm(dialogue)
+    names = await _deny_names(db, clinician_id, patient_id)
+    # Деперсонализация (regexp по всей переписке) и HTTP к LLM — блокирующие:
+    # в event loop FastAPI их пускать нельзя.
+    dialogue, _, _ = await anyio.to_thread.run_sync(
+        lambda: scrub_for_llm(dialogue, None, names=names)
+    )
+    facts = await anyio.to_thread.run_sync(_ask_llm, dialogue)
     source_ids = [str(m.id) for m in messages]
     existing = set(
-        db.scalars(select(ChatInsight.dedupe_hash).where(ChatInsight.patient_id == patient_id))
+        (await db.scalars(
+            select(ChatInsight.dedupe_hash).where(ChatInsight.patient_id == patient_id)
+        )).all()
     )
 
     created: list[ChatInsight] = []
@@ -238,9 +245,9 @@ def analyze(db: Session, clinician_id, patient_id, ip: str | None = None) -> dic
         db.add(row)
         created.append(row)
 
-    db.flush()
-    audit_record(db, clinician_id, "CHAT_INSIGHTS_RUN", "patient", str(patient_id), ip=ip)
-    db.commit()
+    await db.flush()
+    await audit_record(db, clinician_id, "CHAT_INSIGHTS_RUN", "patient", str(patient_id), ip=ip)
+    await db.commit()
     return {
         "created": len(created),
         "skipped": skipped,
@@ -248,23 +255,25 @@ def analyze(db: Session, clinician_id, patient_id, ip: str | None = None) -> dic
     }
 
 
-def list_insights(db: Session, clinician_id, patient_id, status: str | None = None) -> list[dict]:
+async def list_insights(
+    db: AsyncSession, clinician_id, patient_id, status: str | None = None
+) -> list[dict]:
     """Черновики/решения по пациенту из ростра врача (фича должна быть включена)."""
     _require_enabled()
-    require_roster(db, clinician_id, patient_id)
+    await require_roster(db, clinician_id, patient_id)
     query = select(ChatInsight).where(ChatInsight.patient_id == patient_id)
     if status:
         query = query.where(ChatInsight.status == status)
-    rows = db.scalars(query.order_by(ChatInsight.created_at.desc())).all()
+    rows = (await db.scalars(query.order_by(ChatInsight.created_at.desc()))).all()
     return [_insight_dict(i) for i in rows]
 
 
-def decide(
-    db: Session, clinician_id, patient_id, insight_id, status: str, ip: str | None = None
+async def decide(
+    db: AsyncSession, clinician_id, patient_id, insight_id, status: str, ip: str | None = None
 ) -> dict:
     """Решение врача по факту. Чужой/несуществующий → 404; повтор идемпотентен."""
-    require_roster(db, clinician_id, patient_id)
-    row = db.scalar(
+    await require_roster(db, clinician_id, patient_id)
+    row = await db.scalar(
         select(ChatInsight).where(
             ChatInsight.id == insight_id, ChatInsight.patient_id == patient_id
         )
@@ -275,18 +284,18 @@ def decide(
         row.status = status
         row.reviewed_by = clinician_id
         row.reviewed_at = datetime.now(timezone.utc)
-        audit_record(db, clinician_id, "CHAT_INSIGHTS_DECIDE", "patient", str(patient_id), ip=ip)
-        db.commit()
+        await audit_record(db, clinician_id, "CHAT_INSIGHTS_DECIDE", "patient", str(patient_id), ip=ip)
+        await db.commit()
     return _insight_dict(row)
 
 
-def accepted_for_report(db: Session, patient_id) -> list[dict]:
+async def accepted_for_report(db: AsyncSession, patient_id) -> list[dict]:
     """Подтверждённые врачом факты для карточки (без source_message_ids)."""
-    rows = db.scalars(
+    rows = (await db.scalars(
         select(ChatInsight)
         .where(ChatInsight.patient_id == patient_id, ChatInsight.status == "accepted")
         .order_by(ChatInsight.created_at.desc())
-    ).all()
+    )).all()
     return [
         {
             "id": str(i.id),

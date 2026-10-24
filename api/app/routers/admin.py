@@ -7,7 +7,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import services
 from app.db import get_db
@@ -24,36 +24,36 @@ class RosterBody(BaseModel):
 
 
 @router.post("/roster", status_code=201)
-def add_roster(body: RosterBody, user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    patient = db.get(User, body.patient_id)
-    clinician = db.get(User, body.clinician_id)
+async def add_roster(body: RosterBody, user: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    patient = await db.get(User, body.patient_id)
+    clinician = await db.get(User, body.clinician_id)
     if patient is None or clinician is None:
         raise Problem(404, "NOT_FOUND", "Пользователь не найден")
     if patient.role != "PATIENT" or clinician.role != "CLINICIAN":
         raise Problem(422, "VALIDATION", "Роли: patient_id → PATIENT, clinician_id → CLINICIAN")
-    if db.get(ClinicianRoster, (body.clinician_id, body.patient_id)) is not None:
+    if await db.get(ClinicianRoster, (body.clinician_id, body.patient_id)) is not None:
         raise Problem(409, "CONFLICT", "Пациент уже закреплён за этим врачом")
     db.add(ClinicianRoster(clinician_id=body.clinician_id, patient_id=body.patient_id))
-    services.audit.record(db, user.id, "ROSTER_GRANT", "clinician_roster", f"{body.clinician_id}:{body.patient_id}")
-    db.commit()
+    await services.audit.record(db, user.id, "ROSTER_GRANT", "clinician_roster", f"{body.clinician_id}:{body.patient_id}")
+    await db.commit()
     return {}
 
 
 @router.get("/audit")
-def list_audit(
+async def list_audit(
     request: Request,
     after: datetime | None = Query(default=None),
     user: User = Depends(require_admin),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """F6: чтение журнала аудита само аудируется (доступ к истории спецкатегории)."""
     ip = request.client.host if request.client else None
-    services.audit.record(db, user.id, "READ_AUDIT", "audit_log", ip=ip)
-    db.commit()
+    await services.audit.record(db, user.id, "READ_AUDIT", "audit_log", ip=ip)
+    await db.commit()
     q = select(AuditLog).order_by(AuditLog.occurred_at.desc()).limit(500)
     if after is not None:
         q = q.where(AuditLog.occurred_at >= after)
-    rows = db.scalars(q).all()
+    rows = (await db.scalars(q)).all()
     return {
         "items": [
             {

@@ -12,6 +12,7 @@ Usage (в контейнере api или локально):
 from __future__ import annotations
 
 import argparse
+import asyncio
 import secrets
 import sys
 
@@ -24,6 +25,10 @@ from app.models import User
 
 
 def main(argv: list[str] | None = None) -> int:
+    return asyncio.run(_main(argv))
+
+
+async def _main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Создать пользователя вне веб-регистрации")
     ap.add_argument("--email", required=True)
     ap.add_argument("--role", required=True, choices=["PATIENT", "CLINICIAN", "ADMIN"])
@@ -37,8 +42,8 @@ def main(argv: list[str] | None = None) -> int:
     password = args.password or getattr(settings, "bootstrap_password", "") or secrets.token_urlsafe(18)
     generated = args.password is None and not getattr(settings, "bootstrap_password", "")
 
-    with _db.SessionLocal() as s:
-        if s.scalar(select(User).where(User.email == email)):
+    async with _db.AsyncSessionLocal() as s:
+        if await s.scalar(select(User).where(User.email == email)):
             print(f"[bootstrap] пользователь {email} уже существует", file=sys.stderr)
             return 1
         user = User(email=email, password_hash=security.hash_password(password), role=args.role)
@@ -47,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
             totp_secret = security.generate_totp_secret()
             user.totp_secret = totp_secret
         s.add(user)
-        s.commit()
+        await s.commit()
         print(f"[bootstrap] создан {email} role={args.role}")
         if generated:
             print(f"[bootstrap] ПАРОЛЬ (показан один раз): {password}")

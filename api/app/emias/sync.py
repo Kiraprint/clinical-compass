@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import logging
 import uuid
+
+import anyio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import Problem
 from app.models import EmiasLink, EmiasSyncRun, PatientMedication, User, Visit
@@ -88,12 +90,12 @@ def _snils_hash_of(fhir_patient: dict, cfg) -> str | None:
     except ValueError:
         return None  # некорректный формат — ресурс не сопоставляем по СНИЛС
 
-def _upsert_link(db: Session, patient: User, fhir_patient: dict, cfg, stats: SyncStats) -> EmiasLink:
+async def _upsert_link(db: AsyncSession, patient: User, fhir_patient: dict, cfg, stats: SyncStats) -> EmiasLink:
     emias_id = str(fhir_patient.get("id") or "")
     if not emias_id:
         raise ValueError("Patient без id")
     shash = _snils_hash_of(fhir_patient, cfg)
-    link = db.scalar(select(EmiasLink).where(EmiasLink.patient_id == patient.id))
+    link = await db.scalar(select(EmiasLink).where(EmiasLink.patient_id == patient.id))
     now = datetime.now(timezone.utc)
     if link is None:
         link = EmiasLink(
@@ -113,15 +115,16 @@ def _upsert_link(db: Session, patient: User, fhir_patient: dict, cfg, stats: Syn
         stats.bump("link", "updated" if changed else "skipped")
     return link
 
-def _sync_encounters(db: Session, patient: User, emias_patient_id: str, client, stats: SyncStats) -> None:
-    for encounter in client.encounters(emias_patient_id):
+async def _sync_encounters(db: AsyncSession, patient: User, emias_patient_id: str, client, stats: SyncStats) -> None:
+    encs = await anyio.to_thread.run_sync(client.encounters, emias_patient_id)
+    for encounter in encs:
         try:
-            with db.begin_nested():
+            async with db.begin_nested():
                 fields = mapping.encounter_visit_fields(encounter)
-                visit = db.scalar(select(Visit).where(Visit.emias_id == fields["emias_id"]))
+                visit = await db.scalar(select(Visit).where(Visit.emias_id == fields["emias_id"]))
                 if visit is None:
                     db.add(Visit(patient_id=patient.id, clinician_id=None, **fields))
-                    db.flush()
+                    await db.flush()
                     stats.bump("encounter", "created")
                     continue
                 changed = False
@@ -131,7 +134,7 @@ def _sync_encounters(db: Session, patient: User, emias_patient_id: str, client, 
                     if getattr(visit, key) != value:
                         setattr(visit, key, value)
                         changed = True
-                db.flush()
+                await db.flush()
                 stats.bump("encounter", "updated" if changed else "skipped")
         except EmiasError:
             raise
@@ -139,15 +142,16 @@ def _sync_encounters(db: Session, patient: User, emias_patient_id: str, client, 
             stats.bump("encounter", "error")
             log.warning("emias: encounter не сохранён: %s", type(exc).__name__)
 
-def _sync_medications(db: Session, patient: User, emias_patient_id: str, client, stats: SyncStats) -> None:
-    for request in client.medications(emias_patient_id):
+async def _sync_medications(db: AsyncSession, patient: User, emias_patient_id: str, client, stats: SyncStats) -> None:
+    meds = await anyio.to_thread.run_sync(client.medications, emias_patient_id)
+    for request in meds:
         try:
-            with db.begin_nested():
+            async with db.begin_nested():
                 fields = mapping.medication_fields(request)
-                med = db.scalar(select(PatientMedication).where(PatientMedication.emias_id == fields["emias_id"]))
+                med = await db.scalar(select(PatientMedication).where(PatientMedication.emias_id == fields["emias_id"]))
                 if med is None:
                     db.add(PatientMedication(patient_id=patient.id, **fields))
-                    db.flush()
+                    await db.flush()
                     stats.bump("medication", "created")
                     continue
                 changed = False
@@ -157,7 +161,7 @@ def _sync_medications(db: Session, patient: User, emias_patient_id: str, client,
                     if getattr(med, key) != value:
                         setattr(med, key, value)
                         changed = True
-                db.flush()
+                await db.flush()
                 stats.bump("medication", "updated" if changed else "skipped")
         except EmiasError:
             raise
@@ -165,23 +169,23 @@ def _sync_medications(db: Session, patient: User, emias_patient_id: str, client,
             stats.bump("medication", "error")
             log.warning("emias: medication не сохранено: %s", type(exc).__name__)
 
-def _sync_one(db: Session, patient: User, fhir_patient: dict, client, stats: SyncStats) -> None:
-    link = _upsert_link(db, patient, fhir_patient, client.cfg, stats)
-    _sync_encounters(db, patient, link.emias_patient_id, client, stats)
-    _sync_medications(db, patient, link.emias_patient_id, client, stats)
+async def _sync_one(db: AsyncSession, patient: User, fhir_patient: dict, client, stats: SyncStats) -> None:
+    link = await _upsert_link(db, patient, fhir_patient, client.cfg, stats)
+    await _sync_encounters(db, patient, link.emias_patient_id, client, stats)
+    await _sync_medications(db, patient, link.emias_patient_id, client, stats)
 
 # --- публичные операции ------------------------------------------------------
 
-def sync_patients(db: Session, *, client: EmiasClient | None = None) -> SyncStats:
+async def sync_patients(db: AsyncSession, *, client: EmiasClient | None = None) -> SyncStats:
     """Полный обход контура ЕМИАС. Сопоставление — mapping.find_local_patient."""
     client = client or EmiasClient()
     stats = SyncStats(mode="patients")
-    resources = client.list_patients()
+    resources = await anyio.to_thread.run_sync(client.list_patients)
     stats.fetched = len(resources)
     for fhir_patient in resources:
         try:
-            with db.begin_nested():
-                local, via = mapping.find_local_patient(
+            async with db.begin_nested():
+                local, via = await mapping.find_local_patient(
                     db,
                     snils_hash_value=_snils_hash_of(fhir_patient, client.cfg),
                     fio=mapping.patient_display_name(fhir_patient),
@@ -189,43 +193,43 @@ def sync_patients(db: Session, *, client: EmiasClient | None = None) -> SyncStat
                 if local is None:
                     stats.bump("patient", "skipped")
                     continue
-                _sync_one(db, local, fhir_patient, client, stats)
+                await _sync_one(db, local, fhir_patient, client, stats)
                 stats.details.append(f"patient:matched_by:{via or 'unknown'}")
         except EmiasError:
             raise
         except Exception as exc:
             stats.bump("patient", "error")
             log.warning("emias: пациент не синхронизирован: %s", type(exc).__name__)
-    db.commit()
+    await db.commit()
     return stats
 
-def sync_patient(db: Session, patient_id, *, client: EmiasClient | None = None) -> SyncStats:
+async def sync_patient(db: AsyncSession, patient_id, *, client: EmiasClient | None = None) -> SyncStats:
     """Обновление одного пациента. Без связи — Problem 404 EMIAS_NOT_LINKED."""
     client = client or EmiasClient()
-    link = db.scalar(select(EmiasLink).where(EmiasLink.patient_id == patient_id))
+    link = await db.scalar(select(EmiasLink).where(EmiasLink.patient_id == patient_id))
     if link is None:
         raise Problem(404, "EMIAS_NOT_LINKED", "Пациент не связан с ЕМИАС")
-    patient = db.get(User, patient_id)
+    patient = await db.get(User, patient_id)
     if patient is None:
         raise Problem(404, "NOT_FOUND", "Пациент не найден")
     stats = SyncStats(mode="one")
-    fhir_patient = client.get_patient(link.emias_patient_id)
+    fhir_patient = await anyio.to_thread.run_sync(client.get_patient, link.emias_patient_id)
     stats.fetched = 1
-    _sync_one(db, patient, fhir_patient, client, stats)
-    db.commit()
+    await _sync_one(db, patient, fhir_patient, client, stats)
+    await db.commit()
     return stats
 
-def link_patient(db: Session, patient_id, snils: str, *, client: EmiasClient | None = None) -> dict:
+async def link_patient(db: AsyncSession, patient_id, snils: str, *, client: EmiasClient | None = None) -> dict:
     """Связать локального пациента с ЕМИАС по СНИЛС (поиск Patient по identifier)."""
     client = client or EmiasClient()
-    patient = db.get(User, patient_id)
+    patient = await db.get(User, patient_id)
     if patient is None:
         raise Problem(404, "NOT_FOUND", "Пациент не найден")
     try:
         shash = mapping.snils_hash(snils, client.cfg.snils_pepper)
     except ValueError:
         raise Problem(422, "EMIAS_BAD_SNILS", "СНИЛС должен содержать 11 цифр") from None
-    found = client.search_patients(mapping.normalize_snils(snils))
+    found = await anyio.to_thread.run_sync(client.search_patients, mapping.normalize_snils(snils))
     if not found:
         raise Problem(404, "EMIAS_PATIENT_NOT_FOUND", "Пациент с таким СНИЛС не найден в ЕМИАС")
     if len(found) > 1:
@@ -242,7 +246,7 @@ def link_patient(db: Session, patient_id, snils: str, *, client: EmiasClient | N
     emias_id = str(found[0].get("id") or "")
     if not emias_id:
         raise Problem(502, "EMIAS_UPSTREAM", "ЕМИАС вернул пациента без идентификатора")
-    link = db.scalar(select(EmiasLink).where(EmiasLink.patient_id == patient.id))
+    link = await db.scalar(select(EmiasLink).where(EmiasLink.patient_id == patient.id))
     now = datetime.now(timezone.utc)
     if link is None:
         link = EmiasLink(patient_id=patient.id, emias_patient_id=emias_id, snils_hash=shash, synced_at=now)
@@ -254,23 +258,23 @@ def link_patient(db: Session, patient_id, snils: str, *, client: EmiasClient | N
         link.synced_at = now
         created = False
     try:
-        db.commit()
+        await db.commit()
     except IntegrityError:
         # emias_patient_id unique: одна карта ЕМИАС не может быть привязана к двум
         # локальным пациентам (иначе двойные визиты и путаница карт).
-        db.rollback()
+        await db.rollback()
         raise Problem(409, "EMIAS_ALREADY_LINKED", "Этот пациент ЕМИАС уже связан с другой картой") from None
     return {"patient_id": str(patient.id), "emias_patient_id": emias_id, "created": created}
 
-def patient_summary(db: Session, patient_id) -> dict:
+async def patient_summary(db: AsyncSession, patient_id) -> dict:
     """Витрина «ЕМИАС» в карточке врача: связка + назначения + число приёмов."""
-    link = db.scalar(select(EmiasLink).where(EmiasLink.patient_id == patient_id))
-    meds = db.scalars(
+    link = await db.scalar(select(EmiasLink).where(EmiasLink.patient_id == patient_id))
+    meds = (await db.scalars(
         select(PatientMedication)
         .where(PatientMedication.patient_id == patient_id, PatientMedication.source == "emias")
         .order_by(PatientMedication.started_on.desc().nullslast(), PatientMedication.created_at.desc())
-    ).all()
-    encounters = db.scalar(
+    )).all()
+    encounters = await db.scalar(
         select(func.count())
         .select_from(Visit)
         .where(Visit.patient_id == patient_id, Visit.source == "emias")
@@ -282,34 +286,34 @@ def patient_summary(db: Session, patient_id) -> dict:
         "medications": [mapping.medication_dict(m) for m in meds],
     }
 
-def execute_sync(db: Session, *, mode: str, patient_id=None, trigger: str = "manual") -> EmiasSyncRun:
+async def execute_sync(db: AsyncSession, *, mode: str, patient_id=None, trigger: str = "manual") -> EmiasSyncRun:
     """Прогон синхронизации с журналом emias_sync_runs (вызывают роутер и CLI)."""
     run = EmiasSyncRun(trigger=trigger, mode=mode, status="running", stats={})
     db.add(run)
-    db.commit()
+    await db.commit()
     try:
         if mode == "one":
             if patient_id is None:
                 raise Problem(422, "EMIAS_PATIENT_REQUIRED", "Для mode=one нужен patient_id")
-            stats = sync_patient(db, patient_id)
+            stats = await sync_patient(db, patient_id)
         else:
-            stats = sync_patients(db)
+            stats = await sync_patients(db)
         run.stats = stats.as_dict()
         run.status = stats.status()
     except EmiasError as exc:
-        db.rollback()
+        await db.rollback()
         run.stats = {"mode": mode, "errors": 1, "error_code": exc.code}
         run.status = "failed"
     except Problem as exc:
-        db.rollback()
+        await db.rollback()
         run.stats = {"mode": mode, "errors": 1, "error_code": exc.code}
         run.status = "failed"
     except Exception as exc:  # непредвиденный сбой: журнал важнее трейса
-        db.rollback()
+        await db.rollback()
         log.error("emias: прогон упал: %s", type(exc).__name__)
         run.stats = {"mode": mode, "errors": 1, "error_code": "internal_error"}
         run.status = "failed"
     run.finished_at = datetime.now(timezone.utc)
     db.add(run)
-    db.commit()
+    await db.commit()
     return run

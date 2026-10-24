@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -46,7 +48,7 @@ def _answer(client, h, session_id: str, answers: dict, expected: int = 200) -> d
 
 
 def _add_roster(patient_id: str, clinician_id: str) -> None:
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         s.add(
             ClinicianRoster(
                 patient_id=uuid.UUID(patient_id), clinician_id=uuid.UUID(clinician_id)
@@ -56,21 +58,21 @@ def _add_roster(patient_id: str, clinician_id: str) -> None:
 
 
 def _escalations(patient_id: str) -> list[Escalation]:
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         return list(
             s.scalars(select(Escalation).where(Escalation.patient_id == uuid.UUID(patient_id)))
         )
 
 
 def _notifications(user_id: str) -> list[Notification]:
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         return list(
             s.scalars(select(Notification).where(Notification.user_id == uuid.UUID(user_id)))
         )
 
 
 def _audit_actions(patient_id: str) -> list[str]:
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         return list(
             s.scalars(
                 select(AuditLog.action).where(AuditLog.actor_id == uuid.UUID(patient_id))
@@ -122,7 +124,7 @@ def test_start_is_idempotent(client):
     second = client.post("/api/v1/checkins", headers=h)
     assert first.status_code == 201 and second.status_code == 200
     assert first.json()["session_id"] == second.json()["session_id"]
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         assert len(s.scalars(select(CheckinSession)).all()) == 1
     assert _audit_actions(pid).count("CHECKIN_START") == 1
 
@@ -309,7 +311,7 @@ def test_gate_yes_signal_without_roster_escalates_silently(client):
     (escalation,) = _escalations(pid)
     assert escalation.kind == "CHECKIN_RISK_URGENT"
     assert escalation.notified_clinician_at is None  # уведомлений не было
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         assert s.scalars(select(Notification).where(Notification.patient_id == uuid.UUID(pid))).all() == []
 
 
@@ -467,7 +469,7 @@ def test_escalation_queue_visible_to_staff_only(client):
         assert item["risk_answers"] == {"HR4": 1, "RS1": 0, "RS2": 1, "RS3": 0}
     assert client.get("/api/v1/escalations", headers=h).status_code == 403
 
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         escalation = s.scalar(select(Escalation).where(Escalation.patient_id == uuid.UUID(pid)))
         escalation.resolved_at = datetime.now(timezone.utc)
         s.commit()
@@ -483,7 +485,7 @@ def test_consent_revoke_removes_checkin_and_escalations(client, db_session):
 
     assert client.post("/api/v1/consent/revoke", headers=h).status_code == 204
     assert _escalations(pid) == []
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         assert s.scalar(
             select(CheckinSession).where(CheckinSession.patient_id == uuid.UUID(pid))
         ) is None
@@ -515,23 +517,29 @@ def test_ensure_escalation_is_single_row_and_upgrades(client):
     _add_roster(pid, cid)
     sid = _start(client, h)["session_id"]
 
-    with db.SessionLocal() as s:
-        session = s.get(CheckinSession, uuid.UUID(sid))
-        first, recipients = _ensure_escalation(s, session, urgent=False)
-        s.commit()
-        assert first.kind == "CHECKIN_RISK"
-        assert recipients == [uuid.UUID(cid)]
+    async def flow():
+        async with db.AsyncSessionLocal() as s:
+            session = await s.get(CheckinSession, uuid.UUID(sid))
+            first, rec1 = await _ensure_escalation(s, session, urgent=False)
+            await s.commit()
+            first_kind = first.kind
+            again, rec2 = await _ensure_escalation(s, session, urgent=False)
+            await s.commit()
+            urgent, rec3 = await _ensure_escalation(s, session, urgent=True)
+            await s.commit()
+            # Строки поднимаются в одной сессии, объект мутирует: снимаем снимок.
+            return first.id, first_kind, rec1, again.id, rec2, urgent.id, urgent.kind, rec3
 
-        again, recipients = _ensure_escalation(s, session, urgent=False)
-        s.commit()
-        assert again.id == first.id
-        assert recipients == []  # без повышения повторно не уведомляем
-
-        urgent, recipients = _ensure_escalation(s, session, urgent=True)
-        s.commit()
-        assert urgent.id == first.id
-        assert urgent.kind == "CHECKIN_RISK_URGENT"
-        assert recipients == [uuid.UUID(cid)]
+    first_id, first_kind, recipients, again_id, recipients_again, urgent_id, urgent_kind, recipients_urgent = (
+        asyncio.run(flow())
+    )
+    assert first_kind == "CHECKIN_RISK"
+    assert recipients == [uuid.UUID(cid)]
+    assert again_id == first_id
+    assert recipients_again == []  # без повышения повторно не уведомляем
+    assert urgent_id == first_id
+    assert urgent_kind == "CHECKIN_RISK_URGENT"
+    assert recipients_urgent == [uuid.UUID(cid)]
 
     assert len(_escalations(pid)) == 1
     assert len(_notifications(cid)) == 2
@@ -565,7 +573,7 @@ def test_escalation_queue_window_and_limit(client):
         _answer(client, h, sid, {**CORE, "HR4": 1})
         _answer(client, h, sid, {"RS1": 1, "RS2": 0, "RS3": 0})
 
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         old = s.scalars(select(Escalation).where(Escalation.patient_id == uuid.UUID(pid2))).one()
         old.created_at = datetime.now(timezone.utc) - timedelta(days=91)
         s.commit()
@@ -599,7 +607,7 @@ def test_escalation_resolve_closes_signal(client):
 
     assert client.post(url, json={}, headers=ch).status_code == 409
     assert client.get("/api/v1/escalations", headers=ch).json()["items"] == []
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         resolved_actions = list(
             s.scalars(select(AuditLog.action).where(AuditLog.actor_id == uuid.UUID(cid)))
         )
@@ -624,7 +632,7 @@ def test_escalation_resolution_is_encrypted(client):
         ).status_code
         == 200
     )
-    with db.SessionLocal() as s:
+    with db.SyncSessionLocal() as s:
         raw, = s.execute(
             text("SELECT resolution::text FROM escalations WHERE id = :id"),
             {"id": escalation.id},
