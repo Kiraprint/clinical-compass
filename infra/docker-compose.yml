@@ -96,7 +96,9 @@ services:
     build:
       context: ..
       dockerfile: api/Dockerfile
-    command: ["/app/.venv/bin/python", "-m", "app.kb_seed", "--reset"]
+    # Без --reset: upsert идемпотентен по text_hash (docs/15 §11), а --reset
+    # каждый рестарт стирал бы коллекцию вместе с чанками обогащения.
+    command: ["/app/.venv/bin/python", "-m", "app.kb_seed"]
     environment:
       CC_QDRANT_URL: http://qdrant:6333
       CC_DATABASE_URL: postgresql+psycopg://compass:${POSTGRES_PASSWORD:-compass}@postgres:5432/compass
