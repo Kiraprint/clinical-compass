@@ -15,6 +15,8 @@ type QueueItem = {
   checkin_session_id: string | null;
   in_roster: boolean;
   risk_answers: Record<string, number> | null;
+  resolved_at: string | null;
+  resolution: string | null;
 };
 
 type QueueBody = { items: QueueItem[] };
@@ -161,4 +163,45 @@ test("ростерный пациент: имя в очереди ведёт в 
   expect([200, 409]).toContain(resolved.status());
   await admin.ctx.dispose();
   await doc.ctx.dispose();
+});
+
+test("история закрытых сигналов: status=resolved|all, кривой id → 404", async ({ page }) => {
+  await registerPatient(page, freshPatientEmail("queue-history"));
+  await page.getByRole("button", { name: "Даю согласие" }).click();
+  await expect(page.getByText("Согласие активно")).toBeVisible();
+  const sessionId = await riskCheckin(page);
+
+  await openQueue(page);
+  const item = await findInQueue(page, sessionId);
+  const asStaff = await apiAs(page);
+
+  const resolution = `разобрано e2e ${Date.now()}`;
+  const closed = await asStaff.post(`/api/v1/escalations/${item.id}/resolve`, {
+    data: { resolution },
+  });
+  expect(closed.status()).toBe(200);
+
+  // По умолчанию очередь — только открытые сигналы.
+  const openBody = (await (await asStaff.get("/api/v1/escalations")).json()) as QueueBody;
+  expect(openBody.items.map((i) => i.id)).not.toContain(item.id);
+
+  const historyBody = (await (
+    await asStaff.get("/api/v1/escalations?status=resolved")
+  ).json()) as QueueBody;
+  const historyItem = historyBody.items.find((i) => i.id === item.id);
+  expect(historyItem).toBeTruthy();
+  expect(historyItem?.resolution).toBe(resolution);
+  expect(historyItem?.resolved_at).toBeTruthy();
+
+  const allBody = (await (
+    await asStaff.get("/api/v1/escalations?status=all")
+  ).json()) as QueueBody;
+  expect(allBody.items.map((i) => i.id)).toContain(item.id);
+
+  // Кривой id — «не найдено», а не 422 от схемы пути.
+  const badId = await asStaff.post("/api/v1/escalations/not-a-uuid/resolve", { data: {} });
+  expect(badId.status()).toBe(404);
+  expect((await badId.json()).code).toBe("ESCALATION_NOT_FOUND");
+
+  await asStaff.dispose();
 });

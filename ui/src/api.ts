@@ -395,8 +395,9 @@ export const api = {
     const suffix = qs.toString() ? `?${qs}` : "";
     return req<PatientHistory>(`/api/v1/clinician/patients/${patientId}/history${suffix}`);
   },
-  // Общая очередь открытых эскалаций (docs/16 §3): врач или администратор.
-  openEscalations: () => req<{ items: Escalation[] }>("/api/v1/escalations"),
+  // Очередь эскалаций (docs/16 §3): open — работа, resolved — история разбора, all — оба.
+  openEscalations: (status: "open" | "resolved" | "all" = "open") =>
+    req<{ items: Escalation[] }>(`/api/v1/escalations?status=${status}`),
   // Закрытие сигнала вручную (аудит на сервере). Повтор → 409 ESCALATION_ALREADY_RESOLVED,
   // чужая/отсутствующая эскалация → 404; в обоих случаях строку из очереди убираем.
   resolveEscalation: (id: string, resolution: string | null = null) =>
@@ -814,6 +815,9 @@ export interface Escalation {
   /** Ответы риска из чек-ина: {"HR4":1,"RS1":0,...}; на которые не ответили — ключа нет. */
   risk_answers: Record<string, number> | null;
   created_at: string | null;
+  /** Заполнены только у закрытых сигналов (status=resolved|all). */
+  resolved_at: string | null;
+  resolution: string | null;
 }
 /** Ответ POST /escalations/{id}/resolve. */
 export interface EscalationResolved {

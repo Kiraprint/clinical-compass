@@ -116,10 +116,13 @@
 | checkin_no_duplicate_escalation | повторная отправка ответов после завершения | `409`, эскалация одна (partial unique по `checkin_session_id`), уведомлений по-прежнему два |
 | checkin_duplicate_step_submit | повторный submit шага ядра с HR4=«Да» | `422 CHECKIN_UNKNOWN_ITEM`, одна эскалация и одно уведомление |
 | checkin_ensure_escalation_idempotent | прямой `_ensure_escalation` (urgent=False, снова False, затем True) | одна строка; `kind` повышается до `CHECKIN_RISK_URGENT`; второе уведомление только при повышении |
-| escalations_queue_access | открытая эскалация; врач, админ, пациент | врач/админ — `200` с `{id, patient_id, patient_fio, kind, safety, checkin_session_id, notified_at, created_at, in_roster, risk_answers}`; пациент — `403`; закрытая (`resolved_at`) не попадает |
+| escalations_queue_access | открытая эскалация; врач, админ, пациент | врач/админ — `200` (по умолчанию `status=open`) с `{id, patient_id, patient_fio, kind, safety, checkin_session_id, notified_at, created_at, resolved_at, resolution, in_roster, risk_answers}`; у открытой `resolved_at`/`resolution` — `null`; пациент — `403`; закрытая (`resolved_at`) в `open` не попадает |
 | escalations_queue_roster | один пациент в ростере врача, второй — нет | `in_roster=true` только у своего врача; у админа всегда `false`; `risk_answers` содержит только `HR4, RS1, RS2, RS3` |
 | escalations_queue_window_limit | эскалация с `created_at` 91 день назад; `?limit=1`; `?limit=201` | старая не попадает (окно 90 дней), `limit=1` → один элемент, `limit=201` → `422 VALIDATION` |
 | escalations_resolve | врач закрывает сигнал `{resolution}`; повтор; чужой id; пациент | `200 {id, resolved_at, resolution}`, аудит `ESCALATION_RESOLVE`, после закрытия очередь пуста; повтор → `409`, неизвестный id → `404`, пациент → `403` |
+| escalations_queue_status_filter | открытая + закрытая эскалации; `?status=resolved`, `?status=all`, `?status=bogus` | `resolved` — только закрытые, свежие по `resolved_at` сверху, с `resolution`; `all` — оба вида; иной статус → `422 VALIDATION`; аудит `READ_ESCALATIONS` не меняется |
+| escalations_resolve_bad_id | `POST /escalations/not-a-uuid/resolve` | `404 ESCALATION_NOT_FOUND` (а не `422 VALIDATION`); реальная эскалация остаётся открытой |
+| escalations_resolution_length | `resolution` 1001 и 1000 символов | 1001 → `422 RESOLUTION_TOO_LONG` (не `VALIDATION`), сигнал не закрыт; 1000 → `200`, комментарий сохранён целиком |
 | escalations_resolution_encrypted | raw `SELECT resolution::text` | bytea (`\x…`), текста в открытом виде нет; ORM расшифровывает обратно |
 | consent_revoke_checkin | завершённый риск-чек-ин + эскалация + уведомление | после отзыва согласия нет сеансов, эскалаций и уведомлений |
 | diary_mood_scale | новая запись `mood=0`; историчная строка `mood=7, mood_scale=NULL` | `mood_scale="0-4"` / `"1-10"` в `/diary` и в карте врача; старые строки не переписываются; `mood=5` → `422` |
