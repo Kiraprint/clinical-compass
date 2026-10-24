@@ -1,0 +1,11 @@
+# Прямые зависимости ML-сайдкара (образ ml/Dockerfile). Транзитивные
+# разрешает pip при сборке; пины — на проверенных версиях (REPORT-ml-sidecar.md).
+# torch ставится отдельным шагом с index cu128: хостовый драйвер 615.78 (CUDA 12.8).
+torch==2.11.0
+sentence-transformers==6.1.0
+transformers==5.20.1
+accelerate==1.15.0
+huggingface-hub==1.33.0
+numpy==2.5.4
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
