@@ -355,3 +355,51 @@ def test_deny_list_capped_before_sidecar(monkeypatch):
     monkeypatch.setattr(ml_client, "_post", fake_post)
     ml_client.mask("текст", [f"Фамилия{i} Имя Отчество" for i in range(200)])
     assert seen == [128]
+
+def test_degraded_sidecar_fail_closed_in_prod(monkeypatch):
+    """degraded=true (NER упал/не запускался) — это отказ backend'а в prod."""
+    from app.services import ml_client
+
+    monkeypatch.setattr(
+        ml_client, "mask",
+        lambda text, names=None: {
+            "text": text, "spans": [], "model": "regex", "degraded": True,
+        },
+    )
+    settings.prod_mode = True
+    settings.depersonalize_ner = "remote"
+    settings.ml_url = "http://ml.invalid"
+    with pytest.raises(DepersonalizationUnavailable) as err:
+        scrub_text("Иванов Пётр, звоните +79261234567")
+    assert err.value.status == 503
+
+def test_degraded_sidecar_degrades_to_regex_outside_prod(monkeypatch):
+    from app.services import ml_client
+
+    monkeypatch.setattr(
+        ml_client, "mask",
+        lambda text, names=None: {
+            "text": text, "spans": [], "model": "regex", "degraded": True,
+        },
+    )
+    settings.prod_mode = False
+    settings.depersonalize_ner = "remote"
+    settings.ml_url = "http://ml.invalid"
+    out = scrub_text("Звоните +79261234567").text
+    assert "[ТЕЛЕФОН]" in out  # regex-деградация, не сырой текст
+
+def test_degraded_must_be_bool(monkeypatch):
+    """Небулев degraded — тоже несоответствие контракту (strict parsing)."""
+    from app.services import ml_client
+
+    monkeypatch.setattr(
+        ml_client, "mask",
+        lambda text, names=None: {
+            "text": text, "spans": [], "model": "hybrid", "degraded": "false",
+        },
+    )
+    settings.prod_mode = True
+    settings.depersonalize_ner = "remote"
+    settings.ml_url = "http://ml.invalid"
+    with pytest.raises(DepersonalizationUnavailable):
+        scrub_text("Иванов Пётр, звоните +79261234567")

@@ -298,6 +298,15 @@ def _spans_from_remote(text: str, payload: object) -> list[Span]:
     """
     if not isinstance(payload, dict):
         raise TypeError(f"неожиданный ответ /v1/mask: {type(payload).__name__}")
+    # Новый сайдкар честно сообщает о деградации NER. Для egress-пути это
+    # равносильно отказу backend'а: regex-спаны без NER не гарантируют
+    # отсутствие ФИО/адресов (docs/12).
+    if "degraded" in payload:
+        degraded = payload["degraded"]
+        if not isinstance(degraded, bool):
+            raise TypeError("ответ /v1/mask: degraded не bool")
+        if degraded:
+            raise RuntimeError("сайдкар деградировал (NER недоступен)")
     raw_spans = payload.get("spans")
     if not isinstance(raw_spans, list):
         raise TypeError("ответ /v1/mask без списка spans")
