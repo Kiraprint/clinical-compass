@@ -4,11 +4,9 @@ SPI: NameExtractor.extract_spans(text) -> [(вид, start, end)] — спаны 
 объединения со структурными правилами ядра; extract(text) — только ФИО
 (совместимость с прежним deny-list API).
 
-Backend'ы (CC_DEPERSONALIZE_NER):
-  off (demo-дефолт)  — только regex/deny-list ядра;
-  natasha            — NewsNERTagger (PER→ФИО, LOC→АДРЕС), лёгкий;
-  rubert             — redmadrobot-rnd/rubert-base-pii-ner, FIO F1 0.933;
-  hybrid             — rubert + структурные правила + валидаторы (прод-путь).
+  hybrid             — rubert + структурные правила + валидаторы (локальный путь);
+  remote             — GPU-sidecar по HTTP: POST {CC_ML_URL}/v1/mask (прод-путь,
+                       api-образ без torch; docs/12).
 
 Fail-closed (docs/10): в CC_PROD_MODE=true настроенный ML-backend обязан
 загрузиться. Если модель/зависимость недоступны, egress-путь НЕ отправляет
@@ -27,7 +25,12 @@ from typing import Protocol
 
 from compass.depersonalize import (
     ADDRESS,
+    AGE,
+    DOC,
+    DOB,
+    EMAIL,
     FIO,
+    PHONE,
     Depersonalized,
     Span,
     depersonalize as core_depersonalize,
@@ -251,11 +254,110 @@ class HybridNameExtractor(RubertPiiNameExtractor):
         return out
 
 
+
+# Категории sidecar'а (/v1/mask) -> виды ядра. Документы сводятся к DOC с
+# точной категорией в Span.category (так же, как локальный парсер).
+_REMOTE_KIND: dict[str, tuple[str, str | None]] = {
+    "FIO": (FIO, None),
+    "PERSON": (FIO, None),
+    "NAME": (FIO, None),
+    "ФИО": (FIO, None),
+    "ADDRESS": (ADDRESS, None),
+    "LOCATION": (ADDRESS, None),
+    "АДРЕС": (ADDRESS, None),
+    "PHONE": (PHONE, None),
+    "ТЕЛЕФОН": (PHONE, None),
+    "EMAIL": (EMAIL, None),
+    "DOB": (DOB, None),
+    "BIRTHDATE": (DOB, None),
+    "ДАТА РОЖДЕНИЯ": (DOB, None),
+    "AGE": (AGE, None),
+    "ВОЗРАСТ": (AGE, None),
+    "SNILS": (DOC, "SNILS"),
+    "СНИЛС": (DOC, "SNILS"),
+    "INN": (DOC, "INN"),
+    "ИНН": (DOC, "INN"),
+    "OMS": (DOC, "OMS"),
+    "POLICY": (DOC, "OMS"),
+    "PASSPORT": (DOC, "PASSPORT"),
+    "MEDCARD": (DOC, "MEDCARD"),
+    "DOC": (DOC, None),
+    "ДОКУМЕНТ": (DOC, None),
+}
+
+
+
+def _spans_from_remote(text: str, payload: object) -> list[Span]:
+    """Ответ sidecar'а -> Span'ы ядра; мусорные/вне диапазона пропускаются."""
+    if not isinstance(payload, dict):
+        raise TypeError(f"неожиданный ответ /v1/mask: {type(payload).__name__}")
+    out: list[Span] = []
+    for item in payload.get("spans") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            start, end = int(item["start"]), int(item["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not 0 <= start < end <= len(text):
+            continue
+        mapped = _REMOTE_KIND.get(
+            str(item.get("category", "")).strip().upper()
+        )
+        if mapped is None:
+            continue
+        kind, category = mapped
+        span = Span(kind, start, end, category)
+        if is_plausible_person_span(text, span):
+            out.append(span)
+    return out
+
+
+def _remote_spans(text: str, names: list[str] | None = None) -> list[Span]:
+    """Маскирование на GPU-sidecar'е (POST {CC_ML_URL}/v1/mask).
+
+    Клиент общий (`app.services.ml_client`), api-образ остаётся без torch: один
+    повтор на сетевой сбой/5xx и таймауты (2 с connect / 5 с read) живут в
+    клиенте (`CC_ML_TIMEOUT`). Любой сбой уходит в единую политику
+    `_backend_unavailable`: prod — 503 до вызова LLM, вне prod — деградация до
+    regex/deny-list.
+    """
+    from app.services import ml_client  # ленивый импорт: remote без sidecar'а
+
+    try:
+        payload = ml_client.mask(text, list(names or []))
+        return _spans_from_remote(text, payload)
+    except Exception as exc:
+        _backend_unavailable("remote", exc)
+        return []
+
+
+class RemoteNameExtractor:
+    """GPU-sidecar по HTTP (CC_ML_URL): маскирование вне api-процесса.
+
+    Поведение совпадает с hybrid: спаны маппятся в те же виды/категории и
+    проходят те же фильтры (`is_plausible_person_span`).
+    """
+
+    backend = "remote"
+
+    def extract_spans(
+        self, text: str, names: list[str] | None = None
+    ) -> list[tuple[str, int, int]]:
+        return [(s.kind, s.start, s.end) for s in _remote_spans(text, names)]
+
+    def extract(self, text: str) -> list[str]:
+        return [
+            text[s.start:s.end] for s in _remote_spans(text, []) if s.kind == FIO
+        ]
+
+
+
 _NER_OFF = {"", "off", "false", "0", "none", "no"}
 
 
 def ner_backend() -> str:
-    """Нормализованное имя backend'а: off | natasha | rubert | hybrid."""
+    """Нормализованное имя backend'а: off | natasha | rubert | hybrid | remote."""
     raw = getattr(settings, "depersonalize_ner", "off")
     value = str(raw).strip().lower()
     if value in _NER_OFF or raw is False:
@@ -268,6 +370,8 @@ def ner_backend() -> str:
         return "rubert"
     if value == "natasha":
         return "natasha"
+    if value == "remote":
+        return "remote"
     logger.warning("Неизвестный CC_DEPERSONALIZE_NER=%r — используется off", raw)
     return "off"
 
@@ -286,16 +390,26 @@ def build_name_extractor() -> NameExtractor:
             _extractor = RubertPiiNameExtractor()
         elif backend == "natasha":
             _extractor = NatashaNameExtractor()
+        elif backend == "remote":
+            _extractor = RemoteNameExtractor()
         else:
             _extractor = NullNameExtractor()
         logger.info("depersonalize_ner=%s", backend)
     return _extractor
 
 
-def extract_pii_spans(text: str) -> list[Span]:
-    """Спаны ML-детекции для объединения со структурными правилами ядра."""
+def extract_pii_spans(
+    text: str, names: list[str] | None = None
+) -> list[Span]:
+    """Спаны ML-детекции для объединения со структурными правилами ядра.
+
+    Для backend=remote names (deny-list ростра) уходят в sidecar вместе с
+    текстом: он маскирует известные ФИО даже без NER.
+    """
     if not text or ner_backend() == "off":
         return []
+    if ner_backend() == "remote":
+        return _remote_spans(text, names)
     spans: list[Span] = []
     for kind, start, end in build_name_extractor().extract_spans(text):
         if 0 <= start < end <= len(text):
@@ -309,5 +423,5 @@ def scrub_text(text: str, names: list[str] | None = None, *,
                mode: str = "replace") -> Depersonalized:
     """Единая точка деперсонализации перед LLM (regex + ML + deny-list)."""
     return core_depersonalize(
-        text, names=names, mode=mode, extra_spans=extract_pii_spans(text)
+        text, names=names, mode=mode, extra_spans=extract_pii_spans(text, names)
     )

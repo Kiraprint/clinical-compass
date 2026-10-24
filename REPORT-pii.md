@@ -113,6 +113,45 @@ PYTHONPATH=$PWD:$PWD/../core /home/kir/Code/clinical-compass/.venv/bin/python -m
 cd .. && PYTHONPATH=core /home/kir/Code/clinical-compass/.venv/bin/python -m pytest core/tests/test_depersonalize.py -q
 ```
 
+## Phase 2: GPU-sidecar (`CC_DEPERSONALIZE_NER=remote`)
+
+Прод-форма: один сервис `ml` (nvidia runtime) отдаёт эмбеддинги, реранк и
+маскирование; api-образ остаётся без torch.
+
+- backend `remote` → `ml_client.mask(text, names)` (общий клиент
+  `api/app/services/ml_client.py`, скопирован 1:1 из `feat/ml-client`,
+  sha256 `61dfdc79…`), ответ `{text, spans, model}` маппится в `Span`'ы ядра:
+  категории FIO/ADDRESS/PHONE/EMAIL/DOB/AGE → одноимённые виды,
+  SNILS/INN/OMS/PASSPORT/MEDCARD → `DOC` + точная `Finding.category`;
+  дальше — тот же `resolve_spans`/`mask_spans`, что у hybrid.
+- Конфиг: `CC_ML_URL`, `CC_ML_TOKEN` (`X-CC-ML-Token`), `CC_ML_TIMEOUT=5` —
+  в одном экземпляре с веткой клиента (при мерже конфликт полей ожидаем).
+- Fail-closed без изменений: sidecar недоступен/5xx/битый JSON → в
+  `CC_PROD_MODE` `503 DEPERSONALIZATION_UNAVAILABLE` до вызова LLM; вне prod —
+  regex-деградация с WARNING.
+- Стартовая валидация: в prod с LLM-egress принимается `remote` + непустой
+  `CC_ML_URL` **или** локальный `hybrid/rubert/natasha`; `off` и `remote` без
+  URL — `ValueError` с перечислением обоих вариантов.
+- Скруб в `assistant_chat` уведён в `anyio.to_thread.run_sync` (HTTP-вызов не
+  блокирует event loop); `chat_insights` уже так делал.
+- Тесты: `api/tests/test_depersonalize_remote.py` (11) — фейковый HTTP-сервер
+  `/v1/mask` без GPU: структурные форматы, ФИО с инициалами, 8 остаточных
+  промахов строчных ФИО, проброс `names`/токена, fail-closed с проверкой
+  «ноль вызовов LLM», деградация вне prod, все 332 строки клинического корпуса,
+  приёмка prod-конфига. Итог прогона: `test_depersonalize*.py` +
+  `test_assistant_threads.py` — 85 passed.
+- Латентность: 42 мс инференса на sidecar'е (RTX 5090) + ~1 мс HTTP на
+  loopback; таймаут 5 с с одним повтором на сетевой сбой/5xx.
+
+Как перемерить remote:
+
+```bash
+cd api
+CC_ALLOW_DEMO_SECRETS=true CC_TEST_DATABASE_URL=postgresql+psycopg://compass:compass@127.0.0.1:5432/cc_pii_ner \
+PYTHONPATH=$PWD:$PWD/../core /home/kir/Code/clinical-compass/.venv/bin/python -m pytest \
+  tests/test_depersonalize_remote.py -q
+```
+
 ## Принятые ограничения
 
 - 2.5% ФИО целиком строчными не детектируются rubert; эвристика «два
@@ -127,3 +166,7 @@ cd .. && PYTHONPATH=core /home/kir/Code/clinical-compass/.venv/bin/python -m pyt
   изменён (transformers восстановлен на 5.20.1).
 - `hybrid` в тестах использует подменённый extractor (модель не грузится);
   реальный rubert проверен бенчмарком на GPU.
+- `remote` в прод-контуре полностью зависит от sidecar'а: при его недоступности
+  egress честно отказывает (503), а не отдаёт сырой текст; латентность и
+  алерты — на `/health` и таймаутах клиента. Модель внутри sidecar'а — тот же
+  rubert, поэтому остаточный промах строчных ФИО сохраняется (docs/10 R25).

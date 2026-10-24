@@ -259,10 +259,13 @@ async def _history_for_llm(db: AsyncSession, thread_id, names: list[str]) -> lis
         .order_by(AssistantMessage.created_at.desc(), AssistantMessage.id.desc())
         .limit(llm_router.REWRITE_HISTORY_MESSAGES)
     )).all()
-    return [
-        {"role": m.role, "content": scrub_for_llm(m.content, None, names)[0]}
-        for m in reversed(rows)
-    ]
+    out: list[dict] = []
+    for m in reversed(rows):
+        # remote-backend ходит по HTTP (docs/12): не блокируем event loop.
+        scrubbed = await anyio.to_thread.run_sync(scrub_for_llm, m.content, None, names)
+        out.append({"role": m.role, "content": scrubbed[0]})
+    return out
+
 
 async def answer_query(
     db: AsyncSession,
@@ -284,10 +287,16 @@ async def answer_query(
     corpus_drugs = await load_drug_docs(db)
     await db.commit()  # PDn-access audit персистируется до вызова агента (152-ФЗ)
 
-    scrubbed_query, _, report = scrub_for_llm(
-        query, patient_contexts[0] if patient_contexts else None, names
+    scrubbed_query, _, report = await anyio.to_thread.run_sync(
+        scrub_for_llm,
+        query,
+        patient_contexts[0] if patient_contexts else None,
+        names,
     )
-    scrubbed_contexts = [scrub_for_llm(query, ctx, names)[1] for ctx in patient_contexts]
+    scrubbed_contexts = [
+        (await anyio.to_thread.run_sync(scrub_for_llm, query, ctx, names))[1]
+        for ctx in patient_contexts
+    ]
     result = await _invoke_agent(
         scrubbed_query,
         topic=topic,
@@ -341,8 +350,13 @@ async def post_message(
     corpus_drugs = await load_drug_docs(db)
     await db.commit()  # PDn-access audit + вопрос персистируются до вызова агента
 
-    scrubbed_query, _, _ = scrub_for_llm(content, None, names)
-    scrubbed_contexts = [scrub_for_llm(content, ctx, names)[1] for ctx in contexts]
+    scrubbed_query, _, _ = await anyio.to_thread.run_sync(
+        scrub_for_llm, content, None, names
+    )
+    scrubbed_contexts = [
+        (await anyio.to_thread.run_sync(scrub_for_llm, content, ctx, names))[1]
+        for ctx in contexts
+    ]
 
     # Одиночный вопрос (истории нет) LLM не вызывает: переформулировать нечего.
     search_query = scrubbed_query
