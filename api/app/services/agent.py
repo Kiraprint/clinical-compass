@@ -19,7 +19,8 @@ from app.config import settings
 from app.services.depersonalize import build_name_extractor, ner_backend
 
 from app.services import kb as kb_store
-from app.services.embeddings import get_embedder
+from app.services.embeddings import get_embedder, profile_default_min_score
+from app.services.reranker import get_reranker
 
 # GATE: лексическое покрытие (docs/07 §5 — sparse ловит точные термины, dense —
 # смысл, но для демо-эмбеддера минимальный порог на точное совпадение терминов).
@@ -63,11 +64,17 @@ def _dense_top_gate(hits: list[dict], min_score: float) -> list[dict]:
     """Отсечка «нет релевантного ответа» для нейросетевого dense-поиска.
 
     У bge-m3 косинус калиброван: у релевантных чанков золотого набора лучший
-    score >=0.57, у офтоп-запросов <=0.43 (55 запросов, bench/eval_app_path.py),
-    поэтому порог 0.45 отделяет «в KB ничего нет» без лексических эвристик —
-    они отбрасывали бы кросс-языковые совпадения (RU-вопрос → EN-чанк).
+    score >=0.57, у офтоп-запросов <=0.43 (150 запросов, bench/REPORT-retrieval.md),
+    поэтому порог отделяет «в KB ничего нет» без лексических эвристик — они
+    отбрасывали бы кросс-языковые совпадения (RU-вопрос → EN-чанк).
+
+    После реранка score — logit кросс-энкодера, поэтому сравниваем порог с
+    retrieval_score (скор первичного поиска) лучшего кандидата пула.
     """
-    if not hits or (min_score > 0 and hits[0]["score"] < min_score):
+    if not hits:
+        return []
+    best = max((h.get("retrieval_score", h.get("score", 0.0)) for h in hits), default=0.0)
+    if min_score > 0 and best < min_score:
         return []
     return hits
 
@@ -152,6 +159,10 @@ class AgentFactory:
         if detect_redline(redline_query if redline_query is not None else query) is not None:
             return []
         embedder = get_embedder()
+        use_sparse = getattr(embedder, "use_sparse", True)
+        # Реранк осмыслен только для нейросетевых профилей: hash-dense шумит, и
+        # его порядок уже чинится лексическим гейтом/fallback (см. _hash_rerank).
+        reranker = None if use_sparse else get_reranker()
         hits = kb_store.hybrid_search(
             self._client,
             embedder,
@@ -159,13 +170,20 @@ class AgentFactory:
             topic=topic,
             limit=limit,
             exclude_ids=exclude_ids,
+            candidates=settings.retrieval_candidates or None,
+            reranker=reranker,
         )
-        if getattr(embedder, "use_sparse", True):
+        if use_sparse and reranker is None:
             hits = _hash_rerank(
                 query, hits, limit, topic=topic, exclude_ids=exclude_ids, corpus_drugs=corpus_drugs
             )
         else:
-            hits = _dense_top_gate(hits, settings.kb_min_score)
+            min_score = (
+                settings.kb_min_score
+                if settings.kb_min_score is not None
+                else profile_default_min_score(settings.embedder)
+            )
+            hits = _dense_top_gate(hits, min_score)
         return [
             RAGChunk(
                 text=h["text"],

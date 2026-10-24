@@ -42,7 +42,12 @@ ner-rubert = ["torch>=2.2", "transformers>=4.40"]
 # для профиля с нейросетевым поиском. Базовый образ API остаётся без torch.
 # Включает FlagEmbedding (тянет torch+transformers). Инференс оффлайн после
 # однократного скачивания весов в кэш HF; индекс Qdrant нужно пересобрать.
-embeddings = ["FlagEmbedding>=1.2"]
+# sentence-transformers — для dense-профилей qwen3-0.6b / e5-large-instruct /
+# user-bge-m3 (SPI Embedder, docs/08 §4); FlagEmbedding — для bge-m3 dense/спarse.
+embeddings = ["FlagEmbedding>=1.2", "sentence-transformers>=2.7"]
+# Кросс-энкодерный реранк выдачи (CC_RERANKER=<hf-id>, docs/08 §4). Без extra
+# реранк деградирует к порядку RRF с предупреждением в лог.
+rerank = ["sentence-transformers>=2.7"]
 
 [tool.setuptools.packages.find]
 where = ["."]

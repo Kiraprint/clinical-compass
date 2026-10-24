@@ -38,18 +38,42 @@ class EmbedderConfigError(RuntimeError):
 
 @dataclass(frozen=True)
 class EmbedderProfile:
-    """Поддерживаемый профиль CC_EMBEDDER."""
+    """Поддерживаемый профиль CC_EMBEDDER.
+
+    default_min_score — порог «лучший чанк нерелевантен» под калибровку ИМЕННО
+    этой модели (docs/08 §4): шкала косинуса у профилей разная, поэтому
+    CC_KB_MIN_SCORE по умолчанию берётся отсюда, а не единым числом.
+    query_prefix/passage_prefix — инструкции моделей, требующих их (e5, Qwen3).
+    """
 
     kind: str
     model_id: str
     dense_size: int
+    use_sparse: bool = False
+    default_min_score: float = 0.45
+    query_prefix: str = ""
+    passage_prefix: str = ""
 
 
 # Профили — единственный источник истины для размерности dense: коллекция
 # Qdrant создаётся под неё (docs/08 §3), при смене нужна переиндексация.
+# default_min_score перемерян на bench/data/kb_queries.jsonl (bench/REPORT-retrieval.md).
+_INSTRUCT_QWEN = (
+    "Instruct: Given a clinical question, retrieve passages that answer the question\nQuery: "
+)
 PROFILES: dict[str, EmbedderProfile] = {
-    "hash": EmbedderProfile("hash", "offline/hash", DENSE_SIZE),
-    "bge-m3": EmbedderProfile("bge-m3", "BAAI/bge-m3", 1024),
+    "hash": EmbedderProfile("hash", "offline/hash", DENSE_SIZE, use_sparse=True, default_min_score=0.45),
+    "bge-m3": EmbedderProfile("bge-m3", "BAAI/bge-m3", 1024, default_min_score=0.45),
+    "qwen3-0.6b": EmbedderProfile(
+        "st", "Qwen/Qwen3-Embedding-0.6B", 1024,
+        default_min_score=0.40, query_prefix=_INSTRUCT_QWEN,
+    ),
+    "e5-large-instruct": EmbedderProfile(
+        "st", "intfloat/multilingual-e5-large-instruct", 1024,
+        default_min_score=0.80,
+        query_prefix="Instruct: Given a clinical question, retrieve passages that answer the question\nQuery: ",
+    ),
+    "user-bge-m3": EmbedderProfile("st", "deepvk/USER-bge-m3", 1024, default_min_score=0.55),
 }
 
 
@@ -196,6 +220,89 @@ class BgeM3Embedder:
         return indices, values
 
 
+
+class SentenceTransformerEmbedder:
+    """Dense-эмбеддер через sentence-transformers под общим SPI (docs/08 §4).
+
+    Профили qwen3-0.6b / e5-large-instruct / user-bge-m3. Префиксы запроса и
+    пассажа — из EmbedderProfile (инструкции моделей). Sparse-канал лексический
+    (hash): коллекция всегда содержит sparse-вектор, но профиль по умолчанию
+    ищет dense-only (use_sparse=False).
+    """
+
+    use_sparse = False  # стратегия поиска профиля; sparse пишется для схемы коллекции
+
+    def __init__(
+        self,
+        model_id: str,
+        *,
+        dense_size: int,
+        query_prefix: str = "",
+        passage_prefix: str = "",
+        device: str = "auto",
+        batch_size: int = 8,
+        max_length: int = 512,
+    ) -> None:
+        resolved_device = _resolve_device(device)
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            raise EmbedderConfigError(
+                "Dense-профиль требует опциональных зависимостей sentence-transformers+torch. "
+                "Установите extra `embeddings` (uv: `uv sync --extra embeddings`), "
+                "либо верните CC_EMBEDDER=hash. Базовый образ API намеренно без torch "
+                "(docs/08 §4)."
+            ) from exc
+        self.model_id = model_id
+        self.dense_size = dense_size
+        self.device = resolved_device
+        self.query_prefix = query_prefix
+        self.passage_prefix = passage_prefix
+        self._batch_size = batch_size
+        self._max_length = max_length
+        try:
+            self._m = SentenceTransformer(model_id, device=resolved_device)
+        except Exception as exc:  # сеть/кэш HF/несовместимые веса
+            raise EmbedderConfigError(
+                f"Не удалось загрузить эмбеддер '{model_id}' на устройстве "
+                f"'{resolved_device}': {exc}. Проверьте кэш HF и сеть (модель качается "
+                f"при первом запуске) или укажите CC_EMBEDDER_DEVICE=cpu."
+            ) from exc
+        self._m.max_seq_length = max_length
+        self._lexical = HashEmbedder()  # sparse-канал схемы коллекции
+        self._cache: dict[str, tuple[list[float], list[int], list[float]]] = {}
+
+    def _encode(self, text: str, prefix: str) -> tuple[list[float], list[int], list[float]]:
+        key = prefix + text
+        hit = self._cache.get(key)
+        if hit is not None:
+            return hit
+        vec = self._m.encode(
+            [prefix + text],
+            batch_size=self._batch_size,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )[0]
+        indices, values = self._lexical.sparse(text)
+        encoded = (vec.tolist(), indices, values)
+        if len(self._cache) >= _CACHE_SIZE:  # FIFO: держим память ограниченной
+            self._cache.pop(next(iter(self._cache)))
+        self._cache[key] = encoded
+        return encoded
+
+    def dense(self, text: str) -> list[float]:
+        """Вектор ПАССАЖА (индексация) — с passage_prefix профиля."""
+        return self._encode(text, self.passage_prefix)[0]
+
+    def query_dense(self, text: str) -> list[float]:
+        """Вектор ЗАПРОСА — с query_prefix профиля (инструкции e5/Qwen3)."""
+        return self._encode(text, self.query_prefix)[0]
+
+    def sparse(self, text: str) -> tuple[list[int], list[float]]:
+        return self._encode(text, self.passage_prefix)[1:]
+
+
 def _resolve_device(device: str) -> str:
     """auto|cpu|cuda[:N] → конкретное устройство; понятная ошибка при промахе."""
     dev = (device or "auto").strip().lower()
@@ -268,7 +375,29 @@ def build_embedder(
             batch_size=batch_size or settings.embedder_batch_size,
             max_length=max_length or settings.embedder_max_length,
         )
+    if profile.kind == "st":
+        return SentenceTransformerEmbedder(
+            model_id or settings.embedder_model or profile.model_id,
+            dense_size=profile.dense_size,
+            query_prefix=profile.query_prefix,
+            passage_prefix=profile.passage_prefix,
+            device=device or settings.embedder_device,
+            batch_size=batch_size or settings.embedder_batch_size,
+            max_length=max_length or settings.embedder_max_length,
+        )
     return HashEmbedder()
+
+
+def profile_default_min_score(kind: str | None = None) -> float:
+    """Порог «нет релевантного ответа» по умолчанию для выбранного профиля.
+
+    CC_KB_MIN_SCORE (settings.kb_min_score) перекрывает его, если задан явно.
+    """
+    from app.config import settings
+
+    chosen = (kind if kind is not None else settings.embedder) or "hash"
+    profile = PROFILES.get(chosen.strip().lower())
+    return profile.default_min_score if profile else 0.45
 
 
 _embedder: Embedder | None = None

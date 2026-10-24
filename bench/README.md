@@ -151,3 +151,36 @@ PMC (open access): 10277900, 9790363, 13571187, 13641322, 13653422, 13655782,
 13660419, 13264932. ВОЗ: news-room/fact-sheets «Depression» и «Anxiety disorders»
 (EN + RU). Повторный сбор — `fetch_sources.py` (ID/URL детерминированы, сырьё
 не коммитится: сторонний контент, docs/08 §2).
+
+## Бенчмарк БЗ целиком (`kb_bench.py`, `eval_retrieval.py`)
+
+Предыдущие разделы меряют корпус научных статей (108 чанков). Отчёт
+`bench/REPORT-retrieval.md` и скрипты ниже меряют **реальную БЗ** — снимок
+прод-коллекции Qdrant (998 чанков: КР ВОЗ, шкалы, препараты, триаж, статьи) и
+158 клинических запросов (92 RU + 66 EN) с **градуированной** разметкой 0/1/2 от
+LLM-асессора по пулу из восьми стеков.
+
+```bash
+# 1) снимок корпуса из Qdrant + набор запросов (LLM-генерация + 30 ручных)
+.venv/bin/python bench/build_kb_bench.py --export
+
+# 2) разметка пула (идемпотентно, докачивается; см. отчёт §7 про воркеры)
+.venv/bin/python bench/eval_retrieval.py --stacks all --dump-pools bench/data/kb_pool.jsonl
+.venv/bin/python bench/grade_kb_qrels.py --pool bench/data/kb_pool.jsonl --workers 4
+
+# 3) проверки набора (анти-предвзятость, детерминированные)
+.venv/bin/python bench/qa_qrels.py
+
+# 4) матрица стеков: эмбеддеры + реранк, метрики/латентность/VRAM
+.venv/bin/python bench/eval_retrieval.py --stacks all --json-out bench/data/eval_all.json
+.venv/bin/python bench/report_table.py bench/data/eval_all.json
+
+# 5) валидация победной конфигурации на продовом пути (kb.hybrid_search)
+CC_EMBEDDER=bge-m3 CC_QDRANT_COLLECTION=kb_eval_prod \
+CC_RERANKER=BAAI/bge-reranker-v2-m3 CC_RETRIEVAL_CANDIDATES=50 \
+  .venv/bin/python bench/eval_prod_path.py --profile bge-m3 --reindex
+```
+
+Данные (`bench/data/`) в git не коммитятся: корпус КР ВОЗ — сторонний контент,
+qrels/пулы воспроизводятся скриптами. Профили эмбеддеров, реранк и миграция
+коллекции — docs/08 §4.

@@ -139,20 +139,31 @@ def hybrid_search(
     topic: str | None = None,
     limit: int = 5,
     exclude_ids: set[str] | None = None,
+    candidates: int | None = None,
+    reranker=None,
+    rrf_k: int | None = None,
 ) -> list[dict]:
     """Поиск по базе знаний: стратегия зависит от эмбеддера (Embedder.use_sparse).
 
     - hash (демо/тесты): dense + лексический sparse prefetch → RRF fusion.
       Hash-dense шумит, точный лексический канал вытаскивает термины;
-    - bge-m3 (прод): dense-only. RRF уравнивает сильный мультиязычный dense и
-      слабый лексический канал и на золотом наборе роняет RU nDCG@3 с 0.78 до
-      0.49 (55 запросов; bench/eval_app_path.py) — семантически релевантные
-      чанки уступают лексическим совпадениям.
+    - dense-профили (bge-m3, qwen3-0.6b, e5-large-instruct, user-bge-m3):
+      dense-only — RRF с лексическим каналом на RU→EN перефразах только мешает
+      (bench/REPORT-retrieval.md).
 
-    Возвращает [{guideline_id, source_title, topic, score, text}] — текст берём
-    из базового фрагмента (полный корпус хранится отдельно; здесь метаданные).
+    candidates — глубина пула ДО реранка/отсечки (CC_RETRIEVAL_CANDIDATES;
+    None/0 → историческое max(limit*3, 10)). reranker — объект с методом
+    rerank(query, hits, limit, exclude_ids=...) (app.services.reranker);
+    без него — порядок каналов как есть. rrf_k — константа RRF (CC_RRF_K).
+
+    Возвращает [{guideline_id, source_title, topic, score, text}]; при реранке
+    score — скор кросс-энкодера (он же основа порога kb_min_score).
     """
-    dense = embedder.dense(query)
+    if not query.strip():
+        return []
+    fetch = candidates if candidates and candidates > 0 else max(limit * 3, 10)
+    fetch = max(fetch, limit)
+    dense = getattr(embedder, "query_dense", embedder.dense)(query)
     must: list = []
     must_not: list = []
     if topic:
@@ -164,15 +175,19 @@ def hybrid_search(
     if getattr(embedder, "use_sparse", True):
         indices, values = embedder.sparse(query)
         prefetch = [
-            qm.Prefetch(query=dense, using=DENSE_NAME, limit=max(limit * 3, 10)),
-            qm.Prefetch(query=qm.SparseVector(indices=indices, values=values), using=SPARSE_NAME, limit=max(limit * 3, 10)),
+            qm.Prefetch(query=dense, using=DENSE_NAME, limit=fetch),
+            qm.Prefetch(
+                query=qm.SparseVector(indices=indices, values=values),
+                using=SPARSE_NAME,
+                limit=fetch,
+            ),
         ]
         res = client.query_points(
             collection_name=COLLECTION,
             prefetch=prefetch,
-            query=qm.FusionQuery(fusion=qm.Fusion.RRF),
+            query=qm.RrfQuery(rrf=qm.Rrf(k=rrf_k or settings.rrf_k)),
             query_filter=filter_,
-            limit=limit,
+            limit=fetch,
             with_payload=True,
         )
     else:
@@ -181,10 +196,10 @@ def hybrid_search(
             query=dense,
             using=DENSE_NAME,
             query_filter=filter_,
-            limit=limit,
+            limit=fetch,
             with_payload=True,
         )
-    return [
+    hits = [
         {
             "guideline_id": p.payload["guideline_id"],
             "source_title": p.payload["source_title"],
@@ -194,6 +209,14 @@ def hybrid_search(
         }
         for p in (res.points or [])
     ]
+    if reranker is not None:
+        ranked = reranker.rerank(query, hits, limit, exclude_ids=exclude_ids)
+        if exclude_ids:
+            # Реранк не имеет права воскресить исключённый врачом источник,
+            # даже если его реализация забыла про фильтр (defense in depth).
+            ranked = [h for h in ranked if h.get("guideline_id") not in exclude_ids]
+        return ranked[:limit]
+    return hits[:limit]
 
 
 def count_points(client: QdrantClient) -> int:

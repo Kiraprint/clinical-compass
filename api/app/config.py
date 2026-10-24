@@ -49,7 +49,17 @@ class Settings(BaseSettings):
     embedder_device: str = "auto"  # CC_EMBEDDER_DEVICE: auto | cpu | cuda[:N]
     embedder_batch_size: int = 8  # CC_EMBEDDER_BATCH_SIZE: батч энкодера
     embedder_max_length: int = 2048  # CC_EMBEDDER_MAX_LENGTH: токенов на текст
-    kb_min_score: float = 0.45  # CC_KB_MIN_SCORE: порог score лучшего чанка (dense-only профиль)
+    # CC_KB_MIN_SCORE: порог «релевантного ответа нет» для score лучшего чанка.
+    # Пусто → дефолт профиля (PROFILES[...].default_min_score, docs/08 §4):
+    # шкала косинуса у моделей разная, единый порог ненадёжен.
+    kb_min_score: float | None = None
+    # CC_RERANKER: off | id кросс-энкодера (BAAI/bge-reranker-v2-m3 и др.).
+    # Требует extra `rerank`; без него — предупреждение и порядок RRF (docs/08 §4).
+    reranker: str = "off"
+    # CC_RETRIEVAL_CANDIDATES: глубина пула до реранка/отсечки (0 → max(limit*3, 10)).
+    retrieval_candidates: int = 0
+    # CC_RRF_K: константа RRF-слияния dense+sparse (Qdrant RrfQuery, docs/08 §4).
+    rrf_k: int = 60
     # CC_KB_CORPUS_TTL_SECONDS: TTL кеша корпуса KB (kb_seed.build_corpus) в
     # процессе API. In-process писателей drugs нет (seed — отдельный CLI, он
     # зовёт clear_corpus_cache), поэтому TTL — единственная runtime-инвалидация.
