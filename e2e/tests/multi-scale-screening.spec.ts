@@ -1,7 +1,7 @@
 // Многошкальный скрининг (item 1, «Option A»): врач назначает 2 шкалы,
 // пациент выбирает одну, проходит её и видит результат с кодом выбранной шкалы.
 import { expect, test, type APIResponse } from "@playwright/test";
-import { DEMO_PASSWORD, freshPatientEmail, totp } from "./helpers";
+import { DEMO_PASSWORD, freshPatientEmail, openScreening, totp } from "./helpers";
 
 const BASE = process.env.CC_E2E_URL ?? "http://127.0.0.1:8090";
 const j = async (r: APIResponse) => r.json();
@@ -53,7 +53,7 @@ test.describe("Многошкальный скрининг", () => {
     await page.getByLabel("Email").fill(patReg.email);
     await page.getByLabel("Пароль").fill(DEMO_PASSWORD);
     await page.getByRole("button", { name: "Войти" }).click();
-    await page.getByRole("button", { name: "Скрининг", exact: true }).click();
+    await openScreening(page);
     await expect(page.getByText("Шкалы назначены вашим врачом — выберите одну:")).toBeVisible();
     await expect(page.locator("select")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Начать скрининг" })).toBeDisabled();

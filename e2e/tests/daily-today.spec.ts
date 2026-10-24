@@ -80,13 +80,22 @@ test("«Сегодня»: первый шаг — 7 пунктов ядра; н�
   const content = `День прошёл ровно ${Date.now()}`;
   await page.locator("#today-diary").fill(content);
   await expect(page.locator(".mood").getByRole("button")).toHaveCount(5);
-  await page.locator(".mood").getByRole("button", { name: /Отлично/ }).click();
+  // FR-33 F: эмоция — переключатель: выбрана → серым (aria-pressed), повторный клик снимает.
+  const excellent = page.locator(".mood").getByRole("button", { name: /Отлично/ });
+  await excellent.click();
+  await expect(excellent).toHaveAttribute("aria-pressed", "true");
+  await excellent.click();
+  await expect(excellent).toHaveAttribute("aria-pressed", "false");
+  await excellent.click();
+  await expect(excellent).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "Принял", exact: true }).click();
   await page.getByPlaceholder("Препарат (напр. Авиандр) — необязательно").fill("Авиандр");
   await page.getByRole("button", { name: "Сохранить за сегодня" }).click();
 
   // Неполный чек-ин не мешает сохранить дневник и приём лекарств.
   await expect(page.getByText("Сохранено: дневник · приём лекарств")).toBeVisible();
+  // Выбор эмоции не сбрасывается сохранением — пользователь видит, что отправил.
+  await expect(excellent).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByText(content)).toBeVisible();
   await expect(page.locator(".msg", { hasText: content }).getByText("😄 Отлично")).toBeVisible();
   await expect(page.getByText(/За сегодня отмечено: Принял/)).toBeVisible();
