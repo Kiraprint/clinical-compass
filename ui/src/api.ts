@@ -900,6 +900,7 @@ export interface Drug {
   contraindications: string;
   adverse_events: string;
   special_notes: string;
+  source_urls: string[];
 }
 
 // --- FR-28: нежелательные явления ---
