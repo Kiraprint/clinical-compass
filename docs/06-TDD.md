@@ -153,6 +153,11 @@
 | `test_commit_failure_never_publishes_uncommitted_content` | сбой commit реестра во время прогона | ни одной точки в Qdrant, `failed_documents=1`, записи `kb_works` нет |
 | `test_failed_reindex_restores_previous_points` | upsert новой версии падает после delete | опубликованная версия восстановлена (точки и payload прежние) |
 | `test_excluded_work_cannot_be_approved` | `excluded`-работа | `ReviewError`: approve допустим только для `candidate` |
+| `test_request_rejects_untrusted_url_before_network`, `test_redirect_hop_is_validated_like_the_first_request` | URL из JSON IRIS: `http:`, `file:`, link-local/metadata, `localhost`, чужой хост; cross-host редирект | `SourceError` до сетевого вызова; каждый редирект проверяется так же |
+| `test_detect_license_scans_whole_document` | строка лицензии на ~50 000-м символе документа | `CC BY-NC-SA 3.0 IGO` → `met` (раньше документ отвергался) |
+| `test_parse_rejects_dtd_before_parsing`, `test_request_caps_body_size` | XML с `DOCTYPE`/`ENTITY`; ответ PubMed > 8 MiB | `SourceError` до разбора; тело сверх лимита не принимается |
+| `test_reindex_republishes_only_approved`, `test_reindex_failure_does_not_abort_the_rest` | `reindex` после сброса коллекции Qdrant (фейковый `index`) | публикуются только `approved`; сбой одной работы не отменяет остальные; итог `переиндексировано N, пропущено M, ошибок K` |
+| `test_fetch_documents_labels_non_english_stream` | выбран русский TEXT bitstream IRIS | документ получает `language="ru"`, а не `en` |
 | `test_thread_create_message_and_read_back` | тред с 2 пациентами → вопрос → чтение | оба сообщения и цитаты в истории, карты обоих пациентов в ответе, дедуп `patient_ids` |
 | `test_foreign_thread_is_404` | чужой тред: GET/PATCH/POST/DELETE | 404 `THREAD_NOT_FOUND`, чужой тред не виден в списке |
 | `test_patient_ids_roster_gate` | пациент вне roster в `patient_ids` | 403 `PATIENT_NOT_IN_ROSTER` (создание и сообщение) |
