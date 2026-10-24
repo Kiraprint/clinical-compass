@@ -6,7 +6,7 @@
 
 ## 1. Стратегия
 
-- Пирамида (фактически достигнуто на 2026-10-24, см. `core/tests` + `api/tests`): unit (ядро) 141, integration (API+БД) 544 (из них 78 — обогащение КБ, FR-20), e2e (UI-флоу) 42. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
+- Пирамида (фактически достигнуто на 2026-10-24, см. `core/tests` + `api/tests`): unit (ядро) 141, integration (API+БД) 559 (из них 78 — обогащение КБ, FR-20; 15 — rate limiter на общем Redis-счётчике, docs/03 §12), e2e (UI-флоу) 42. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
 - Ядро: 100% детерминированные чистые функции — табличные параметризованные тесты порогов.
 - Интеграция: реальные HTTP-запросы к тестовому Postgres (отдельная БД), не мок-эхо.
 - Запрещены тесты «на копирование»: только поведение контрактов (вход → выход/инвариант/ошибка).
@@ -288,6 +288,12 @@
 | `test_request_path_drug_docs_are_not_cached` | `build_corpus(drug_docs=...)` | два вызова с разными препаратами | данные запроса не попадают в общий кеш |
 | `test_push_failure_log_has_no_capability_token` (`test_push.py`) | endpoint с токеном в пути | `_endpoint_host` | в лог попадает только хост, токена нет |
 | `test_ip_budget_blocks_spray_of_distinct_emails` (`test_ratelimit.py`) | `CC_RATE_IP_MAX` неудачных попыток с одного IP по разным email | проверка входа с этого IP / с другого | отказ с `retry_after ≥ 1`; другой IP не затронут |
+| `test_pair_budget_shared_between_processes`, `test_ip_budget_shared_between_processes` (`test_ratelimit_redis.py`) | два «процесса» с общим фейковым Redis | `rate_max`/`rate_ip_max` неудач вперемешку через оба | 429 на обоих: бюджет не умножается на число процессов |
+| `test_increments_are_atomic_across_processes` | 8 потоков × 2 клиента, 25 записей каждый | `_redis_record` | ровно 200 в `INCR`-счётчике и TTL на ключе (нет lost update) |
+| `test_window_expires_by_ttl`, `test_check_does_not_create_keys` | TTL = 2 окна | `check_rate` после истечения | окно отпускает; проверка не создаёт ключей |
+| `test_redis_failure_falls_back_to_memory_and_warns_once`, `test_dead_redis_does_not_delay_login_beyond_timeout` | Redis отвечает ошибкой/спит | `check_rate` | fail-open `(True, 0)`, один WARNING, `redis_errors=1`, задержка ≤ socket_timeout, дальше memory |
+| `test_auto_*`, `test_missing_redis_package_degrades`, `test_connect_passes_timeout_and_disables_retries` | нет URL / нет пакета / мёртвый Redis / избыток ретраев | `init_backend`/`_connect` | memory + WARNING; timeout 0.3 с и `Retry(..., 0)` |
+| `test_reset_clears_redis_store`, `test_reset_clears_memory_store` | активное хранилище с окнами | `reset_rate_limits` | чистится именно активный store, выбор бэкенда сбрасывается |
 | `test_migrations_do_not_disable_application_loggers` (`test_async_db.py`) | после `init_db()` (alembic `fileConfig`) | запись в логгер `app.services.push` | логгер не отключён, запись доходит до handler'а |
 | `test_thread_message_deadline_is_503_without_assistant_message` (`test_assistant_threads.py`) | агент-заглушка спит дольше `CC_ASSISTANT_DEADLINE_S` | POST сообщения в тред | 503 `ASSISTANT_TIMEOUT`, `Retry-After: 5`, RFC 7807 `instance` = путь; ответ ассистента не персистится (в треде только вопрос) |
 | `test_agent_offload_uses_dedicated_limiter` | `AGENT_LIMITER` = `CC_ASSISTANT_THREAD_LIMIT` (8) | offload `_invoke_agent` | `to_thread.run_sync` получает `limiter=AGENT_LIMITER` — общий пул AnyIO не занимается |

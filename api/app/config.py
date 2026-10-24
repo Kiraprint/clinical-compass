@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     rate_max: int = 5  # попыток захода на /auth/login за окно (перебор 2FA)
     rate_window: int = 60  # сек
     rate_ip_max: int = 30  # CC_RATE_IP_MAX: неудачных попыток на IP за окно (любые email)
+    # Rate limiter логинов (docs/03 §12): memory — словари процесса (бюджет
+    # умножается на WEB_CONCURRENCY и реплики), redis — общий атомарный счётчик
+    # в Redis, auto — redis при заданном CC_REDIS_URL и живом PING, иначе memory.
+    rate_backend: str = "auto"  # CC_RATE_BACKEND: auto | memory | redis
+    redis_url: str = ""  # CC_REDIS_URL: пусто → in-process memory (бюджет на процесс)
+    # CC_RATE_REDIS_TIMEOUT: сек на socket/connect. Мёртвый Redis не должен
+    # задерживать логин: по таймауту limiter деградирует в memory (fail-open).
+    rate_redis_timeout: float = Field(default=0.3, gt=0)
     push_enabled: bool = True
     vapid_private_key: str = ""  # base64(PKCS8 PEM); пусто → генерируется в памяти (демо)
     fcm_service_account_b64: str = ""  # base64(JSON service account Firebase); пусто → FCM выключен

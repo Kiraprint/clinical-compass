@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from . import db
+from . import db, ratelimit
 from .config import settings
 from .errors import register_handlers
 
@@ -47,6 +47,9 @@ async def lifespan(app: FastAPI):
         db.validate_pool_budget()
         # Оффлоадим в поток: сборка эмбеддера (torch) и запрос к Qdrant — не в loop.
         await asyncio.to_thread(_validate_kb_index)
+        # Общий счётчик логинов (docs/03 §12): PING Redis на старте фиксирует
+        # режим до первого запроса; недоступный Redis — WARNING и memory, не 500.
+        await asyncio.to_thread(ratelimit.init_backend)
         yield
     finally:
         # Закрываем пулы явно: иначе при рестарте/перезагрузке процесса воркеры

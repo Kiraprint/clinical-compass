@@ -9,18 +9,19 @@ COPY api/pyproject.toml /app/api/pyproject.toml
 # F8 layer caching: первый sync — только сторонние зависимости всех workspace-членов
 # (--all-packages нужен т.к. рут-проект не имеет deps, deps в членах core/api),
 # без установки самих пакетов (--no-install-workspace) → кеш при change кода.
-RUN uv sync --frozen --no-dev --all-packages --no-install-workspace
+RUN uv sync --frozen --no-dev --all-packages --extra redis --no-install-workspace
 COPY core/ /app/core/
 COPY api/ /app/api/
-RUN uv sync --frozen --no-dev --all-packages
+RUN uv sync --frozen --no-dev --all-packages --extra redis
 WORKDIR /app/api
 EXPOSE 8000
 # WEB_CONCURRENCY — число ПРОЦЕССОВ uvicorn (не потоков): каждый держит свой
-# пул БД (CC_DB_POOL_SIZE + CC_DB_MAX_OVERFLOW) и свой in-process rate limiter
-# логина. При дефолтах 20+20 бюджет max_connections=100 выдерживает 2 воркера;
-# app.db.validate_pool_budget() падает на старте, если суммарный пул не влезает.
-# Rate limit логина становится per-worker: при N воркерах окно CC_RATE_WINDOW
-# допускает до N×CC_RATE_MAX попыток на процесс-аггрегат (см. README).
+# пул БД (CC_DB_POOL_SIZE + CC_DB_MAX_OVERFLOW). При дефолтах 20+20 бюджет
+# max_connections=100 выдерживает 2 воркера; app.db.validate_pool_budget()
+# падает на старте, если суммарный пул не влезает.
+# Rate limit логина общий, если задан CC_REDIS_URL (docker compose: сервис
+# redis): N воркеров/реплик тратят ОДИН бюджет CC_RATE_MAX. Без Redis счётчик
+# per-process: при N процессах допустимо до N×CC_RATE_MAX попыток (README).
 # F6: --proxy-headers → uvicorn читает X-Forwarded-For/X-Real-IP от nginx,
 # request.client.host = реальный IP клиента (для audit_log.ip).
 ENV WEB_CONCURRENCY=1

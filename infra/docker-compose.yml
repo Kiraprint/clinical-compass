@@ -39,6 +39,25 @@ services:
       timeout: 3s
       retries: 10
 
+  # Общий счётчик rate limiter логинов (docs/03 §12, docs/10 R24): перебор
+  # пароля/2FA считается на всю инсталляцию, а не на процесс uvicorn.
+  # В хост-сеть порт не публикуется (NEW-4): доступ только api внутри compose;
+  # без пароля — аутентификация не нужна, т.к. сеть приватная, а ключи
+  # лимитера содержат только SHA-256 идентификаторов и живут ≤ 2×CC_RATE_WINDOW.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Без persistence: счётчики — эфемерные окна (TTL ≤ 2×CC_RATE_WINDOW),
+    # после рестарта Redis лимит просто начинается заново (fail-open).
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   api:
     build:
       context: ..
@@ -67,6 +86,10 @@ services:
       CC_CHAT_INSIGHTS_ENABLED: "${CC_CHAT_INSIGHTS_ENABLED:-false}"
       <<: *vapid
       CC_QDRANT_URL: http://qdrant:6333
+      # Rate limiter логинов (docs/03 §12): общий бэкенд для всех воркеров и
+      # реплик api. Пусто → memory (бюджет на процесс); auto при живом Redis.
+      CC_REDIS_URL: "${CC_REDIS_URL:-redis://redis:6379/0}"
+      CC_RATE_BACKEND: "${CC_RATE_BACKEND:-auto}"
       # FR-25: ЕМИАС. Egress по умолчанию ВЫКЛЮЧЕН (docs/10 R17); включается
       # CC_EMIAS_ENABLED=true. CC_EMIAS_ALLOW_INSECURE=true — только для мока по http.
       CC_EMIAS_ENABLED: "${CC_EMIAS_ENABLED:-false}"
@@ -82,6 +105,10 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_healthy
+      # service_started, не service_healthy: недоступный Redis — деградация
+      # в memory (WARNING), а не отказ старта api.
+      redis:
+        condition: service_started
     # F12: порт 8000 не экспонируется на хост — только через nginx (ui:8090).
     # Прямой HTTP-доступ в обход TLS/nginx отсутствует.
     expose:
