@@ -189,19 +189,25 @@ DDL, а второй дожидается первого.
 
 ```bash
 # только на хосте с NVIDIA GPU (иначе профиль gpu не поднимается)
+# 1) секреты (включая CC_ML_TOKEN — без него ml не стартует)
+tools/gen-secrets.sh infra/.env
+# 2) разово скачать веса в том ml-models (единственный шаг с egress)
+docker compose -f infra/docker-compose.yml --profile gpu run --rm ml-warmup
+# 3) запустить сайдкар: сеть mlnet внутренняя, egress и БД ему недоступны
 docker compose -f infra/docker-compose.yml --profile gpu up -d ml
 docker compose -f infra/docker-compose.yml --profile gpu logs -f ml
 # порт наружу не публикуется: health читаем изнутри контейнера
 docker compose -f infra/docker-compose.yml --profile gpu exec ml python -c "import json,urllib.request; print(json.load(urllib.request.urlopen('http://127.0.0.1:8080/health')))"
 
-# тесты без GPU/torch
+# тесты без GPU/torch/token
 python -m pytest ml/tests -q
 ```
 
-Первый старт скачивает ~4 ГБ весов в том `ml-models` (разовый egress), дальше
-сервис работает офлайн. Без `--profile gpu` стек не меняется:
-`CC_EMBEDDER=hash`, `CC_DEPERSONALIZE_NER=off`; на не-GPU хосте задайте
-`CC_ML_URL=` (пусто), чтобы api даже не пытался ходить в отсутствующий `ml`.
+Сеть `mlnet` объявлена `internal: true`: `ml` не видит postgres/qdrant/redis и
+не имеет выхода в интернет, а api подключён к ней вторым интерфейсом. После
+`ml-warmup` сайдкар стартует с `HF_HUB_OFFLINE=1`. Без `--profile gpu` стек не
+меняется: `CC_EMBEDDER=hash`, `CC_DEPERSONALIZE_NER=off`; на не-GPU хосте
+задайте `CC_ML_URL=` (пусто), чтобы api не ходил в отсутствующий `ml`.
 Замеры латентности/VRAM — [REPORT-ml-sidecar.md](REPORT-ml-sidecar.md).
 
 ## Обогащение базы знаний (kb-enrichment)
