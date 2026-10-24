@@ -121,15 +121,26 @@ def _l2(v: np.ndarray) -> np.ndarray:
 
 # ------------------------------------------------------- обёртки реранкеров
 class CrossEncoderReranker:
-    def __init__(self, model_id: str, *, trust_remote_code: bool = False, max_length: int = 512) -> None:
+    def __init__(
+        self,
+        model_id: str,
+        *,
+        trust_remote_code: bool = False,
+        max_length: int = 512,
+        chars: int = 0,
+    ) -> None:
         from sentence_transformers import CrossEncoder
 
         self.name = model_id
+        # chars>0 — обрезать фрагмент перед парой: цена CE растёт с длиной, а
+        # при max_length=512 хвост 1800-знакового чанка всё равно отбрасывается.
+        self.chars = chars
         self._m = CrossEncoder(model_id, device="cuda", trust_remote_code=trust_remote_code,
                                max_length=max_length)
 
     def score(self, query: str, texts: list[str]) -> np.ndarray:
-        return np.asarray(self._m.predict([(query, t) for t in texts], show_progress_bar=False))
+        cut = [t[: self.chars] if self.chars else t for t in texts]
+        return np.asarray(self._m.predict([(query, t) for t in cut], show_progress_bar=False))
 
 
 class Qwen3Reranker:
@@ -158,17 +169,22 @@ class Qwen3Reranker:
     def score(self, query: str, texts: list[str]) -> np.ndarray:
         import torch
 
-        pairs = [
-            f"<Instruct>: {self._instruct}\n<Query>: {query}\n<Document>: {t[:2000]}"
-            for t in texts
-        ]
-        enc = self._tok([self._prefix + p + self._suffix for p in pairs], padding=True,
-                        truncation=True, max_length=self._max, return_tensors="pt").to("cuda")
-        with torch.no_grad():
-            logits = self._m(**enc).logits[:, -1, :]
-        yes = logits[:, self._yes]
-        no = logits[:, self._no]
-        return (yes - no).float().cpu().numpy()
+        # Микро-батчи: один forward на 100 документов по 2048 токенов не влезает
+        # в 24 ГБ рядом с эмбеддером (OOM 11.9 ГБ), а по 8 — стабильно.
+        out: list[float] = []
+        step = 8
+        for i in range(0, len(texts), step):
+            pairs = [
+                f"<Instruct>: {self._instruct}\n<Query>: {query}\n<Document>: {t[:2000]}"
+                for t in texts[i : i + step]
+            ]
+            enc = self._tok([self._prefix + p + self._suffix for p in pairs], padding=True,
+                            truncation=True, max_length=self._max, return_tensors="pt").to("cuda")
+            with torch.no_grad():
+                logits = self._m(**enc).logits[:, -1, :]
+            out.extend((logits[:, self._yes] - logits[:, self._no]).float().cpu().tolist())
+            del enc, logits
+        return np.asarray(out, dtype=np.float32)
 
 
 RERANKERS = {
@@ -311,6 +327,7 @@ def main() -> None:
     ap.add_argument("--candidates", type=int, default=100, help="глубина каналов/пула")
     ap.add_argument("--rrf-k", type=int, default=60)
     ap.add_argument("--rerank-depth", type=int, default=50)
+    ap.add_argument("--rerank-chars", type=int, default=0, help="обрезать фрагмент перед CE (0 — целиком)")
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--limit", type=int, default=10)
     ap.add_argument("--dump-pools", default="", help="путь JSONL для пула кандидатов")
@@ -360,7 +377,10 @@ def main() -> None:
         if spec.get("reranker"):
             kind, model_id, kwargs = RERANKERS[spec["reranker"]]
             t0 = time.perf_counter()
-            reranker = CrossEncoderReranker(model_id, **kwargs) if kind == "ce" else Qwen3Reranker(model_id)
+            if kind == "ce":
+                reranker = CrossEncoderReranker(model_id, chars=args.rerank_chars, **kwargs)
+            else:
+                reranker = Qwen3Reranker(model_id)
             print(f"[{sname}] reranker {model_id} loaded in {time.perf_counter() - t0:.1f}s", file=sys.stderr)
 
         # прогрев: первый вызов грузит ядра CUDA и инициализирует кэши — в латентность не идёт
@@ -373,7 +393,9 @@ def main() -> None:
             t0 = time.perf_counter()
             qv = emb.encode_query(q["q"])
             depth = int(spec.get("rerank_depth", args.rerank_depth))
-            cand = max(args.candidates, depth if spec.get("reranker") else 0)
+            # Для реранк-стека пул = глубина реранка (свип глубины должен менять цену),
+            # для прочих — обычная глубина каналов.
+            cand = depth if spec.get("reranker") else args.candidates
             rrf_k = int(spec.get("rrf_k", args.rrf_k))
             if need_sparse:
                 if name == "bge-m3":
@@ -392,7 +414,16 @@ def main() -> None:
             if reranker is not None:
                 cand_texts = [texts[i] for i in order]
                 rs = reranker.score(q["q"], cand_texts)
-                order = order[np.argsort(-rs)]
+                ce_order = order[np.argsort(-rs)]
+                if spec.get("blend"):
+                    # RRF порядков dense и реранкера: кросс-энкодер на длинных
+                    # чанках портит голову выдачи, слияние сохраняет оба сигнала.
+                    bk = float(spec.get("blend_k", 10))
+                    dense_rank = np.arange(len(order), dtype=np.float64)
+                    ce_rank = np.argsort(np.argsort(-rs)).astype(np.float64)
+                    order = order[np.argsort(-(1.0 / (bk + dense_rank) + 1.0 / (bk + ce_rank)))]
+                else:
+                    order = ce_order
             ranked = [corpus[i]["id"] for i in order[: args.limit]]
             rankings[q["id"]] = ranked
             lat.append(time.perf_counter() - t0)
@@ -467,6 +498,17 @@ def define_stacks(args) -> dict[str, dict]:
                     "reranker": model,
                     "rerank_depth": depth,
                 }
+    # Слияние порядка dense и порядка реранкера (RRF) — проверка гипотезы, что
+    # кросс-энкодер портит голову выдачи на длинных чанках.
+    for base in ("bge-m3", "qwen3-0.6b"):
+        for k in (10, 60):
+            stacks[f"{base}-dense+rerank-bge-d50-blend{k}"] = {
+                "embedder": base,
+                "reranker": "bge-reranker-v2-m3",
+                "rerank_depth": 50,
+                "blend": True,
+                "blend_k": k,
+            }
     return stacks
 
 
