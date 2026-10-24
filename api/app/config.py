@@ -89,6 +89,15 @@ class Settings(BaseSettings):
     # Apache-2.0, FIO F1 0.933 на redmadrobot-rnd/pii_benchmark (bench/ner).
     depersonalize_ner: str = "off"
     ner_model: str = "redmadrobot-rnd/rubert-base-pii-ner"  # CC_NER_MODEL
+    # CC_ML_URL: адрес ML-сайдкара (эмбеддинги, реранк, маскирование ПДн) —
+    # GPU-сервис `ml` во внутренней сети compose (docs/08 §4). Пусто → сайдкар
+    # не используется: остаются локальные профили эмбеддера и regex-путь ПДн.
+    ml_url: str = ""
+    ml_token: str = ""  # CC_ML_TOKEN: общий секрет api ↔ сайдкар (заголовок X-CC-ML-Token)
+    # CC_ML_TIMEOUT: сек на один вызов сайдкара. Метки ПДн ждут этот таймаут в
+    # запросе, поэтому он короче LLM-таймаута; при недоступном сайдкаре —
+    # MlUnavailable (в прод-режиме egress ПДн fail-closed, docs/12).
+    ml_timeout: float = Field(default=5.0, gt=0)
     data_key: str = ""  # CC_DATA_KEY: симметричный ключ pgcrypto для free-text ПДн (прод — KMS)
     # F3: инверсия fail-fast. По умолчанию демо-секреты запрещены; демо/тест
     # окружение явно ставит CC_ALLOW_DEMO_SECRETS=true. prod-деплой compose as-is
