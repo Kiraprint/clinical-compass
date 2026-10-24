@@ -34,6 +34,7 @@ from compass.depersonalize import (
     Depersonalized,
     Span,
     depersonalize as core_depersonalize,
+    merge_adjacent_spans,
     is_plausible_person_span,
 )
 
@@ -244,13 +245,19 @@ class HybridNameExtractor(RubertPiiNameExtractor):
     backend = "hybrid"
 
     def extract_spans(self, text: str) -> list[tuple[str, int, int]]:
+        # Нейро-NER режет «Иванов Пётр» + «Сергеевич» на два спана. Если
+        # фильтровать до склейки, одиночный «Сергеевич» отбрасывается как
+        # «однословное ФИО» и отчество уходит в LLM открытым текстом.
+        candidates = [
+            Span(kind, start, end)
+            for kind, start, end in super().extract_spans(text)
+            if kind in (FIO, ADDRESS) and 0 <= start < end <= len(text)
+        ]
         out: list[tuple[str, int, int]] = []
-        for kind, start, end in super().extract_spans(text):
-            if kind not in (FIO, ADDRESS):
+        for span in merge_adjacent_spans(candidates, text):
+            if not is_plausible_person_span(text, span):
                 continue
-            if not is_plausible_person_span(text, Span(kind, start, end)):
-                continue
-            out.append((kind, start, end))
+            out.append((span.kind, span.start, span.end))
         return out
 
 
@@ -323,10 +330,14 @@ def _spans_from_remote(text: str, payload: object) -> list[Span]:
         if mapped is None:
             raise ValueError(f"span[{index}] с неизвестной категорией")
         kind, category = mapped
-        span = Span(kind, start, end, category)
-        if is_plausible_person_span(text, span):
-            out.append(span)
-    return out
+        out.append(Span(kind, start, end, category))
+    # Сайдкар отдаёт «Иванов Пётр» и «Сергеевич» двумя спанами одного вида.
+    # Склеиваем до фильтра правдоподобности: одиночный «Сергеевич» иначе
+    # отбрасывается как мусорное однословное ФИО и уходит в LLM открытым.
+    return [
+        span for span in merge_adjacent_spans(out, text)
+        if is_plausible_person_span(text, span)
+    ]
 
 
 def _remote_spans(text: str, names: list[str] | None = None) -> list[Span]:

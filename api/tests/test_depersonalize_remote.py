@@ -403,3 +403,26 @@ def test_degraded_must_be_bool(monkeypatch):
     settings.ml_url = "http://ml.invalid"
     with pytest.raises(DepersonalizationUnavailable):
         scrub_text("Иванов Пётр, звоните +79261234567")
+
+def test_split_fio_spans_are_merged_before_plausibility(monkeypatch):
+    """Сайдкар режет «Иванов Пётр» + «Сергеевич» — отчество не должно утечь."""
+    from app.services import ml_client
+
+    text = "Меня зовут Иванов Пётр Сергеевич, перезвоните"
+    monkeypatch.setattr(
+        ml_client, "mask",
+        lambda text, names=None: {
+            "text": text,
+            "spans": [
+                {"category": "FIO", "start": 11, "end": 22},
+                {"category": "FIO", "start": 22, "end": 32},
+            ],
+            "model": "fake",
+        },
+    )
+    settings.prod_mode = False
+    settings.depersonalize_ner = "remote"
+    settings.ml_url = "http://ml.invalid"
+    out = scrub_text(text).text
+    assert "Иванов" not in out and "Пётр" not in out and "Сергеевич" not in out, out
+    assert out.count("[ФИО]") == 1

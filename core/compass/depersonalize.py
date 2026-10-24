@@ -479,7 +479,7 @@ def is_plausible_person_span(text: str, span: Span) -> bool:
 
 # ------------------------------------------------------------------ разрешение
 
-def _merge_adjacent(spans: list[Span], text: str) -> list[Span]:
+def merge_adjacent_spans(spans: list[Span], text: str) -> list[Span]:
     """Склеивает соседние спаны одного вида через пробел/запятую.
 
     Нейро-NER часто режет «Иванов Пётр» + «Сергеевич» на два спана одного ФИО.
@@ -491,7 +491,7 @@ def _merge_adjacent(spans: list[Span], text: str) -> list[Span]:
             prev = merged[-1]
             gap = text[prev.end:s.start]
             if (prev.kind == s.kind and prev.category == s.category
-                    and gap in (" ", ", ", ",") and
+                    and gap in ("", " ", ", ", ",") and
                     len(gap) <= 2):
                 merged[-1] = Span(prev.kind, prev.start, s.end, prev.category)
                 continue
@@ -524,7 +524,7 @@ def resolve_spans(spans: Iterable[Span], text: str) -> list[Span]:
     Возраст оставляется только рядом с ФИО в том же предложении (комбо-
     идентификатор); одиночный возраст — клинические данные, не ПДн.
     """
-    merged = _merge_adjacent(list(spans), text)
+    merged = merge_adjacent_spans(list(spans), text)
     fio_spans = [s for s in merged if s.kind == FIO]
     age_ok: list[Span] = []
     for s in merged:
