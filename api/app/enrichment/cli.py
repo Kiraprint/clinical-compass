@@ -5,6 +5,7 @@
   serve                                   цикл по CC_ENRICH_INTERVAL_HOURS
   review list|show|approve|reject         ревью источников (врач/админ)
   runs [--limit N]                        история прогонов (воспроизводимость)
+  reindex [--work-id UUID] [--dry-run]    перепубликация approved-работ в Qdrant
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 import argparse
 import anyio
 import asyncio
+import datetime as dt
 import json
 import sys
 import time
@@ -20,7 +22,7 @@ from sqlalchemy import select, text
 
 from app import db as db_module
 from app.config import settings
-from app.enrichment import pipeline, review
+from app.enrichment import CRITERIA_VERSION, pipeline, review
 from app.enrichment.config import EnrichmentConfig
 from app.models import KBRun, KBWork
 
@@ -174,6 +176,95 @@ async def _cmd_runs(args) -> int:
     _print(payload, args.json)
     return 0
 
+async def _cmd_reindex(args) -> int:
+    """Перепубликация approved-работ в Qdrant — восстановление производного индекса.
+
+    Нужна после сброса коллекции снаружи (`kb_seed --reset`, смена эмбеддера):
+    реестр kb_works остаётся источником истины, а прогон `run` для той же сверки
+    потребовал бы похода в PubMed/IRIS. Порядок как в pipeline.execute: реестр
+    читается и отвязывается от сессии до сетевого вызова, chunk_count
+    записывается короткой транзакцией после.
+    """
+    from app.enrichment import index as index_mod
+    from app.services.embeddings import get_embedder
+
+    cfg = EnrichmentConfig.from_env()
+    embedder = get_embedder()
+    client = None if args.dry_run else _client()
+
+    if args.work_id is None:
+        query = select(KBWork).where(KBWork.status == "approved").order_by(KBWork.guideline_id)
+    else:
+        query = select(KBWork).where(KBWork.id == args.work_id)
+    async with _session() as session:
+        rows = list((await session.scalars(query)).all())
+        # Снимок отвязывается от сессии: сетевой вызов не должен идти внутри
+        # открытой транзакции.
+        for work in rows:
+            session.expunge(work)
+
+    reindexed = 0
+    skipped = 0
+    errors: list[str] = []
+    stale: list[str] = []
+    for work in rows:
+        if work.status != "approved":
+            # Возможно только с --work-id: без него статус отфильтрован в SQL.
+            skipped += 1
+            continue
+        # Вердикты критериев хранятся на момент ингеста: работу, одобренную до
+        # появления нового жёсткого критерия, нельзя переопубликовать вслепую.
+        if (work.criteria or {}).get("version") != CRITERIA_VERSION:
+            stale.append(f"{work.guideline_id}: критерии {((work.criteria or {}).get('version') or '—')} != {CRITERIA_VERSION}")
+            skipped += 1
+            continue
+        if args.dry_run:
+            reindexed += 1
+            print(f"dry-run: {work.guideline_id} (чанков в реестре: {work.chunk_count})")
+            continue
+        try:
+            chunks = await anyio.to_thread.run_sync(
+                lambda work=work: index_mod.index_work(
+                    client,
+                    embedder,
+                    work,
+                    chunk_chars=cfg.chunk_chars,
+                    chunk_overlap=cfg.chunk_overlap,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — одна работа не валит остальные
+            errors.append(f"{work.guideline_id}: {exc}")
+            continue
+        await _record_reindex(work.id, work.content_hash, chunks)
+        reindexed += 1
+
+    if args.dry_run:
+        print(f"dry-run: будет переиндексировано {reindexed}, пропущено {skipped}")
+        for note in stale:
+            print(f"критерии устарели: {note}", file=sys.stderr)
+        return 0
+    print(f"переиндексировано {reindexed}, пропущено {skipped}, ошибок {len(errors)}")
+    for note in stale:
+        print(f"критерии устарели: {note} — нужен повторный run", file=sys.stderr)
+    for error in errors:
+        print(f"ошибка: {error}", file=sys.stderr)
+    return 1 if errors else 0
+
+async def _record_reindex(work_id, content_hash: str, chunks: int) -> None:
+    """Короткая транзакция после индексации: сеть внутри неё не выполняется.
+
+    Сверка content_hash не даёт записать chunk_count для работы, которую
+    параллельный прогон успел заменить новой версией.
+    """
+    async with _session() as session:
+        work = await session.get(KBWork, work_id)
+        if work is None or work.status != "approved" or work.content_hash != content_hash:
+            return
+        work.chunk_count = chunks
+        work.indexed_hash = content_hash
+        work.published_at = dt.datetime.now(dt.timezone.utc)
+        await session.commit()
+
 def _uuid(value: str):
     import uuid
 
@@ -210,6 +301,11 @@ def build_parser() -> argparse.ArgumentParser:
     runs.add_argument("--limit", type=int, default=10)
     runs.add_argument("--json", action="store_true")
     runs.set_defaults(func=_cmd_runs)
+
+    reindex = sub.add_parser("reindex", help="перепубликовать approved-работы в Qdrant")
+    reindex.add_argument("--work-id", type=_uuid, default=None, help="только одна работа")
+    reindex.add_argument("--dry-run", action="store_true", help="только показать план")
+    reindex.set_defaults(func=_cmd_reindex)
     return parser
 
 

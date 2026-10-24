@@ -5,11 +5,12 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.deps import get_db, require_clinician
+from app.deps import get_db, require_roles
+from app.errors import Problem
 from app.models import Drug, User
 
 router = APIRouter(tags=["drugs"])
@@ -31,6 +32,7 @@ def _drug_dict(d: Drug) -> dict:
         "contraindications": d.contraindications,
         "adverse_events": d.adverse_events,
         "special_notes": d.special_notes,
+        "source_urls": d.source_urls or [],
     }
 
 
@@ -38,7 +40,7 @@ def _drug_dict(d: Drug) -> dict:
 async def list_drugs(
     q: str | None = None,
     db: AsyncSession = Depends(get_db),
-    _user: User = Depends(require_clinician),
+    _user: User = Depends(require_roles("CLINICIAN", "ADMIN")),
 ) -> dict:
     """Список препаратов. Опциональный фильтр q — ILIKE по trade_name/inn/inn_en."""
     stmt = select(Drug).order_by(Drug.drug_id)
@@ -57,9 +59,9 @@ async def list_drugs(
 async def get_drug(
     drug_id: str,
     db: AsyncSession = Depends(get_db),
-    _user: User = Depends(require_clinician),
+    _user: User = Depends(require_roles("CLINICIAN", "ADMIN")),
 ) -> dict:
     d = (await db.execute(select(Drug).where(Drug.drug_id == drug_id))).scalar_one_or_none()
     if d is None:
-        raise HTTPException(status_code=404, detail={"code": "NOT_FOUND", "detail": "Препарат не найден"})
+        raise Problem(404, "NOT_FOUND", "Препарат не найден")
     return _drug_dict(d)

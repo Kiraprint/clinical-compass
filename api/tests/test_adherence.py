@@ -2,7 +2,8 @@
 
 Проверяем математику (знаменатель = times_per_day × дни активности в окне),
 weighted-агрегат по препаратам, отсутствие расписания, валидацию отметки и
-исключение исторических записей из знаменателя.
+исключение исторических записей из знаменателя. Отдельно — уточнение
+«частично» (partial_kind) и статус «не назначено сегодня» (not_scheduled).
 """
 
 from __future__ import annotations
@@ -10,12 +11,14 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import pytest
 from sqlalchemy import func, select
 
 from app.models import AdherenceRecord, PatientMedication
 
 from .conftest import admin_ctx, clinician_ctx, patient_ctx
 
+UNSET = object()
 MOSCOW = ZoneInfo("Europe/Moscow")
 
 def _today():
@@ -41,10 +44,15 @@ def _med(client, c, pid, **overrides) -> dict:
     assert resp.status_code == 201, resp.text
     return resp.json()
 
-def _mark(client, h, status: str, medication_id: str | None = None) -> dict:
-    body = {"status": status}
+def _mark(
+    client, h, status: str, medication_id: str | None = None, partial_kind=UNSET,
+) -> dict:
+    body: dict = {"status": status}
     if medication_id is not None:
         body["medication_id"] = medication_id
+    if partial_kind is not UNSET:
+        # Явный None — новый клиент с ошибкой; отсутствие поля — старый клиент.
+        body["partial_kind"] = partial_kind
     resp = client.post("/api/v1/me/adherence", json=body, headers=h)
     assert resp.status_code == 201, resp.text
     return resp.json()
@@ -104,7 +112,7 @@ def test_overall_pct_is_weighted_not_average(client):
     assert pcts == [0, 100]
 
 def test_partial_counts_half(client):
-    """partial = 0.5 приёма: 3 partial из 2×в день за 1 день → 1.5/2 = 75%."""
+    """partial без уточнения (legacy) = 0.5 приёма: 3 partial из 2×в день → 75%."""
     ph, pid, c = _setup(client, "adh-partial@test.ru")
     med = _med(client, c, pid, times_per_day=2, started_on=_iso())
     for _ in range(3):
@@ -218,3 +226,104 @@ def test_missing_start_date_counts_from_creation(client):
     assert row["expected"] == 2
     assert row["pct"] == 50
     assert stats["summary"]["expected"] == 2
+
+@pytest.mark.parametrize(
+    ("kind", "share"),
+    [
+        ("quarter", 0.25),
+        ("half", 0.5),
+        ("three_quarters", 0.75),
+        ("one_of_two", 0.5),
+        ("two_of_three", 2 / 3),
+        ("less_than_prescribed", 0.5),
+        ("self_changed", 0.5),
+    ],
+)
+def test_partial_kind_contributes_its_share(client, kind: str, share: float):
+    """Уточнение «частично» задаёт фактическую долю приёма в числителе."""
+    ph, pid, c = _setup(client, f"adh-kind-{kind}@test.ru")
+    med = _med(client, c, pid, times_per_day=1, started_on=_iso())
+    rec = _mark(client, ph, "partial", med["id"], partial_kind=kind)
+    assert rec["partial_kind"] == kind
+
+    body = _stats(client, ph, days=7)
+    assert body["summary"]["expected"] == 1
+    assert body["summary"]["score"] == pytest.approx(share)
+    assert body["medications"][0]["score"] == pytest.approx(share)
+    assert body["summary"]["pct"] == round(share * 100)
+
+def test_not_scheduled_removes_expected_doses_of_that_day(client):
+    """«Не назначено сегодня» снимает ожидаемые приёмы дня: и из числителя, и из знаменателя."""
+    ph, pid, c = _setup(client, "adh-notsched@test.ru")
+    med = _med(client, c, pid, times_per_day=2, started_on=_iso(6))
+    _mark(client, ph, "taken", med["id"])
+    rec = _mark(client, ph, "not_scheduled", med["id"])
+    assert rec["status"] == "not_scheduled" and rec["partial_kind"] is None
+
+    body = _stats(client, ph, days=7)
+    # Режим 2×день × 7 дней = 14, день «не назначено» убирает 2 → 12.
+    assert body["summary"]["expected"] == 12
+    assert body["summary"]["score"] == 1
+    assert body["summary"]["pct"] == round(1 / 12 * 100)
+    assert body["not_scheduled"] == 1
+    assert body["missed"] == 0
+    (row,) = body["medications"]
+    assert row["not_scheduled"] == 1 and row["missed"] == 0
+
+def test_all_days_not_scheduled_leaves_no_denominator(client):
+    """Если все дни «не назначено», знаменателя нет и процент не выдумывается."""
+    ph, pid, c = _setup(client, "adh-allnotsched@test.ru")
+    med = _med(client, c, pid, times_per_day=1, started_on=_iso())
+    _mark(client, ph, "not_scheduled", med["id"])
+
+    body = _stats(client, ph, days=1)
+    assert body["summary"]["expected"] == 0
+    assert body["summary"]["pct"] is None
+    assert body["not_scheduled"] == 1
+
+
+def test_legacy_partial_without_kind_still_accepted(client):
+    """Старый клиент шлёт partial без kind — 201, прежняя доля 0.5."""
+    ph, pid, c = _setup(client, "adh-legacy-partial@test.ru")
+    med = _med(client, c, pid, times_per_day=1, started_on=_iso())
+    rec = _mark(client, ph, "partial", med["id"])
+    assert rec["partial_kind"] == "less_than_prescribed"
+    body = _stats(client, ph, days=7)
+    assert body["summary"]["score"] == 0.5
+    assert body["summary"]["pct"] == 50
+
+def test_partial_with_explicit_null_kind_422(client):
+    """Новый клиент с явным null: 422 PARTIAL_KIND_REQUIRED."""
+    ph, pid, c = _setup(client, "adh-kind-null@test.ru")
+    med = _med(client, c, pid, started_on=_iso())
+    r = client.post(
+        "/api/v1/me/adherence",
+        json={"medication_id": med["id"], "status": "partial", "partial_kind": None},
+        headers=ph,
+    )
+    assert r.status_code == 422
+    assert r.json()["code"] == "PARTIAL_KIND_REQUIRED"
+
+@pytest.mark.parametrize("status", ["taken", "missed", "not_scheduled"])
+def test_partial_kind_rejected_for_other_statuses(client, status: str):
+    """kind при статусе, отличном от partial, — 422 PARTIAL_KIND_INVALID."""
+    ph, pid, c = _setup(client, f"adh-kind-{status}@test.ru")
+    med = _med(client, c, pid, started_on=_iso())
+    r = client.post(
+        "/api/v1/me/adherence",
+        json={"medication_id": med["id"], "status": status, "partial_kind": "half"},
+        headers=ph,
+    )
+    assert r.status_code == 422
+    assert r.json()["code"] == "PARTIAL_KIND_INVALID"
+
+def test_unknown_partial_kind_422(client):
+    """Неизвестный код уточнения — 422 (валидация схемы)."""
+    ph, pid, c = _setup(client, "adh-kind-unknown@test.ru")
+    med = _med(client, c, pid, started_on=_iso())
+    r = client.post(
+        "/api/v1/me/adherence",
+        json={"medication_id": med["id"], "status": "partial", "partial_kind": "most"},
+        headers=ph,
+    )
+    assert r.status_code == 422

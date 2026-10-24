@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from sqlalchemy import delete, text
+from sqlalchemy import select, text
 
 from app import db, security
 from app.models import Answer, Assessment, Consent, DiaryEntry, Drug, Prescription, Run, User
@@ -81,24 +81,50 @@ def _drug_rows(payload: list[dict]) -> list[Drug]:
             revision_date=datetime.strptime(d["revision_date"], "%Y-%m-%d").date() if d.get("revision_date") else None,
             pharmacology=d["pharmacology"], indications=d["indications"], dosage=d["dosage"],
             contraindications=d["contraindications"], adverse_events=d["adverse_events"],
-            special_notes=d["special_notes"],
+            special_notes=d["special_notes"], source_urls=d.get("source_urls") or [],
         )
         for d in payload
     ]
+
+# Поля справочника, переносимые из drugs.json в строку drugs (кроме id,
+# drug_id и created_at).
+_DRUG_FIELDS = (
+    "trade_name", "inn", "inn_en", "form", "reg_certificate", "reg_date",
+    "revision_date", "pharmacology", "indications", "dosage",
+    "contraindications", "adverse_events", "special_notes", "source_urls",
+)
+
+
+def _upsert_drugs(s, existing: dict[str, Drug], rows: list[Drug]) -> None:
+    """Upsert по drug_id: обновляет совпавшие строки, добавляет новые, удаляет выбывшие.
+
+    Обновление вместо DELETE+INSERT: на drugs.drug_id ссылается
+    adverse_events.drug_id, поэтому повторный сид не должен ни ломать FK, ни
+    менять id строк (id стабилен между прогонами).
+    """
+    for row in rows:
+        current = existing.pop(row.drug_id, None)
+        if current is None:
+            s.add(row)
+            continue
+        for field in _DRUG_FIELDS:
+            setattr(current, field, getattr(row, field))
+    # Препарат убрали из drugs.json — из справочника он тоже уходит.
+    for stale in existing.values():
+        s.delete(stale)
 
 
 def _seed_drugs(s) -> None:
     """Загружает api/app/data/drugs.json в drugs (sync: тесты/схема, не request-path).
 
-    Idempotent: удаляет старые строки и вставляет заново (на drugs нет FK, ссылающихся
-    INTO таблицу — AdverseEvent.suspected_drug свободный текст). Таблица — источник
-    правды для чанков ИИ-агента (kb_seed._drug_docs) и для API /drugs.
+    Idempotent: upsert по drug_id, повторный запуск не создаёт дубликатов. Таблица —
+    источник правды для чанков ИИ-агента (kb_seed._drug_docs) и для API /drugs.
     """
     payload = _drug_payload()
     if payload is None:
         return
-    s.execute(delete(Drug))
-    s.add_all(_drug_rows(payload))
+    existing = {d.drug_id: d for d in s.execute(select(Drug)).scalars()}
+    _upsert_drugs(s, existing, _drug_rows(payload))
     s.flush()
     # drugs — источник чанков корпуса (kb_seed._drug_docs): сбрасываем кеш корпуса,
     # иначе python -m app.kb_seed / тесты увидят старые чанки до истечения TTL.
@@ -113,8 +139,8 @@ async def _seed_drugs_async(s) -> None:
     payload = _drug_payload()
     if payload is None:
         return
-    await s.execute(delete(Drug))
-    s.add_all(_drug_rows(payload))
+    existing = {d.drug_id: d for d in (await s.execute(select(Drug))).scalars()}
+    _upsert_drugs(s, existing, _drug_rows(payload))
     await s.flush()
     # См. _seed_drugs: срез препаратов в кеше корпуса устарел.
     from app.kb_seed import clear_corpus_cache

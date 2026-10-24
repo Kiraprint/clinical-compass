@@ -17,12 +17,85 @@ import hashlib
 import json
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
 from app.enrichment.types import SourceDocument
 
 MAX_BOOK_BYTES = 30 * 1024 * 1024
+
+# SSRF: URL берутся из JSON IRIS, поэтому перед запросом и на каждом редиректе
+# проверяются схема, хост и отсутствие учётных данных в URL.
+IRIS_HOST = "iris.who.int"
+MAX_REDIRECTS = 5
+
+# Окно поиска лицензии: положения о лицензии стоят в конце документа (после
+# титула и оглавления), поэтому 20k символов начала недостаточно.
+LICENSE_SCAN_CHARS = 400_000
+
+_LANGUAGES = {
+    "en": "en", "eng": "en",
+    "ru": "ru", "rus": "ru",
+    "fr": "fr", "fre": "fr", "fra": "fr",
+    "de": "de", "ger": "de", "deu": "de",
+    "es": "es", "spa": "es",
+    "pt": "pt", "por": "pt",
+    "it": "it", "ita": "it",
+    "ar": "ar", "ara": "ar",
+    "zh": "zh", "chi": "zh", "zho": "zh",
+    "ja": "ja", "jpn": "ja",
+}
+
+def _redact_url(url: str) -> str:
+    parts = urllib.parse.urlsplit(url)
+    if not (parts.username or parts.password):
+        return url
+    netloc = parts.hostname or ""
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+def _validate_url(url: str, *, allowed_host: str = IRIS_HOST) -> None:
+    """Только https на хосте IRIS, без userinfo. Иначе — SourceError."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "https":
+        raise SourceError(
+            f"WHO IRIS: схема {parts.scheme or '—'} запрещена (только https): {_redact_url(url)}"
+        )
+    if parts.username or parts.password:
+        raise SourceError(f"WHO IRIS: учётные данные в URL запрещены: {_redact_url(url)}")
+    host = (parts.hostname or "").lower()
+    if host != allowed_host:
+        raise SourceError(
+            f"WHO IRIS: хост {host or '—'} вне белого списка (только {allowed_host}): "
+            f"{_redact_url(url)}"
+        )
+    try:
+        port = parts.port
+    except ValueError as exc:
+        # urlsplit не валидирует порт: «https://iris.who.int:abc/» падает только
+        # при чтении .port — это тоже отказ, а не трейсбек наружу.
+        raise SourceError(
+            f"WHO IRIS: некорректный порт в URL: {_redact_url(url)}"
+        ) from exc
+    if port not in (None, 443):
+        raise SourceError(
+            f"WHO IRIS: порт {port} запрещён (только 443): {_redact_url(url)}"
+        )
+
+class _IRISRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Проверяет каждый хоп: Location обязан остаться https://iris.who.int."""
+
+    max_redirections = MAX_REDIRECTS
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        absolute = urllib.parse.urljoin(req.full_url, newurl)
+        _validate_url(absolute)
+        return super().redirect_request(req, fp, code, msg, headers, absolute)
+
+def _build_opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(_IRISRedirectHandler())
 
 
 class SourceError(RuntimeError):
@@ -123,17 +196,18 @@ _OTHER_CC = re.compile(r"Creative Commons|\bCC BY\b", re.I)
 
 
 def _request(cfg, url: str, *, accept: str) -> bytes:
+    _validate_url(url)
     req = urllib.request.Request(
         url,
         headers={"Accept": accept, "User-Agent": cfg.user_agent},
     )
     try:
-        with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:  # noqa: S310 — фиксированный https-хост
+        with _build_opener().open(req, timeout=cfg.timeout) as resp:  # noqa: S310 — хост проверен в _validate_url
             data = resp.read(MAX_BOOK_BYTES)
     except urllib.error.HTTPError as exc:  # pragma: no cover - сеть
-        raise SourceError(f"WHO IRIS HTTP {exc.code} для {url}") from exc
+        raise SourceError(f"WHO IRIS HTTP {exc.code} для {_redact_url(url)}") from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:  # pragma: no cover - сеть
-        raise SourceError(f"WHO IRIS недоступен ({url}): {exc}") from exc
+        raise SourceError(f"WHO IRIS недоступен ({_redact_url(url)}): {exc}") from exc
     return data
 
 
@@ -142,7 +216,7 @@ def _get_json(cfg, url: str) -> dict:
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise SourceError(f"WHO IRIS вернул не JSON: {url}") from exc
+        raise SourceError(f"WHO IRIS вернул не JSON: {_redact_url(url)}") from exc
 
 
 def _bitstreams(cfg, item: dict) -> list[dict]:
@@ -166,25 +240,49 @@ def _pick_text_stream(streams: list[dict]) -> dict | None:
     return (eng or texts)[0]
 
 
+def _normalize_language(value: str | None) -> str:
+    if not value:
+        return ""
+    return _LANGUAGES.get(value.strip().lower().replace("_", "-").split("-")[0], "")
+
+def _item_language(item: dict) -> str:
+    for entry in (item.get("metadata") or {}).get("dc.language.iso") or []:
+        language = _normalize_language(entry.get("value") if isinstance(entry, dict) else entry)
+        if language:
+            return language
+    return ""
+
+def stream_language(stream: dict, item: dict | None = None) -> str:
+    """Язык выбранного bitstream: код в имени (`*-rus.pdf.txt`) → dc.language.iso → en."""
+    match = re.search(r"(?:^|[-_.])([a-z]{2,3})\.pdf(?:\.txt)?$", (stream.get("name") or "").lower())
+    language = _normalize_language(match.group(1)) if match else ""
+    return language or _item_language(item or {}) or "en"
+
 def detect_license(text: str) -> str:
     """Класс лицензии по тексту документа.
 
     Возвращает: "CC BY-NC-SA 3.0 IGO" (можно индексировать), "proprietary"
     (all rights reserved — публикация запрещена), "other-cc" (другая CC —
     требует ручного решения) или "" (не найдено).
+
+    Сканируется весь текст (до LICENSE_SCAN_CHARS): у гайдлайнов ВОЗ положение
+    о лицензии стоит в конце документа, после титула и оглавления.
     """
-    head = text[:20000]
-    if _CC_OK.search(head):
+    window = " ".join(text[:LICENSE_SCAN_CHARS].split())
+    if _CC_OK.search(window):
         return "CC BY-NC-SA 3.0 IGO"
-    if _PROPRIETARY.search(head):
+    if _PROPRIETARY.search(window):
         return "proprietary"
-    if _OTHER_CC.search(head):
+    if _OTHER_CC.search(window):
         return "other-cc"
     return ""
 
 
-def parse_iris_item(item: dict, text: str, handle_meta: WHOHandle) -> SourceDocument:
+def parse_iris_item(
+    item: dict, text: str, handle_meta: WHOHandle, *, language: str | None = None
+) -> SourceDocument:
     """Чистая функция: метаданные item + текст bitstream → SourceDocument."""
+    language = _normalize_language(language) or _item_language(item) or "en"
     metadata = item.get("metadata", {})
     title = (metadata.get("dc.title") or [{"value": handle_meta.title}])[0]["value"].strip()
     issued = (metadata.get("dc.date.issued") or [{"value": handle_meta.issued}])[0]["value"]
@@ -207,7 +305,7 @@ def parse_iris_item(item: dict, text: str, handle_meta: WHOHandle) -> SourceDocu
         url=f"https://iris.who.int/handle/{handle}",
         fulltext_url=f"https://iris.who.int/handle/{handle}",
         license=detect_license(text),
-        language="en",
+        language=language,
         publication_types=("Guideline", "WHO guideline"),
         retraction="not_checked",  # у гайдлайнов нет механизма ретракции
         fetched_at="",
@@ -251,7 +349,9 @@ def fetch_documents(cfg) -> tuple[list[SourceDocument], dict, list[str]]:
                 )
             if len(text.strip()) < 2000:
                 raise SourceError(f"подозрительно короткий текст {handle_meta.handle}")
-            documents.append(parse_iris_item(item, text, handle_meta))
+            documents.append(
+                parse_iris_item(item, text, handle_meta, language=stream_language(stream, item))
+            )
         except (SourceError, KeyError, IndexError) as exc:
             errors.append(f"who {handle_meta.handle}: {exc}")
     return documents, plan, errors

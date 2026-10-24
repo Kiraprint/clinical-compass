@@ -23,21 +23,38 @@ import xml.etree.ElementTree as ET
 from app.enrichment.types import SourceDocument
 
 MAX_BATCH = 100
+# efetch отдаёт метаданные, а не полные тексты: 8 MiB — потолок ответа,
+# дальше источник считается неисправным, а не «медленным».
+MAX_BODY_BYTES = 8 * 1024 * 1024
+
+# DOCTYPE/ENTITY в ответе NCBI не встречаются, но дают XML-бомбы и внешние
+# сущности: такой ответ отклоняется до разбора.
+_DTD_MARKER = re.compile(r"<!\s*(?:DOCTYPE|ENTITY)\b", re.I)
 
 
 class SourceError(RuntimeError):
     """PubMed недоступен или отдал неожиданный формат."""
 
 
+def _safe_int(value) -> int:
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
+    return max(number, 0)
+
 def _request(cfg, url: str) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": cfg.user_agent})
     try:
         with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:  # noqa: S310 — фиксированный https-хост
-            return resp.read()
+            data = resp.read(MAX_BODY_BYTES + 1)
     except urllib.error.HTTPError as exc:  # pragma: no cover - сеть
         raise SourceError(f"PubMed HTTP {exc.code}") from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:  # pragma: no cover - сеть
         raise SourceError(f"PubMed недоступен: {exc}") from exc
+    if len(data) > MAX_BODY_BYTES:
+        raise SourceError(f"PubMed ответ больше {MAX_BODY_BYTES} байт")
+    return data
 
 
 def _text(node: ET.Element | None) -> str:
@@ -117,6 +134,8 @@ def retraction_status(
 
 def parse_pubmed_xml(xml_text: str) -> list[SourceDocument]:
     """XML от efetch → SourceDocument. Чистая функция (тесты на фикстурах)."""
+    if _DTD_MARKER.search(xml_text):
+        raise SourceError("PubMed XML содержит DOCTYPE/ENTITY — разбор отклонён")
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError as exc:
@@ -262,14 +281,25 @@ def fetch_documents(cfg, today: dt.date | None = None) -> tuple[list[SourceDocum
     result = payload.get("esearchresult", {})
     if "ERROR" in result:
         raise SourceError(f"esearch: {result['ERROR']}")
-    ids = [i for i in result.get("idlist", []) if i]
+    requested = max(1, _safe_int(params.get("retmax")) or MAX_BATCH)
+    raw_ids = result.get("idlist")
+    if not isinstance(raw_ids, list):
+        raw_ids = []
+    ids = [str(item).strip() for item in raw_ids if str(item).strip()]
+    truncated = len(ids) > requested
+    if truncated:
+        # esearch не должен отдавать больше retmax: лишние PMID не запрашиваем,
+        # иначе план прогона разошёлся бы с фактическим размером батча.
+        ids = ids[:requested]
     plan = {
         "source": "pubmed",
         "endpoint": f"{cfg.base_url}/esearch.fcgi",
         "params": {k: v for k, v in params.items() if k != "api_key"},
-        "count": int(result.get("count") or 0),
+        "count": _safe_int(result.get("count")),
         "returned": len(ids),
     }
+    if truncated:
+        plan["truncated"] = True
     if not ids:
         return [], plan, []
 

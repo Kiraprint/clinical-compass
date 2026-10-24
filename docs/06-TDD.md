@@ -6,7 +6,7 @@
 
 ## 1. Стратегия
 
-- Пирамида (фактически достигнуто на 2026-10-24, см. `core/tests` + `api/tests`): unit (ядро) 141, integration (API+БД) 478 (из них 78 — обогащение КБ, FR-20), e2e (UI-флоу) 40. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
+- Пирамида (фактически достигнуто на 2026-10-24, см. `core/tests` + `api/tests`): unit (ядро) 141, integration (API+БД) 544 (из них 78 — обогащение КБ, FR-20), e2e (UI-флоу) 42. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
 - Ядро: 100% детерминированные чистые функции — табличные параметризованные тесты порогов.
 - Интеграция: реальные HTTP-запросы к тестовому Postgres (отдельная БД), не мок-эхо.
 - Запрещены тесты «на копирование»: только поведение контрактов (вход → выход/инвариант/ошибка).
@@ -116,10 +116,13 @@
 | checkin_no_duplicate_escalation | повторная отправка ответов после завершения | `409`, эскалация одна (partial unique по `checkin_session_id`), уведомлений по-прежнему два |
 | checkin_duplicate_step_submit | повторный submit шага ядра с HR4=«Да» | `422 CHECKIN_UNKNOWN_ITEM`, одна эскалация и одно уведомление |
 | checkin_ensure_escalation_idempotent | прямой `_ensure_escalation` (urgent=False, снова False, затем True) | одна строка; `kind` повышается до `CHECKIN_RISK_URGENT`; второе уведомление только при повышении |
-| escalations_queue_access | открытая эскалация; врач, админ, пациент | врач/админ — `200` с `{id, patient_id, patient_fio, kind, safety, checkin_session_id, notified_at, created_at, in_roster, risk_answers}`; пациент — `403`; закрытая (`resolved_at`) не попадает |
+| escalations_queue_access | открытая эскалация; врач, админ, пациент | врач/админ — `200` (по умолчанию `status=open`) с `{id, patient_id, patient_fio, kind, safety, checkin_session_id, notified_at, created_at, resolved_at, resolution, in_roster, risk_answers}`; у открытой `resolved_at`/`resolution` — `null`; пациент — `403`; закрытая (`resolved_at`) в `open` не попадает |
 | escalations_queue_roster | один пациент в ростере врача, второй — нет | `in_roster=true` только у своего врача; у админа всегда `false`; `risk_answers` содержит только `HR4, RS1, RS2, RS3` |
 | escalations_queue_window_limit | эскалация с `created_at` 91 день назад; `?limit=1`; `?limit=201` | старая не попадает (окно 90 дней), `limit=1` → один элемент, `limit=201` → `422 VALIDATION` |
 | escalations_resolve | врач закрывает сигнал `{resolution}`; повтор; чужой id; пациент | `200 {id, resolved_at, resolution}`, аудит `ESCALATION_RESOLVE`, после закрытия очередь пуста; повтор → `409`, неизвестный id → `404`, пациент → `403` |
+| escalations_queue_status_filter | открытая + закрытая эскалации; `?status=resolved`, `?status=all`, `?status=bogus` | `resolved` — только закрытые, свежие по `resolved_at` сверху, с `resolution`; `all` — оба вида; иной статус → `422 VALIDATION`; аудит `READ_ESCALATIONS` не меняется |
+| escalations_resolve_bad_id | `POST /escalations/not-a-uuid/resolve` | `404 ESCALATION_NOT_FOUND` (а не `422 VALIDATION`); реальная эскалация остаётся открытой |
+| escalations_resolution_length | `resolution` 1001 и 1000 символов | 1001 → `422 RESOLUTION_TOO_LONG` (не `VALIDATION`), сигнал не закрыт; 1000 → `200`, комментарий сохранён целиком |
 | escalations_resolution_encrypted | raw `SELECT resolution::text` | bytea (`\x…`), текста в открытом виде нет; ORM расшифровывает обратно |
 | consent_revoke_checkin | завершённый риск-чек-ин + эскалация + уведомление | после отзыва согласия нет сеансов, эскалаций и уведомлений |
 | diary_mood_scale | новая запись `mood=0`; историчная строка `mood=7, mood_scale=NULL` | `mood_scale="0-4"` / `"1-10"` в `/diary` и в карте врача; старые строки не переписываются; `mood=5` → `422` |
@@ -153,6 +156,12 @@
 | `test_commit_failure_never_publishes_uncommitted_content` | сбой commit реестра во время прогона | ни одной точки в Qdrant, `failed_documents=1`, записи `kb_works` нет |
 | `test_failed_reindex_restores_previous_points` | upsert новой версии падает после delete | опубликованная версия восстановлена (точки и payload прежние) |
 | `test_excluded_work_cannot_be_approved` | `excluded`-работа | `ReviewError`: approve допустим только для `candidate` |
+| `test_request_rejects_untrusted_url_before_network`, `test_redirect_hop_is_validated_like_the_first_request` | URL из JSON IRIS: `http:`, `file:`, link-local/metadata, `localhost`, чужой хост; cross-host редирект | `SourceError` до сетевого вызова; каждый редирект проверяется так же |
+| `test_detect_license_scans_whole_document` | строка лицензии на ~50 000-м символе документа | `CC BY-NC-SA 3.0 IGO` → `met` (раньше документ отвергался) |
+| `test_parse_rejects_dtd_before_parsing`, `test_request_caps_body_size` | XML с `DOCTYPE`/`ENTITY`; ответ PubMed > 8 MiB | `SourceError` до разбора; тело сверх лимита не принимается |
+| `test_reindex_republishes_only_approved`, `test_reindex_failure_does_not_abort_the_rest` | `reindex` после сброса коллекции Qdrant (фейковый `index`) | публикуются только `approved`; сбой одной работы не отменяет остальные; итог `переиндексировано N, пропущено M, ошибок K` |
+| `test_reindex_skips_works_with_stale_criteria_version` | работа `approved` с `criteria.version=0.9.0` | не публикуется, в stderr «критерии устарели», нужен повторный `run` |
+| `test_fetch_documents_labels_non_english_stream` | выбран русский TEXT bitstream IRIS | документ получает `language="ru"`, а не `en` |
 | `test_thread_create_message_and_read_back` | тред с 2 пациентами → вопрос → чтение | оба сообщения и цитаты в истории, карты обоих пациентов в ответе, дедуп `patient_ids` |
 | `test_foreign_thread_is_404` | чужой тред: GET/PATCH/POST/DELETE | 404 `THREAD_NOT_FOUND`, чужой тред не виден в списке |
 | `test_patient_ids_roster_gate` | пациент вне roster в `patient_ids` | 403 `PATIENT_NOT_IN_ROSTER` (создание и сообщение) |
@@ -223,7 +232,14 @@
 | `test_expected_is_calendar_days_not_weekdays` | тот же режим, окна 7 и 14 дней | знаменатель — все календарные дни активности; выходные не исключаются |
 | `test_ended_on_cuts_expected_days` | `started_on` = −9 дн, `ended_on` = −3 дн, окно 7 дней | `active_days=4`, `expected=4`, 2 `taken` → 50% |
 | `test_overall_pct_is_weighted_not_average` | препарат A 2/2, препарат B 0/1 | общий 67% (2/3), не среднее 50% |
-| `test_partial_counts_half` | 3 `partial` при режиме 2×день | `score=1.5`, `pct=75` |
+| `test_partial_counts_half` | 3 `partial` без `partial_kind` (legacy) при режиме 2×день | `partial_kind=less_than_prescribed`, `score=1.5`, `pct=75` |
+| `test_partial_kind_contributes_its_share` (7 кодов) | по одной `partial`-отметке на режим 1×день | `score` = 0,25 / 0,5 / 0,75 / 0,5 / 0,667 / 0,5 / 0,5; `pct` = 25/50/75/50/67/50/50 |
+| `test_not_scheduled_removes_expected_doses_of_that_day` | `taken` + `not_scheduled` при режиме 2×день и 7 днях | `expected=12`, `score=1`, `pct=8`, `not_scheduled=1`, `missed=0` |
+| `test_all_days_not_scheduled_leaves_no_denominator` | все дни «не назначено» | `expected=0`, `pct=null` |
+| `test_legacy_partial_without_kind_still_accepted` | старый клиент: `partial` без поля `partial_kind` | 201, `partial_kind=less_than_prescribed`, доля 0,5 |
+| `test_partial_with_explicit_null_kind_422` | `partial` + явный `partial_kind: null` | 422 `PARTIAL_KIND_REQUIRED` |
+| `test_partial_kind_rejected_for_other_statuses` | `taken`/`missed`/`not_scheduled` + `partial_kind=half` | 422 `PARTIAL_KIND_INVALID` |
+| `test_unknown_partial_kind_422` | `partial` + `partial_kind=most` | 422 (валидация схемы) |
 | `test_no_schedule_means_no_percent` | `times_per_day IS NULL`, отметка привязана | `pct=null`, `expected=0`, отметка в `excluded` |
 | `test_no_medications_gives_empty_aggregate` | нет назначений | `medications=[]`, `summary.pct=null` |
 | `test_legacy_records_are_outside_denominator` | отметка без `medication_id` рядом со связанной | 100% по назначению, legacy-отметка только в `excluded`/`total` |
@@ -245,6 +261,11 @@
 | `test_patient_report_audit_has_no_content` | создание НЯ пациентом | в `audit_log` только `ADVERSE_REPORT` и id объекта, без текста |
 | `test_consent_revoke_deletes_patient_events` | НЯ → отзыв согласия | строки пациента в `adverse_events` удалены |
 | `test_adverse_text_encrypted_at_rest` | после проверки врача | `event_text`/`verification_note` — `bytea`, plaintext на диске отсутствует, ORM расшифровывает |
+| `test_drugs_list_returns_whole_library` (`test_drugs.py`): справочник из `drugs.json` | GET `/drugs` | 3 препарата (Авиандр, Золофт, Эсциталопрам Канон); у каждого заполнены показания/дозы/противопоказания, `ЛП-` в РУ и непустой `source_urls` |
+| `test_drugs_filter_by_query`: `q=маритупир / сертралин / эсциталопрам / ЗОЛОФТ` | GET `/drugs?q=` | находит ровно один препарат по МНН или торговому названию; несовпадающий фильтр — пусто |
+| `test_drug_detail_and_404`: `/drugs/{drug_id}` | карточка препарата | поля и `source_urls`; 404 на неизвестный `drug_id` |
+| `test_seed_drugs_is_idempotent`: повторный `_seed_drugs` | два прогона подряд | 3 строки, `id` не изменились — upsert по `drug_id`, не DELETE+INSERT |
+| `test_kb_search_finds_new_drugs` (`test_assistant.py`): «сертралин дозировка», «эсциталопрам противопоказания» | `kb.hybrid_search` | в топе чанки `drug-zoloft*` / `drug-escitalopram-canon-safety` с `topic=ЛЕКАРСТВА` |
 
 
 ### 3.2 Async-рантайм, пулы и кеш корпуса
@@ -268,6 +289,10 @@
 | `test_push_failure_log_has_no_capability_token` (`test_push.py`) | endpoint с токеном в пути | `_endpoint_host` | в лог попадает только хост, токена нет |
 | `test_ip_budget_blocks_spray_of_distinct_emails` (`test_ratelimit.py`) | `CC_RATE_IP_MAX` неудачных попыток с одного IP по разным email | проверка входа с этого IP / с другого | отказ с `retry_after ≥ 1`; другой IP не затронут |
 | `test_migrations_do_not_disable_application_loggers` (`test_async_db.py`) | после `init_db()` (alembic `fileConfig`) | запись в логгер `app.services.push` | логгер не отключён, запись доходит до handler'а |
+| `test_thread_message_deadline_is_503_without_assistant_message` (`test_assistant_threads.py`) | агент-заглушка спит дольше `CC_ASSISTANT_DEADLINE_S` | POST сообщения в тред | 503 `ASSISTANT_TIMEOUT`, `Retry-After: 5`, RFC 7807 `instance` = путь; ответ ассистента не персистится (в треде только вопрос) |
+| `test_agent_offload_uses_dedicated_limiter` | `AGENT_LIMITER` = `CC_ASSISTANT_THREAD_LIMIT` (8) | offload `_invoke_agent` | `to_thread.run_sync` получает `limiter=AGENT_LIMITER` — общий пул AnyIO не занимается |
+| `test_assistant_ask_deadline_is_503_with_retry_after` (`test_assistant.py`) | медленный агент | POST `/assistant/ask` | 503 `ASSISTANT_TIMEOUT` + `Retry-After: 5`, без traceback — тот же маппинг, что у треда |
+| `test_assistant_ask_validation_code_unchanged` | пустой `query` | POST `/assistant/ask` | прежний код `422 VALIDATION` (коды ошибок не сдвинулись) |
 
 ## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/`)
 

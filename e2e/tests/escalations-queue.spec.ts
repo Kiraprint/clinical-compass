@@ -15,6 +15,8 @@ type QueueItem = {
   checkin_session_id: string | null;
   in_roster: boolean;
   risk_answers: Record<string, number> | null;
+  resolved_at: string | null;
+  resolution: string | null;
 };
 
 type QueueBody = { items: QueueItem[] };
@@ -161,4 +163,73 @@ test("ростерный пациент: имя в очереди ведёт в 
   expect([200, 409]).toContain(resolved.status());
   await admin.ctx.dispose();
   await doc.ctx.dispose();
+});
+
+test("история закрытых сигналов: status=resolved|all, кривой id → 404", async ({ page }) => {
+  await registerPatient(page, freshPatientEmail("queue-history"));
+  await page.getByRole("button", { name: "Даю согласие" }).click();
+  await expect(page.getByText("Согласие активно")).toBeVisible();
+  const sessionId = await riskCheckin(page);
+
+  await openQueue(page);
+  const item = await findInQueue(page, sessionId);
+  const asStaff = await apiAs(page);
+
+  const resolution = `разобрано e2e ${Date.now()}`;
+  const closed = await asStaff.post(`/api/v1/escalations/${item.id}/resolve`, {
+    data: { resolution },
+  });
+  expect(closed.status()).toBe(200);
+
+  // По умолчанию очередь — только открытые сигналы.
+  const openBody = (await (await asStaff.get("/api/v1/escalations")).json()) as QueueBody;
+  expect(openBody.items.map((i) => i.id)).not.toContain(item.id);
+
+  const historyBody = (await (
+    await asStaff.get("/api/v1/escalations?status=resolved")
+  ).json()) as QueueBody;
+  const historyItem = historyBody.items.find((i) => i.id === item.id);
+  expect(historyItem).toBeTruthy();
+  expect(historyItem?.resolution).toBe(resolution);
+  expect(historyItem?.resolved_at).toBeTruthy();
+
+  const allBody = (await (
+    await asStaff.get("/api/v1/escalations?status=all")
+  ).json()) as QueueBody;
+  expect(allBody.items.map((i) => i.id)).toContain(item.id);
+
+  // Кривой id — «не найдено», а не 422 от схемы пути.
+  const badId = await asStaff.post("/api/v1/escalations/not-a-uuid/resolve", { data: {} });
+  expect(badId.status()).toBe(404);
+  expect((await badId.json()).code).toBe("ESCALATION_NOT_FOUND");
+
+  await asStaff.dispose();
+});
+
+test("очередь: переключатель «Показать закрытые» показывает разбор без действий", async ({ page }) => {
+  await registerPatient(page, freshPatientEmail("queue-toggle"));
+  await page.getByRole("button", { name: "Даю согласие" }).click();
+  await expect(page.getByText("Согласие активно")).toBeVisible();
+  const sessionId = await riskCheckin(page);
+
+  await openQueue(page);
+  const item = await findInQueue(page, sessionId);
+  const row = page.locator(`tr[data-escalation="${item.id}"]`);
+  await expect(row).toBeVisible();
+  await row.getByRole("button", { name: /Закрыть сигнал/ }).click();
+  await expect(row).toHaveCount(0);
+  // Общий empty-state не проверяем: в демо-БД могут быть другие открытые сигналы.
+
+  // Карточка остаётся на месте и даёт доступ к истории.
+  await page.getByRole("button", { name: "Показать закрытые" }).click();
+  const closedRow = page.locator(`tr[data-escalation="${item.id}"]`);
+  await expect(closedRow).toBeVisible();
+  await expect(closedRow).toContainText("без комментария");
+  // История — только чтение: закрывать в ней нечего.
+  await expect(closedRow.getByRole("button")).toHaveCount(0);
+  await expect(page.getByRole("columnheader", { name: "Закрыт" })).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "Комментарий" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Только открытые" }).click();
+  await expect(page.locator(`tr[data-escalation="${item.id}"]`)).toHaveCount(0);
 });

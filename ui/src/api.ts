@@ -308,7 +308,8 @@ export const api = {
     }),
   recordAdherence: (body: {
     medication_id?: string; medication?: string;
-    status: "taken" | "partial" | "missed"; note?: string;
+    status: "taken" | "partial" | "missed" | "not_scheduled";
+    partial_kind?: PartialKind; note?: string;
   }) =>
     req<Report["adherence"]["records"][number]>("/api/v1/me/adherence", {
       method: "POST",
@@ -395,8 +396,9 @@ export const api = {
     const suffix = qs.toString() ? `?${qs}` : "";
     return req<PatientHistory>(`/api/v1/clinician/patients/${patientId}/history${suffix}`);
   },
-  // Общая очередь открытых эскалаций (docs/16 §3): врач или администратор.
-  openEscalations: () => req<{ items: Escalation[] }>("/api/v1/escalations"),
+  // Очередь эскалаций (docs/16 §3): open — работа, resolved — история разбора, all — оба.
+  openEscalations: (status: "open" | "resolved" | "all" = "open") =>
+    req<{ items: Escalation[] }>(`/api/v1/escalations?status=${status}`),
   // Закрытие сигнала вручную (аудит на сервере). Повтор → 409 ESCALATION_ALREADY_RESOLVED,
   // чужая/отсутствующая эскалация → 404; в обоих случаях строку из очереди убираем.
   resolveEscalation: (id: string, resolution: string | null = null) =>
@@ -530,11 +532,18 @@ export interface DiaryEntry {
   tags: string[];
   created_at: string;
 }
+// Уточнение «частично» (FR-27): доля принятого приёма.
+export type PartialKind =
+  | "quarter" | "half" | "three_quarters"
+  | "one_of_two" | "two_of_three"
+  | "less_than_prescribed" | "self_changed";
+
 export interface AdherenceRecord {
   id: string;
   medication_id: string | null;
   medication: string | null;
-  status: string;
+  status: "taken" | "partial" | "missed" | "not_scheduled";
+  partial_kind: PartialKind | null;
   note: string | null;
   created_at: string;
 }
@@ -552,6 +561,7 @@ export interface AdherenceMedication {
   taken: number;
   partial: number;
   missed: number;
+  not_scheduled: number;
   score: number;
   pct: number | null;
 }
@@ -568,6 +578,7 @@ export interface AdherenceSummary {
   taken: number;
   partial: number;
   missed: number;
+  not_scheduled: number;
   excluded: { count: number; items: AdherenceRecord[] };
   items: AdherenceRecord[];
   today: AdherenceRecord | null;
@@ -773,7 +784,7 @@ export interface Report {
     window: { from: string; to: string };
     // weighted: сумма score / сумма expected по назначениям с режимом.
     pct: number | null; score: number; expected: number;
-    total: number; taken: number; partial: number; missed: number;
+    total: number; taken: number; partial: number; missed: number; not_scheduled: number;
     medications: AdherenceMedication[];
     excluded_count: number;
     records: AdherenceRecord[];
@@ -814,6 +825,9 @@ export interface Escalation {
   /** Ответы риска из чек-ина: {"HR4":1,"RS1":0,...}; на которые не ответили — ключа нет. */
   risk_answers: Record<string, number> | null;
   created_at: string | null;
+  /** Заполнены только у закрытых сигналов (status=resolved|all). */
+  resolved_at: string | null;
+  resolution: string | null;
 }
 /** Ответ POST /escalations/{id}/resolve. */
 export interface EscalationResolved {
@@ -900,6 +914,7 @@ export interface Drug {
   contraindications: string;
   adverse_events: string;
   special_notes: string;
+  source_urls: string[];
 }
 
 // --- FR-28: нежелательные явления ---

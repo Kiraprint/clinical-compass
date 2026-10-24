@@ -4,7 +4,13 @@
 `kb_loadtest`, отдельный процесс uvicorn на порту 8011. Прод/демо-стек не
 затрагивается.
 
-Запуск: `.venv/bin/python -m loadtest.run_all` (из корня worktree).
+Жёсткий предохранитель: имена целей обязаны попадать в allowlist
+(`compass_load*` / `kb_load*`), а `DROP DATABASE` и пересоздание коллекции
+дополнительно требуют `CC_LOADTEST_ALLOW=1`. Проверка выполняется до любого
+соединения (`assert_safe` / `assert_destructive`), отказ называет значение.
+
+Запуск: `python -m loadtest.run_all` (из корня worktree); проверка целей без
+соединений: `python -m loadtest.provision --dry-run`.
 """
 
 from __future__ import annotations
@@ -13,7 +19,9 @@ import asyncio
 import json
 import math
 import os
+import re
 import statistics
+import subprocess
 import sys
 import threading
 import time
@@ -38,12 +46,129 @@ for _path in (str(CORE_DIR), str(API_DIR)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
-DB_NAME = os.environ.get("CC_LOADTEST_DB", "compass_loadtest")
-PG_DSN = "host=127.0.0.1 port=5432 user=compass password=compass"
-DB_URL = f"postgresql+psycopg://compass:compass@127.0.0.1:5432/{DB_NAME}"
+# ---------------------------------------------------------------------------
+# Целевые ресурсы и защитный allowlist.
+#
+# Стенд умеет `DROP DATABASE ... WITH FORCE` и пересоздавать коллекцию Qdrant.
+# Чтобы опечатка в CC_LOADTEST_DB/--db не снесла прод, имя БД обязано начинаться
+# с `compass_load`, имя коллекции — с `kb_load`; разрушающие операции требуют
+# CC_LOADTEST_ALLOW=1. Проверка идёт ДО любого соединения.
+# ---------------------------------------------------------------------------
+DB_PREFIX = "compass_load"
+COLLECTION_PREFIX = "kb_load"
+DEFAULT_DB = "compass_loadtest"
+DEFAULT_COLLECTION = "kb_loadtest"
+ALLOW_ENV = "CC_LOADTEST_ALLOW"
+
+PG_HOST = "127.0.0.1"
+PG_PORT = 5432
+PG_USER = "compass"
+PG_PASSWORD = "compass"
 
 QDRANT_URL = os.environ.get("CC_QDRANT_URL", "http://127.0.0.1:6333")
-QDRANT_COLLECTION = os.environ.get("CC_LOADTEST_COLLECTION", "kb_loadtest")
+
+
+class SafetyRefusal(RuntimeError):
+    """Имя ресурса вне allowlist или нет CC_LOADTEST_ALLOW=1."""
+
+    exit_code = 2
+
+
+def resolve_db(name: str | None = None) -> str:
+    """Явный аргумент → CC_LOADTEST_DB → compass_loadtest (резолв в момент вызова)."""
+    return name or os.environ.get("CC_LOADTEST_DB") or DEFAULT_DB
+
+
+def resolve_collection(name: str | None = None) -> str:
+    """Явный аргумент → CC_LOADTEST_COLLECTION → kb_loadtest."""
+    return name or os.environ.get("CC_LOADTEST_COLLECTION") or DEFAULT_COLLECTION
+
+
+def db_url(name: str | None = None) -> str:
+    return f"postgresql+psycopg://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{resolve_db(name)}"
+
+
+def redacted_db_url(name: str | None = None) -> str:
+    return f"postgresql+psycopg://{PG_USER}:***@{PG_HOST}:{PG_PORT}/{resolve_db(name)}"
+
+
+def _check_name(kind: str, value: str, prefix: str, env_var: str, flag: str) -> str:
+    # Только [a-z0-9_] и длина ≤ 48: имя подставляется в DDL (DROP DATABASE),
+    # поэтому кавычки/точки с запятой должны отсекаться до любого соединения.
+    if not value.startswith(prefix):
+        raise SafetyRefusal(
+            f"{kind} {value!r} не разрешено: имя должно начинаться с {prefix!r} "
+            f"(по умолчанию {prefix}test). Исправьте {env_var} или {flag}."
+        )
+    if not re.fullmatch(r"[a-z0-9_]{1,48}", value):
+        raise SafetyRefusal(
+            f"{kind} {value!r} не разрешено: только строчные латинские буквы, "
+            f"цифры и подчёркивание (≤48 символов)."
+        )
+    return value
+
+
+def assert_safe(db: str | None = None, collection: str | None = None) -> tuple[str, str]:
+    """Проверить оба имени до соединения; вернуть (db, collection)."""
+    db_name = _check_name("БД", resolve_db(db), DB_PREFIX, "CC_LOADTEST_DB", "--db")
+    coll = _check_name(
+        "Коллекция Qdrant",
+        resolve_collection(collection),
+        COLLECTION_PREFIX,
+        "CC_LOADTEST_COLLECTION",
+        "--collection",
+    )
+    return db_name, coll
+
+
+def assert_destructive(
+    db: str | None = None, collection: str | None = None, action: str = "provision"
+) -> tuple[str, str]:
+    """Allowlist + CC_LOADTEST_ALLOW=1: для DROP DATABASE и пересоздания коллекции."""
+    db_name, coll = assert_safe(db, collection)
+    allow = os.environ.get(ALLOW_ENV)
+    if allow != "1":
+        raise SafetyRefusal(
+            f"{action}: разрушающие операции запрещены без {ALLOW_ENV}=1 "
+            f"(сейчас {allow or 'не задан'}). Будут затронуты БД {db_name!r} и "
+            f"коллекция {coll!r}."
+        )
+    return db_name, coll
+
+
+def describe_target(db: str | None = None, collection: str | None = None) -> str:
+    db_name, coll = assert_safe(db, collection)
+    return (
+        f"БД: {redacted_db_url(db_name)}\n"
+        f"Коллекция Qdrant: {coll} @ {QDRANT_URL}\n"
+        f"Разрушающие операции: {ALLOW_ENV}={os.environ.get(ALLOW_ENV) or 'не задан'}"
+    )
+
+
+def git_provenance() -> dict:
+    """Коммит и грязность дерева — для провенанса отчёта."""
+
+    def run(*args: str) -> str:
+        result = subprocess.run(
+            ["git", *args], cwd=ROOT, capture_output=True, text=True, check=False
+        )
+        return result.stdout.strip()
+
+    changed = [line for line in run("status", "--porcelain").splitlines() if line]
+    return {
+        "commit": run("rev-parse", "--short", "HEAD") or "—",
+        "dirty": bool(changed),
+        "changed_files": len(changed),
+    }
+
+
+def apply_env(
+    embedder: str = "hash", collection: str | None = None, db: str | None = None
+) -> dict[str, str]:
+    """Зафиксировать env стенда в os.environ и вернуть его. Вызывать ДО импорта app.*"""
+    env = setup_env(embedder=embedder, collection=collection, db=db)
+    os.environ.update(env)
+    return env
 
 
 def bench_data_dir() -> Path:
@@ -167,14 +292,25 @@ def read_json(name: str) -> dict:
     return json.loads((RESULTS_DIR / name).read_text(encoding="utf-8"))
 
 
-def setup_env(embedder: str = "hash", collection: str = QDRANT_COLLECTION) -> dict[str, str]:
-    """Env, общий для provision и API-процесса. Вызывать ДО импорта app.*"""
+def setup_env(
+    embedder: str = "hash", collection: str | None = None, db: str | None = None
+) -> dict[str, str]:
+    """Env, общий для provision и API-процесса. Вызывать ДО импорта app.*.
+
+    Явные аргументы важнее os.environ: CLI-переопределения не должны затираться
+    дефолтами. Имена проверяются allowlist'ом (без соединения).
+    """
+    db_name, coll = assert_safe(db, collection)
     env = os.environ.copy()
     env.update(
         {
-            "CC_DATABASE_URL": DB_URL,
+            "CC_DATABASE_URL": db_url(db_name),
             "CC_QDRANT_URL": QDRANT_URL,
-            "CC_QDRANT_COLLECTION": collection,
+            "CC_QDRANT_COLLECTION": coll,
+            # Явные имена целей: дочерние процессы (uvicorn, замеры) обязаны
+            # резолвить ту же БД/коллекцию, что и provision.
+            "CC_LOADTEST_DB": db_name,
+            "CC_LOADTEST_COLLECTION": coll,
             "CC_EMBEDDER": embedder,
             "CC_ALLOW_DEMO_SECRETS": "true",
             "CC_JWT_SECRET": JWT_SECRET,
@@ -333,8 +469,11 @@ async def run_closed_loop(
 
 
 __all__ = [
-    "BASE_URL", "DB_URL", "DB_NAME", "PG_DSN", "QDRANT_URL", "QDRANT_COLLECTION",
+    "ALLOW_ENV", "COLLECTION_PREFIX", "DB_PREFIX", "DEFAULT_COLLECTION", "DEFAULT_DB",
+    "BASE_URL", "QDRANT_URL", "SafetyRefusal", "assert_destructive", "assert_safe",
+    "apply_env", "describe_target", "db_url", "git_provenance", "redacted_db_url",
+    "resolve_collection", "resolve_db", "setup_env",
     "API_DIR", "CORE_DIR", "ROOT", "RESULTS_DIR", "PYTHON", "JWT_SECRET", "PASSWORD",
     "PATIENTS", "CLINICIANS", "ResourceSampler", "Scenario", "run_closed_loop",
-    "latency_summary", "percentile", "write_json", "read_json", "setup_env",
+    "latency_summary", "percentile", "write_json", "read_json",
 ]

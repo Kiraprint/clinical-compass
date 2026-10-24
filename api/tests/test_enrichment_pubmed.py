@@ -113,3 +113,79 @@ def test_parse_without_abstract_or_doi_is_honest():
     assert doc.doi == ""
     assert doc.url == "https://pubmed.ncbi.nlm.nih.gov/1/"
     assert doc.fulltext_url == doc.url
+
+
+
+# --- Устойчивость к враждебным/битым ответам ---
+
+
+@pytest.mark.parametrize(
+    "xml",
+    [
+        "<!DOCTYPE PubmedArticleSet><PubmedArticleSet/>",
+        '<!DOCTYPE x [<!ENTITY e "boom">]><PubmedArticleSet>&e;</PubmedArticleSet>',
+        '<PubmedArticleSet><!ENTITY e "boom"></PubmedArticleSet>',
+        '<?xml version="1.0"?><!DoCtYpE x SYSTEM "http://evil.example/x.dtd"><x/>',
+    ],
+)
+def test_parse_rejects_dtd_before_parsing(xml):
+    with pytest.raises(pubmed.SourceError, match="DOCTYPE/ENTITY"):
+        pubmed.parse_pubmed_xml(xml)
+
+
+class _Body:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def read(self, size: int = -1) -> bytes:
+        return self._body if size is None or size < 0 else self._body[:size]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_request_caps_body_size(monkeypatch):
+    body = b"x" * (pubmed.MAX_BODY_BYTES + 1)
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None: _Body(body))
+    with pytest.raises(pubmed.SourceError, match="больше"):
+        pubmed._request(_cfg(), "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi")
+
+
+def test_request_returns_body_below_cap(monkeypatch):
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None: _Body(b"ok"))
+    assert pubmed._request(_cfg(), "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi") == b"ok"
+
+
+def test_fetch_clamps_garbage_count_and_oversized_idlist(monkeypatch):
+    calls: list[str] = []
+
+    def fake_request(cfg, url):
+        calls.append(url)
+        if "esearch" in url:
+            return json.dumps(
+                {"esearchresult": {"count": "not-a-number", "idlist": ["1", "2", "3", "4"]}}
+            ).encode()
+        return b"<PubmedArticleSet></PubmedArticleSet>"
+
+    monkeypatch.setattr(pubmed, "_request", fake_request)
+    docs, plan, errors = pubmed.fetch_documents(_cfg(retmax=2))
+    assert docs == [] and errors == []
+    assert plan["count"] == 0  # мусорный count не роняет прогон
+    assert plan["returned"] == 2  # idlist обрезан до запрошенного retmax
+    assert plan["truncated"] is True
+    assert "id=1%2C2" in calls[1]
+
+
+def test_fetch_tolerates_missing_count_and_non_list_idlist(monkeypatch):
+    def fake_request(cfg, url):
+        if "esearch" in url:
+            return b'{"esearchresult": {"count": null, "idlist": "garbage"}}'
+        pytest.fail("efetch не должен вызываться без PMID")
+
+    monkeypatch.setattr(pubmed, "_request", fake_request)
+    docs, plan, errors = pubmed.fetch_documents(_cfg())
+    assert (docs, plan["count"], plan["returned"], errors) == ([], 0, 0, [])
+    assert "truncated" not in plan

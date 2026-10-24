@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
+import platform
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from . import common
 
@@ -27,6 +31,124 @@ def _num(value: float | int | None, digits: int = 1) -> str:
     return f"{value:,.{digits}f}".replace(",", " ")
 
 
+def _msk(value: str | None) -> str:
+    if not value or value == "—":
+        return "—"
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(ZoneInfo("Europe/Moscow")).strftime("%Y-%m-%d %H:%M:%S MSK")
+
+
+def _cpu_model() -> str:
+    try:
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            if line.startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return platform.processor() or platform.machine() or "—"
+
+
+def _mem_total() -> str:
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal:"):
+                return f"{int(line.split()[1]) / 1024 / 1024:.1f} ГиБ"
+    except OSError:
+        pass
+    return "—"
+
+
+def _provenance_table(meta: dict, prov: dict, qdrant: dict) -> list[str]:
+    git = meta.get("git") or common.git_provenance()
+    dirty = git.get("dirty")
+    commit = f"`{git.get('commit', '—')}`"
+    if dirty is not None:
+        commit += (
+            f" (dirty: {git.get('changed_files', '?')} изменённых файлов)"
+            if dirty
+            else " (чистое дерево)"
+        )
+    llm_url = meta.get("llm_url", "")
+    embedder = prov.get("embedder") or meta.get("embedder") or "—"
+    device = qdrant.get("device", "—")
+    collection = (
+        qdrant.get("collection") or meta.get("collection") or common.DEFAULT_COLLECTION
+    )
+    return [
+        "## 0. Провенанс и воспроизводимость",
+        "",
+        "| Что | Значение |",
+        "|---|---|",
+        f"| git commit (на момент замера) | {commit} |",
+        f"| Дата прогона (MSK) | {_msk(meta.get('started_at'))} |",
+        f"| Отчёт собран (MSK) | "
+        f"{datetime.now(ZoneInfo('Europe/Moscow')).strftime('%Y-%m-%d %H:%M:%S MSK')} |",
+        f"| Python (API и стенд) | "
+        f"{meta.get('host', {}).get('python') or platform.python_version()} |",
+        f"| CPU | {_cpu_model()}, "
+        f"{meta.get('host', {}).get('cpu_count') or os.cpu_count()} логических ядер |",
+        f"| RAM | {_mem_total()} |",
+        f"| ОС | {meta.get('host', {}).get('platform', '—')} |",
+        f"| Эмбеддер | {embedder}, device={device}, "
+        f"dense={qdrant.get('dense_size', '—')} |",
+        f"| LLM | {'выключен' if not llm_url else 'включён: ' + str(llm_url)} "
+        f"(`CC_ASSISTANT_LLM_URL=\"{llm_url}\"`) |",
+        f"| БД | `{prov.get('database') or meta.get('database') or common.DEFAULT_DB}` |",
+        f"| Коллекция Qdrant | `{collection}` |",
+        f"| Чанков в индексе | {_num(qdrant.get('chunks'), 0)} |",
+        f"| Документов (уникальных guideline_id) | {_num(qdrant.get('documents'), 0)} |",
+        f"| Препаратов в справочнике | {_num(prov.get('drugs'), 0)} |",
+        f"| Пользователей | {_num(prov.get('users'), 0)} "
+        f"(пациентов {_num(prov.get('patients'), 0)}, "
+        f"врачей {_num(prov.get('clinicians'), 0)}) |",
+        "",
+    ]
+
+
+def _remeasure_block(meta: dict, prov: dict) -> list[str]:
+    git = meta.get("git") or common.git_provenance()
+    embedder = meta.get("embedder") or prov.get("embedder") or "hash"
+    db = prov.get("database") or common.DEFAULT_DB
+    collection = (
+        prov.get("collection") or meta.get("collection") or common.DEFAULT_COLLECTION
+    )
+    commit = git.get("commit", "<commit из таблицы выше>")
+    return [
+        "### Как перемерить",
+        "",
+        "```bash",
+        f"git checkout {commit}",
+        "export CC_LOADTEST_ALLOW=1          # обязательно: provision делает DROP DATABASE",
+        f"export CC_LOADTEST_DB={db}",
+        f"export CC_LOADTEST_COLLECTION={collection}",
+        "# 1) инфраструктура (Postgres + Qdrant демо-стека, порты 5432/6333)",
+        "docker compose -f infra/docker-compose.yml up -d postgres qdrant",
+        "# 2) безопасная проверка целей без соединений",
+        "python -m loadtest.provision --dry-run",
+        "# 3) пересоздать БД/коллекцию: схема, users, drugs, корпус + bench",
+        f"python -m loadtest.provision --embedder {embedder}",
+        "# 4) полный прогон (provision → API → ML → HTTP → ядро → REPORT.md)",
+        f"python -m loadtest.run_all --embedder {embedder}",
+        "# быстрый смоук: python -m loadtest.run_all --quick --embedder " + embedder,
+        "```",
+        "",
+        "Требования: `bench/data/{queries,corpus}.jsonl` (см. `loadtest/README.md`), "
+        "Python 3.12 с зависимостями API, `CC_LOADTEST_PYTHON` — интерпретатор для "
+        "процесса API. Прогон детерминирован по данным (seed=42), но зависит от "
+        "машины: числа сравнимы только на том же железе и том же коммите.",
+        "",
+        "Артефакты замера (`loadtest/results/*.json`, `loadtest/results/api.log`) "
+        "в git не попадают (`.gitignore`), поэтому воспроизводимость обеспечивают "
+        "эта команда и провенанс выше, а не сохранённые JSON.",
+        "",
+    ]
+
+
 def build() -> Path:
     meta = _load("meta.json")
     core = _load("core.json")
@@ -39,39 +161,51 @@ def build() -> Path:
 
     add("# Нагрузочные и ML-метрики Clinical Compass")
     add("")
-    add(f"Дата прогона: {meta.get('started_at', '—')}.")
-    add("")
-    add("Замеры выполнены на изолированном контуре: отдельная БД `compass_loadtest`, "
-        "отдельная коллекция Qdrant, отдельный процесс uvicorn. Демо- и прод-стек "
-        "не затронуты.")
+    add(f"Дата прогона (MSK): {_msk(meta.get('started_at'))}.")
     add("")
 
     host = meta.get("host", {})
     prov = meta.get("provision", {})
     qdrant = prov.get("qdrant", {})
     server = meta.get("server", {})
+    llm_url = meta.get("llm_url", "")
+    collection = (
+        qdrant.get("collection") or meta.get("collection") or common.DEFAULT_COLLECTION
+    )
+
+    add("Замеры выполнены на изолированном контуре: отдельная БД "
+        f"`{prov.get('database') or meta.get('database') or common.DEFAULT_DB}`, "
+        "отдельная коллекция Qdrant, отдельный процесс uvicorn. Демо- и прод-стек "
+        "не затронуты.")
+    add("")
+    lines.extend(_provenance_table(meta, prov, qdrant))
+    lines.extend(_remeasure_block(meta, prov))
+
     add("## 1. Стенд и методика")
     add("")
     add("| Параметр | Значение |")
     add("|---|---|")
-    add(f"| CPU | {host.get('platform', '—')} |")
-    add(f"| Ядер | {host.get('cpu_count', '—')} |")
-    add(f"| Python API | {host.get('python', '—')} |")
-    add(f"| Эмбеддер | {prov.get('qdrant', {}).get('embedder', meta.get('embedder', '—'))} "
-        f"(dense={qdrant.get('dense_size', '—')}) |")
-    add(f"| Коллекция Qdrant | `{qdrant.get('collection', meta.get('collection', '—'))}` |")
-    add(f"| Документов в индексе | {_num(qdrant.get('documents'), 0)} "
-        f"(приложение {_num(qdrant.get('app_documents'), 0)}, "
-        f"золотой корпус {_num(qdrant.get('bench_documents'), 0)}) |")
+    add(f"| CPU | {_cpu_model()} |")
+    add(f"| Ядер | {host.get('cpu_count') or os.cpu_count()} |")
+    add(f"| Python API | {host.get('python') or platform.python_version()} |")
+    add(f"| Эмбеддер | {prov.get('embedder') or meta.get('embedder') or '—'}, "
+        f"device={qdrant.get('device', '—')} (dense={qdrant.get('dense_size', '—')}) |")
+    add(f"| Коллекция Qdrant | `{collection}` |")
+    add(f"| Чанков в индексе | {_num(qdrant.get('chunks'), 0)} "
+        f"(приложение {_num(qdrant.get('app_chunks'), 0)}, "
+        f"золотой корпус {_num(qdrant.get('bench_chunks'), 0)}, "
+        f"препараты {_num(qdrant.get('drug_chunks'), 0)}) |")
     add(f"| Пользователей | {_num(prov.get('users'), 0)} "
         f"(пациентов {_num(prov.get('patients'), 0)}, врачей {_num(prov.get('clinicians'), 0)}) |")
     add(f"| Холодный старт API | {_num(server.get('startup_s'), 2)} с |")
     add(f"| RSS после старта | {_num(server.get('idle_rss_mb'), 1)} МБ |")
+    add(f"| LLM | {'выключен' if not llm_url else 'включён'} |")
     add("")
     add("Методика:")
-    add("")
-    add("- HTTP: замкнутый контур, C воркеров без пауз, длительность "
-        f"{_num(http.get('duration_s'), 1)} с на уровень; прогрев 1 с не учитывается.")
+    duration = http.get("duration_s")
+    add("- HTTP: замкнутый контур, C воркеров без пауз"
+        + (f", длительность {_num(duration, 1)} с на уровень" if duration else "")
+        + "; прогрев 1 с не учитывается.")
     add("- max RPS — лучший уровень конкуренции с долей ошибок < 1 %.")
     add("- Латентность — по каждой HTTP-операции; p50/p95/p99 (nearest-rank).")
     add("- RPS сценария-транзакции (screening flow) считается по транзакциям, "
@@ -81,17 +215,29 @@ def build() -> Path:
     add("")
 
     if core:
-        add("## 2. Ядро (чистые функции, одно ядро)")
+        add("## 2. Ядро (одно ядро)")
         add("")
-        add("| Функция | ops/s | p50, мкс | p95, мкс |")
-        add("|---|---:|---:|---:|")
+        add("| Функция | ops/s | p50, мкс | p95, мкс | Сэмплы (вызовов × повторов) |")
+        add("|---|---:|---:|---:|---|")
         for name, row in core.get("functions", {}).items():
+            samples = f"{_num(row.get('n'), 0)} × {row.get('repeats', '—')}"
             add(f"| `{name}` | {_num(row['ops_per_s'], 0)} | "
-                f"{row['us_p50']:.1f} | {row['us_p95']:.1f} |")
+                f"{row['us_p50']:.1f} | {row['us_p95']:.1f} | {samples} |")
+        agent_core = core.get("agent_path", {})
+        if agent_core.get("status") == "ok":
+            samples = f"{_num(agent_core.get('n'), 0)} × {agent_core.get('repeats', '—')}"
+            add(f"| `agent.AgentFactory.invoke` (поиск Qdrant + ответ, LLM off) | "
+                f"{_num(agent_core.get('ops_per_s'), 0)} | "
+                f"{agent_core.get('us_p50', 0):.1f} | "
+                f"{agent_core.get('us_p95', 0):.1f} | {samples} |")
+        elif agent_core:
+            add("")
+            add(f"> Замер пути агента пропущен: {agent_core.get('reason', '—')}")
         add("")
         scaling = core.get("scaling_ops_per_s_by_processes", {})
         if scaling:
-            add("Масштабирование по процессам, ops/s:")
+            add("Масштабирование по процессам, ops/s (см. `run_core.scalable`: "
+                "40 000 вызовов на точку, у `depersonalize` — 10 000):")
             add("")
             add("| Функция | 1 | 2 | 4 | 8 |")
             add("|---|---:|---:|---:|---:|")
@@ -104,10 +250,12 @@ def build() -> Path:
     if ml:
         direct = ml.get("direct", {})
         agent = ml.get("agent", {})
+        dm, am = direct.get("metrics", {}), agent.get("metrics", {})
         add("## 3. ML-метрики поиска")
         add("")
-        add("Золотой набор: 55 запросов RU+EN, qrels — чанки корпуса bench. "
-        "Обе оценки на одном индексе и одном эмбеддере.")
+        add(f"Золотой набор: {_num(dm.get('queries'), 0)} запросов RU+EN, "
+            "qrels — чанки корпуса bench. "
+            "Обе оценки на одном индексе и одном эмбеддере.")
         add("")
         add("| Метрика | Прямой `hybrid_search` | Агент `POST /assistant/ask` |")
         add("|---|---:|---:|")
@@ -121,7 +269,7 @@ def build() -> Path:
             ("mrr@10", "MRR@10"),
             ("hit@3", "Hit@3 (есть релевантный в топ-3)"),
         ]
-        dm, am = direct.get("metrics", {}), agent.get("metrics", {})
+
         for key, label in labels:
             add(f"| {label} | {dm.get(key, 0):.3f} | {am.get(key, 0):.3f} |")
         add("")
@@ -131,6 +279,8 @@ def build() -> Path:
 
         add("| Метрика | Прямой поиск | Агент |")
         add("|---|---:|---:|")
+        add(f"| Запросов в срезе | {_num(dm.get('queries'), 0)} | "
+            f"{_num(am.get('queries'), 0)} |")
         add(f"| Латентность p50, мс | {_ms(direct.get('latency_ms', {}).get('p50'))} | "
             f"{_ms(agent.get('latency_ms', {}).get('p50'))} |")
         add(f"| Латентность p95, мс | {_ms(direct.get('latency_ms', {}).get('p95'))} | "
@@ -199,11 +349,12 @@ def build() -> Path:
         add("")
         add("### Кривые по конкуренции")
         add("")
-        add("| Сценарий | C | RPS | p50, мс | p95, мс | p99, мс | Ошибки |")
-        add("|---|---:|---:|---:|---:|---:|---:|")
+        add("| Сценарий | C | RPS | Запросов | p50, мс | p95, мс | p99, мс | Ошибки |")
+        add("|---|---:|---:|---:|---:|---:|---:|---:|")
         for block in scenarios.values():
             for point in block["summary"]["points"]:
                 add(f"| {block['name']} | {point['concurrency']} | {_num(point['rps'])} | "
+                    f"{_num(point.get('requests'), 0)} | "
                     f"{_ms(point['latency_ms']['p50'])} | {_ms(point['latency_ms']['p95'])} | "
                     f"{_ms(point['latency_ms']['p99'])} | {point['error_rate']:.2%} |")
         add("")
@@ -225,7 +376,16 @@ def build() -> Path:
                 "`max_connections=100` без запаса, поэтому C≥96 упирается в лимит "
                 "Postgres, а не в приложение.")
             add("")
-        add("На уровнях до C=48 включительно ошибок не было ни в одном сценарии.")
+        low_concurrency = [
+            point
+            for block in scenarios.values()
+            for point in block["summary"]["points"]
+            if point["concurrency"] <= 48
+        ]
+        if low_concurrency:
+            worst_low = max(point["error_rate"] for point in low_concurrency)
+            add(f"До C=48 включительно максимальная доля ошибок по всем сценариям — "
+                f"{worst_low:.2%}.")
         add("")
 
         by_key = {key: block["summary"] for key, block in scenarios.items()}
@@ -276,8 +436,8 @@ def build() -> Path:
             if limited:
                 worst = max(limited, key=lambda p: p["concurrency"])
                 add(f"- Ошибки на пуле {worst['pool_size']} при C={worst['concurrency']} — "
-                    f"упор в `max_connections=100` Postgres (пул 80+20 не оставляет запаса), "
-                    f"а не дефект приложения.")
+                    f"похоже на упор в `max_connections=100` Postgres (пул 80+20 "
+                    f"не оставляет запаса), а не дефект приложения.")
         if ask_rps:
             add(f"- RAG-ответ врачу (Qdrant + аудит, детерминированная сборка): "
                 f"**{_num(ask_rps)} RPS**; время ответа p50 "
@@ -300,7 +460,8 @@ def build() -> Path:
                 add(f"- Накладные расходы агента над чистым поиском: "
                     f"{_num(agent_p50 - direct_p50)} мс на запрос "
                     f"(p50 {_num(direct_p50)} → {_num(agent_p50)} мс).")
-            add(f"- ML (hash-эмбеддер): Recall@3 {dm.get('recall@3', 0):.3f} → "
+            add(f"- ML ({meta.get('embedder', '—')}-эмбеддер): Recall@3 " 
+                f"{dm.get('recall@3', 0):.3f} → "
                 f"{am.get('recall@3', 0):.3f}, nDCG@3 {dm.get('ndcg@3', 0):.3f} → "
                 f"{am.get('ndcg@3', 0):.3f}, MRR@3 {dm.get('mrr@3', 0):.3f} → "
                 f"{am.get('mrr@3', 0):.3f} (прямой поиск → агент).")
@@ -310,43 +471,22 @@ def build() -> Path:
             missed = [row["query"] for row in red.get("results", []) if not row.get("refused")]
             if missed:
                 add(f"- **Red line пропускает**: {'; '.join(missed)}.")
-        corpus = core.get("functions", {}).get("kb_seed.build_corpus (на запрос агента)")
+        corpus = core.get("functions", {}).get("kb_seed.build_corpus (кеш TTL-снимка)")
         if corpus:
-            add(f"- `build_corpus` (кеш статических секций): "
-                f"{_num(corpus['ops_per_s'], 0)} вызовов в секунду "
-                f"(p50 {_num(corpus['us_p50'], 1)} мкс); на request-path "
-                f"препараты приходят из async-сессии, без повторного запроса к БД.")
+            add(f"- `build_corpus` по кешу: {_num(corpus['ops_per_s'], 0)} вызовов в "
+                f"секунду (p50 {_num(corpus['us_p50'], 1)} мкс) — это попадание в "
+                f"TTL-снимок статических секций; препараты в снимке читаются из БД "
+                f"один раз на сборку. Реальный путь агента (поиск + ответ) — строка "
+                f"`agent.AgentFactory.invoke` в разделе 2.")
         add("")
-        add("### 5.1 Эффект исправлений (базовый прогон 2026-10-23 → текущий)")
+        add("### 5.1 Сравнение с прошлыми прогонами")
         add("")
-        add("| Метрика | До | После |")
-        add("|---|---:|---:|")
-        add(f"| Чтение дневника, max RPS | 133.7 | {_num(db_rps)} |")
-        add(f"| Запись дневника, max RPS | 127.5 | {_num(write_rps)} |")
-        add(f"| Скрининг, транзакций/с | 33.8 | {_num(flow_rate)} |")
-        add(f"| Агент врачу, max RPS | 65.4 | {_num(ask_rps)} |")
-        add(f"| Роспись врача, max RPS | 44.2 | {_num(roster.get('max_rps', 0))} |")
-        add(f"| Mixed, max RPS | 97.1 | {_num(by_key.get('mixed', {}).get('max_rps', 0))} |")
-        if cliff.get("probes"):
-            probes = sorted(cliff["probes"], key=lambda p: (p.get("pool_size", 0), p["concurrency"]))
-            default_pool = min(p.get("pool_size", 0) for p in probes)
-            at64 = [p for p in probes if p.get("pool_size") == default_pool and p["concurrency"] == 64]
-            if at64:
-                add(f"| Дневник при C=64, RPS / ошибки | 2.8 / 75% | "
-                    f"{_num(at64[0]['rps'])} / {at64[0]['error_rate']:.0%} |")
-        add(f"| `build_corpus`, вызовов/с | 642 | {_num(corpus['ops_per_s'], 0) if corpus else 0} |")
-        if ml:
-            red = ml.get("agent", {}).get("redline", {})
-            add(f"| Red-line отказы | 5/6 (83%) | {red.get('refused_ok', 0)}/"
-                f"{red.get('queries', 0)} ({red.get('accuracy', 0):.0%}) |")
-            ru = (ml.get("agent", {}).get("by_lang") or {}).get("ru", {})
-            if ru:
-                add(f"| RU nDCG@3 (hash) | 0.142 | {ru.get('ndcg@3', 0):.3f} |")
-        add("")
-        add("Отдельный замер прод-профиля bge-m3 (RTX 5090, fp16, тот же путь "
-            "`hybrid_search` + Qdrant, 55 запросов): RU nDCG@3 **0.776**, R@3 0.819, "
-            "EN nDCG@3 0.723, p50 24.9 мс (индексация 126 чанков 3.7 с); "
-            "hash на том же стенде — RU 0.142.")
+        add("Исторические числа этого отчёта (базовый прогон 2026-10-23, отдельный "
+            "замер bge-m3 на RTX 5090) удалены: у них не был зафиксирован git-коммит, "
+            "а `loadtest/results/*.json` в git не хранятся — воспроизвести их нельзя. "
+            "Сравнивать можно только прогоны, собранные этой версией `report.py` "
+            "(провенанс — раздел 0): выполните «Как перемерить» на двух коммитах и "
+            "сопоставьте таблицы.")
         add("")
         add("## 6. Ограничения")
         add("")

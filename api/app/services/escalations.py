@@ -1,4 +1,4 @@
-"""Очередь открытых эскалаций и их закрытие (docs/16 §3, docs/04 §3).
+"""Очередь эскалаций (открытые и закрытые) и их закрытие (docs/16 §3, docs/04 §3).
 
 Общая очередь для врачей и администратора: сигнал чек-ина не теряется, если у
 пациента ещё нет roster-врача. Чтение и закрытие аудируются (152-ФЗ,
@@ -22,6 +22,8 @@ from .audit import record as audit_record
 QUEUE_WINDOW_DAYS = 90
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
+# open — очередь работы, resolved — история разбора, all — и то, и другое.
+QUEUE_STATUSES = ("open", "resolved", "all")
 
 # В очередь риска попадают только ответы гейта и модуля безопасности:
 # остальная симптоматика клиницисту для решения о сигнале не нужна.
@@ -37,17 +39,38 @@ def _risk_answers(raw: str | None) -> dict:
     answers = json.loads(raw)
     return {item: answers[item] for item in RISK_ITEMS if item in answers}
 
-async def list_open(
+
+def _parse_id(raw: str | uuid.UUID) -> uuid.UUID:
+    """Кривой id в пути — это «не найдено», а не ошибка валидации схемы (422)."""
+    if isinstance(raw, uuid.UUID):
+        return raw
+    try:
+        return uuid.UUID(raw)
+    except ValueError:
+        raise Problem(404, "ESCALATION_NOT_FOUND", "Эскалация не найдена") from None
+
+
+async def list_queue(
     db: AsyncSession,
     actor_id: uuid.UUID,
     ip: str | None = None,
     *,
+    status: str = "open",
     limit: int = DEFAULT_LIMIT,
     is_admin: bool = False,
 ) -> dict:
-    """Открытые эскалации за последние 90 дней, новые сверху."""
+    """Эскалации за последние 90 дней: `open` (по умолчанию), `resolved`, `all`.
+
+    У `open` предикат и сортировка совпадают с частичным индексом
+    `escalations_open_queue`. История закрытых сигналов считает окно по
+    `resolved_at` — иначе недавно разобранный старый сигнал из неё выпал бы.
+    """
+    if status not in QUEUE_STATUSES:
+        raise Problem(
+            422, "VALIDATION", f"status должен быть одним из: {', '.join(QUEUE_STATUSES)}"
+        )
     since = datetime.now(timezone.utc) - timedelta(days=QUEUE_WINDOW_DAYS)
-    rows = (await db.execute(
+    query = (
         select(
             Escalation,
             User.fio,
@@ -56,13 +79,22 @@ async def list_open(
         )
         .join(User, User.id == Escalation.patient_id)
         .outerjoin(CheckinSession, CheckinSession.id == Escalation.checkin_session_id)
-        .where(
+    )
+    if status == "open":
+        query = query.where(
             Escalation.resolved_at.is_(None),
             Escalation.created_at >= since,
+        ).order_by(Escalation.created_at.desc().nulls_last(), Escalation.id.desc())
+    elif status == "resolved":
+        query = query.where(
+            Escalation.resolved_at.is_not(None),
+            Escalation.resolved_at >= since,
+        ).order_by(Escalation.resolved_at.desc(), Escalation.id.desc())
+    else:
+        query = query.where(Escalation.created_at >= since).order_by(
+            Escalation.created_at.desc().nulls_last(), Escalation.id.desc()
         )
-        .order_by(Escalation.created_at.desc().nulls_last(), Escalation.id.desc())
-        .limit(limit)
-    )).all()
+    rows = (await db.execute(query.limit(limit))).all()
 
     roster: set[uuid.UUID] = set()
     if not is_admin and rows:
@@ -85,6 +117,8 @@ async def list_open(
             "checkin_session_id": str(e.checkin_session_id) if e.checkin_session_id else None,
             "notified_at": e.notified_clinician_at.isoformat() if e.notified_clinician_at else None,
             "created_at": e.created_at.isoformat() if e.created_at else None,
+            "resolved_at": e.resolved_at.isoformat() if e.resolved_at else None,
+            "resolution": e.resolution,
             "in_roster": (not is_admin) and e.patient_id in roster,
             "risk_answers": _risk_answers(answers),
         }
@@ -98,20 +132,23 @@ async def list_open(
 async def resolve(
     db: AsyncSession,
     actor_id: uuid.UUID,
-    escalation_id: uuid.UUID,
+    escalation_id: str | uuid.UUID,
     resolution: str | None = None,
     ip: str | None = None,
 ) -> dict:
     """Закрыть сигнал: resolved_at + комментарий (шифруется EncryptedText)."""
+    escalation_uuid = _parse_id(escalation_id)
     # FOR UPDATE: два врача одновременно не закроют сигнал дважды (409 у второго).
     escalation = await db.scalar(
-        select(Escalation).where(Escalation.id == escalation_id).with_for_update()
+        select(Escalation).where(Escalation.id == escalation_uuid).with_for_update()
     )
     if escalation is None:
         raise Problem(404, "ESCALATION_NOT_FOUND", "Эскалация не найдена")
     if escalation.resolved_at is not None:
         raise Problem(409, "ESCALATION_ALREADY_RESOLVED", "Эскалация уже закрыта")
 
+    # Длину проверяем здесь, а не в pydantic: иначе клиент получает 422 VALIDATION
+    # вместо документированного RESOLUTION_TOO_LONG.
     text = (resolution or "").strip()
     if len(text) > RESOLUTION_MAX:
         raise Problem(

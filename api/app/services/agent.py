@@ -84,6 +84,11 @@ def _hash_rerank(
 
     Hash-dense шумит, поэтому гарантируем, что чанки с прямым лексическим
     совпадением (напр. «Авиандр») всплывают независимо от dense-ранжирования.
+
+    Функция исполняется в рабочем потоке (offload агента), поэтому sync-сессию
+    БД здесь открывать нельзя. Загрузку препаратов владеет вызывающий
+    (`load_drug_docs` в async-сессии запроса); `corpus_drugs is None` означает
+    «препаратов в корпусе нет», а не «сходи в БД».
     """
     hits = _relevance_gate(query, hits, limit)
     if len(hits) >= limit:
@@ -91,7 +96,8 @@ def _hash_rerank(
     from app.kb_seed import build_corpus  # lazy: избегаем циклического импорта
     seen = {h.get("guideline_id") for h in hits}
     kw = sorted(
-        ((_lexical_overlap(query, d["text"]), d) for d in build_corpus(drug_docs=corpus_drugs)
+        ((_lexical_overlap(query, d["text"]), d)
+         for d in build_corpus(drug_docs=corpus_drugs or [])
          if (topic is None or d.get("topic") == topic)
          and (not exclude_ids or d["guideline_id"] not in exclude_ids)),
         key=lambda x: x[0],

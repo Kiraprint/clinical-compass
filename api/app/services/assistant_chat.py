@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from compass.agent import detect_redline
 
+from app.config import settings
 from app.enrichment import review as kb_review
 from app.errors import Problem
 from app.kb_seed import load_drug_docs
@@ -36,18 +37,49 @@ from app.services import audit, clinician, llm_router
 from app.services.agent import scrub_for_llm, shared_factory
 
 MAX_THREAD_PATIENTS = 10
+# Потолок одновременных прогонов агента на процесс. RAG блокирующий и дорогой
+# (Qdrant + эмбеддинги + LLM), поэтому у него собственный limiter, а не общий
+# пул AnyIO (40 потоков): всплеск запросов к ассистенту ждёт здесь и не съедает
+# токены пула у push/эмбеддингов/Qdrant других ручек (docs/03 §12).
+AGENT_LIMITER = anyio.CapacityLimiter(settings.assistant_thread_limit)
 
 def _not_found() -> Problem:
     return Problem(404, "THREAD_NOT_FOUND", "Диалог не найден")
+
+def _timeout() -> Problem:
+    """Дедлайн прогона агента. Retry-After — клиенту есть смысл повторить."""
+    return Problem(
+        503,
+        "ASSISTANT_TIMEOUT",
+        f"Ассистент не ответил за {settings.assistant_deadline_s:g} с, повторите запрос",
+        headers={"Retry-After": "5"},
+    )
 
 async def _invoke_agent(query: str, **kwargs) -> dict:
     """RAG-граф (Qdrant + эмбеддинги + LLM-роутинг) — в поток: вызов блокирующий.
 
     Сессия БД к этому моменту закоммичена, поэтому соединение не удерживается,
-    пока агент ходит во внешние сервисы.
+    пока агент ходит во внешние сервисы. Дедлайн (`CC_ASSISTANT_DEADLINE_S`)
+    покрывает и ожидание лимитера, и сам прогон: `move_on_after`, а не
+    `fail_after`, — собственный TimeoutError агента (например, таймаут
+    LLM-роутера) не должен подменяться нашим дедлайном.
+
+    `abandon_on_cancel=True` обязателен: иначе `run_sync` (дефолт
+    `abandon_on_cancel=False`) дожидается потока и дедлайн не срабатывает.
+    Брошенный поток досчитывает сам и держит токен `AGENT_LIMITER` до конца —
+    поэтому параллелизм агента и ограничен этим лимитером.
     """
     factory = shared_factory()
-    return await anyio.to_thread.run_sync(lambda: factory.invoke(query, **kwargs))
+    result: dict | None = None
+    with anyio.move_on_after(settings.assistant_deadline_s) as scope:
+        result = await anyio.to_thread.run_sync(
+            lambda: factory.invoke(query, **kwargs),
+            abandon_on_cancel=True,
+            limiter=AGENT_LIMITER,
+        )
+    if scope.cancelled_caught:
+        raise _timeout()
+    return result
 
 async def normalize_patient_ids(db: AsyncSession, clinician_id, patient_ids) -> list[uuid.UUID]:
     """Дедуп + лимит + roster-гейт. Возвращает id в порядке перечисления."""

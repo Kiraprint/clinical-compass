@@ -7,10 +7,11 @@ bench/data/corpus.jsonl). Корпус проиндексирован в изо�
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
-import os
 import re
+import sys
 import time
 
 from . import common
@@ -89,8 +90,8 @@ def _score_query(ranked: list[str], qrels: list[str]) -> dict:
 
 def direct_search_metrics() -> dict:
     """Гибридный поиск (Qdrant RRF) без HTTP, без агентского gate/fallback."""
-    os.environ.update(common.setup_env())
-    from qdrant_client import QdrantClient
+    # env уже применён точкой входа (main/run_all): повторный apply_env затёр бы
+    # --db/--collection/--embedder дефолтами.
 
     from app.services import kb
     from app.services.embeddings import build_embedder
@@ -236,5 +237,28 @@ def run(credentials: dict) -> dict:
     return payload
 
 
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="ML-метрики поиска Clinical Compass")
+    parser.add_argument("--db", default=None, help="БД (allowlist: compass_load*)")
+    parser.add_argument(
+        "--collection", default=None, help="коллекция Qdrant (allowlist: kb_load*)"
+    )
+    parser.add_argument("--embedder", default="hash", choices=["hash", "bge-m3"])
+    args = parser.parse_args(argv)
+    try:
+        common.apply_env(
+            embedder=args.embedder, collection=args.collection, db=args.db
+        )
+    except common.SafetyRefusal as exc:
+        print(f"ОТКАЗ: {exc}", file=sys.stderr)
+        return common.SafetyRefusal.exit_code
+    print(
+        json.dumps(
+            run(common.read_json("credentials.json")), ensure_ascii=False, indent=2
+        )
+    )
+    return 0
+
+
 if __name__ == "__main__":
-    print(json.dumps(run(common.read_json("credentials.json")), ensure_ascii=False, indent=2))
+    raise SystemExit(main())

@@ -3,6 +3,7 @@
 """Треды ассистента: изоляция врачей, roster-гейт, история, аудит, каскад."""
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -524,3 +525,61 @@ def test_followup_question_retrieves_drug_chunk(client, kb_collection, monkeypat
     assert next(c for c in body["citations"] if c["guideline_id"] == "drug-aviandr")[
         "topic"
     ] == "ЛЕКАРСТВА"
+
+class _SlowAgent:
+    """Агент, не укладывающийся в дедлайн: поток спит дольше `assistant_deadline_s`."""
+
+    def invoke(self, query, **kwargs):
+        time.sleep(0.5)
+        return {"answer": "поздний ответ", "citations": [], "topic": "ЛЕКАРСТВА"}
+
+
+def test_thread_message_deadline_is_503_without_assistant_message(client, monkeypatch):
+    """Дедлайн агента → 503 ASSISTANT_TIMEOUT; недописанный ответ в тред не идёт.
+
+    Вопрос врача персистируется до вызова агента (аудит ПДн-доступа), ответа
+    ассистента при таймауте быть не должно: иначе история треда показывала бы
+    ответ, которого никто не получил.
+    """
+    from app.services import assistant_chat
+
+    ch, url = _new_thread(client, "th-deadline@test.ru")
+    monkeypatch.setattr(assistant_chat, "shared_factory", lambda: _SlowAgent())
+    monkeypatch.setattr(assistant_chat.settings, "assistant_deadline_s", 0.05)
+
+    resp = client.post(url, json={"content": "Что известно про Авиандр?"}, headers=ch)
+
+    assert resp.status_code == 503, resp.text
+    body = resp.json()
+    assert body["code"] == "ASSISTANT_TIMEOUT"
+    assert body["status"] == 503 and body["type"] == "about:blank"
+    assert body["instance"] == url
+    assert resp.headers["retry-after"] == "5"
+    assert "Traceback" not in resp.text and "поздний ответ" not in resp.text
+    thread = client.get(url.rsplit("/messages", 1)[0], headers=ch).json()
+    assert [m["role"] for m in thread["messages"]] == ["CLINICIAN"]
+
+
+def test_agent_offload_uses_dedicated_limiter(monkeypatch):
+    """Агент идёт в поток под своим лимитером, а не под общим пулом AnyIO (40)."""
+    import anyio
+
+    from app.services import assistant_chat
+
+    assert assistant_chat.AGENT_LIMITER.total_tokens == settings.assistant_thread_limit
+    assert settings.assistant_thread_limit == 8, "дефолт CC_ASSISTANT_THREAD_LIMIT"
+    seen: dict[str, object] = {}
+
+    class _Agent:
+        def invoke(self, query, **kwargs):
+            return {"answer": "ответ", "citations": []}
+
+    async def spy(fn, **kwargs):
+        seen["limiter"] = kwargs.get("limiter")
+        return fn()
+
+    monkeypatch.setattr(assistant_chat, "shared_factory", lambda: _Agent())
+    monkeypatch.setattr(assistant_chat.anyio.to_thread, "run_sync", spy)
+
+    assert anyio.run(assistant_chat._invoke_agent, "вопрос")["answer"] == "ответ"
+    assert seen["limiter"] is assistant_chat.AGENT_LIMITER

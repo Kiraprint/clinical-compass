@@ -1,6 +1,10 @@
 """Тесты справочника препаратов (таблица drugs, источник — ГРЛС). Не ПДн."""
 from .conftest import auth_header, clinician_ctx, login, register
 
+# Ожидаемый состав справочника (api/app/data/drugs.json): препараты первой линии
+# при F32/F33/F41.1 — СИОЗС сертралин и эсциталопрам плюс анксиолитик Авиандр.
+DRUG_IDS = {"aviandr", "zoloft", "escitalopram-canon"}
+
 
 def test_drugs_list_requires_clinician(client):
     register(client, "p-drugs@test.ru")
@@ -10,16 +14,31 @@ def test_drugs_list_requires_clinician(client):
     assert r.json()["code"] == "ROLE_MISMATCH"
 
 
-def test_drugs_list_returns_aviandr(client):
+def test_drugs_list_returns_whole_library(client):
     h, _ = clinician_ctx(client, "doc-drugs@test.ru")
     r = client.get("/api/v1/drugs", headers=h)
     assert r.status_code == 200
     items = r.json()["items"]
-    assert any(d["drug_id"] == "aviandr" for d in items)
+    assert {d["drug_id"] for d in items} == DRUG_IDS
+    # У каждого препарата заполнены клинические поля и провенанс источников.
+    for d in items:
+        assert d["dosage"] and d["indications"] and d["contraindications"]
+        assert "ЛП-" in d["reg_certificate"]
+        assert d["source_urls"], d["drug_id"]
+
     av = next(d for d in items if d["drug_id"] == "aviandr")
     assert av["trade_name"] == "АВИАНДР®"
-    assert "ЛП-" in av["reg_certificate"]
-    assert av["dosage"]  # не пусто
+
+    zoloft = next(d for d in items if d["drug_id"] == "zoloft")
+    assert zoloft["trade_name"] == "ЗОЛОФТ®"
+    assert zoloft["inn"] == "сертралин" and zoloft["inn_en"] == "sertraline"
+    assert zoloft["reg_certificate"] == "ЛП-№(002851)-(РГ-RU)"
+    assert zoloft["reg_date"] == "2023-07-24"
+
+    esc = next(d for d in items if d["drug_id"] == "escitalopram-canon")
+    assert esc["inn"] == "эсциталопрам" and esc["inn_en"] == "escitalopram"
+    assert esc["reg_certificate"] == "ЛП-№(006068)-(РГ-RU)"
+    assert esc["reg_date"] == "2024-06-28"
 
 
 def test_drugs_filter_by_query(client):
@@ -28,9 +47,18 @@ def test_drugs_filter_by_query(client):
     assert r.status_code == 200
     items = r.json()["items"]
     assert len(items) == 1 and items[0]["drug_id"] == "aviandr"
+
+    # Поиск по МНН находит каждый новый препарат.
+    r2 = client.get("/api/v1/drugs", params={"q": "сертралин"}, headers=h)
+    assert [d["drug_id"] for d in r2.json()["items"]] == ["zoloft"]
+    r3 = client.get("/api/v1/drugs", params={"q": "эсциталопрам"}, headers=h)
+    assert [d["drug_id"] for d in r3.json()["items"]] == ["escitalopram-canon"]
+    # Поиск по торговому наименованию — тоже.
+    r4 = client.get("/api/v1/drugs", params={"q": "ЗОЛОФТ"}, headers=h)
+    assert [d["drug_id"] for d in r4.json()["items"]] == ["zoloft"]
     # Несовпадающий фильтр → пусто
-    r2 = client.get("/api/v1/drugs", params={"q": "несуществующий"}, headers=h)
-    assert r2.json()["items"] == []
+    r5 = client.get("/api/v1/drugs", params={"q": "несуществующий"}, headers=h)
+    assert r5.json()["items"] == []
 
 
 def test_drug_detail_and_404(client):
@@ -38,5 +66,43 @@ def test_drug_detail_and_404(client):
     r = client.get("/api/v1/drugs/aviandr", headers=h)
     assert r.status_code == 200
     assert r.json()["inn"] == "маритупирдин"
-    r2 = client.get("/api/v1/drugs/nope", headers=h)
-    assert r2.status_code == 404
+
+    r2 = client.get("/api/v1/drugs/zoloft", headers=h)
+    assert r2.status_code == 200
+    body = r2.json()
+    assert body["inn_en"] == "sertraline"
+    assert body["source_urls"] and all(
+        u.startswith("https://") for u in body["source_urls"]
+    )
+
+    r3 = client.get("/api/v1/drugs/escitalopram-canon", headers=h)
+    assert r3.status_code == 200
+    assert "генерализованное тревожное расстройство" in r3.json()["indications"].lower()
+
+    r4 = client.get("/api/v1/drugs/nope", headers=h)
+    assert r4.status_code == 404
+
+
+def test_seed_drugs_is_idempotent(db_session):
+    """Повторный сид не дублирует строки и не пересоздаёт их (на drugs.drug_id
+    ссылается adverse_events.drug_id, поэтому DELETE+INSERT недопустим)."""
+    from sqlalchemy import select
+
+    from app.models import Drug
+    from app.seed import _seed_drugs
+
+    def snapshot() -> dict[str, str]:
+        return {
+            d.drug_id: str(d.id)
+            for d in db_session.execute(select(Drug)).scalars()
+        }
+
+    _seed_drugs(db_session)
+    db_session.commit()
+    first = snapshot()
+    _seed_drugs(db_session)
+    db_session.commit()
+    second = snapshot()
+
+    assert set(second) == DRUG_IDS
+    assert second == first, "повторный сид должен обновлять строки, а не пересоздавать"

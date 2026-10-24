@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import os
+import sys
 import time
 
 from . import common, serve
@@ -333,12 +335,13 @@ def run(
 
 
 def run_cliff(credentials: dict, *, quick: bool = False, embedder: str = "hash",
-              collection: str = common.QDRANT_COLLECTION) -> dict:
+              collection: str | None = None, db: str | None = None) -> dict:
     """Проверка обрыва на высокой конкуренции: дефолтный пул и увеличенный.
 
     Каждый уровень — на свежем процессе API, чтобы исключить влияние
     предыдущего уровня на пул соединений.
     """
+    collection = common.resolve_collection(collection)
     scenario = build_scenarios(credentials)["diary_read"]
     default_pool = int(os.environ.get("CC_DB_POOL_SIZE", "20")) + int(
         os.environ.get("CC_DB_MAX_OVERFLOW", "20")
@@ -354,7 +357,7 @@ def run_cliff(credentials: dict, *, quick: bool = False, embedder: str = "hash",
     results = []
     for pool_size, concurrency in plan:
         server = serve.ApiServer(embedder=embedder, collection=collection,
-                                 pool_size=pool_size)
+                                 db=db, pool_size=pool_size)
         server.start()
         try:
             result = asyncio.run(
@@ -376,6 +379,27 @@ def run_cliff(credentials: dict, *, quick: bool = False, embedder: str = "hash",
     payload = {"probes": results}
     common.write_json("cliff.json", payload)
     return payload
-if __name__ == "__main__":
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="HTTP-нагрузка Clinical Compass")
+    parser.add_argument("--db", default=None, help="БД (allowlist: compass_load*)")
+    parser.add_argument(
+        "--collection", default=None, help="коллекция Qdrant (allowlist: kb_load*)"
+    )
+    parser.add_argument("--embedder", default="hash", choices=["hash", "bge-m3"])
+    parser.add_argument("--quick", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        common.apply_env(
+            embedder=args.embedder, collection=args.collection, db=args.db
+        )
+    except common.SafetyRefusal as exc:
+        print(f"ОТКАЗ: {exc}", file=sys.stderr)
+        return common.SafetyRefusal.exit_code
     credentials = common.read_json("credentials.json")
-    print(json.dumps(run(credentials), ensure_ascii=False, indent=2))
+    print(json.dumps(run(credentials, quick=args.quick), ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
