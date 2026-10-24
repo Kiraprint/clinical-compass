@@ -33,6 +33,11 @@ class ScaleItem:
     # Пусто — варианты без подписей (не используется в каталоге scales.py).
     anchors: tuple[str, ...] = ()
 
+    # False — пункт не предъявляется пациенту (прямой вопрос о суициде в
+    # самоопроснике): его не видит каталог пациента и не спрашивает скрининг.
+    # Пункт остаётся в шкале для врача и для риск-протокола чек-ина.
+    patient_visible: bool = True
+
     def __post_init__(self) -> None:
         if self.anchors and len(self.anchors) != self.max_value + 1:
             raise ValueError(
