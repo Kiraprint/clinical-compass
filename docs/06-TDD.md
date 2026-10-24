@@ -6,7 +6,7 @@
 
 ## 1. Стратегия
 
-- Пирамида (фактически достигнуто на 2026-10-24, см. `core/tests` + `api/tests`): unit (ядро) 141, integration (API+БД) 559 (из них 78 — обогащение КБ, FR-20; 15 — rate limiter на общем Redis-счётчике, docs/03 §12), e2e (UI-флоу) 42. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
+- Пирамида (фактически достигнуто на 2026-10-24, см. `core/tests` + `api/tests`): unit (ядро) 141, integration (API+БД) 562 (из них 78 — обогащение КБ, FR-20; 18 — rate limiter на общем Redis-счётчике, docs/03 §12), e2e (UI-флоу) 42. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
 - Ядро: 100% детерминированные чистые функции — табличные параметризованные тесты порогов.
 - Интеграция: реальные HTTP-запросы к тестовому Postgres (отдельная БД), не мок-эхо.
 - Запрещены тесты «на копирование»: только поведение контрактов (вход → выход/инвариант/ошибка).
@@ -293,6 +293,7 @@
 | `test_window_expires_by_ttl`, `test_check_does_not_create_keys` | TTL = 2 окна | `check_rate` после истечения | окно отпускает; проверка не создаёт ключей |
 | `test_redis_failure_falls_back_to_memory_and_warns_once`, `test_dead_redis_does_not_delay_login_beyond_timeout` | Redis отвечает ошибкой/спит | `check_rate` | fail-open `(True, 0)`, один WARNING, `redis_errors=1`, задержка ≤ socket_timeout, дальше memory |
 | `test_auto_*`, `test_missing_redis_package_degrades`, `test_connect_passes_timeout_and_disables_retries` | нет URL / нет пакета / мёртвый Redis / избыток ретраев | `init_backend`/`_connect` | memory + WARNING; timeout 0.3 с и `Retry(..., 0)` |
+| `test_health_reports_rate_limit_backend`, `test_ip_key_is_hmac_with_server_secret`, `test_async_check_does_not_block_event_loop` | правки ревью PR #38: видимость хранилища, необратимость ключа, блокировка event loop | `GET /health`; `_redis_key("ip", …)` при смене `CC_DATA_KEY`; `acheck_rate` при «медленном» Redis (0.2 с) | `rate_limit.backend`/`redis_errors` в ответе; ключ ≠ `SHA-256(ip)`, меняется со сменой секрета; тикер успевает ≥ 5 тиков, т.е. loop не заблокирован |
 | `test_reset_clears_redis_store`, `test_reset_clears_memory_store` | активное хранилище с окнами | `reset_rate_limits` | чистится именно активный store, выбор бэкенда сбрасывается |
 | `test_migrations_do_not_disable_application_loggers` (`test_async_db.py`) | после `init_db()` (alembic `fileConfig`) | запись в логгер `app.services.push` | логгер не отключён, запись доходит до handler'а |
 | `test_thread_message_deadline_is_503_without_assistant_message` (`test_assistant_threads.py`) | агент-заглушка спит дольше `CC_ASSISTANT_DEADLINE_S` | POST сообщения в тред | 503 `ASSISTANT_TIMEOUT`, `Retry-After: 5`, RFC 7807 `instance` = путь; ответ ассистента не персистится (в треде только вопрос) |

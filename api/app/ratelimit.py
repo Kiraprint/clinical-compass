@@ -36,11 +36,13 @@ TTL ключа — два окна, поэтому счётчики живут �
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import threading
 import time
 from collections import deque
 
+import anyio
 from .config import settings
 
 log = logging.getLogger(__name__)
@@ -219,12 +221,15 @@ def _retry_after(now: float, window: int) -> int:
     return int(window - (now % window)) + 1
 
 def _redis_key(kind: str, ident: str, now: float, window: int) -> str:
-    """Ключ окна: namespace + вид + номер окна + SHA-256 идентификатора.
+    """Ключ окна: namespace + вид + номер окна + HMAC-SHA256 идентификатора.
 
-    Хеш вместо открытых значений — чтобы в Redis не лежали email/IP: TTL
-    ограничивает и без того короткое хранение, но хранилище общее.
+    HMAC с серверным ключом (`CC_DATA_KEY`), а не голый хеш: пространство IP
+    перебираемо за минуты, поэтому SHA-256(ip) в Redis — фактически список
+    адресов клиентов. HMAC оставляет ключи фиксированной длины и стабильными
+    в пределах инсталляции, но без ключа не восстанавливается (docs/02 §5).
     """
-    digest = hashlib.sha256(ident.encode("utf-8")).hexdigest()[:32]
+    secret = settings.data_key.encode("utf-8")
+    digest = hmac.new(secret, ident.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
     return f"{_REDIS_PREFIX}:{kind}:{_window_id(now, window)}:{digest}"
 
 def _redis_keys(key: tuple[str, str], now: float, window: int) -> tuple[str, str]:
@@ -268,7 +273,10 @@ def _redis_record(key: tuple[str, str], client=None) -> bool:
     window = settings.rate_window
     ttl = window * 2
     try:
-        pipe = client.pipeline(transaction=False)
+        # transaction=True → MULTI/EXEC: INCR и EXPIRE применяются вместе,
+        # поэтому счётчик не может остаться в Redis без TTL (иначе окно
+        # никогда не истечёт и ключ утечёт в память навсегда).
+        pipe = client.pipeline(transaction=True)
         for k in _redis_keys(key, now, window):
             pipe.incr(k)
             pipe.expire(k, ttl)
@@ -315,3 +323,31 @@ def reset_rate_limits() -> None:
     redis_errors = 0
     _redis_warned = False
     _warned.clear()
+
+async def acheck_rate(key: tuple[str, str]) -> tuple[bool, int]:
+    """Async-обёртка над `check_rate` для роутов.
+
+    Redis-режим делает сетевой ввод-вывод (до `CC_RATE_REDIS_TIMEOUT` на сокет):
+    в event loop FastAPI его пускать нельзя, поэтому уходим в рабочий поток —
+    ровно как для argon2 (`routers/auth.py`). Memory-режим остаётся быстрым
+    и выполняется на месте.
+    """
+    if _resolve_backend() == "memory":
+        return check_rate(key)
+    return await anyio.to_thread.run_sync(check_rate, key)
+
+async def arecord_rate_hit(key: tuple[str, str]) -> None:
+    """Async-обёртка над `record_rate_hit`; см. `acheck_rate`."""
+    if _resolve_backend() == "memory":
+        record_rate_hit(key)
+        return
+    await anyio.to_thread.run_sync(record_rate_hit, key)
+
+def backend_status() -> dict[str, object]:
+    """Активное хранилище и счётчик отказов Redis — для /health (docs/03 §12).
+
+    Счётчик нужен, потому что после первого сбоя Redis режим навсегда
+    переключается на memory: без статуса оператор не узнает, что общий бюджет
+    деградировал до per-process (единственный WARNING уходит в лог один раз).
+    """
+    return {"backend": _backend or "unresolved", "redis_errors": redis_errors}

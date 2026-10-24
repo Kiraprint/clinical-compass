@@ -15,7 +15,7 @@ from app.config import settings
 from app.db import get_db
 from app.errors import Problem
 from app.models import RefreshToken, User
-from app.ratelimit import check_rate, record_rate_hit
+from app.ratelimit import acheck_rate, arecord_rate_hit
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -108,7 +108,7 @@ async def register(body: RegisterBody, request: Request, db: AsyncSession = Depe
 async def login(body: LoginBody, request: Request, response: Response, db: AsyncSession = Depends(get_db)):
     email = body.email.strip().lower()
     client = request.client.host if request.client else "unknown"
-    allowed, retry_after = check_rate((client, email))
+    allowed, retry_after = await acheck_rate((client, email))
     if not allowed:
         raise Problem(429, "TOO_MANY_REQUESTS",
                       f"Слишком много попыток входа, повторите через {retry_after} с")
@@ -117,11 +117,11 @@ async def login(body: LoginBody, request: Request, response: Response, db: Async
         security.verify_password, body.password, user.password_hash
     )
     if not password_ok:
-        record_rate_hit((client, email))
+        await arecord_rate_hit((client, email))
         raise Problem(401, "UNAUTHORIZED", "Неверный email или пароль")
     if user.role != "PATIENT" and settings.require_otp:
         if not user.totp_secret or not body.otp or not security.verify_totp(user.totp_secret, body.otp):
-            record_rate_hit((client, email))
+            await arecord_rate_hit((client, email))
             raise Problem(401, "UNAUTHORIZED", "Требуется корректный код 2FA")
     jti = await _issue_jti(db, user.id)
     await db.commit()

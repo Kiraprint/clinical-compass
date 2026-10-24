@@ -378,3 +378,62 @@ def test_reset_clears_memory_store(monkeypatch):
     ratelimit.reset_rate_limits()
     assert ratelimit._hits == {} and ratelimit._ip_hits == {}
     assert ratelimit.check_rate(key) == (True, 0)
+
+# --- правки ревью PR #38: HMAC-ключи, статус в /health, offload из event loop --
+
+def test_health_reports_rate_limit_backend(client):
+    """/health показывает активное хранилище: иначе деградация бюджета невидима."""
+    body = client.get("/health").json()
+    assert body["status"] == "ok"
+    assert body["rate_limit"]["backend"] in {"memory", "redis", "unresolved"}
+    assert isinstance(body["rate_limit"]["redis_errors"], int)
+
+def test_ip_key_is_hmac_with_server_secret(monkeypatch):
+    """Ключ IP не равен голому SHA-256: пространство IPv4 перебираемо."""
+    import hashlib
+    import hmac as hmac_mod
+
+    ip = "203.0.113.7"
+    plain = hashlib.sha256(ip.encode()).hexdigest()[:32]
+    key = ratelimit._redis_key("ip", ip, 1000.0, 60)
+    assert key.endswith(plain) is False
+    # Стабилен в пределах инсталляции…
+    assert ratelimit._redis_key("ip", ip, 1000.0, 60) == key
+    assert key.endswith(
+        hmac_mod.new(settings.data_key.encode(), ip.encode(), hashlib.sha256).hexdigest()[:32]
+    )
+    # …и меняется при смене ключа: без секрета дайджест не восстанавливается.
+    monkeypatch.setattr(settings, "data_key", "another-server-key-0123456789abcdef")
+    assert ratelimit._redis_key("ip", ip, 1000.0, 60) != key
+
+def test_async_check_does_not_block_event_loop(monkeypatch):
+    """Redis-ввод-вывод уходит в рабочий поток: loop продолжает тикать."""
+    import anyio
+
+    monkeypatch.setattr(ratelimit, "_resolve_backend", lambda: "redis")
+
+    def slow_check(key):
+        time.sleep(0.2)
+        return True, 0
+
+    monkeypatch.setattr(ratelimit, "_redis_check", slow_check)
+    ticks = 0
+
+    async def run() -> tuple[bool, int]:
+        nonlocal ticks
+
+        async def ticker() -> None:
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await anyio.sleep(0.01)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(ticker)
+            verdict = await ratelimit.acheck_rate(("198.51.100.1", "loop@test.ru"))
+            tg.cancel_scope.cancel()
+        return verdict
+
+    assert anyio.run(run) == (True, 0)
+    # Без offload тикер получил бы 0–1 тик за 200 мс блокировки.
+    assert ticks >= 5

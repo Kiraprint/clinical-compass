@@ -49,7 +49,11 @@ services:
     restart: unless-stopped
     # Без persistence: счётчики — эфемерные окна (TTL ≤ 2×CC_RATE_WINDOW),
     # после рестарта Redis лимит просто начинается заново (fail-open).
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    # Потолок памяти: ключи фиксированных окон живут ≤ 2×окна, но массовый
+    # перебой может забить хост; allkeys-lru безопасен — вытеснение окна лишь
+    # ослабляет лимит для конкретного ключа, а не ломает его.
+    command: ["redis-server", "--save", "", "--appendonly", "no",
+              "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
     expose:
       - "6379"
     healthcheck:

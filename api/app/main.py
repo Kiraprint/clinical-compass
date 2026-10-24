@@ -92,7 +92,9 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health() -> dict:
-        return {"status": "ok"}
+        # rate_limit: активное хранилище лимитера логинов (memory|redis) и число
+        # отказов Redis — иначе молчаливая деградация общего бюджета невидима.
+        return {"status": "ok", "rate_limit": ratelimit.backend_status()}
 
     return app
 

@@ -88,8 +88,18 @@ PYTHONPATH=$PWD:../core ../.venv/bin/python -m pytest \
 - Redis в compose — single-node, без пароля и без persistence (порт не
   публикуется). Для HA/нескольких хостов нужен внешний Redis (Sentinel/кластер)
   и `CC_REDIS_URL` на него; после рестарта Redis окна начинаются заново.
-- `check_rate`/`record_rate_hit` остаются синхронными вызовами в async-ручке
-  (как было): при живом Redis это доли миллисекунды, худший случай ограничен
-  socket_timeout.
+- Redis-ввод-вывод в рантайме уходит в рабочий поток (`acheck_rate`/
+  `arecord_rate_hit` в `routers/auth.py`), поэтому медленный Redis не
+  замораживает event loop; memory-режим остаётся синхронным и быстрым.
 - Тесты не требуют Redis: фейковый клиент моделирует общее хранилище и TTL;
   тест конфигурации клиента пропускается, если пакет redis не установлен.
+
+## Правки по ревью PR #38 (RateLimitReview)
+
+| Замечание | Что сделано |
+|---|---|
+| P2: Redis I/O выполнялся на event loop | `acheck_rate`/`arecord_rate_hit` (`anyio.to_thread`), `routers/auth.py` переведён на них; `test_async_check_does_not_block_event_loop` (тикер ≥ 5 тиков за 200 мс «медленного» Redis) |
+| P3: `redis_errors` был write-only | `backend_status()` → `GET /health` отдаёт `rate_limit.backend` и `rate_limit.redis_errors`; `test_health_reports_rate_limit_backend` |
+| P3: ключ IP = голый SHA-256, пространство IPv4 перебираемо | `_redis_key` → HMAC-SHA256 с `CC_DATA_KEY`; `test_ip_key_is_hmac_with_server_secret` (ключ ≠ SHA-256, меняется со сменой секрета) |
+| P3: атомарность записи и TTL | `_redis_record` переведён на `pipeline(transaction=True)` — `INCR`+`EXPIRE` в одном `MULTI/EXEC`, счётчик не может остаться без TTL |
+| P3: Redis без потолка памяти | compose: `--maxmemory 64mb --maxmemory-policy allkeys-lru` (вытеснение окна ослабляет лимит только для этого ключа) |
