@@ -156,12 +156,21 @@ async def clinician_update(db: AsyncSession, clinician_id, patient_id, changes: 
     await db.commit()
     return contacts_payload(patient)
 
+def _own_payload(user: User) -> dict:
+    """Свои данные для личного кабинета: контакты + ФИО/e-mail (read-only).
+
+    ФИО/e-mail добавляются только в self-service ответ: витрины врача
+    (список/карта) остаются на contacts_payload без лишних полей.
+    """
+    return {**contacts_payload(user), "fio": user.fio, "email": user.email}
+
+
 
 async def own_read(db: AsyncSession, user: User, ip: str | None = None) -> dict:
     """Пациент читает собственные контакты (require_consent — на роутере)."""
     await audit_record(db, user.id, "READ_OWN_CONTACTS", "user", str(user.id), ip=ip)
     await db.commit()
-    return contacts_payload(user)
+    return _own_payload(user)
 
 
 async def own_update(db: AsyncSession, user: User, changes: dict, ip: str | None = None) -> dict:
@@ -169,4 +178,4 @@ async def own_update(db: AsyncSession, user: User, changes: dict, ip: str | None
     apply_contacts(user, changes)
     await audit_record(db, user.id, "UPDATE_OWN_CONTACTS", "user", str(user.id), ip=ip)
     await db.commit()
-    return contacts_payload(user)
+    return _own_payload(user)

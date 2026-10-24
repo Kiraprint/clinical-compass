@@ -157,7 +157,7 @@ export default function App() {
         </div>
       </header>
       <main>
-        {session.role === "PATIENT" && <PatientView />}
+        {session.role === "PATIENT" && <PatientView onLogout={logout} />}
         {session.role === "CLINICIAN" && <ClinicianView />}
         {session.role === "ADMIN" && <AdminView />}
       </main>

@@ -9,7 +9,6 @@ AUDIENCE_PATIENT = "PATIENT"
 AUDIENCE_CLINICIAN = "CLINICIAN"
 
 
-
 class Severity:
     NONE = "NONE"
     MILD = "MILD"
@@ -32,6 +31,10 @@ class ScaleItem:
     # Подписи вариантов ответа для значений 0..max_value (len == max_value + 1).
     # Пусто — варианты без подписей (не используется в каталоге scales.py).
     anchors: tuple[str, ...] = ()
+    # False — пункт не предъявляется пациенту (прямой вопрос о суициде в
+    # самоопроснике): его не видит каталог пациента и не спрашивает скрининг.
+    # Пункт остаётся в шкале для врача и для риск-протокола чек-ина.
+    patient_visible: bool = True
 
     def __post_init__(self) -> None:
         if self.anchors and len(self.anchors) != self.max_value + 1:
@@ -53,12 +56,18 @@ class Scale:
     def item_keys(self) -> frozenset[str]:
         return frozenset(i.key for i in self.items)
 
+    def patient_items(self) -> tuple[ScaleItem, ...]:
+        """Пункты, которые предъявляются пациенту при самоопросе."""
+        return tuple(i for i in self.items if i.patient_visible)
+
+    def patient_item_keys(self) -> frozenset[str]:
+        return frozenset(i.key for i in self.patient_items())
+
     def item(self, key: str) -> ScaleItem:
         for i in self.items:
             if i.key == key:
                 return i
         raise KeyError(key)
-
 
     def severity_for(self, total: int) -> str:
         result: str | None = None
@@ -76,6 +85,9 @@ class ScaleResult:
     total_score: int
     severity: str
     per_item: dict[str, int]
+    # Ключи пунктов, которые не задавались (скрыты от пациента). Сумма
+    # посчитана без них — сравнивать с порогами полной шкалы нужно с поправкой.
+    omitted_items: tuple[str, ...] = ()
 
 
 class FlagKind:
@@ -83,6 +95,7 @@ class FlagKind:
     без привязки к конкретному расстройству (диагноз — функция врача)."""
     SUICIDAL_IDEATION = "SUICIDAL_IDEATION"  # любой scale.suicidal_item (пункт о суициде) >= 1
     SEVERE_SYMPTOMS = "SEVERE_SYMPTOMS"      # сумма баллов шкалы достигла собственного порога SEVERE
+    NOT_ASSESSED = "NOT_ASSESSED"            # скрининговый пункт скрыт от пациента → риск не оценён
 
 
 @dataclass(frozen=True)
@@ -100,14 +113,14 @@ class Trend:
 
 
 __all__ = [
-    "Severity",
-    "AUDIENCE_PATIENT",
     "AUDIENCE_CLINICIAN",
-    "Triage",
-    "ScaleItem",
-    "Scale",
-    "ScaleResult",
-    "RiskFlag",
+    "AUDIENCE_PATIENT",
     "FlagKind",
+    "RiskFlag",
+    "Scale",
+    "ScaleItem",
+    "ScaleResult",
+    "Severity",
     "Trend",
+    "Triage",
 ]

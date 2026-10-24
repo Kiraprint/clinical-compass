@@ -2,7 +2,14 @@
 // Эти флоу недостижимы на предсозданных пациентах симулятора (они уже согласны),
 // поэтому покрывают демо-вход и ежедневные действия пациента.
 import { expect, test } from "@playwright/test";
-import { DEMO_PASSWORD, freshPatientEmail, login, registerPatient } from "./helpers";
+import {
+  DEMO_PASSWORD,
+  freshPatientEmail,
+  login,
+  openScreening,
+  patientSection,
+  registerPatient,
+} from "./helpers";
 
 test.describe("Пациент: первый запуск и ежедневные действия", () => {
   test("регистрация → экран согласия → подпись → доступен скрининг", async ({ page }) => {
@@ -12,13 +19,13 @@ test.describe("Пациент: первый запуск и ежедневные
     await expect(
       page.getByRole("heading", { name: "Согласие на обработку персональных данных" })
     ).toBeVisible();
-    await expect(page.getByRole("button", { name: "Скрининг", exact: true })).toBeHidden();
+    await expect(page.getByText("Скрининг, назначенный врачом")).toBeHidden();
 
-    // После подписи — вкладки, скрининг доступен.
+    // После подписи — главный экран с баннером скрининга (FR-33 A).
     await page.getByRole("button", { name: "Даю согласие" }).click();
     await expect(page.getByText("Согласие активно")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Скрининг", exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "Скрининг", exact: true }).click();
+    await expect(page.getByText("Скрининг, назначенный врачом")).toBeVisible();
+    await openScreening(page);
 
     // item 1: пациент не выбирает шкалу — селекта нет, назначена врачом (дефолт PHQ-9).
     await expect(page.locator("select")).toHaveCount(0);
@@ -31,7 +38,7 @@ test.describe("Пациент: первый запуск и ежедневные
     await registerPatient(page, email);
     await page.getByRole("button", { name: "Даю согласие" }).click();
 
-    await page.getByRole("button", { name: "Сегодня", exact: true }).click();
+    // Главный экран — это и есть «Сегодня»: чек-ин сразу под напоминаниями.
     await page.getByRole("button", { name: "Начать чек-ин" }).click();
 
     // Первый шаг — 7 пунктов ядра (docs/16 §1); отвечаем первым вариантом.
@@ -57,20 +64,19 @@ test.describe("Пациент: первый запуск и ежедневные
 
   test("дневник: запись из «Сегодня» появляется в истории", async ({ page }) => {
     await login(page, "p1@compass.demo", DEMO_PASSWORD);
-    await page.getByRole("button", { name: "Сегодня", exact: true }).click();
 
     const content = `Запись e2e ${Date.now()}`;
     await page.locator("#today-diary").fill(content);
     await page.getByRole("button", { name: "Сохранить за сегодня" }).click();
     await expect(page.getByText(content)).toBeVisible();
 
-    await page.getByRole("button", { name: "Дневник" }).click();
+    await patientSection(page, "Дневник");
     await expect(page.getByText(content)).toBeVisible();
   });
 
   test("тренд пациента: график и последний балл при наличии истории", async ({ page }) => {
     await login(page, "p1@compass.demo", DEMO_PASSWORD);
-    await page.getByRole("button", { name: "Мой тренд" }).click();
+    await patientSection(page, "Мой тренд");
 
     // 14 скринингов → polyline рисуется, есть текст с последним баллом и дельтой.
     await expect(page.locator("svg polyline")).toBeVisible();

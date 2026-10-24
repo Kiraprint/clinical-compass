@@ -6,7 +6,7 @@
 
 ## 1. Стратегия
 
-- Пирамида (фактически достигнуто на 2026-10-24, см. `core/tests` + `api/tests` + `ml/tests`): unit (ядро) 158, integration (API+БД) 640 (из них 78 — обогащение КБ, FR-20; 18 — rate limiter на общем Redis-счётчике, docs/03 §12; 43 — деперсонализация/NER/remote, docs/12; 9 — клиент ML-сайдкара, docs/08 §4), ML-сайдкар в stub-режиме (без БД/GPU/torch) 30, e2e (UI-флоу) 42. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
+- Пирамида (фактически достигнуто на 2026-10-25, см. `core/tests` + `api/tests` + `ml/tests` + `e2e/tests`): unit (ядро) 158, integration (API+БД) 652 (из них 78 — обогащение КБ, FR-20; 18 — rate limiter на общем Redis-счётчике, docs/03 §12; 43 — деперсонализация/NER/remote, docs/12; 9 — клиент ML-сайдкара, docs/08 §4; 9 — пациентский кабинет и FR-34 в `test_patient_ux.py`), ML-сайдкар в stub-режиме (без БД/GPU/torch) 30, e2e (UI-флоу) 42. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
 - Ядро: 100% детерминированные чистые функции — табличные параметризованные тесты порогов.
 - Интеграция: реальные HTTP-запросы к тестовому Postgres (отдельная БД), не мок-эхо.
 - Запрещены тесты «на копирование»: только поведение контрактов (вход → выход/инвариант/ошибка).
@@ -287,6 +287,22 @@
 | `test_kb_search_finds_new_drugs` (`test_assistant.py`): «сертралин дозировка», «эсциталопрам противопоказания» | `kb.hybrid_search` | в топе чанки `drug-zoloft*` / `drug-escitalopram-canon-safety` с `topic=ЛЕКАРСТВА` |
 
 
+### 3.1.1 Пациентский кабинет и FR-34 (`test_patient_ux.py`)
+
+| Тест | Given | When | Then |
+|---|---|---|---|
+| `test_catalog_hides_suicidal_item` | шкала PHQ-9 | `GET /questionnaires` | у PHQ-9 ровно 8 пунктов `q1..q8`, текста про «умереть» нет |
+| `test_screening_without_item9_scores_phq8` | ответы `q1..q8 = 0` | `finish` | `total_score=0`, GREEN, `omitted_items=["q9"]`, в `risk_flags` только `NOT_ASSESSED` (не `SUICIDAL_IDEATION`) |
+| `test_screening_without_item9_can_be_red` | `q1..q8 = 3` | `finish` | `total_score=24` (максимум неполной шкалы), SEVERE → RED, эскалация создана |
+| `test_legacy_client_item9_answer_still_scored` | старый клиент присылает `q9=2` | `finish` | балл учитывается, `SUICIDAL_IDEATION` → RED (явно сообщённый риск не теряем) |
+| `test_chat_auto_reply_once_per_moscow_day` | два сообщения подряд | `POST /chat/thread` ×2 | первый ответ `FAQ`, второй `reply=null`; в треде 3 сообщения и 1 `SYSTEM`; перенос SYSTEM-строки на вчера снова разрешает ответ |
+| `test_chat_hotline_copy_is_supportive` | RED-скрининг | `POST /chat/thread` | ответ `HOTLINE` без «специалисты уведомлены» / «требуется внимание» / обещания мгновенного контакта |
+| `test_me_drugs_returns_only_own_prescriptions` | препарат пациента + карточка ГРЛС | `GET /me/drugs` | только своё назначение с совпавшей карточкой, чужого препарата нет |
+| `test_checkin_history_aggregates_without_raw_answers` | завершённый сеанс с ответами ядра | `GET /checkins/history?days=7` | `{date, wellbeing, safety}`, `wellbeing` — среднее 0..4, сырых ответов в payload нет |
+| `test_contacts_include_fio_and_email` | пациент с ФИО | `GET /profile/contacts` | в ответе `fio` и `email` (только self-service) |
+
+`test_adverse_events.py::test_patient_report_has_no_severity_until_clinician_verifies`: пациент шлёт НЯ без `severity` → 201 и `severity: null` в БД, врач `PATCH` ставит `moderate` (FR-34). `test_screening.py::test_finish_incomplete_422`: неполный набор (7 из 8 пунктов) → 422 `VALIDATION`.
+
 ### 3.2 Async-рантайм, пулы и кеш корпуса
 
 | Тест | Given | When | Then |
@@ -356,9 +372,11 @@
 
 ## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/`)
 
+Навигация пациента: разделы — через меню «Меню» (три полоски), скрининг — баннером «Перейти к скринингу», чат — плашкой «Чат с врачом» (хелперы `openPatientMenu`/`patientSection`/`openScreening`/`openPatientChat`).
+
 `pitch.spec.ts` — питч-сценарий (docs/04 §6):
-1. Пациент: скрининг с суицидальным ответом (PHQ-9 item 9 = 3) → RED + контакты помощи (8-800-2000-122, 112).
-2. Пациент с RED-историей: чат с горячей линией отвечает контактами.
+1. Пациент: скрининг по 8 пунктам (PHQ-8, пункт 9 не предъявляется; все по 3 → 24 ⇒ RED) + примечание «Пункт 9 не задавался» + контакты помощи (8-800-2000-122, 112).
+2. Свежий пациент с RED-историей: чат-плашка («Чат с врачом») отвечает горячей линией один раз в сутки — второе сообщение сохраняется без автоответа.
 3. Врач: вход с 2FA (TOTP), фильтр RED, открытие отчёта первого RED-пациента.
 
 `patient-flows.spec.ts` — первый запуск и ежедневные действия (недостижимы на предсозданных пациентах симулятора, у которых согласие уже есть):

@@ -210,23 +210,26 @@ async def list_patients(db: AsyncSession, clinician_id, triage: str | None = Non
 
 async def patient_timeline(db: AsyncSession, patient_id, days: int) -> dict:
     since = datetime.now(timezone.utc) - timedelta(days=days)
-    rows = (await db.scalars(
-        select(Assessment)
+    rows = (await db.execute(
+        select(Assessment, Run.questionnaire_code)
+        .join(Run, Run.id == Assessment.run_id)
         .where(Assessment.patient_id == patient_id, Assessment.computed_at >= since)
         .order_by(Assessment.computed_at.asc())
     )).all()
     runs = [
         {
             "assessment_id": str(a.id),
+            "questionnaire_code": code,
             "total_score": a.total_score,
             "severity": a.severity,
             "triage": a.triage,
             "computed_at": a.computed_at.isoformat(),
         }
-        for a in rows
+        for a, code in rows
     ]
     results = [
-        ScaleResult(code="", total_score=a.total_score, severity=a.severity, per_item={}) for a in rows
+        ScaleResult(code=code, total_score=a.total_score, severity=a.severity, per_item={})
+        for a, code in rows
     ]
     t = trends(results)
     return {
@@ -308,6 +311,13 @@ async def _patient_card(db: AsyncSession, patient_id) -> dict:
                 "total_score": last.total_score,
                 "severity": last.severity,
                 "triage": last.triage,
+                # FR-34: NOT_ASSESSED означает, что пункт 9 пациенту не задавался,
+                # то есть риск не оценён, а не отрицателен.
+                "risk_flags": last.risk_flags or [],
+                "omitted_items": [
+                    f.get("item_key") for f in (last.risk_flags or [])
+                    if f.get("kind") == "NOT_ASSESSED" and f.get("item_key")
+                ],
                 "computed_at": last.computed_at.isoformat(),
             }
             if last

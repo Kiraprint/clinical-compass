@@ -39,7 +39,7 @@ async def list_questionnaires(user: User = Depends(require_consent), db: AsyncSe
             "title": s.title,
             "items": [
                 {"key": i.key, "text": i.text, "max_value": i.max_value, "anchors": list(i.anchors)}
-                for i in s.items
+                for i in s.patient_items()
             ],
         }
         for s in patient_administered_scales()

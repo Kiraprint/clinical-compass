@@ -390,3 +390,33 @@ def test_onset_date_is_validated_by_moscow_calendar(client, monkeypatch):
         headers=h,
     )
     assert future.status_code == 422, future.text
+
+
+def test_patient_report_has_no_severity_until_clinician_verifies(client):
+    """FR-33/34: пациент не оценивает тяжесть — колонка NULL до проверки врачом."""
+    h, pid = patient_ctx(client, "ae-nosev-p@test.ru")
+    ch, cid = clinician_ctx(client, "ae-nosev-doc@test.ru")
+    _roster(pid, cid)
+
+    resp = client.post(
+        "/api/v1/me/adverse-events",
+        json={"event_text": "Сыпь на предплечье", "onset_date": "2026-10-20"},
+        headers=h,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["severity"] is None
+    assert body["status"] == "pending"
+
+    with db.SyncSessionLocal() as s:
+        ev = s.execute(select(AdverseEvent).where(AdverseEvent.id == uuid.UUID(body["id"]))).scalar_one()
+        assert ev.severity is None
+
+    # Врач выставляет шкалу при проверке.
+    verdict = client.patch(
+        f"/api/v1/clinician/patients/{pid}/adverse-events/{body['id']}",
+        json={"status": "confirmed", "severity": "moderate"},
+        headers=ch,
+    )
+    assert verdict.status_code == 200, verdict.text
+    assert verdict.json()["severity"] == "moderate"

@@ -105,6 +105,22 @@ async def _validate_answers(db: AsyncSession, run: Run, answers: Mapping[str, in
             raise Problem(422, "VALIDATION", f"Значение {value} вне диапазона для пункта {key}")
 
 
+def _omitted_items(scale, mode: str, answers: Mapping[str, int]) -> tuple[str, ...]:
+    """Пункты, скрытые от пациента, на которые он не ответил (PHQ-9 q9).
+
+    Новый каталог и скрининг q9 не предъявляют → пункт считается не заданным,
+    сумма идёт по остальным, в отчёт попадает флаг NOT_ASSESSED. Если старый
+    клиент всё же прислал ответ на q9, он учитывается как раньше (в т.ч. как
+    SUICIDAL_IDEATION → RED): терять явно сообщённый риск нельзя.
+    Клиницистский прогон (HDRS-17) заполняется целиком — скрытых пунктов нет.
+    """
+    if mode != "SCREENING":
+        return ()
+    return tuple(
+        i.key for i in scale.items if not i.patient_visible and i.key not in answers
+    )
+
+
 async def add_answers(db: AsyncSession, run_id, patient_id, answers: Mapping[str, int]) -> None:
     run = await _own_run(db, run_id, patient_id)
     if run.finished_at is not None:
@@ -127,11 +143,12 @@ async def finish_screening(db: AsyncSession, run_id, patient_id, *, audit_action
     scale = _scale(run.questionnaire_code)
     rows = (await db.scalars(select(Answer).where(Answer.run_id == run_id))).all()
     answers = {a.item_key: a.value for a in rows}
+    omitted = _omitted_items(scale, run.mode, answers)
     try:
-        result = score(scale, answers)
+        result = score(scale, answers, omitted=omitted)
     except ValueError as exc:
         raise Problem(422, "VALIDATION", str(exc))
-    flags = risk_flags(scale, answers)
+    flags = risk_flags(scale, answers, omitted=omitted)
     level = triage(result, flags)
 
     assessment = Assessment(
@@ -175,6 +192,7 @@ async def finish_screening(db: AsyncSession, run_id, patient_id, *, audit_action
         "triage": assessment.triage,
         "risk_flags": assessment.risk_flags,
         "computed_at": assessment.computed_at.isoformat(),
+        "omitted_items": list(result.omitted_items),
     }
     if escalation is not None:
         await db.refresh(escalation)

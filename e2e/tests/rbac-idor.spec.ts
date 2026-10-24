@@ -80,7 +80,7 @@ test.describe("RBAC и IDOR: негативные проверки", () => {
     await page.getByLabel("Пароль").fill(DEMO_PASSWORD);
     await page.getByRole("button", { name: "Войти" }).click();
 
-    await expect(page.getByRole("button", { name: "Скрининг", exact: true })).toBeVisible();
+    await expect(page.getByText("Скрининг, назначенный врачом")).toBeVisible();
     // Клинические/админ-элементы недоступны пациенту в UI.
     await expect(page.getByRole("button", { name: "Пациенты" })).toHaveCount(0);
     await expect(page.getByRole("heading", { name: "Журнал аудита (append-only)" })).toHaveCount(0);
