@@ -1,7 +1,8 @@
 """Клиент ML-сайдкара: remote-эмбеддер и remote-реранк (docs/08 §4.7).
 
-Проверяем контракт без GPU и без сайдкара: HTTP подменяется фейковым
-клиентом (`app.services.ml_client.get_ml_client`), Qdrant — фейковым
+Проверяем контракт без GPU и без сайдкара: функции клиента
+(`app.services.ml_client.ping/embed/rerank/enabled`) подменяются фейками
+рядом с самим модулем, Qdrant — фейковым
 `query_points`. Покрытие:
 - размерность из сайдкара должна совпадать с профилем (иначе громкая ошибка);
 - `remote`-профиль передаёт id профиля и kind=query|passage;
@@ -27,8 +28,8 @@ DOCS = [
 ]
 
 
-class FakeMlClient:
-    """Фейк контракта сайдкара; пишет принятые запросы в `calls`."""
+class FakeMl:
+    """Фейк функций контракта сайдкара: те же имена, что в ml_client."""
 
     def __init__(self, *, dense_size: int = 1024, scores: list[float] | None = None, down: bool = False):
         self.base_url = "http://ml-test:8080"
@@ -37,24 +38,21 @@ class FakeMlClient:
         self.down = down
         self.calls: list[tuple[str, dict]] = []
 
-    def health(self, **_kw):
+    def _guard(self) -> None:
         if self.down:
             raise MlUnavailable("connection refused")
+
+    def ping(self):
+        self._guard()
         return {"status": "ok", "device": "cuda", "models": {"qwen3-0.6b": {"dense_size": self.dense_size}}}
 
-    def embeddings(self, texts, *, kind="query", profile="", timeout_s=None):
-        if self.down:
-            raise MlUnavailable("connection refused")
+    def embed(self, texts, *, kind="query", profile=""):
+        self._guard()
         self.calls.append(("embeddings", {"kind": kind, "profile": profile, "texts": list(texts)}))
-        return {
-            "profile": profile,
-            "dense_size": self.dense_size,
-            "vectors": [[0.1] * self.dense_size for _ in texts],
-        }
+        return [[0.1] * self.dense_size for _ in texts]
 
-    def rerank(self, query, documents, *, top_k=0, timeout_s=None):
-        if self.down:
-            raise MlUnavailable("connection refused")
+    def rerank(self, query, documents, *, top_k=None):
+        self._guard()
         self.calls.append(("rerank", {"query": query, "documents": list(documents), "top_k": top_k}))
         if self._scores is not None:
             return self._scores
@@ -86,12 +84,24 @@ class FakeQdrant:
         )
 
 
+def _patch(monkeypatch, fake: "FakeMl") -> None:
+    """Подменить функции клиента фейком (контракт тот же, сети нет)."""
+    monkeypatch.setattr(ml_client, "enabled", lambda: True)
+    monkeypatch.setattr(ml_client, "ping", fake.ping)
+    monkeypatch.setattr(ml_client, "embed", fake.embed)
+    monkeypatch.setattr(ml_client, "rerank", fake.rerank)
+    monkeypatch.setattr(settings, "ml_url", fake.base_url)
+
+
 @pytest.fixture
 def fake_client(monkeypatch):
-    client = FakeMlClient()
-    monkeypatch.setattr(ml_client, "get_ml_client", lambda: client)
-    monkeypatch.setattr(settings, "ml_url", client.base_url)
-    return client
+    fake = FakeMl()
+    monkeypatch.setattr(ml_client, "enabled", lambda: True)
+    monkeypatch.setattr(ml_client, "ping", fake.ping)
+    monkeypatch.setattr(ml_client, "embed", fake.embed)
+    monkeypatch.setattr(ml_client, "rerank", fake.rerank)
+    monkeypatch.setattr(settings, "ml_url", fake.base_url)
+    return fake
 
 
 def test_remote_embedder_dimension_mismatch_raises(fake_client):
@@ -103,9 +113,7 @@ def test_remote_embedder_dimension_mismatch_raises(fake_client):
 
 def test_remote_embedder_without_url_raises(monkeypatch):
     monkeypatch.setattr(settings, "ml_url", "")
-    empty = FakeMlClient()
-    empty.base_url = ""
-    monkeypatch.setattr(ml_client, "get_ml_client", lambda: empty)
+    monkeypatch.setattr(ml_client, "enabled", lambda: False)
     with pytest.raises(EmbedderConfigError) as exc:
         RemoteEmbedder("qwen3-0.6b", expected_dense_size=1024)
     assert "CC_ML_URL" in str(exc.value)
@@ -125,9 +133,8 @@ def test_sidecar_down_degrades_to_rrf_order(monkeypatch):
     """Падение сайдкара не роняет поиск: выдача совпадает с путём без реранка."""
     client = FakeQdrant(DOCS)
     planned = kb.hybrid_search(client, _Hash(), "шкала PHQ-9", limit=3)
-    down = FakeMlClient(down=True)
-    monkeypatch.setattr(ml_client, "get_ml_client", lambda: down)
-    monkeypatch.setattr(settings, "ml_url", down.base_url)
+    down = FakeMl(down=True)
+    _patch(monkeypatch, down)
     reranker = RemoteReranker()
     assert [h["guideline_id"] for h in kb.hybrid_search(client, _Hash(), "шкала PHQ-9", limit=3, reranker=reranker)] == [
         h["guideline_id"] for h in planned
@@ -138,9 +145,8 @@ def test_remote_rerank_never_resurrects_excluded(monkeypatch):
     client = FakeQdrant(DOCS)
     # сайдкар ставит исключённый документ первым — фильтр всё равно обязан его убрать
     scores = [1.0, 2.0, 3.0]
-    ml = FakeMlClient(scores=scores)
-    monkeypatch.setattr(ml_client, "get_ml_client", lambda: ml)
-    monkeypatch.setattr(settings, "ml_url", ml.base_url)
+    ml = FakeMl(scores=scores)
+    _patch(monkeypatch, ml)
     hits = kb.hybrid_search(
         client, _Hash(), "шкала тревоги", limit=2, exclude_ids={"g-c"}, reranker=RemoteReranker()
     )
@@ -150,9 +156,8 @@ def test_remote_rerank_never_resurrects_excluded(monkeypatch):
 
 def test_remote_rerank_uses_retrieval_score_for_gate(monkeypatch):
     client = FakeQdrant(DOCS)
-    ml = FakeMlClient(scores=[-5.0, 1.0, 2.0])
-    monkeypatch.setattr(ml_client, "get_ml_client", lambda: ml)
-    monkeypatch.setattr(settings, "ml_url", ml.base_url)
+    ml = FakeMl(scores=[-5.0, 1.0, 2.0])
+    _patch(monkeypatch, ml)
     hits = kb.hybrid_search(client, _Hash(), "шкала PHQ-9", limit=3, reranker=RemoteReranker())
     from app.services.agent import _dense_top_gate
 
@@ -162,10 +167,12 @@ def test_remote_rerank_uses_retrieval_score_for_gate(monkeypatch):
     assert _dense_top_gate(hits, 0.45)  # порог смотрит на retrieval_score, а не на logit
 
 
-def test_ml_client_requires_url():
-    client = ml_client.MlClient("")
+def test_ml_client_requires_url(monkeypatch):
+    """Без CC_ML_URL клиент падает MlUnavailable — второй клиент не заводим."""
+    monkeypatch.setattr(settings, "ml_url", "")
+    assert ml_client.enabled() is False
     with pytest.raises(MlUnavailable):
-        client.embeddings(["x"])
+        ml_client.embed(["x"])
 
 
 class _Hash:

@@ -147,28 +147,20 @@ class RemoteReranker:
 
     model_id = "remote"
 
-    def __init__(self, *, timeout_s: float | None = None) -> None:
-        from app.services.ml_client import get_ml_client
+    def __init__(self) -> None:
+        from app.services import ml_client
 
-        client = get_ml_client()
-        if not client.base_url:
+        if not ml_client.enabled():
             raise RuntimeError("CC_RERANKER=remote требует CC_ML_URL (base-url ML-сайдкара)")
-        self._client = client
-        self._timeout_s = timeout_s
 
     def score(self, query: str, texts: list[str]) -> list[float]:
+        # Повтор на сетевой сбой/5xx делает сам клиент (ml_client.rerank):
+        # второй цикл ретраев здесь только удвоил бы таймаут запроса.
         if not texts:
             return []
-        from app.services.ml_client import MlUnavailable
+        from app.services import ml_client
 
-        for attempt in (0, 1):
-            try:
-                return self._client.rerank(query, texts, top_k=0, timeout_s=self._timeout_s)
-            except MlUnavailable:
-                if attempt:
-                    raise
-                log.warning("реранк сайдкара: повтор после ошибки транспорта")
-        return []
+        return ml_client.rerank(query, texts)
 
     def rerank(
         self,

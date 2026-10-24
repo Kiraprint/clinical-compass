@@ -71,12 +71,6 @@ class Settings(BaseSettings):
     retrieval_candidates: int = 0
     # CC_RRF_K: константа RRF-слияния dense+sparse (Qdrant RrfQuery, docs/08 §4).
     rrf_k: int = 60
-    # CC_ML_URL: base-url ML-сайдкара на GPU (в compose — http://ml:8080).
-    # Пусто → профиль remote и CC_RERANKER=remote недоступны: явный выбор падает
-    # громко, недоступность в рантайме деградирует к RRF (docs/08 §4.7).
-    ml_url: str = ""
-    ml_token: str = ""  # CC_ML_TOKEN: необязательный заголовок X-CC-ML-Token
-    ml_timeout_s: float = 5.0  # короткий таймаут: поиск не висит на упавшем сайдкаре
     # CC_KB_CORPUS_TTL_SECONDS: TTL кеша корпуса KB (kb_seed.build_corpus) в
     # процессе API. In-process писателей drugs нет (seed — отдельный CLI, он
     # зовёт clear_corpus_cache), поэтому TTL — единственная runtime-инвалидация.
@@ -109,11 +103,25 @@ class Settings(BaseSettings):
     # Требует и этот флаг, и CC_ASSISTANT_LLM_URL: текст переписки уходит в LLM
     # только при явном включении и (рекомендуется) локальной модели — docs/17, docs/10.
     chat_insights_enabled: bool = False  # CC_CHAT_INSIGHTS_ENABLED
-    # CC_DEPERSONALIZE_NER: off | natasha | rubert (docs/12). true/1 = natasha
-    # (обратная совместимость). rubert — redmadrobot-rnd/rubert-base-pii-ner:
-    # Apache-2.0, FIO F1 0.933 на redmadrobot-rnd/pii_benchmark (bench/ner).
+    # CC_CHAT_INSIGHTS_TIMEOUT: таймаут одного вызова при извлечении фактов.
+    # Живой шлюз отвечает 12–13 с, прежний общий 30-секундный лимит давал
+    # ложные 503; в chat_insights один ретрай на таймаут (docs/04 FR-31).
+    chat_insights_timeout: float = Field(default=60.0, gt=0)
+    # CC_DEPERSONALIZE_NER: off | natasha | rubert | hybrid | remote (docs/12).
+    # true/1 = natasha (обратная совместимость). rubert — redmadrobot-rnd/
+    # rubert-base-pii-ner: Apache-2.0, FIO F1 0.933 (bench/ner); hybrid — rubert
+    # + правила; remote — GPU-sidecar по HTTP (прод-путь, api без torch).
     depersonalize_ner: str = "off"
     ner_model: str = "redmadrobot-rnd/rubert-base-pii-ner"  # CC_NER_MODEL
+    # CC_ML_URL: адрес ML-сайдкара (эмбеддинги, реранк, маскирование ПДн) —
+    # GPU-сервис `ml` во внутренней сети compose (docs/08 §4). Пусто → сайдкар
+    # не используется: остаются локальные профили эмбеддера и regex-путь ПДн.
+    ml_url: str = ""
+    ml_token: str = ""  # CC_ML_TOKEN: общий секрет api ↔ сайдкар (заголовок X-CC-ML-Token)
+    # CC_ML_TIMEOUT: сек на один вызов сайдкара. Метки ПДн ждут этот таймаут в
+    # запросе, поэтому он короче LLM-таймаута; при недоступном сайдкаре —
+    # MlUnavailable (в прод-режиме egress ПДн fail-closed, docs/12).
+    ml_timeout: float = Field(default=5.0, gt=0)
     data_key: str = ""  # CC_DATA_KEY: симметричный ключ pgcrypto для free-text ПДн (прод — KMS)
     # F3: инверсия fail-fast. По умолчанию демо-секреты запрещены; демо/тест
     # окружение явно ставит CC_ALLOW_DEMO_SECRETS=true. prod-деплой compose as-is
@@ -183,6 +191,28 @@ class Settings(BaseSettings):
                 raise ValueError("CC_PROD_MODE несовместим с CC_ALLOW_DEMO_SECRETS")
             if not self.require_otp:
                 raise ValueError("CC_PROD_MODE требует CC_REQUIRE_OTP=true (2FA обязателен в проде)")
+            # Fail-closed деперсонализации (docs/10, docs/12): как только настроен
+            # LLM-egress, regex-пути недостаточно (свободные ФИО не в ростре
+            # утекали). Прод обязан иметь ML-backend; недоступность модели на
+            # старте/в запросе даст 503 DEPERSONALIZATION_UNAVAILABLE.
+            if self.assistant_llm_url.strip() or self.chat_insights_enabled:
+                # Два допустимых прод-контура (docs/12): GPU-sidecar по HTTP
+                # (remote + CC_ML_URL, рекомендуется) или локальный extra
+                # (rubert/natasha/hybrid, torch внутри api-образа).
+                backend = str(self.depersonalize_ner).strip().lower()
+                if backend in ("", "off", "false", "0", "none", "no"):
+                    raise ValueError(
+                        "CC_PROD_MODE с LLM-egress требует ML-деперсонализацию: "
+                        "CC_DEPERSONALIZE_NER=remote + CC_ML_URL (GPU-sidecar, "
+                        "рекомендуется) либо hybrid/rubert/natasha + extra "
+                        "api[ner-rubert]"
+                    )
+                if backend == "remote" and not self.ml_url.strip():
+                    raise ValueError(
+                        "CC_DEPERSONALIZE_NER=remote требует CC_ML_URL "
+                        "(например http://ml:8080); альтернатива — локальный "
+                        "hybrid/rubert/natasha + extra api[ner-rubert]"
+                    )
         return self
 
 

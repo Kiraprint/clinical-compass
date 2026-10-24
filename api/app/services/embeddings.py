@@ -325,10 +325,10 @@ class RemoteEmbedder:
     use_sparse = False
 
     def __init__(self, profile_id: str, *, expected_dense_size: int = 0) -> None:
-        from app.services.ml_client import MlUnavailable, get_ml_client
+        from app.services import ml_client
+        from app.services.ml_client import MlUnavailable
 
-        client = get_ml_client()
-        if not client.base_url:
+        if not ml_client.enabled():
             raise EmbedderConfigError(
                 f"CC_EMBEDDER={profile_id} — профиль ML-сайдкара, но CC_ML_URL не задан. "
                 "Укажите base-url сайдкара (compose: CC_ML_URL=http://ml:8080) "
@@ -336,14 +336,13 @@ class RemoteEmbedder:
             )
         self.model_id = profile_id
         self.profile_id = profile_id
-        self._client = client
         self._lexical = HashEmbedder()
         self._cache: dict[tuple[str, str], list[float]] = {}
         try:
-            health = client.health()
+            health = ml_client.ping()
         except MlUnavailable as exc:
             raise EmbedderConfigError(
-                f"ML-сайдкар недоступен по CC_ML_URL={client.base_url}: {exc}. "
+                f"ML-сайдкар недоступен по CC_ML_URL={settings.ml_url}: {exc}. "
                 "Поиск без эмбеддера невозможен — проверьте сервис `ml` (GET /health)."
             ) from exc
         models = health.get("models") or {}
@@ -356,7 +355,8 @@ class RemoteEmbedder:
         if not size:
             # /health без размерности — узнаём из первого же ответа
             try:
-                size = int(client.embeddings(["warmup"], kind="passage", profile=profile_id).get("dense_size") or 0)
+                vec = ml_client.embed(["warmup"], kind="passage", profile=profile_id)[0]
+                size = len(vec)
             except MlUnavailable as exc:
                 raise EmbedderConfigError(f"ML-сайдкар не вернул размерность для '{profile_id}': {exc}") from exc
         if not size:
@@ -374,10 +374,10 @@ class RemoteEmbedder:
         hit = self._cache.get(key)
         if hit is not None:
             return hit
+        from app.services import ml_client
         from app.services.ml_client import MlUnavailable
 
-        data = self._client.embeddings([text], kind=kind, profile=self.profile_id)
-        vectors = data.get("vectors") or []
+        vectors = ml_client.embed([text], kind=kind, profile=self.profile_id)
         if not vectors or not isinstance(vectors[0], list):
             raise MlUnavailable("/v1/embeddings: пустой ответ")
         vec = [float(v) for v in vectors[0]]

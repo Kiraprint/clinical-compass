@@ -13,10 +13,9 @@ import re
 from langgraph.graph import END, START, StateGraph
 
 from compass.agent import RAGChunk, build_rag_answer, detect_redline
-from compass.depersonalize import depersonalize
 
 from app.config import settings
-from app.services.depersonalize import build_name_extractor, ner_backend
+from app.services.depersonalize import scrub_text
 
 from app.services import kb as kb_store
 from app.services.embeddings import get_embedder, profile_default_min_score
@@ -323,9 +322,10 @@ def scrub_for_llm(
     свободный текст карты (ФИО, дневниковые записи). Числовые поля (баллы,
     триаж, тренд) — не ПДн и остаются как есть.
 
-    При CC_DEPERSONALIZE_NER=true (и установленном natasha) к deny-list
-    добавляются имена из NER-детекции — для ФИО, неизвестных системе
-    (docs/12 §NER).
+    Текст проходит единый span-based путь services.depersonalize.scrub_text:
+    структурные правила + контрольные числа + ML-backend (ФИО/адреса) +
+    deny-list ростра. В CC_PROD_MODE при недоступном ML-backend поднимается
+    DepersonalizationUnavailable → 503, сырой текст в LLM не уходит.
     """
     counts: dict[str, int] = {}
 
@@ -333,27 +333,7 @@ def scrub_for_llm(
         for f in found:
             counts[f.kind] = counts.get(f.kind, 0) + 1
 
-    # NER-расширение: имена из запроса и карты → в deny-list (если включён флаг).
-    extra_names: list[str] = []
-    if ner_backend() != "off":
-        extractor = build_name_extractor()
-        texts = [query]
-        if patient_context is not None:
-            if patient_context.get("fio"):
-                texts.append(str(patient_context["fio"]))
-            texts.extend(
-                str(e.get("content"))
-                for e in (patient_context.get("recent_diary") or [])
-                if e.get("content")
-            )
-        for t in texts:
-            for name in extractor.extract(t):
-                if name not in extra_names:
-                    extra_names.append(name)
-    if extra_names:
-        names = list(names or []) + extra_names
-
-    masked_query = depersonalize(query, names=names)
+    masked_query = scrub_text(query, names=names)
     _add(masked_query.findings)
 
     masked_ctx = None
@@ -363,7 +343,7 @@ def scrub_for_llm(
         if fio:
             # ФИО пациента маскируется всегда, даже если его нет в deny-list
             # (врач мог открыть карту по id без явного упоминания).
-            name_findings = depersonalize(str(fio), names=names or [str(fio)]).findings
+            name_findings = scrub_text(str(fio), names=names or [str(fio)]).findings
             _add(name_findings)
             masked_ctx["fio"] = "[ПАЦИЕНТ]"
         diary = masked_ctx.get("recent_diary") or []
@@ -371,7 +351,7 @@ def scrub_for_llm(
         for entry in diary:
             content = entry.get("content")
             if content:
-                scrubbed = depersonalize(str(content), names=names)
+                scrubbed = scrub_text(str(content), names=names)
                 _add(scrubbed.findings)
                 masked_diary.append({**entry, "content": scrubbed.text})
             else:

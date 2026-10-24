@@ -337,3 +337,21 @@ def test_consent_revoke_deletes_insights(client, monkeypatch, db_session):
 
     assert client.post("/api/v1/consent/revoke", headers=h).status_code == 204
     assert db_session.scalar(text("select count(*) from chat_insights")) == 0
+
+def test_long_message_masked_before_truncation(client, monkeypatch):
+    """Телефон на границе 500 символов не должен утекать обрезанным хвостом.
+
+    Регресс ревью PR #40: раньше сообщение резалось до маскирования, и
+    «…+7926» уходил в LLM как обычный текст.
+    """
+    _enable(monkeypatch)
+    captured = _fake_llm(monkeypatch, json.dumps(FACTS))
+    h, pid, c, _ = _setup(client, "pt@test.ru", "ct@test.ru")
+    filler = "а" * 495
+    body = filler + "+79261234567 и ещё немного текста"
+    assert client.post("/api/v1/chat/thread", json={"content": body}, headers=h).status_code == 201
+
+    assert _analyze(client, c, pid).status_code == 200
+    prompt = json.dumps(captured["body"], ensure_ascii=False)
+    assert "79261234567" not in prompt
+    assert "+7926" not in prompt

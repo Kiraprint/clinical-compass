@@ -67,6 +67,11 @@ services:
       context: ..
       dockerfile: api/Dockerfile
     restart: unless-stopped
+    # ML-сайдкар живёт только во внутренней mlnet; остальные зависимости —
+    # в default. У ml нет egress и нет доступа к postgres/qdrant/redis.
+    networks:
+      - default
+      - mlnet
     environment:
       # F3: секреты читаются из .env (docker compose подхватывает автоматически).
       # Демо-значения — только дефолты, если .env отсутствует. Прод: `tools/gen-secrets.sh`
@@ -90,6 +95,12 @@ services:
       CC_CHAT_INSIGHTS_ENABLED: "${CC_CHAT_INSIGHTS_ENABLED:-false}"
       <<: *vapid
       CC_QDRANT_URL: http://qdrant:6333
+      # ML-сайдкар (docs/08 §4): GPU-профиль, http://ml:8080 во внутренней
+      # сети. Без профиля gpu сайдкара нет — на не-GPU хосте CC_ML_URL=
+      # (api остаётся на hash/regex).
+      CC_ML_URL: "${CC_ML_URL:-http://ml:8080}"
+      CC_ML_TOKEN: "${CC_ML_TOKEN:-}"
+      CC_ML_TIMEOUT: "${CC_ML_TIMEOUT:-5}"
       # Rate limiter логинов (docs/03 §12): общий бэкенд для всех воркеров и
       # реплик api. Пусто → memory (бюджет на процесс); auto при живом Redis.
       CC_REDIS_URL: "${CC_REDIS_URL:-redis://redis:6379/0}"
@@ -240,6 +251,80 @@ services:
       - "8090"
     restart: unless-stopped
 
+  # ML-сайдкар (docs/08 §4): эмбеддинги / реранк / маскирование ПДн на GPU.
+  # Профиль gpu: без него стек стартует как раньше (CI/e2e без видеокарты),
+  # api при этом остаётся на CC_EMBEDDER=hash и CC_DEPERSONALIZE_NER=off.
+  # Сеть mlnet внутренняя: у ml нет egress и он не видит postgres/qdrant/redis.
+  # Веса качает одноразовый ml-warmup (единственный с egress), затем ml
+  # работает офлайн (HF_HUB_OFFLINE=1). Порт на хост не публикуется.
+  ml:
+    profiles: ["gpu"]
+    build:
+      context: ..
+      dockerfile: ml/Dockerfile
+    image: clinical-compass-ml:local
+    restart: unless-stopped
+    environment:
+      CC_ML_DEVICE: "${CC_ML_DEVICE:-cuda}"
+      CC_ML_DEFAULT_PROFILE: "${CC_ML_DEFAULT_PROFILE:-qwen3-0.6b}"
+      CC_ML_PROFILES: "${CC_ML_PROFILES:-}"
+      CC_ML_TOKEN: "${CC_ML_TOKEN:-}"
+      CC_ML_RERANK_MODEL: "${CC_ML_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}"
+      CC_ML_NER_MODEL: "${CC_ML_NER_MODEL:-redmadrobot-rnd/rubert-base-pii-ner}"
+      CC_ML_ALLOW_ANONYMOUS: "${CC_ML_ALLOW_ANONYMOUS:-0}"
+      HF_HOME: /models
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-1}"
+      TRANSFORMERS_OFFLINE: "${TRANSFORMERS_OFFLINE:-1}"
+    volumes:
+      - ml-models:/models
+    networks:
+      - mlnet
+    expose:
+      - "8080"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request,sys; d=json.load(urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)); sys.exit(0 if d.get('status')=='ready' else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10m
+      retries: 3
+
+  # Одноразовый прогрев весов: единственный контейнер с egress к Hugging Face.
+  # Запуск: docker compose --profile gpu run --rm ml-warmup
+  ml-warmup:
+    profiles: ["gpu"]
+    build:
+      context: ..
+      dockerfile: ml/Dockerfile
+    image: clinical-compass-ml:local
+    command: ["python", "-m", "warmup"]
+    restart: "no"
+    environment:
+      HF_HOME: /models
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      # Единственный контейнер, которому разрешён egress к Hugging Face.
+      HF_HUB_OFFLINE: "0"
+      TRANSFORMERS_OFFLINE: "0"
+      CC_ML_DEFAULT_PROFILE: "${CC_ML_DEFAULT_PROFILE:-qwen3-0.6b}"
+      CC_ML_PROFILES: "${CC_ML_PROFILES:-}"
+      CC_ML_RERANK_MODEL: "${CC_ML_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}"
+      CC_ML_NER_MODEL: "${CC_ML_NER_MODEL:-redmadrobot-rnd/rubert-base-pii-ner}"
+    volumes:
+      - ml-models:/models
+
 volumes:
   pgdata:
   qdrant-data:
+  ml-models:
+
+networks:
+  # api<->ml без egress и без доступа к БД/очередям: там ходит сырой текст.
+  mlnet:
+    internal: true

@@ -6,7 +6,7 @@
 
 ## 1. Стратегия
 
-- Пирамида (фактически достигнуто на 2026-10-24, см. `core/tests` + `api/tests`): unit (ядро) 141, integration (API+БД) 578 (из них 78 — обогащение КБ, FR-20; 18 — rate limiter на общем Redis-счётчике, docs/03 §12; 9 — retrieval-стек и реранк + 7 — клиент ML-сайдкара, docs/08 §4), e2e (UI-флоу) 42. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
+- Пирамида (фактически достигнуто на 2026-10-24, см. `core/tests` + `api/tests` + `ml/tests`): unit (ядро) 158, integration (API+БД) 663 (из них 78 — обогащение КБ, FR-20; 18 — rate limiter на общем Redis-счётчике, docs/03 §12; 43 — деперсонализация/NER/remote, docs/12; 9 — клиент ML-сайдкара + 7 — remote-эмбеддер/реранк, docs/08 §4; 9 — retrieval-стек и реранк, 7 — чанкер и окно реранка, docs/08 §3), ML-сайдкар в stub-режиме (без БД/GPU/torch) 30, e2e (UI-флоу) 42. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
 - Ядро: 100% детерминированные чистые функции — табличные параметризованные тесты порогов.
 - Интеграция: реальные HTTP-запросы к тестовому Postgres (отдельная БД), не мок-эхо.
 - Запрещены тесты «на копирование»: только поведение контрактов (вход → выход/инвариант/ошибка).
@@ -75,6 +75,25 @@
 | trend_empty_input | runs = [] | trends() | пустой тренд, без исключений |
 | trend_delta_30 | 30-дневная серия с известной разницей | trends() | delta_30 = конец − начало |
 | trend_moving_avg | серия [1,2,3,4,5] окно 7 | trends() | avg = расширяющееся среднее: длина ряда та же, значения = (1/1, 3/2, 6/3, 10/4, 15/5); окно > длины ряда — не ошибка, а полное среднее |
+
+### 2.5 деперсонализация (docs/12)
+
+| Тест | Given | When | Then |
+|---|---|---|---|
+| phone_forms | 8 форм РФ-телефона (`+7…`, `8 (…)`, `9261234567`) | depersonalize() | `[ТЕЛЕФОН]`, normalize_phone → E.164 |
+| document_forms | СНИЛС (с дефисами/слитно), ИНН 10/12, ОМС 16 (с пробелами/слитно), паспорт, медкарта/ИБ | depersonalize() | `[ДОКУМЕНТ]`, Finding.category точная |
+| dob_forms | `12.03.1954`, `12-03-54`, `1985-04-17`, `9 августа 1949`, `… г.р.` | depersonalize() | `[ДАТА РОЖДЕНИЯ]`; дата без маркера (приём) не маскируется |
+| span_overlap | частичный + полный спан ФИО + телефон | depersonalize(extra_spans=…) | один плейсхолдер на сущность, дыр нет |
+| age_combo | «Петрова Анна, 64 года» с/без ФИО-спана | depersonalize() | `[ВОЗРАСТ]` только при ФИО в той же фразе |
+
+
+| remote_mask | фейковый `/v1/mask` (без GPU) + `CC_DEPERSONALIZE_NER=remote` | scrub_text() | те же плейсхолдеры, что hybrid; `names` и `X-CC-ML-Token` доходят |
+| remote_fail_closed | prod + недоступный sidecar | scrub_text() | 503 `DEPERSONALIZATION_UNAVAILABLE`, ноль вызовов LLM |
+| remote_malformed_response | sidecar отдаёт строковые/вне диапазона/неизвестные спаны | scrub_text() в prod / вне prod | 503 до LLM в prod; regex-деградация вне prod (без «успешного» немаскирования) |
+| deny_list_capped | deny-list на 200 ФИО | `ml_client.mask` | в сайдкар уходит 128 записей |
+| partial_overlap_masks_tail | спаны 0–11 и 7–21 по «Иванов Пётр Иванович» | resolve_spans + mask_spans | хвост второго спана тоже `[ФИО]` |
+| insights_scrub_before_truncate | телефон на границе 500 символов | `_dialogue_text` → prompt | в prompt нет ни полного номера, ни обрезка `+7926` |
+| clinician_own_fio_masked | `CC_DEPERSONALIZE_NER=off`, ФИО врача в вопросе | `/assistant/ask` | ФИО маскируется deny-list'ом (не зависит от NER) |
 
 ## 3. Интеграционные тесты (api/tests, реальный Postgres)
 
@@ -300,6 +319,40 @@
 | `test_agent_offload_uses_dedicated_limiter` | `AGENT_LIMITER` = `CC_ASSISTANT_THREAD_LIMIT` (8) | offload `_invoke_agent` | `to_thread.run_sync` получает `limiter=AGENT_LIMITER` — общий пул AnyIO не занимается |
 | `test_assistant_ask_deadline_is_503_with_retry_after` (`test_assistant.py`) | медленный агент | POST `/assistant/ask` | 503 `ASSISTANT_TIMEOUT` + `Retry-After: 5`, без traceback — тот же маппинг, что у треда |
 | `test_assistant_ask_validation_code_unchanged` | пустой `query` | POST `/assistant/ask` | прежний код `422 VALIDATION` (коды ошибок не сдвинулись) |
+
+### 3.3 ML-сайдкар (stub, `ml/tests`)
+
+`python -m pytest ml/tests -q` — 30 тестов без Postgres, Qdrant, torch и GPU
+(`CC_ML_STUB=1`, детерминированные заглушки той же формы, что реальные
+модели). Контракт — `api/app/services/ml_client.py`, docs/08 §4.1.
+
+| Тест | Сценарий | Ожидание |
+|---|---|---|
+| `test_health_loading` | до загрузки моделей | 200, `status=loading`, `device=stub` |
+| `test_endpoints_503_while_loading` | три эндпоинта до `warmup()` | 503 `model_loading` + `Retry-After` |
+| `test_health_ready` | загрузка завершена | `status=ready`, дефолтный профиль и список загруженных |
+| `test_invalid_default_profile_rejected` | опечатка в `CC_ML_DEFAULT_PROFILE` | старт падает, а не 500 в запросе |
+| `test_models_unavailable_code` | упавшая загрузка | 503 `model_unavailable` |
+| `test_token_missing_401` / `_wrong_403` / `_ok` | `CC_ML_TOKEN` задан | 401 без заголовка, 403 с неверным, 200 с верным |
+| `test_embeddings_shape_and_dims` | batch, `kind=query` | `profile`, `dense_size=1024`, L2≈1, len=1024 |
+| `test_embeddings_*_profile` / `query_and_passage_differ` | смена профиля, префиксы | профиль в ответе; query≠passage |
+| `test_embeddings_unknown_profile` | неизвестный профиль | 404 `unknown_profile` |
+| `test_embeddings_caps` / `test_rerank_caps` / `test_mask_cap` | >64 текстов, >256 документов, >20000 символов, `top_k` вне диапазона | 422 `invalid_request` |
+| `test_rerank_alignment` | 3 документа | `len(scores)==len(documents)`, порядок сохранён |
+| `test_mask_spans_and_text` | ФИО+телефон+ДР+СНИЛС | stub: `model=regex`, `degraded=false`, спаны по `start`, категории FIO/PHONE/DOB/DOC, исходные ПДн заменены |
+| `test_mask_without_names_keeps_regex_only` | только телефон | regex-путь не трогает время «15:00» |
+| `test_startup_requires_token` / `_allows_explicit_anonymous` | пустой `CC_ML_TOKEN` | старт падает; только `CC_ML_ALLOW_ANONYMOUS=1` разрешает анонимно |
+| `test_body_too_large_rejected_before_parsing` | тело >1 МиБ на `/v1/mask` | 413 `payload_too_large` до валидации схемы |
+| `test_health_error_has_no_details` | упавшая загрузка с путём в ошибке | в `/health` только `error: true`, без путей/токена |
+| `test_ner_chunks_cover_long_text` | текст >2 окон | окна ≤1200 символов, перекрытие ≈200, хвост покрыт |
+| `test_ner_finds_name_in_last_chunk` | ФИО только в конце 6000+ символов | `model=hybrid`, `[ФИО]`, имя не утекло |
+| `test_ner_failure_is_degraded_and_sticky` | pipe бросает исключение | `model=regex`, `degraded=true`, `_broken` залипает |
+| `test_health_hides_model_paths` | `CC_ML_*_MODEL=/srv/...` | в `/health` только basename, пути не уходят |
+
+Реальные модели на GPU проверяются отдельным прогоном (не в CI):
+`REPORT-ml-sidecar.md` — холодная загрузка, VRAM, p50/p95 всех четырёх
+эндпоинтов, фактически замаскированный текст и тексты 393/6000 символов
+(ФИО в конце длинного документа находится и маскируется).
 
 ## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/`)
 
