@@ -27,6 +27,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "httpx>=0.27"]
+# Общий счётчик неудачных логинов в Redis (docs/03 §12): без extra модуль
+# app.ratelimit работает на памяти процесса (graceful degradation, WARNING).
+redis = ["redis>=5"]
 # NER-детекция ФИО для деперсонализации (docs/12): ставится отдельно,
 # включается CC_DEPERSONALIZE_NER=true; без него — regex/deny-list.
 ###############################################################

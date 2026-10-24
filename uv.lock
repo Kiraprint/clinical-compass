@@ -633,6 +633,9 @@ ner-rubert = [
     { name = "torch" },
     { name = "transformers" },
 ]
+redis = [
+    { name = "redis" },
+]
 rerank = [
     { name = "sentence-transformers" },
 ]
@@ -656,6 +659,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pywebpush", specifier = ">=2.0" },
     { name = "qdrant-client", specifier = ">=1.10" },
+    { name = "redis", marker = "extra == 'redis'", specifier = ">=5" },
     { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=2.7" },
     { name = "sentence-transformers", marker = "extra == 'rerank'", specifier = ">=2.7" },
     { name = "sqlalchemy", specifier = ">=2.0.30" },
@@ -663,7 +667,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'ner-rubert'", specifier = ">=4.40" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
-provides-extras = ["dev", "ner", "ner-rubert", "embeddings", "rerank"]
+provides-extras = ["dev", "redis", "ner", "ner-rubert", "embeddings", "rerank"]
 
 [[package]]
 name = "clinical-compass-core"
@@ -3535,6 +3539,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/70/ea/0151ae55bd26699487e668a865ef43e49409025c7464569beffe1a5789f0/razdel-0.5.0.tar.gz", hash = "sha256:4334c0fdfe34d4e888cf0ed854968c9df14f0a547df909a77f4634f9ffe626e6", size = 19248, upload-time = "2020-03-26T04:27:54.331Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/15/2c/664223a3924aa6e70479f7d37220b3a658765b9cfe760b4af7ffdc50d38f/razdel-0.5.0-py3-none-any.whl", hash = "sha256:76f59691c3216b47d32fef6274c18c12d61f602f1444b7ef4b135b03801f6d37", size = 21149, upload-time = "2020-03-26T04:27:52.591Z" },
+]
+
+[[package]]
+name = "redis"
+version = "8.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a8/99/604f0b666d4c616d891cf77ebb9db6bb21601344c051aebf1b72b9ff915f/redis-8.1.0.tar.gz", hash = "sha256:6e1a19beef9225c83efd689c7e6b7da2d5215b1f42cd13b7fc3714d0a09c7b25", size = 5254356, upload-time = "2026-07-30T08:51:00.269Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/66/9d/c5731f6e3608663d4d3656fd8d3aecee8b509c3082818f5a13eae925baea/redis-8.1.0-py3-none-any.whl", hash = "sha256:a4fe1aac3d3b3cc791d4b3d5931c5a956045dc951ee74d1c913ee3ac4d2ee9fb", size = 560618, upload-time = "2026-07-30T08:50:58.497Z" },
 ]
 
 [[package]]
