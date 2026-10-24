@@ -80,7 +80,7 @@ const riskCheckin = async (page: Page): Promise<string> => {
 const openQueue = async (page: Page) => {
   await page.context().clearCookies();
   await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
-  await expect(page.getByRole("button", { name: "Все" })).toBeVisible();
+  // FR-32: очередь эскалаций — на главном экране кабинета, фильтр пациентов не нужен.
   await expect(page.getByText(/Очередь эскалаций/)).toBeVisible();
 };
 

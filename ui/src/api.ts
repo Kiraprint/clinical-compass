@@ -315,6 +315,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  // FR-32: карточка врача в личном кабинете (ФИО, e-mail, роли).
+  clinicianMe: () => req<ClinicianProfile>("/api/v1/clinician/me"),
   clinicianChats: () => req<{ items: PatientChat[] }>("/api/v1/clinician/chats"),
   clinicianChatList: (patientId: string) =>
     req<{ items: PatientChatMessage[] }>(`/api/v1/clinician/patients/${patientId}/chat`),
@@ -617,6 +619,13 @@ export interface PatientContacts {
 export interface ContactPatch {
   phone?: string | null;
   birth_date?: string | null;
+}
+// FR-32: свой профиль врача для личного кабинета.
+export interface ClinicianProfile {
+  fio: string | null;
+  email: string;
+  role: string;
+  roles: string[];
 }
 // FR-24: личное напоминание врача по пациенту. note — свободный текст (может
 // содержать ПДн), в списке приходит расшифрованным (доступ только владельцу).
@@ -945,7 +954,8 @@ export interface ClinicianAdverseEvent {
   patient_id: string;
   patient_fio: string | null;
   event_text: string;
-  severity: AdverseSeverity;
+  // Пациент может сообщить НЯ без оценки тяжести (UxPatient: severity nullable).
+  severity: AdverseSeverity | null;
   onset_date: string;
   status: AdverseStatus;
   reported_by: "clinician" | "patient";

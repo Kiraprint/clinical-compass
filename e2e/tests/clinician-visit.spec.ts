@@ -2,7 +2,7 @@
 // запись появляется в карточке. Заметка — спецкатегория ПДн и уничтожается
 // при отзыве согласия (проверяется в test_consent.py).
 import { expect, test, type APIResponse } from "@playwright/test";
-import { DEMO_PASSWORD, freshPatientEmail, totp } from "./helpers";
+import { DEMO_PASSWORD, freshPatientEmail, openSection, totp } from "./helpers";
 
 const BASE = process.env.CC_E2E_URL ?? "http://127.0.0.1:8090";
 const j = async (r: APIResponse) => r.json();
@@ -38,7 +38,9 @@ test.describe("Приёмы врача", () => {
     await page.getByLabel("Код 2FA").fill(totp(docReg.totp_secret as string));
     await page.getByRole("button", { name: "Войти" }).click();
 
-    const row = page.locator("tbody tr", { hasText: patReg.email }).first();
+    await openSection(page, "Пациенты");
+
+    const row = page.locator(".patients tbody tr", { hasText: patReg.email }).first();
     await expect(row).toBeVisible();
     await row.getByRole("button", { name: "Открыть" }).click();
 

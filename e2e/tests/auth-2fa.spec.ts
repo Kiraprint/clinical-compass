@@ -56,6 +56,6 @@ test.describe("2FA: краевые случаи", () => {
     // Остаёмся на форме — вводим TOTP и входим.
     await page.getByLabel("Код 2FA").fill(totp(doc.totpSecret));
     await page.getByRole("button", { name: "Войти" }).click();
-    await expect(page.getByRole("button", { name: "Все" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Меню", exact: true })).toBeVisible();
   });
 });

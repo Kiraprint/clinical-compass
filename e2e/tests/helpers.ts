@@ -55,3 +55,16 @@ export async function registerPatient(page, email: string, password = DEMO_PASSW
   await page.getByLabel("Пароль").fill(password);
   await page.getByRole("button", { name: "Создать аккаунт" }).click();
 }
+
+/**
+ * FR-32: левое меню врача спрятано под «три полоски». Открываем (если закрыто)
+ * и выбираем раздел по точному имени.
+ */
+export async function openSection(page, name: string) {
+  const toggle = page.getByRole("button", { name: "Меню", exact: true });
+  if ((await toggle.getAttribute("aria-expanded")) !== "true") await toggle.click();
+  await page
+    .getByRole("navigation", { name: "Разделы кабинета врача" })
+    .getByRole("button", { name, exact: true })
+    .click();
+}

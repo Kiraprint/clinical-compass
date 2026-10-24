@@ -1,6 +1,6 @@
 // e2e питч-сценария (docs/04 §6): пациент → RED-скрининг → эскалация → чат HOTLINE → врач видит RED.
 import { expect, test } from "@playwright/test";
-import { DEMO_PASSWORD, DEMO_TOTP, login } from "./helpers";
+import { DEMO_PASSWORD, DEMO_TOTP, login, openSection } from "./helpers";
 
 test.describe("Питч-сценарий", () => {
   test("пациент: скрининг с суицидальным ответом → RED + контакты помощи", async ({ page }) => {
@@ -40,6 +40,7 @@ test.describe("Питч-сценарий", () => {
 
   test("врач: входит с 2FA и видит RED-пациентов", async ({ page }) => {
     await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
+    await openSection(page, "Пациенты");
     await expect(page.getByRole("button", { name: "Все" })).toBeVisible();
 
     await page.getByRole("button", { name: "RED", exact: true }).click();
@@ -48,6 +49,6 @@ test.describe("Питч-сценарий", () => {
     await expect(cards.first().locator(".badge.RED")).toBeVisible();
 
     await cards.first().getByRole("button", { name: "Открыть" }).click();
-    await expect(page.getByText("Последний скрининг")).toBeVisible();
+    await expect(page.getByText("Риск по последней оценке:")).toBeVisible();
   });
 });
