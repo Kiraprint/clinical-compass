@@ -210,7 +210,12 @@ def hybrid_search(
         for p in (res.points or [])
     ]
     if reranker is not None:
-        ranked = reranker.rerank(query, hits, limit, exclude_ids=exclude_ids)
+        try:
+            ranked = reranker.rerank(query, hits, limit, exclude_ids=exclude_ids)
+        except Exception as exc:  # noqa: BLE001 — реранк не должен ронять запрос
+            # Сайдкар/модель/сеть упали: прод обязан отвечать, порядок остаётся RRF.
+            log.warning("реранк недоступен (%s) — выдача остаётся в порядке RRF", exc)
+            return hits[:limit]
         if exclude_ids:
             # Реранк не имеет права воскресить исключённый врачом источник,
             # даже если его реализация забыла про фильтр (defense in depth).

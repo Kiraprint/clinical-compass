@@ -68,6 +68,12 @@ class Settings(BaseSettings):
     retrieval_candidates: int = 0
     # CC_RRF_K: константа RRF-слияния dense+sparse (Qdrant RrfQuery, docs/08 §4).
     rrf_k: int = 60
+    # CC_ML_URL: base-url ML-сайдкара на GPU (в compose — http://ml:8080).
+    # Пусто → профиль remote и CC_RERANKER=remote недоступны: явный выбор падает
+    # громко, недоступность в рантайме деградирует к RRF (docs/08 §4.7).
+    ml_url: str = ""
+    ml_token: str = ""  # CC_ML_TOKEN: необязательный заголовок X-CC-ML-Token
+    ml_timeout_s: float = 5.0  # короткий таймаут: поиск не висит на упавшем сайдкаре
     # CC_KB_CORPUS_TTL_SECONDS: TTL кеша корпуса KB (kb_seed.build_corpus) в
     # процессе API. In-process писателей drugs нет (seed — отдельный CLI, он
     # зовёт clear_corpus_cache), поэтому TTL — единственная runtime-инвалидация.

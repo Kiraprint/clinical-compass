@@ -103,6 +103,8 @@ def main() -> None:
     for qid, cands in jobs:
         left[qid] = left.get(qid, 0) + len(cands)
 
+    attempts: dict[str, int] = {}
+
     def run_batch(chunk: list[tuple[str, list[str]]]) -> list[dict[int, int]]:
         """Оценки по пачке промптов: [{локальный номер: grade}]."""
         texts_out = []
@@ -146,21 +148,20 @@ def main() -> None:
             for idx, g in local.items():
                 grades[cands[idx]] = g
             missing = [c for c in cands if c in corpus and c not in grades]
-            if missing:
+            left[qid] -= len(cands)
+            if missing and attempts.get(qid, 0) < 2:
+                attempts[qid] = attempts.get(qid, 0) + 1
                 retry.append((qid, missing))
-            elif qid not in done_qids:
-                left[qid] -= len(cands)
-                if left[qid] <= 0:
-                    q = queries[qid]
-                    out.write(
-                        json.dumps(
-                            {"qid": qid, "q": q["q"], "lang": q.get("lang"), "family": q.get("family"), "grades": grades},
-                            ensure_ascii=False,
-                        )
-                        + "\n"
-                    )
-                    out.flush()
-                    done_qids.add(qid)
+            elif qid not in done_qids and left[qid] <= 0:
+                qrec = queries[qid]
+                rec = {"qid": qid, "q": qrec["q"], "lang": qrec.get("lang"), "family": qrec.get("family"), "grades": grades}
+                if missing:
+                    # модель так и не покрыла часть номеров — фиксируем 0 и помечаем запрос
+                    rec["partial"] = len(missing)
+                    print(f"  {qid}: {len(missing)} кандидатов без оценки → 0", flush=True)
+                out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                out.flush()
+                done_qids.add(qid)
         return retry
 
     out = out_path.open("a", encoding="utf-8")

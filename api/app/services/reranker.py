@@ -99,6 +99,65 @@ class CrossEncoderReranker:
             for i in order[:limit]
         ]
 
+class RemoteReranker:
+    """Реранк в ML-сайдкаре на GPU (docs/08 §4.7): POST /v1/rerank.
+
+    Один ретрай на транспортной ошибке; если сайдкар так и не ответил,
+    `MlUnavailable` уходит наверх, а `kb.hybrid_search` оставляет порядок RRF:
+    прод обязан отвечать, реранк — улучшение, а не условие работы.
+    """
+
+    model_id = "remote"
+
+    def __init__(self, *, timeout_s: float | None = None) -> None:
+        from app.services.ml_client import get_ml_client
+
+        client = get_ml_client()
+        if not client.base_url:
+            raise RuntimeError("CC_RERANKER=remote требует CC_ML_URL (base-url ML-сайдкара)")
+        self._client = client
+        self._timeout_s = timeout_s
+
+    def score(self, query: str, texts: list[str]) -> list[float]:
+        if not texts:
+            return []
+        from app.services.ml_client import MlUnavailable
+
+        for attempt in (0, 1):
+            try:
+                return self._client.rerank(query, texts, top_k=0, timeout_s=self._timeout_s)
+            except MlUnavailable:
+                if attempt:
+                    raise
+                log.warning("реранк сайдкара: повтор после ошибки транспорта")
+        return []
+
+    def rerank(
+        self,
+        query: str,
+        hits: list[dict],
+        limit: int,
+        *,
+        exclude_ids: set[str] | None = None,
+    ) -> list[dict]:
+        if exclude_ids:
+            hits = [h for h in hits if h.get("guideline_id") not in exclude_ids]
+        if not hits:
+            return []
+        scores = self.score(query, [h.get("text", "") for h in hits])
+        # stable sort: равные скоры сохраняют порядок RRF (детерминизм выдачи)
+        order = sorted(range(len(hits)), key=lambda i: (-scores[i], i))
+        return [
+            {
+                **hits[i],
+                "score": scores[i],
+                "rerank_score": scores[i],
+                "retrieval_score": hits[i].get("score", 0.0),
+            }
+            for i in order[:limit]
+        ]
+
+
 
 _reranker: Reranker | None = None
 _reranker_loaded = False
@@ -112,6 +171,8 @@ def build_reranker(spec: str | None = None) -> Reranker | None:
     if chosen.lower() in {"off", "none", "no", ""}:
         return None
     try:
+        if chosen.lower() == "remote":
+            return RemoteReranker()
         return CrossEncoderReranker(chosen, device=settings.embedder_device)
     except ImportError as exc:
         log.warning(
