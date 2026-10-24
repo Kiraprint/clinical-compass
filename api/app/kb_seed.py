@@ -306,12 +306,15 @@ def _tail_chunks(with_guidelines: bool) -> list[dict]:
 # кешируется — он принадлежит запросу.
 _corpus_lock = threading.Lock()
 _corpus_cache: dict[tuple, tuple[float, tuple[Mapping[str, Any], ...]]] = {}
+_corpus_generation = 0  # растёт при каждой инвалидации: сборка «в полёте» не должна кешироваться
 
 
 def clear_corpus_cache() -> None:
     """Сбросить кеш корпуса (после записи в drugs/КР, в CLI-сиде и тестах)."""
+    global _corpus_generation
     with _corpus_lock:
         _corpus_cache.clear()
+        _corpus_generation += 1
 
 
 def _cached(key: tuple, build) -> tuple[Mapping[str, Any], ...]:
@@ -324,13 +327,17 @@ def _cached(key: tuple, build) -> tuple[Mapping[str, Any], ...]:
     следующий вызов попытается собрать снимок снова.
     """
     ttl = settings.kb_corpus_ttl_seconds
-    if ttl > 0:
-        with _corpus_lock:
-            cached = _corpus_cache.get(key)
-            if cached is not None and time.monotonic() - cached[0] < ttl:
-                return cached[1]
+    with _corpus_lock:
+        generation = _corpus_generation
+        cached = _corpus_cache.get(key) if ttl > 0 else None
+        if cached is not None and time.monotonic() - cached[0] < ttl:
+            return cached[1]
     snapshot = tuple(MappingProxyType(dict(d)) for d in build())
     with _corpus_lock:
+        # Пока собирали, могла пройти clear_corpus_cache() (seed/тест/будущий
+        # писатель): тогда наш снимок уже устарел и класть его в кеш нельзя.
+        if generation != _corpus_generation:
+            return snapshot
         if ttl > 0:
             cached = _corpus_cache.get(key)
             if cached is not None and time.monotonic() - cached[0] < ttl:

@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+
+import anyio
 import logging
 
 from app import db
@@ -52,8 +54,10 @@ async def _run_and_dispose(*, once: bool, max_runs: int | None) -> int:
     try:
         return await run(once=once, max_runs=max_runs)
     finally:
-        if db.engine is not None:
-            await db.engine.dispose()
+        # Shield: при отмене (SIGTERM) закрытие пула всё равно должно выполниться.
+        with anyio.CancelScope(shield=True):
+            if db.engine is not None:
+                await db.engine.dispose()
 
 
 def main(argv: list[str] | None = None) -> int:

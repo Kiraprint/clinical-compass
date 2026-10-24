@@ -27,7 +27,10 @@ if not config.get_main_option("sqlalchemy.url", None):
     config.set_main_option("sqlalchemy.url", database_url)
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False: иначе fileConfig выключает все логгеры,
+    # созданные при импорте приложения, и в проде/тестах после миграций пропадают
+    # все log.warning/info сервисов (init_db вызывается из lifespan).
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = db.Base.metadata
 

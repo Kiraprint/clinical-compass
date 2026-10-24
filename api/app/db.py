@@ -9,6 +9,7 @@ dialect) и `AsyncSessionLocal`. Синхронный `sync_engine`/`SyncSession
 from __future__ import annotations
 
 import os
+import time
 from typing import AsyncIterator
 
 import anyio
@@ -58,7 +59,7 @@ def pool_capacity(profile: str = "api") -> int:
     return settings.db_pool_size + settings.db_max_overflow
 
 
-_SYNC_ALLOWANCE = 1  # init_db/alembic: одно служебное соединение на процесс
+_SYNC_ALLOWANCE = 2  # init_db/alembic + возможное соединение sync-сессии (seed/CLI)
 
 
 def validate_pool_budget(workers: int | None = None, background: int | None = None) -> None:
@@ -69,7 +70,7 @@ def validate_pool_budget(workers: int | None = None, background: int | None = No
     Поэтому считаем оба вида процессов: `workers × (api-пул + служебное
     соединение) + background × (bg-пул + служебное)`. При дефолтах
     20+20 на воркер и 2+0 на фоновый процесс потолок 100 выдерживают
-    2 воркера и 2 фоновых сервиса (2*41 + 2*3 = 88).
+    2 воркера и 2 фоновых сервиса (2*42 + 2*4 = 92).
     """
     workers = worker_count() if workers is None else workers
     background = settings.db_background_processes if background is None else background
@@ -80,9 +81,9 @@ def validate_pool_budget(workers: int | None = None, background: int | None = No
         raise RuntimeError(
             f"Пул БД не влезает в Postgres: {workers} × "
             f"(CC_DB_POOL_SIZE={settings.db_pool_size} + "
-            f"CC_DB_MAX_OVERFLOW={settings.db_max_overflow} + 1 служебное) + "
+            f"CC_DB_MAX_OVERFLOW={settings.db_max_overflow} + {_SYNC_ALLOWANCE} служебных) + "
             f"{background} фоновых × (CC_DB_BG_POOL_SIZE={settings.db_bg_pool_size} + "
-            f"CC_DB_BG_MAX_OVERFLOW={settings.db_bg_max_overflow} + 1) = {demand} > "
+            f"CC_DB_BG_MAX_OVERFLOW={settings.db_bg_max_overflow} + {_SYNC_ALLOWANCE}) = {demand} > "
             f"CC_DB_MAX_CONNECTIONS={settings.db_max_connections}. "
             "Уменьшите CC_DB_POOL_SIZE/CC_DB_MAX_OVERFLOW, WEB_CONCURRENCY или "
             "CC_DB_BACKGROUND_PROCESSES."
@@ -172,6 +173,7 @@ def install_audit_trigger(engine_=None) -> None:
 
 
 _MIGRATION_LOCK = "cc_alembic_migrations"
+_MIGRATION_WAIT_SECONDS = 60
 
 
 def init_db() -> None:
@@ -201,14 +203,36 @@ def init_db() -> None:
     # str(url) маскирует пароль как *** — нужен render_as_string без маски.
     cfg.set_main_option("sqlalchemy.url", sync_engine.url.render_as_string(hide_password=False))
     with sync_engine.connect() as lock_conn:
-        lock_conn.execute(text("SELECT pg_advisory_lock(hashtext(:k))"), {"k": _MIGRATION_LOCK})
+        # Ждём лок не бесконечно: если предшественник упал, соединение закрыто —
+        # Postgres снимает лок сам, но подвисший DDL лучше встретить ошибкой старта.
+        got = lock_conn.execute(
+            text("SELECT pg_try_advisory_lock(hashtext(:k))"), {"k": _MIGRATION_LOCK}
+        ).scalar()
+        waited = 0
+        while not got and waited < _MIGRATION_WAIT_SECONDS:
+            lock_conn.commit()
+            time.sleep(1)
+            waited += 1
+            got = lock_conn.execute(
+                text("SELECT pg_try_advisory_lock(hashtext(:k))"), {"k": _MIGRATION_LOCK}
+            ).scalar()
+        if not got:
+            raise RuntimeError(
+                "не удалось взять advisory-лок миграций за "
+                f"{_MIGRATION_WAIT_SECONDS} с: другой процесс держит его слишком долго"
+            )
         lock_conn.commit()  # не держим открытую транзакцию, пока alembic делает DDL
         try:
             command.upgrade(cfg, "head")
             install_audit_trigger(sync_engine)
         finally:
-            lock_conn.execute(text("SELECT pg_advisory_unlock(hashtext(:k))"), {"k": _MIGRATION_LOCK})
-            lock_conn.commit()
+            try:
+                lock_conn.execute(
+                    text("SELECT pg_advisory_unlock(hashtext(:k))"), {"k": _MIGRATION_LOCK}
+                )
+                lock_conn.commit()
+            except Exception:  # noqa: BLE001 — закрытие соединения снимет лок само
+                lock_conn.invalidate()
 
 
 def truncate_all() -> None:

@@ -42,11 +42,11 @@ async def lifespan(app: FastAPI):
         db.setup(settings.database_url)
         # Alembic/DDL — синхронно и блокирующе: в loop нельзя, поэтому в поток.
         await asyncio.to_thread(db.init_db)
-    # Fail-fast: суммарный пул воркеров и фоновых сервисов влезает в max_connections.
-    db.validate_pool_budget()
-    # Оффлоадим в поток: сборка эмбеддера (torch) и запрос к Qdrant — не в loop.
-    await asyncio.to_thread(_validate_kb_index)
     try:
+        # Fail-fast: суммарный пул воркеров и фоновых сервисов влезает в max_connections.
+        db.validate_pool_budget()
+        # Оффлоадим в поток: сборка эмбеддера (torch) и запрос к Qdrant — не в loop.
+        await asyncio.to_thread(_validate_kb_index)
         yield
     finally:
         # Закрываем пулы явно: иначе при рестарте/перезагрузке процесса воркеры

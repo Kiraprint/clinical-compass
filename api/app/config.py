@@ -28,13 +28,14 @@ class Settings(BaseSettings):
     # пул: им не нужен веер соединений под HTTP-нагрузку, но их спрос обязан
     # попадать в тот же бюджет max_connections (см. db.validate_pool_budget).
     db_bg_pool_size: int = 2  # CC_DB_BG_POOL_SIZE: соединений на фоновый процесс
-    db_bg_max_overflow: int = 0  # CC_DB_BG_MAX_OVERFLOW: пиковых сверх пула
+    db_bg_max_overflow: int = 1  # CC_DB_BG_MAX_OVERFLOW: пиковых сверх пула (тик держит лок-соединение + сессию)
     db_background_processes: int = 2  # CC_DB_BACKGROUND_PROCESSES: их число в инсталляции
     jwt_secret: str = "dev-secret-change-me-0123456789abcdef"  # >= 32 байт (RFC 7518)
     access_ttl_minutes: int = 15
     refresh_ttl_days: int = 7
     rate_max: int = 5  # попыток захода на /auth/login за окно (перебор 2FA)
     rate_window: int = 60  # сек
+    rate_ip_max: int = 30  # CC_RATE_IP_MAX: неудачных попыток на IP за окно (любые email)
     push_enabled: bool = True
     vapid_private_key: str = ""  # base64(PKCS8 PEM); пусто → генерируется в памяти (демо)
     fcm_service_account_b64: str = ""  # base64(JSON service account Firebase); пусто → FCM выключен

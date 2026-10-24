@@ -132,8 +132,8 @@ def test_pool_budget_counts_api_workers_and_background_services():
     а Postgres потом отбивал соединения.
     """
     settings = Settings()
-    per_worker = settings.db_pool_size + settings.db_max_overflow + 1
-    per_bg = settings.db_bg_pool_size + settings.db_bg_max_overflow + 1
+    per_worker = db.pool_capacity() + db._SYNC_ALLOWANCE
+    per_bg = db.pool_capacity("background") + db._SYNC_ALLOWANCE
     max_workers = max(1, (settings.db_max_connections - per_bg) // per_worker)
 
     db.validate_pool_budget(max_workers, background=1)  # впритык — допустимо
@@ -150,3 +150,30 @@ def test_background_profile_has_small_pool_and_sync_engine_is_nullpool():
 
     assert db.pool_capacity("background") < db.pool_capacity()
     assert isinstance(db.sync_engine.pool, NullPool)
+
+
+def test_migrations_do_not_disable_application_loggers(engine):
+    """init_db() (alembic fileConfig) не должен глушить логгеры приложения.
+
+    Регресс: `fileConfig()` по умолчанию ставит disable_existing_loggers=True,
+    поэтому после миграций в lifespan все log.warning/info сервисов молча
+    исчезали — и в тестах, и на проде.
+    """
+    import logging
+
+    logger = logging.getLogger("app.services.push")
+    assert logger.disabled is False
+
+    received: list[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            received.append(record.getMessage())
+
+    handler = _Capture()
+    logger.addHandler(handler)
+    try:
+        logger.warning("проверка")
+    finally:
+        logger.removeHandler(handler)
+    assert received == ["проверка"]

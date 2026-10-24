@@ -6,7 +6,7 @@
 
 ## 1. Стратегия
 
-- Пирамида (фактически достигнуто на 2026-10-24, см. `core/tests` + `api/tests`): unit (ядро) 141, integration (API+БД) 476 (из них 78 — обогащение КБ, FR-20), e2e (UI-флоу) 40. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
+- Пирамида (фактически достигнуто на 2026-10-24, см. `core/tests` + `api/tests`): unit (ядро) 141, integration (API+БД) 478 (из них 78 — обогащение КБ, FR-20), e2e (UI-флоу) 40. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
 - Ядро: 100% детерминированные чистые функции — табличные параметризованные тесты порогов.
 - Интеграция: реальные HTTP-запросы к тестовому Postgres (отдельная БД), не мок-эхо.
 - Запрещены тесты «на копирование»: только поведение контрактов (вход → выход/инвариант/ошибка).
@@ -265,7 +265,9 @@
 | `test_ttl_expiry_rebuilds_corpus` / `test_ttl_zero_disables_cache` | TTL истёк / `CC_KB_CORPUS_TTL_SECONDS=0` | вызовы | пересборка / кеш отключён |
 | `test_errors_are_not_cached` | сборка бросает исключение | повторный вызов | исключение не закешировано, сборка повторяется |
 | `test_request_path_drug_docs_are_not_cached` | `build_corpus(drug_docs=...)` | два вызова с разными препаратами | данные запроса не попадают в общий кеш |
-| `test_endpoint_host_hides_capability_token` (`test_push.py`) | endpoint с токеном в пути | `_endpoint_host` | в лог попадает только хост, токена нет |
+| `test_push_failure_log_has_no_capability_token` (`test_push.py`) | endpoint с токеном в пути | `_endpoint_host` | в лог попадает только хост, токена нет |
+| `test_ip_budget_blocks_spray_of_distinct_emails` (`test_ratelimit.py`) | `CC_RATE_IP_MAX` неудачных попыток с одного IP по разным email | проверка входа с этого IP / с другого | отказ с `retry_after ≥ 1`; другой IP не затронут |
+| `test_migrations_do_not_disable_application_loggers` (`test_async_db.py`) | после `init_db()` (alembic `fileConfig`) | запись в логгер `app.services.push` | логгер не отключён, запись доходит до handler'а |
 
 ## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/`)
 

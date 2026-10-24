@@ -136,17 +136,17 @@ API работает с PostgreSQL через **async**-драйвер (`sqlalch
 Каждый процесс API держит собственный пул соединений. Бюджет инсталляции:
 
 ```
-WEB_CONCURRENCY × (CC_DB_POOL_SIZE + CC_DB_MAX_OVERFLOW + 1) +
-CC_DB_BACKGROUND_PROCESSES × (CC_DB_BG_POOL_SIZE + CC_DB_BG_MAX_OVERFLOW + 1) ≤ CC_DB_MAX_CONNECTIONS
+WEB_CONCURRENCY × (CC_DB_POOL_SIZE + CC_DB_MAX_OVERFLOW + 2) +
+CC_DB_BACKGROUND_PROCESSES × (CC_DB_BG_POOL_SIZE + CC_DB_BG_MAX_OVERFLOW + 2) ≤ CC_DB_MAX_CONNECTIONS
 ```
 
-Слагаемое `+ 1` на процесс — служебное соединение (`init_db`/alembic). Фоновые
+Слагаемое `+ 2` на процесс — служебные соединения (`init_db`/alembic и sync-сессия seed/CLI). Фоновые
 сервисы (`reminders-worker`, `kb-enrichment`) держат маленький пул. Синхронный
 движок работает на `NullPool`: request-path его не использует, и он не занимает
 соединения в бюджете.
 
-Дефолты (`20+20` на воркер, `2+0` на фоновый процесс, потолок `100`) означают
-**2 воркера и 2 фоновых сервиса**: 2×41 + 2×3 = 88 ≤ 100. На старте
+Дефолты (`20+20` на воркер, `2+1` на фоновый процесс, потолок `100`) означают
+**2 воркера и 2 фоновых сервиса**: 2×42 + 2×5 = 94 ≤ 100. На старте
 `app.db.validate_pool_budget()` падает, если конфигурация не влезает в бюджет:
 молчаливой деградации до таймаутов пула нет. Исчерпание пула в рантайме отдаётся
 как `503 DB_UNAVAILABLE` с `Retry-After`, а не как 500.
@@ -159,7 +159,7 @@ CC_DB_BACKGROUND_PROCESSES × (CC_DB_BG_POOL_SIZE + CC_DB_BG_MAX_OVERFLOW + 1) �
 | `CC_DB_POOL_TIMEOUT` | `30` | сек ожидания свободного соединения (затем `503 DB_UNAVAILABLE`) |
 | `CC_DB_MAX_CONNECTIONS` | `100` | потолок Postgres для всей инсталляции |
 | `CC_DB_BG_POOL_SIZE` | `2` | соединений на фоновый сервис (напоминания, обогащение) |
-| `CC_DB_BG_MAX_OVERFLOW` | `0` | пиковых сверх пула у фонового сервиса |
+| `CC_DB_BG_MAX_OVERFLOW` | `1` | пиковых сверх пула у фонового сервиса |
 | `CC_DB_BACKGROUND_PROCESSES` | `2` | сколько фоновых сервисов учитывать в бюджете |
 
 `init_db()` (alembic `upgrade head` + триггер аудита) выполняется под

@@ -368,6 +368,11 @@ def _fcm_send(token: str, title: str, body: str) -> bool:
         log.warning("FCM send сбой (token %s…): %s", token[:8], exc)
     return False
 
+def _log_push_failure(endpoint: str, exc: BaseException) -> None:
+    """В лог — только хост: endpoint веб-пуша содержит capability-токен."""
+    log.warning("push не доставлен (%s): %s", _endpoint_host(endpoint), exc)
+
+
 def _endpoint_host(endpoint: str) -> str:
     """Хост подписки для логов: сам endpoint — capability-токен, его логировать нельзя."""
     try:
@@ -388,7 +393,7 @@ async def push_to_clinicians(
             select(PushSubscription).where(PushSubscription.user_id.in_(clinician_ids))
         )).all()
         payload = json.dumps({"title": title, "body": body})
-        from pywebpush import WebPushException, webpush
+        from pywebpush import webpush
 
 
         def _send(endpoint: str, p256dh: str, auth: str) -> None:  # sync: pywebpush блокирует → в потоке
@@ -402,10 +407,8 @@ async def push_to_clinicians(
                     vapid_claims={"sub": "mailto:admin@compass.demo"},
                     timeout=5,
                 )
-            except WebPushException as exc:
-                log.warning("push не доставлен (%s): %s", _endpoint_host(endpoint), exc)
             except Exception as exc:  # noqa: BLE001 — одна плохая подписка не валит остальные
-                log.warning("push error %s: %s", _endpoint_host(endpoint), exc)
+                _log_push_failure(endpoint, exc)
 
         for s in subs:
             await anyio.to_thread.run_sync(_send, s.endpoint, s.p256dh, s.auth)

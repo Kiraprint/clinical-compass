@@ -133,8 +133,24 @@ def test_push_to_clinicians_signs_request(client, db_session, monkeypatch):
     assert body != json.dumps({"title": "тест", "body": "тело"}).encode()  # зашифровано
 
 
-def test_endpoint_host_hides_capability_token():
-    """Endpoint подписки — capability-токен: в лог идёт только хост."""
-    host = push._endpoint_host("https://fcm.googleapis.com/wp/AbC-sEcReT-token?x=1")
-    assert host == "fcm.googleapis.com"
-    assert "AbC-sEcReT" not in host
+def test_push_failure_log_has_no_capability_token():
+    """Endpoint подписки — capability-токен: в логе только хост."""
+    import logging
+
+    records: list[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record.getMessage())
+
+    handler = _Capture()
+    push.log.addHandler(handler)
+    try:
+        push._log_push_failure(
+            "https://fcm.googleapis.com/wp/AbC-sEcReT-token?x=1", RuntimeError("boom")
+        )
+    finally:
+        push.log.removeHandler(handler)
+    message = " ".join(records)
+    assert "fcm.googleapis.com" in message
+    assert "AbC-sEcReT" not in message

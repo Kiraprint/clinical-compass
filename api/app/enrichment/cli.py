@@ -219,8 +219,10 @@ async def _run_and_dispose(func, args) -> int:
     try:
         return await func(args)
     finally:
-        if db_module.engine is not None:
-            await db_module.engine.dispose()
+        # Shield: при отмене (SIGTERM) закрытие пула всё равно должно выполниться.
+        with anyio.CancelScope(shield=True):
+            if db_module.engine is not None:
+                await db_module.engine.dispose()
 
 
 def main(argv: list[str] | None = None) -> int:
