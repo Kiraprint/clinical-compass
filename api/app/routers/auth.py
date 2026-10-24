@@ -4,6 +4,7 @@ from __future__ import annotations
 import uuid
 
 from datetime import datetime, timezone
+import anyio
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -88,7 +89,10 @@ async def register(body: RegisterBody, request: Request, db: AsyncSession = Depe
             403, "REGISTRATION_FORBIDDEN",
             "Создание роли CLINICIAN/ADMIN требует аутентифицированного администратора",
         )
-    user = User(email=email, password_hash=security.hash_password(body.password), role=body.role)
+    # argon2id — десятки миллисекунд CPU и 64 МиБ памяти: на event loop это
+    # стопор для всех запросов воркера, поэтому хешируем в потоке.
+    password_hash = await anyio.to_thread.run_sync(security.hash_password, body.password)
+    user = User(email=email, password_hash=password_hash, role=body.role)
     totp_secret: str | None = None
     if body.role != "PATIENT":
         totp_secret = security.generate_totp_secret()
@@ -109,7 +113,10 @@ async def login(body: LoginBody, request: Request, response: Response, db: Async
         raise Problem(429, "TOO_MANY_REQUESTS",
                       f"Слишком много попыток входа, повторите через {retry_after} с")
     user = await db.scalar(select(User).where(User.email == email))
-    if user is None or not security.verify_password(body.password, user.password_hash):
+    password_ok = user is not None and await anyio.to_thread.run_sync(
+        security.verify_password, body.password, user.password_hash
+    )
+    if not password_ok:
         record_rate_hit((client, email))
         raise Problem(401, "UNAUTHORIZED", "Неверный email или пароль")
     if user.role != "PATIENT" and settings.require_otp:

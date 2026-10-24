@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from .config import settings
 
@@ -45,54 +46,87 @@ def worker_count() -> int:
         return 1
 
 
-def pool_capacity() -> int:
-    """Сколько соединений один процесс может занять одновременно (pool+overflow)."""
+def pool_capacity(profile: str = "api") -> int:
+    """Сколько соединений один процесс может занять одновременно (pool+overflow).
+
+    `profile="api"` — процесс uvicorn; `profile="background"` — воркер
+    напоминаний и сервис обогащения КБ: им веер соединений не нужен, поэтому
+    их пул меньше и считается отдельно в бюджете Postgres.
+    """
+    if profile == "background":
+        return settings.db_bg_pool_size + settings.db_bg_max_overflow
     return settings.db_pool_size + settings.db_max_overflow
 
 
-def validate_pool_budget(workers: int | None = None) -> None:
+_SYNC_ALLOWANCE = 1  # init_db/alembic: одно служебное соединение на процесс
+
+
+def validate_pool_budget(workers: int | None = None, background: int | None = None) -> None:
     """Fail-fast: суммарный спрос пулов не должен превышать CC_DB_MAX_CONNECTIONS.
 
     max_connections Postgres — общий ресурс инсталляции: его делят все процессы
-    API, воркеры/CLI и psql/миграции. При дефолтах 20+20 на процесс потолок
-    100 соединений выдерживают максимум 2 воркера (2*40=80, остаток — служебный).
+    API, фоновые сервисы (напоминания, обогащение КБ), CLI и psql/миграции.
+    Поэтому считаем оба вида процессов: `workers × (api-пул + служебное
+    соединение) + background × (bg-пул + служебное)`. При дефолтах
+    20+20 на воркер и 2+0 на фоновый процесс потолок 100 выдерживают
+    2 воркера и 2 фоновых сервиса (2*41 + 2*3 = 88).
     """
     workers = worker_count() if workers is None else workers
-    demand = workers * pool_capacity()
+    background = settings.db_background_processes if background is None else background
+    demand = workers * (pool_capacity() + _SYNC_ALLOWANCE) + background * (
+        pool_capacity("background") + _SYNC_ALLOWANCE
+    )
     if demand > settings.db_max_connections:
         raise RuntimeError(
-            f"Пул БД не влезает в Postgres: WEB_CONCURRENCY={workers} × "
+            f"Пул БД не влезает в Postgres: {workers} × "
             f"(CC_DB_POOL_SIZE={settings.db_pool_size} + "
-            f"CC_DB_MAX_OVERFLOW={settings.db_max_overflow}) = {demand} > "
+            f"CC_DB_MAX_OVERFLOW={settings.db_max_overflow} + 1 служебное) + "
+            f"{background} фоновых × (CC_DB_BG_POOL_SIZE={settings.db_bg_pool_size} + "
+            f"CC_DB_BG_MAX_OVERFLOW={settings.db_bg_max_overflow} + 1) = {demand} > "
             f"CC_DB_MAX_CONNECTIONS={settings.db_max_connections}. "
-            "Уменьшите CC_DB_POOL_SIZE/CC_DB_MAX_OVERFLOW или WEB_CONCURRENCY."
+            "Уменьшите CC_DB_POOL_SIZE/CC_DB_MAX_OVERFLOW, WEB_CONCURRENCY или "
+            "CC_DB_BACKGROUND_PROCESSES."
         )
 
 
-def setup(database_url: str | None = None, *, poolclass=None) -> None:
+def setup(database_url: str | None = None, *, poolclass=None, profile: str = "api") -> None:
     """Инициализирует оба engine'а. poolclass=NullPool — для тестов.
 
     Тесты гоняют TestClient с отдельным event loop на каждый тест; пул,
     созданный в чужом цикле, нельзя переиспользовать, поэтому conftest
     просит NullPool (соединение на checkout, без удержания между запросами).
+
+    `profile="background"` даёт маленький пул (CC_DB_BG_POOL_SIZE) — так
+    фоновые процессы не съедают бюджет соединений, рассчитанный на API.
     """
     global engine, AsyncSessionLocal, sync_engine, SyncSessionLocal
     url = database_url or settings.database_url
 
     if poolclass is None:
-        async_kwargs: dict = {
-            "pool_pre_ping": True,
-            "pool_size": settings.db_pool_size,
-            "max_overflow": settings.db_max_overflow,
-            "pool_timeout": settings.db_pool_timeout,
-        }
+        if profile == "background":
+            async_kwargs: dict = {
+                "pool_pre_ping": True,
+                "pool_size": settings.db_bg_pool_size,
+                "max_overflow": settings.db_bg_max_overflow,
+                "pool_timeout": settings.db_pool_timeout,
+            }
+        else:
+            async_kwargs = {
+                "pool_pre_ping": True,
+                "pool_size": settings.db_pool_size,
+                "max_overflow": settings.db_max_overflow,
+                "pool_timeout": settings.db_pool_timeout,
+            }
     else:
         async_kwargs = {"pool_pre_ping": True, "poolclass": poolclass}
 
     engine = create_async_engine(url, **async_kwargs)
     AsyncSessionLocal = async_sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
-    sync_engine = create_engine(url, pool_pre_ping=True)
+    # Sync-движок — только alembic/seed/CLI/подготовка схемы в тестах, никогда
+    # request-path. NullPool: служебные соединения не должны висеть в пуле
+    # процесса и выпадать из бюджета max_connections.
+    sync_engine = create_engine(url, pool_pre_ping=True, poolclass=NullPool)
     SyncSessionLocal = sessionmaker(bind=sync_engine, autoflush=False, expire_on_commit=False)
 
 
@@ -137,6 +171,9 @@ def install_audit_trigger(engine_=None) -> None:
         ))
 
 
+_MIGRATION_LOCK = "cc_alembic_migrations"
+
+
 def init_db() -> None:
     """Приводим схему к актуальной: alembic upgrade head + гарантия триггера аудита.
 
@@ -144,6 +181,11 @@ def init_db() -> None:
     таблицы, из-за чего демо-БД ловила устаревшую схему (недостающие индексы
     runs_checkin_daily/audit_log_occurred/escalations_patient и CHECK-ограничения).
     Единственный источник истины — миграции в api/alembic.
+
+    Адvisory-лок: при `--workers N` каждый процесс идёт в lifespan и вызывает
+    init_db, поэтому холодная БД получала N гонок CREATE TABLE. Лок берём на
+    отдельном соединении (alembic открывает своё), чтобы миграции шли строго
+    по очереди; второй процесс дождётся и увидит уже актуальную версию.
     """
     from pathlib import Path
 
@@ -158,8 +200,15 @@ def init_db() -> None:
     # URL берём из уже настроенного engine (соответствует CC_DATABASE_URL).
     # str(url) маскирует пароль как *** — нужен render_as_string без маски.
     cfg.set_main_option("sqlalchemy.url", sync_engine.url.render_as_string(hide_password=False))
-    command.upgrade(cfg, "head")
-    install_audit_trigger(sync_engine)
+    with sync_engine.connect() as lock_conn:
+        lock_conn.execute(text("SELECT pg_advisory_lock(hashtext(:k))"), {"k": _MIGRATION_LOCK})
+        lock_conn.commit()  # не держим открытую транзакцию, пока alembic делает DDL
+        try:
+            command.upgrade(cfg, "head")
+            install_audit_trigger(sync_engine)
+        finally:
+            lock_conn.execute(text("SELECT pg_advisory_unlock(hashtext(:k))"), {"k": _MIGRATION_LOCK})
+            lock_conn.commit()
 
 
 def truncate_all() -> None:

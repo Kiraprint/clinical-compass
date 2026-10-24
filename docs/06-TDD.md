@@ -6,7 +6,7 @@
 
 ## 1. Стратегия
 
-- Пирамида (фактически достигнуто, см. `core/tests` + `api/tests`): unit (ядро) 88, integration (API+БД) 222 (из них 78 — обогащение КБ, FR-20), e2e (UI-флоу) 33. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
+- Пирамида (фактически достигнуто на 2026-10-24, см. `core/tests` + `api/tests`): unit (ядро) 141, integration (API+БД) 476 (из них 78 — обогащение КБ, FR-20), e2e (UI-флоу) 40. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
 - Ядро: 100% детерминированные чистые функции — табличные параметризованные тесты порогов.
 - Интеграция: реальные HTTP-запросы к тестовому Postgres (отдельная БД), не мок-эхо.
 - Запрещены тесты «на копирование»: только поведение контрактов (вход → выход/инвариант/ошибка).
@@ -246,6 +246,26 @@
 | `test_consent_revoke_deletes_patient_events` | НЯ → отзыв согласия | строки пациента в `adverse_events` удалены |
 | `test_adverse_text_encrypted_at_rest` | после проверки врача | `event_text`/`verification_note` — `bytea`, plaintext на диске отсутствует, ORM расшифровывает |
 
+
+### 3.2 Async-рантайм, пулы и кеш корпуса
+
+| Тест | Given | When | Then |
+|---|---|---|---|
+| `test_finish_rolls_back_whole_unit` (`test_async_db.py`) | инъекция сбоя аудита на финише скрининга | POST финиша | нет ни `assessments`, ни `escalations`, ни `notifications` — async-сессия не оставляет частичных строк |
+| `test_audit_and_business_write_are_atomic` | сбой записи аудита | доменная операция | бизнес-строка тоже откатана (одна транзакция) |
+| `test_no_idle_in_transaction_after_concurrent_requests` | 200 одновременных запросов | после ответов | `pg_stat_activity` не содержит `idle in transaction` — сессия из `get_db` всегда закрывается |
+| `test_pool_budget_counts_api_workers_and_background_services` | формула бюджета | `validate_pool_budget(max_workers, background=1)` и `max_workers+1` | впритык проходит, превышение — `RuntimeError`; фоновые процессы входят в тот же бюджет |
+| `test_background_profile_has_small_pool_and_sync_engine_is_nullpool` | `db.setup` | проверка профилей | `pool_capacity("background") < pool_capacity()`; `sync_engine.pool` — `NullPool` |
+| `test_pool_exhaustion_is_503_with_retry_after` (`test_errors.py`) | маршрут бросает `sqlalchemy.exc.TimeoutError` | GET | 503 `DB_UNAVAILABLE`, заголовок `Retry-After: 2`, `instance` = путь |
+| `test_check_rate_does_not_create_entries` (`test_ratelimit.py`) | чистое состояние лимитера | `check_rate` без неудачных попыток | словарь ключей пуст (проверка не создаёт запись) |
+| `test_recorded_hits_are_bounded_by_max_keys` | поток неудачных попыток по разным парам (IP, email) | `record_rate_hit` × (`_MAX_KEYS`+50) | размер словаря ≤ `_MAX_KEYS` — память процесса ограничена |
+| `test_limit_still_blocks_after_hits` | 5 неудачных входов | `check_rate` | отказ с `retry_after ≥ 1` (лимит не сломан уборкой) |
+| `test_second_call_is_cache_hit_without_db_query` (`test_kb_corpus_cache.py`) | корпус собран | повторный `build_corpus()` | сборка из кеша, запросов к `drugs` нет |
+| `test_mutation_is_invisible_until_invalidated` | правка справочника | `build_corpus()` без инвалидации, затем `clear_corpus_cache()` | до инвалидации снимок прежний, после — новый |
+| `test_ttl_expiry_rebuilds_corpus` / `test_ttl_zero_disables_cache` | TTL истёк / `CC_KB_CORPUS_TTL_SECONDS=0` | вызовы | пересборка / кеш отключён |
+| `test_errors_are_not_cached` | сборка бросает исключение | повторный вызов | исключение не закешировано, сборка повторяется |
+| `test_request_path_drug_docs_are_not_cached` | `build_corpus(drug_docs=...)` | два вызова с разными препаратами | данные запроса не попадают в общий кеш |
+| `test_endpoint_host_hides_capability_token` (`test_push.py`) | endpoint с токеном в пути | `_endpoint_host` | в лог попадает только хост, токена нет |
 
 ## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/`)
 

@@ -15,12 +15,13 @@ from __future__ import annotations
 
 import threading
 import time
-from collections import defaultdict, deque
+from collections import deque
 
 from .config import settings
 
 _lock = threading.Lock()
-_hits: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+_MAX_KEYS = 4096  # порог уборки: перебор пар (IP,email) не должен растить память
+_hits: dict[tuple[str, str], deque[float]] = {}
 
 
 def check_rate(key: tuple[str, str]) -> tuple[bool, int]:
@@ -29,13 +30,37 @@ def check_rate(key: tuple[str, str]) -> tuple[bool, int]:
     window = settings.rate_window
     limit = settings.rate_max
     with _lock:
-        dq = _hits[key]
+        # get, а не defaultdict-индексация: проверка не должна создавать запись
+        # (иначе перебор пар «IP,email» растит память без единой неудачной попытки).
+        dq = _hits.get(key)
+        if dq is None:
+            return True, 0
         while dq and now - dq[0] >= window:
             dq.popleft()
+        if not dq:
+            _hits.pop(key, None)
+            return True, 0
         if len(dq) >= limit:
             retry = int(window - (now - dq[0])) + 1
             return False, retry
         return True, 0
+
+
+def _prune_locked(now: float, window: int) -> None:
+    """Уборка словаря: сначала протухшие окна, затем самые старые ключи.
+
+    Жёсткий потолок нужен, потому что ключ — пара (IP, email): перебор
+    произвольных email создаёт неограниченное число записей. Вытеснение
+    старейших означает fail-open для вытесненного ключа — без Redis точный
+    глобальный счётчик не построить (см. docstring модуля).
+    """
+    for k, dq in list(_hits.items()):
+        while dq and now - dq[0] >= window:
+            dq.popleft()
+        if not dq:
+            del _hits[k]
+    while len(_hits) >= _MAX_KEYS:
+        del _hits[next(iter(_hits))]
 
 
 def record_rate_hit(key: tuple[str, str]) -> None:
@@ -43,7 +68,9 @@ def record_rate_hit(key: tuple[str, str]) -> None:
     now = time.monotonic()
     window = settings.rate_window
     with _lock:
-        dq = _hits[key]
+        if len(_hits) >= _MAX_KEYS:
+            _prune_locked(now, window)
+        dq = _hits.setdefault(key, deque())
         while dq and now - dq[0] >= window:
             dq.popleft()
         dq.append(now)

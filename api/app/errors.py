@@ -55,7 +55,28 @@ async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse
     )
 
 
+
+async def pool_timeout_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Пул соединений исчерпан (CC_DB_POOL_TIMEOUT) → 503 + Retry-After.
+
+    Без явного маппинга SQLAlchemy TimeoutError уходил в общий 500: клиент
+    не понимал, что это временная перегрузка, и не мог ретраить с задержкой.
+    """
+    return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": "2"},
+        content=_problem(
+            503, "DB_UNAVAILABLE", "Нет свободного соединения с БД, повторите запрос",
+            str(request.url.path),
+        ),
+    )
+
+
 def register_handlers(app) -> None:
     app.add_exception_handler(Problem, problem_handler)
     app.add_exception_handler(RequestValidationError, validation_handler)
     app.add_exception_handler(ValueError, value_error_handler)
+    # sqlalchemy.exc.TimeoutError — исчерпан пул (см. CC_DB_POOL_TIMEOUT).
+    from sqlalchemy.exc import TimeoutError as PoolTimeoutError
+
+    app.add_exception_handler(PoolTimeoutError, pool_timeout_handler)

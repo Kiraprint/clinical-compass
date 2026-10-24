@@ -46,6 +46,16 @@ async def run(*, once: bool = False, max_runs: int | None = None) -> int:
             return 0
         await asyncio.sleep(interval)
 
+async def _run_and_dispose(*, once: bool, max_runs: int | None) -> int:
+    """Тики + закрытие пула в одном event loop (dispose из другого цикла
+    получает соединения, привязанные к чужому loop)."""
+    try:
+        return await run(once=once, max_runs=max_runs)
+    finally:
+        if db.engine is not None:
+            await db.engine.dispose()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Доставка напоминаний врача (FR-24)")
     parser.add_argument("--once", action="store_true", help="один тик и выход")
@@ -53,11 +63,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    db.setup()
-    try:
-        return asyncio.run(run(once=args.once, max_runs=args.max_runs))
-    finally:
-        db.sync_engine.dispose()
+    db.setup(profile="background")
+    return asyncio.run(_run_and_dispose(once=args.once, max_runs=args.max_runs))
 
 if __name__ == "__main__":
     raise SystemExit(main())

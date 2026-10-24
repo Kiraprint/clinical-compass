@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import anyio
 import asyncio
 import json
 import sys
@@ -26,7 +27,7 @@ from app.models import KBRun, KBWork
 
 def _setup() -> None:
     if db_module.engine is None:
-        db_module.setup(settings.database_url)
+        db_module.setup(settings.database_url, profile="background")
 
 
 def _session():
@@ -108,10 +109,16 @@ async def _cmd_serve(args) -> int:
                     # сессия закрывается в context manager выше → неявный rollback
                     print(f"kb-enrichment: прогон упал: {exc}", flush=True)
                 finally:
-                    await lock_conn.execute(
-                        text("SELECT pg_advisory_unlock(hashtext('kb-enrichment'))")
-                    )
-                    await lock_conn.commit()
+                    # Shield: отмена посреди прогона не должна оставить
+                    # session-level лок на соединении из пула.
+                    with anyio.CancelScope(shield=True):
+                        try:
+                            await lock_conn.execute(
+                                text("SELECT pg_advisory_unlock(hashtext('kb-enrichment'))")
+                            )
+                            await lock_conn.commit()
+                        except Exception:  # noqa: BLE001 — разрыв соединения снимет лок сам
+                            print("kb-enrichment: не удалось снять advisory-лок", flush=True)
         await asyncio.sleep(interval)
 
 async def _cmd_review(args) -> int:
@@ -206,11 +213,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+async def _run_and_dispose(func, args) -> int:
+    """Выполнить команду и закрыть пул в том же event loop (иначе dispose из
+    другого цикла получает соединения, привязанные к чужому loop)."""
+    try:
+        return await func(args)
+    finally:
+        if db_module.engine is not None:
+            await db_module.engine.dispose()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        return asyncio.run(args.func(args))
+        return asyncio.run(_run_and_dispose(args.func, args))
     except review.ReviewError as exc:
         print(f"ошибка ревью: {exc}", file=sys.stderr)
         return 2

@@ -179,8 +179,19 @@ def main() -> int:
     if args.limit < 10:
         raise SystemExit("--limit должен быть >= 10")
     collection = args.collection or f"kb_eval_{args.profile.replace('-', '_')}"
-    if collection in ("kb", "kb_test"):
-        raise SystemExit("нельзя использовать боевую/тестовую коллекцию: укажите --collection")
+    # Скрипт пересоздаёт коллекцию, поэтому разрешаем только изолированные имена.
+    # Сравнение с конфигом (а не с литералами) важно: прод-коллекция задаётся
+    # CC_QDRANT_COLLECTION и может называться как угодно.
+    configured = os.environ.get("CC_QDRANT_COLLECTION", "kb")
+    if not collection.startswith("kb_eval_"):
+        raise SystemExit(
+            "коллекция должна быть изолированной: имя обязано начинаться с kb_eval_ "
+            f"(получено {collection!r})"
+        )
+    if collection in ("kb", "kb_test", configured):
+        raise SystemExit(
+            f"нельзя использовать рабочую коллекцию ({configured}): укажите --collection"
+        )
 
     from qdrant_client import QdrantClient
 

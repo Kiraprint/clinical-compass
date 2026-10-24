@@ -124,11 +124,29 @@ def test_no_idle_in_transaction_after_concurrent_requests(client):
     assert idle_tx == 0
 
 
-def test_pool_budget_validation():
-    """Суммарный пул воркеров обязан влезать в CC_DB_MAX_CONNECTIONS."""
+def test_pool_budget_counts_api_workers_and_background_services():
+    """Бюджет считает и воркеры API, и фоновые сервисы (+1 служебное соединение).
+
+    Регресс: раньше формула учитывала только `workers × (pool+overflow)`, хотя
+    reminders-worker и kb-enrichment держат такие же пулы — проверка проходила,
+    а Postgres потом отбивал соединения.
+    """
     settings = Settings()
-    per_worker = settings.db_pool_size + settings.db_max_overflow
-    fits = max(1, settings.db_max_connections // per_worker)
-    db.validate_pool_budget(fits)  # впритык — допустимо
+    per_worker = settings.db_pool_size + settings.db_max_overflow + 1
+    per_bg = settings.db_bg_pool_size + settings.db_bg_max_overflow + 1
+    max_workers = max(1, (settings.db_max_connections - per_bg) // per_worker)
+
+    db.validate_pool_budget(max_workers, background=1)  # впритык — допустимо
     with pytest.raises(RuntimeError, match="Пул БД не влезает"):
-        db.validate_pool_budget(fits + 1)
+        db.validate_pool_budget(max_workers + 1, background=1)
+    with pytest.raises(RuntimeError, match="Пул БД не влезает"):
+        # фоновые процессы входят в тот же бюджет
+        db.validate_pool_budget(1, background=settings.db_max_connections)
+
+
+def test_background_profile_has_small_pool_and_sync_engine_is_nullpool():
+    """Фоновый профиль не занимает полный пул API; sync-движок не держит соединений."""
+    from sqlalchemy.pool import NullPool
+
+    assert db.pool_capacity("background") < db.pool_capacity()
+    assert isinstance(db.sync_engine.pool, NullPool)

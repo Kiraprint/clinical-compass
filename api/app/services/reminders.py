@@ -23,6 +23,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import anyio
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.engine import Connection
@@ -257,7 +258,9 @@ async def deliver_due(db: AsyncSession, now: datetime | None = None) -> int:
     Возвращает число доставленных напоминаний.
     """
     now = now or _now()
-    engine = db.bind  # AsyncEngine: PgAsyncSession привязан к нему в db.setup()
+    engine = db.bind  # AsyncEngine: AsyncSession привязан к нему в db.setup()
+    if engine is None:  # сессия без bind: лок не на чем держать — лучше упасть явно
+        raise RuntimeError("reminders.deliver_due: сессия без AsyncEngine (db.setup не вызван)")
     pushes: list[tuple[uuid.UUID, str, str]] = []
     # Лок берём на отдельном соединении: после ошибки транзакция сессии может
     # быть aborted, и pg_advisory_unlock на ней же не выполнится — лок утечёт
@@ -316,10 +319,20 @@ async def deliver_due(db: AsyncSession, now: datetime | None = None) -> int:
             await db.rollback()
             raise
         finally:
-            await lock_conn.execute(
-                text("SELECT pg_advisory_unlock(hashtext(:k))"), {"k": DELIVERY_LOCK_KEY}
-            )
-            await lock_conn.commit()
+            # Shield: при отмене (SIGTERM/reload посреди тика, в т.ч. внутри
+            # to_thread в push) обычный await в finally сразу бросит
+            # CancelledError, unlock не выполнится — и соединение вернётся в пул
+            # всё ещё держателем session-level лока. Тогда все следующие тики
+            # этого воркера молча пропускаются.
+            with anyio.CancelScope(shield=True):
+                try:
+                    await lock_conn.execute(
+                        text("SELECT pg_advisory_unlock(hashtext(:k))"),
+                        {"k": DELIVERY_LOCK_KEY},
+                    )
+                    await lock_conn.commit()
+                except Exception:  # noqa: BLE001 — разрыв соединения сам снимет лок
+                    log.warning("reminders: не удалось снять advisory-лок", exc_info=True)
 
     # Push — best-effort и вне критической секции лока: сбой доставки не откатывает БД.
     for clinician_id, title, body in pushes:

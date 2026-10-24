@@ -137,8 +137,8 @@ def _fio_patterns(name: str) -> list[re.Pattern[str]]:
     variants = [" ".join(esc)]
     if len(esc) >= 2:
         initials = " ".join(f"{w[0]}." for w in esc[1:])
-        variants.append(f"{esc[0]}\s+{re.escape(initials)}")
-        variants.append(f"{esc[0]}\s+{''.join(f'{w[0]}.' for w in esc[1:])}")
+        variants.append(rf"{esc[0]}\s+{re.escape(initials)}")
+        variants.append(rf"{esc[0]}\s+{''.join(f'{w[0]}.' for w in esc[1:])}")
         variants.append(" ".join(esc[:2]))
     # Отдельно — основа первого слова в любом падеже (в русском ФИО это
     # фамилия; для «Игорь К.» — имя). [а-яё]{0,3} — короткие окончания.

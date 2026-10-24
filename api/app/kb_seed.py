@@ -315,24 +315,30 @@ def clear_corpus_cache() -> None:
 
 
 def _cached(key: tuple, build) -> tuple[Mapping[str, Any], ...]:
-    """Снимок по ключу с TTL; сборка идёт под локом (один промах на всех).
+    """Снимок по ключу с TTL. Сборка — ВНЕ лока.
 
-    Исключения не кешируются — при ошибке (напр. БД недоступна) следующий
-    вызов снова попытается собрать снимок.
+    Под локом был бы «один промах на всех», но сборка полного корпуса читает
+    drugs из БД sync-сессией: если БД притормозила, лок держал бы все потоки
+    keyword-fallback. Поэтому допускаем редкие дубли сборки на холодном старте,
+    а под локом только читаем/пишем кеш. Исключения не кешируются — при ошибке
+    следующий вызов попытается собрать снимок снова.
     """
     ttl = settings.kb_corpus_ttl_seconds
-    now = time.monotonic()
+    if ttl > 0:
+        with _corpus_lock:
+            cached = _corpus_cache.get(key)
+            if cached is not None and time.monotonic() - cached[0] < ttl:
+                return cached[1]
+    snapshot = tuple(MappingProxyType(dict(d)) for d in build())
     with _corpus_lock:
         if ttl > 0:
             cached = _corpus_cache.get(key)
-            if cached is not None and now - cached[0] < ttl:
+            if cached is not None and time.monotonic() - cached[0] < ttl:
                 return cached[1]
+            _corpus_cache[key] = (time.monotonic(), snapshot)
         else:
             _corpus_cache.pop(key, None)
-        snapshot = tuple(MappingProxyType(dict(d)) for d in build())
-        if ttl > 0:
-            _corpus_cache[key] = (now, snapshot)
-        return snapshot
+    return snapshot
 
 
 def _immutable(docs: list[dict]) -> list[Mapping[str, Any]]:

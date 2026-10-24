@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     db_max_overflow: int = 20  # CC_DB_MAX_OVERFLOW: пиковых сверх pool_size
     db_pool_timeout: int = 30  # CC_DB_POOL_TIMEOUT: сек ожидания свободного соединения
     db_max_connections: int = 100  # CC_DB_MAX_CONNECTIONS: потолок Postgres для инсталляции
+    # Фоновые процессы (reminders-worker, kb-enrichment) держат свой маленький
+    # пул: им не нужен веер соединений под HTTP-нагрузку, но их спрос обязан
+    # попадать в тот же бюджет max_connections (см. db.validate_pool_budget).
+    db_bg_pool_size: int = 2  # CC_DB_BG_POOL_SIZE: соединений на фоновый процесс
+    db_bg_max_overflow: int = 0  # CC_DB_BG_MAX_OVERFLOW: пиковых сверх пула
+    db_background_processes: int = 2  # CC_DB_BACKGROUND_PROCESSES: их число в инсталляции
     jwt_secret: str = "dev-secret-change-me-0123456789abcdef"  # >= 32 байт (RFC 7518)
     access_ttl_minutes: int = 15
     refresh_ttl_days: int = 7

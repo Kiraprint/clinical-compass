@@ -131,3 +131,10 @@ def test_push_to_clinicians_signs_request(client, db_session, monkeypatch):
     assert headers["content-encoding"] == "aes128gcm"
     assert headers["ttl"] == "0"
     assert body != json.dumps({"title": "тест", "body": "тело"}).encode()  # зашифровано
+
+
+def test_endpoint_host_hides_capability_token():
+    """Endpoint подписки — capability-токен: в лог идёт только хост."""
+    host = push._endpoint_host("https://fcm.googleapis.com/wp/AbC-sEcReT-token?x=1")
+    assert host == "fcm.googleapis.com"
+    assert "AbC-sEcReT" not in host

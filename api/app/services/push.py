@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from urllib.parse import urlparse
 import uuid
 
 import anyio
@@ -362,10 +363,18 @@ def _fcm_send(token: str, title: str, body: str) -> bool:
         with urllib.request.urlopen(req, timeout=5) as resp:
             return resp.status == 200
     except urllib.error.HTTPError as exc:  # noqa: BLE001
-        log.warning("FCM send error %s (token %s...): %s", exc.code, token[:40], exc.read()[:200])
+        log.warning("FCM send error %s (token %s…): %s", exc.code, token[:8], exc.read()[:200])
     except Exception as exc:  # noqa: BLE001
-        log.warning("FCM send сбой (token %s...): %s", token[:40], exc)
+        log.warning("FCM send сбой (token %s…): %s", token[:8], exc)
     return False
+
+def _endpoint_host(endpoint: str) -> str:
+    """Хост подписки для логов: сам endpoint — capability-токен, его логировать нельзя."""
+    try:
+        return urlparse(endpoint).netloc or "?"
+    except ValueError:
+        return "?"
+
 
 async def push_to_clinicians(
     db: AsyncSession, clinician_ids: list[uuid.UUID], title: str, body: str
@@ -382,22 +391,24 @@ async def push_to_clinicians(
         from pywebpush import WebPushException, webpush
 
 
-        def _send(sub) -> None:  # sync: pywebpush блокирует → в потоке
+        def _send(endpoint: str, p256dh: str, auth: str) -> None:  # sync: pywebpush блокирует → в потоке
+            # В поток передаём только примитивы: ORM-объект живёт в сессии loop'а,
+            # а endpoint — capability-токен, поэтому в лог идёт лишь хост.
             try:
                 webpush(
-                    {"endpoint": sub.endpoint, "keys": {"p256dh": sub.p256dh, "auth": sub.auth}},
+                    {"endpoint": endpoint, "keys": {"p256dh": p256dh, "auth": auth}},
                     data=payload,
                     vapid_private_key=keys["vapid"],
                     vapid_claims={"sub": "mailto:admin@compass.demo"},
                     timeout=5,
                 )
             except WebPushException as exc:
-                log.warning("push не доставлен (%s): %s", sub.endpoint[:60], exc)
+                log.warning("push не доставлен (%s): %s", _endpoint_host(endpoint), exc)
             except Exception as exc:  # noqa: BLE001 — одна плохая подписка не валит остальные
-                log.warning("push error %s: %s", sub.endpoint[:60], exc)
+                log.warning("push error %s: %s", _endpoint_host(endpoint), exc)
 
         for s in subs:
-            await anyio.to_thread.run_sync(_send, s)
+            await anyio.to_thread.run_sync(_send, s.endpoint, s.p256dh, s.auth)
 
         # Нативные FCM-токены (Android APK).
         devices = (await db.scalars(
