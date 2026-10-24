@@ -33,6 +33,11 @@ MAX_DOCUMENTS = 256
 MAX_CHARS = 20_000
 MAX_NAMES = 256
 
+# Окно NER: rubert видит 512 токенов, поэтому длинный текст режется на
+# перекрывающиеся куски с привязкой к пробелам (см. HybridMasker).
+NER_CHUNK_CHARS = 1200
+NER_CHUNK_OVERLAP = 200
+
 # Инструкция запроса для instruct-эмбеддеров. Модели обучены на английских
 # инструкциях; сам текст запроса/пассажа остаётся русским.
 DEFAULT_INSTRUCTION = (
@@ -86,6 +91,16 @@ class EmbedProfile:
     def prefix(self, kind: str, instruction: str) -> str:
         template = self.query_prefix if kind == "query" else self.passage_prefix
         return template.replace("{instruction}", instruction)
+
+
+def public_model_name(model_id: str) -> str:
+    """Имя модели для /health: файловый путь наружу не отдаём (только basename)."""
+    value = (model_id or "").strip()
+    if not value:
+        return ""
+    if value.startswith(("/", "~", ".")) or "\\" in value:
+        return os.path.basename(value.rstrip("/\\"))
+    return value
 
 
 # Встроенные профили. Дефолт выбирается одной env CC_ML_DEFAULT_PROFILE
@@ -204,18 +219,26 @@ class KeywordReranker:
         return scores
 
 
-def _regex_mask(text: str, names: list[str]) -> dict:
-    from compass.depersonalize import depersonalize
-
-    result = depersonalize(text, names=names or None)
+def _mask_payload(result: Any, *, model: str, degraded: bool) -> dict:
     return {
         "text": result.text,
         "spans": [
             {"category": f.kind, "start": f.start, "end": f.end}
             for f in result.findings
         ],
-        "model": "hybrid",
+        "model": model,
+        "degraded": degraded,
     }
+
+
+def _regex_mask(
+    text: str, names: list[str], *, model: str = "regex", degraded: bool = False
+) -> dict:
+    from compass.depersonalize import depersonalize
+
+    return _mask_payload(
+        depersonalize(text, names=names or None), model=model, degraded=degraded
+    )
 
 
 class RegexMasker:
@@ -309,7 +332,17 @@ class HybridMasker:
 
     Повторяет api/app/services/depersonalize.py (aggregation_strategy="first",
     только FIO-спаны идут в deny-list); маскирование и границы спанов считает
-    тот же core-модуль, что и локальный гибрид — спаны совпадают.
+    тот же core-модуль, что и локальный гибрид.
+
+    rubert видит 512 токенов (~1200 символов русского текста), поэтому
+    длинный документ режется на перекрывающиеся окна по границам слов.
+    Спан, оборванный правой границей окна, отбрасывается — его целиком
+    увидит следующее окно (перекрытие 200 символов).
+
+    Честность ответа: ``model="hybrid"`` только если NER реально отработал;
+    при сбое любого окна ``_broken=True`` (до перезапуска), ответ —
+    ``model="regex"``, ``degraded=true``, и api обязан считать это отказом
+    backend'а (docs/12).
     """
 
     def __init__(self, model_id: str, device: str) -> None:
@@ -327,30 +360,70 @@ class HybridMasker:
         self._lock = threading.Lock()
         self._broken = False
 
-    def _names(self, text: str) -> list[str]:
-        if self._broken or not text:
-            return []
-        try:
-            with self._lock:
-                entities = self._pipe(text)
-        except Exception as exc:  # noqa: BLE001 — NER не должен валить маскирование
-            log.warning("rubert NER сбой: %s", exc)
-            return []
+    @staticmethod
+    def _chunks(text: str) -> list[tuple[int, int]]:
+        """Окна (start, end) по границам слов с перекрытием NER_CHUNK_OVERLAP."""
+        out: list[tuple[int, int]] = []
+        start, size = 0, len(text)
+        while start < size:
+            end = min(start + NER_CHUNK_CHARS, size)
+            if end < size:
+                cut = text.rfind(" ", start + 1, end)
+                if cut > start:
+                    end = cut + 1
+            out.append((start, end))
+            if end >= size:
+                break
+            nxt = max(end - NER_CHUNK_OVERLAP, start + 1)
+            space = text.find(" ", nxt, end)
+            start = space + 1 if space > 0 else nxt
+        return out
+
+    def _fio_names(self, text: str) -> tuple[list[str], bool]:
+        """(имена для deny-list, degraded). degraded=True — NER не отработал."""
+        if not text:
+            return [], False
+        if self._broken:
+            return [], True
         names: list[str] = []
-        for entity in entities:
-            label = entity.get("entity_group") or entity.get("entity")
-            if _RUBERT_KIND.get(label) == "FIO":
-                value = text[int(entity["start"]) : int(entity["end"])].strip()
+        chunks = self._chunks(text)
+        for index, (start, end) in enumerate(chunks):
+            chunk = text[start:end]
+            try:
+                with self._lock:
+                    entities = self._pipe(chunk)
+            except Exception as exc:  # noqa: BLE001 — статус важнее, чем текст ошибки
+                log.warning(
+                    "rubert NER сбой (окно %d/%d): %r", index + 1, len(chunks), exc
+                )
+                self._broken = True
+                return names, True
+            last = index == len(chunks) - 1
+            for entity in entities:
+                label = entity.get("entity_group") or entity.get("entity")
+                if _RUBERT_KIND.get(label) != "FIO":
+                    continue
+                ent_start = start + int(entity["start"])
+                ent_end = start + int(entity["end"])
+                if not last and ent_end >= end - 1:
+                    continue  # оборван границей окна — покроет следующее
+                value = text[ent_start:ent_end].strip()
                 if value and value not in names:
                     names.append(value)
-        return names
+        return names, False
 
     def mask(self, text: str, names: list[str]) -> dict:
+        found, degraded = self._fio_names(text)
         merged = list(names or [])
-        for name in self._names(text):
+        for name in found:
             if name not in merged:
                 merged.append(name)
-        return _regex_mask(text, merged)
+        return _regex_mask(
+            text,
+            merged,
+            model="regex" if degraded else "hybrid",
+            degraded=degraded,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -421,10 +494,19 @@ class Registry:
                         "loaded": sorted(self._embedders),
                         "available": sorted(self.profiles),
                     },
-                    "rerank": self.rerank_model if self._reranker is not None else None,
-                    "mask": self.mask_model if self._masker is not None else None,
+                    "rerank": (
+                        public_model_name(self.rerank_model)
+                        if self._reranker is not None
+                        else None
+                    ),
+                    "mask": (
+                        public_model_name(self.mask_model)
+                        if self._masker is not None
+                        else None
+                    ),
                 },
-                "error": self._error,
+                # Никаких путей к весам/текстов ошибок наружу: только флаг.
+                "error": self._status == "error",
             }
 
     # -- загрузка ----------------------------------------------------------
@@ -462,7 +544,8 @@ class Registry:
 
     def _require_ready(self) -> None:
         if not self.ready:
-            raise ModelNotReady(self._error or "модели загружаются")
+            # Текст ошибки загрузки остаётся в логах: в ответ он не попадает.
+            raise ModelNotReady()
 
     # -- бэкенды -----------------------------------------------------------
 

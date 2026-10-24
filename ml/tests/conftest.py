@@ -19,7 +19,9 @@ for path in (_ML, _ROOT / "core"):
 
 # До импорта app: реестр по умолчанию (app = create_app()) должен быть stub.
 import os  # noqa: E402
-
+# Тесты работают без токена: явный анонимный режим (в проде приложение без
+# CC_ML_TOKEN не стартует — см. test_startup_requires_token).
+os.environ.setdefault("CC_ML_ALLOW_ANONYMOUS", "1")
 os.environ.setdefault("CC_ML_STUB", "1")
 
 from fastapi.testclient import TestClient  # noqa: E402

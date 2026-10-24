@@ -1,17 +1,23 @@
 """HTTP-фасад ML-сайдкара (контракт — api/app/services/ml_client.py).
 
-Эндпоинты (все, кроме /health, требуют X-CC-ML-Token при заданном
-CC_ML_TOKEN):
+Эндпоинты (все, кроме /health, требуют X-CC-ML-Token; без заданного
+CC_ML_TOKEN приложение не стартует, если явно не выставлен
+CC_ML_ALLOW_ANONYMOUS=1):
 
 - ``POST /v1/embeddings`` {texts, kind, profile} -> {profile, dense_size, vectors}
 - ``POST /v1/rerank`` {query, documents, top_k} -> {scores}
-- ``POST /v1/mask`` {text, names} -> {text, spans, model}
-- ``GET  /health`` -> {status, device, models}
+- ``POST /v1/mask`` {text, names} -> {text, spans, model, degraded}
+- ``GET  /health`` -> {status, device, models, error: bool}
+
+``model`` в ответе маскирования — ``hybrid`` только когда NER реально
+отработал; ``regex`` + ``degraded=true`` означают, что api обязан трактовать
+ответ как отказ backend'а (docs/12).
 
 Ошибки всегда структурированы: ``{"detail": {"code": ..., "message": ...}}``.
 Пока модели грузятся — 503 ``model_loading`` (с Retry-After); упавшая
 загрузка — 503 ``model_unavailable``. Вход ограничен по объёму (MAX_* в
-models.py): сайдкар не принимает «весь корпус» одной пачкой.
+models.py), а тело запроса — по Content-Length до парсинга JSON:
+сайдкар не принимает «весь корпус» одной пачкой.
 """
 
 from __future__ import annotations
@@ -36,10 +42,20 @@ from models import (
     ModelNotReady,
     Registry,
     UnknownProfile,
+    public_model_name,
 )
 
 log = logging.getLogger("ml.app")
 
+
+# Потолки тела по Content-Length — до парсинга JSON. С запасом покрывают
+# валидные MAX_* (utf-8 до 4 байт/символ): embeddings 64×20k, rerank
+# query+256×20k, mask текст+256 имён.
+_BODY_LIMITS = {
+    "/v1/embeddings": 6 * 1024 * 1024,
+    "/v1/rerank": 24 * 1024 * 1024,
+    "/v1/mask": 1 * 1024 * 1024,
+}
 
 class ApiError(Exception):
     """Ошибка с машинным кодом и человекочитаемым сообщением."""
@@ -115,6 +131,26 @@ class MaskRequest(BaseModel):
 def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -> FastAPI:
     registry = registry or Registry()
     token = os.environ.get("CC_ML_TOKEN", "").strip()
+    allow_anonymous = os.environ.get("CC_ML_ALLOW_ANONYMOUS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not token:
+        # Fail-closed: через сайдкар идёт сырой клинический текст. Токен
+        # генерирует tools/gen-secrets.sh; анонимный режим — только явный флаг
+        # (локальная отладка, не прод).
+        if not allow_anonymous:
+            raise RuntimeError(
+                "CC_ML_TOKEN не задан: сайдкар не стартует без токена. "
+                "Сгенерируйте секреты (tools/gen-secrets.sh) или для локальной "
+                "отладки выставьте CC_ML_ALLOW_ANONYMOUS=1"
+            )
+        log.warning(
+            "CC_ML_TOKEN пуст, CC_ML_ALLOW_ANONYMOUS=1: запросы принимаются "
+            "без аутентификации — только для локальной отладки"
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # noqa: ARG001 — подпись FastAPI
@@ -151,8 +187,13 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
     @app.exception_handler(ModelNotReady)
     async def _not_ready(request: Request, exc: ModelNotReady) -> JSONResponse:  # noqa: ARG001
         status = registry.status()
-        code = "model_unavailable" if status["status"] == "error" else "model_loading"
-        return _error(503, code, str(exc), {"Retry-After": "10"})
+        if status["status"] == "error":
+            code = "model_unavailable"
+            message = "модели не загрузились, подробности — в логах сайдкара"
+        else:
+            code = "model_loading"
+            message = "модели загружаются"
+        return _error(503, code, message, {"Retry-After": "10"})
 
     # --- авторизация и готовность ---
 
@@ -166,8 +207,35 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
 
     def require_ready() -> Registry:
         if not registry.ready:
-            raise ModelNotReady(registry.status()["error"] or "модели загружаются")
+            raise ModelNotReady()
         return registry
+
+    @app.middleware("http")
+    async def _limit_body(request: Request, call_next):  # noqa: ANN001 — сигнатура Starlette
+        """Отсечь гигантское тело по Content-Length до парсинга JSON.
+
+        Лимиты в разы ниже максимального валидного тела под MAX_* из
+        models.py (64/256 текстов по 20 000 символов); token-проверка
+        остаётся первой зависимостью эндпоинта.
+        """
+        limit = _BODY_LIMITS.get(request.url.path)
+        if limit is not None and request.method == "POST":
+            raw = request.headers.get("content-length")
+            if raw is None:
+                return _error(411, "length_required", "требуется заголовок Content-Length")
+            try:
+                size = int(raw)
+            except ValueError:
+                return _error(400, "invalid_request", "некорректный Content-Length")
+            if size < 0:
+                return _error(400, "invalid_request", "некорректный Content-Length")
+            if size > limit:
+                return _error(
+                    413,
+                    "payload_too_large",
+                    f"тело запроса больше {limit} байт",
+                )
+        return await call_next(request)
 
     # --- эндпоинты ---
 
@@ -204,7 +272,7 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
             "default": registry.default_profile,
             "profiles": {
                 key: {
-                    "model": value.model_id,
+                    "model": public_model_name(value.model_id),
                     "dense_size": value.dense_size,
                     "query_prefix": value.query_prefix,
                     "passage_prefix": value.passage_prefix,

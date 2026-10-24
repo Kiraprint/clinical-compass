@@ -10,6 +10,8 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     HF_HOME=/models \
     HF_HUB_DISABLE_TELEMETRY=1 \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
     PYTHONPATH=/app/core:/app
 
 # libgomp — OpenMP для torch; больше ничего для CPU-пути не нужно.
@@ -26,7 +28,7 @@ RUN pip install -r /app/requirements.txt
 
 # core/ нужен целиком: compass.depersonalize — та же гибридная логика, что в api.
 COPY core/ /app/core/
-COPY ml/app.py ml/models.py /app/
+COPY ml/app.py ml/models.py ml/warmup.py /app/
 COPY ml/README.md /app/ML-README.md
 
 # Модели кешируются в томе ml-models (HF_HOME=/models), пользователь должен

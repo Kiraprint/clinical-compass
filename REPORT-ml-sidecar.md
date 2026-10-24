@@ -25,13 +25,14 @@
 
 | Метрика | Значение |
 |---|---|
-| Холодный старт до `status: ready` (веса в HF-кеше) | **19.4 с** |
+| Холодный старт до `status: ready` (веса в HF-кеше, `HF_HUB_OFFLINE=1`) | **19.4 с** |
 | VRAM до старта (с другими процессами на карте) | 4 772 MiB |
 | VRAM после загрузки всех трёх моделей | 8 910 MiB |
 | Прирост на сайдкар | **≈ 4 138 MiB (4.0 GiB)** |
 
-Первый старт «с нуля» дополнительно скачивает ~4 ГБ весов в том `ml-models`
-(разовый egress, время зависит от сети).
+Веса (~4 ГБ) скачивает одноразовый `ml-warmup` (единственный контейнер с
+egress); после него `ml` живёт в внутренней сети `mlnet` и стартует с
+`HF_HUB_OFFLINE=1`, без обращений в сеть.
 
 ## Латентность (реальные модели, CUDA, bf16)
 
@@ -90,7 +91,8 @@
     {"category": "DOC", "start": 147, "end": 161},
     {"category": "EMAIL", "start": 375, "end": 392}
   ],
-  "model": "hybrid"
+  "model": "hybrid",
+  "degraded": false
 }
 ```
 
@@ -123,7 +125,8 @@ uvicorn'ом на хосте с теми же зависимостями. GPU-re
 
 | Команда | Результат |
 |---|---|
-| `python -m pytest ml/tests -q` | **22 passed** (stub, без torch/GPU/Postgres) |
+| `python -m pytest ml/tests -q` | **30 passed** (stub, без torch/GPU/Postgres) |
+| `PYTHONPATH=api:core … pytest api/tests/test_depersonalize_remote.py -q` | **22 passed** |
 | `PYTHONPATH=api:core … pytest api/tests/test_ml_client.py -q` | **9 passed** |
 
 API-тесты запускались с `CC_TEST_DATABASE_URL=…/compass_pii`,
@@ -132,16 +135,46 @@ API-тесты запускались с `CC_TEST_DATABASE_URL=…/compass_pii`,
 полного прогона `api/tests` другим процессом на той же БД; после его
 завершения — 9 passed.
 
+## Безопасность после ревью (P2-1…P2-3)
+
+- **Токен fail-closed.** Без `CC_ML_TOKEN` приложение не стартует
+  (`RuntimeError` при импорте): анонимный режим только через явный
+  `CC_ML_ALLOW_ANONYMOUS=1` с WARNING в лог. `tools/gen-secrets.sh` теперь
+  генерирует `CC_ML_TOKEN`, а `.env.example` больше не обещает выключенную
+  проверку.
+- **Сеть.** `mlnet` объявлена `internal: true`; в ней только api и ml.
+  postgres/qdrant/redis остаются в default, у `ml` нет egress. Веса скачивает
+  одноразовый `ml-warmup` (default-сеть) в том `ml-models`; после него `ml`
+  работает с `HF_HUB_OFFLINE=1`/`TRANSFORMERS_OFFLINE=1` (проверено прогоном:
+  `status=ready` при offline-переменных).
+- **Честный NER.** Длинный текст режется на окна 1200/200 с абсолютными
+  смещениями; исключение в любом окне → `_broken=True`,
+  `model="regex"`, `degraded=true`. Api (`_spans_from_remote`) считает
+  `degraded=true` или небулев `degraded` отказом backend'а: в prod — 503
+  `DEPERSONALIZATION_UNAVAILABLE`, вне prod — regex-деградация с WARNING.
+- **Тело и утечки.** Тело больше лимита (1/6/24 МиБ) отсекается по
+  `Content-Length` до парсинга (413 `payload_too_large`); `/health` отдаёт
+  только `error: bool`, тексты 503 не содержат путей к весам/токена.
+
+### Длинный текст: ФИО в конце 6000 символов
+
+Прогон на реальных весах (`CC_ML_DEVICE=cuda`, `HF_HUB_OFFLINE=1`):
+6000 символов клинической записи, ФИО «Смирнов Алексей Петрович» только в
+последних 80 символах (позиция 5921). Ответ: `model=hybrid`,
+`degraded=false`, 4 спана, `[ФИО]` на месте имени; телефон и дата рождения
+замаскированы; `"Смирнов"` и `"14.07.1972"` в тексте ответа отсутствуют.
+Первое обращение к длинному тексту — 2.6 с (прогрев пайплайна), далее
+p50 **130 мс** / p95 **143 мс** (n=10). До фикса текст обрезался первым
+512-токенным окном rubert и ФИО в хвосте не находилось.
+
 ## Что осталось для боевого переключения
 
-1. Собрать образ на целевом хосте и прогреть том `ml-models`
-   (`docker compose --profile gpu up -d ml`) — дальше сервис работает офлайн.
-2. Задать `CC_ML_TOKEN` (общий для api и ml) и убедиться, что api видит `ml`
-   по `http://ml:8080` (`GET /health` из контейнера api).
-3. Включить использование сайдкара в потребителях (retrieval/маскирование):
-   сейчас `ml_client` реализован и протестирован, но в бизнес-путь api ещё не
-   подключён — это отдельная задача; профиль эмбеддингов выбирается
-   `CC_ML_DEFAULT_PROFILE` по замерам retrieval-агента, после чего требуется
-   переиндексация коллекции.
+1. Собрать образ на целевом хосте, прогреть том
+   (`tools/gen-secrets.sh` → `docker compose --profile gpu run --rm ml-warmup`)
+   и поднять `ml`; дальше сервис работает офлайн.
+2. Убедиться, что api видит `ml` по `http://ml:8080` и общий `CC_ML_TOKEN`
+   совпадает (иначе 401/403); включить `CC_DEPERSONALIZE_NER=remote`.
+3. Для эмбеддингов выбрать `CC_ML_DEFAULT_PROFILE` по замерам retrieval-агента
+   и переиндексировать коллекцию (векторы разных моделей несравнимы).
 4. Для не-GPU окружений ничего не меняется: профиль `gpu` не поднимается,
    `CC_EMBEDDER=hash`, `CC_DEPERSONALIZE_NER=off`, `CC_ML_URL` пустой.

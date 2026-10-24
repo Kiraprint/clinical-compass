@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from models import MAX_CHARS, MAX_DOCUMENTS, MAX_TEXTS
-
+from app import create_app
+from models import MAX_CHARS, MAX_DOCUMENTS, MAX_TEXTS, HybridMasker, Registry
 
 def _detail(response) -> dict:
     body = response.json()
@@ -233,7 +233,9 @@ def test_mask_spans_and_text(ready):
         "дата рождения: 12.03.1975, СНИЛС 123-456-789 00. Жалобы: тревога."
     )
     body = _mask(ready, text, ["Иванов Иван Иванович"])
-    assert body["model"] == "hybrid"
+    # stub — явный режим без NER: model=regex и это не деградация.
+    assert body["model"] == "regex"
+    assert body["degraded"] is False
     spans = body["spans"]
     assert spans == sorted(spans, key=lambda s: (s["start"], s["end"]))
     categories = {s["category"] for s in spans}
@@ -253,3 +255,118 @@ def test_mask_without_names_keeps_regex_only(ready):
     body = _mask(ready, "Позвонить +7 (916) 123-45-67 в 15:00.")
     assert [s["category"] for s in body["spans"]] == ["PHONE"]
     assert "15:00" in body["text"]
+
+# --- старт без токена, потолок тела, отсутствие утечек ---------------------
+
+def test_startup_requires_token(monkeypatch):
+    monkeypatch.delenv("CC_ML_TOKEN", raising=False)
+    monkeypatch.delenv("CC_ML_ALLOW_ANONYMOUS", raising=False)
+    from models import Registry
+
+    with pytest.raises(RuntimeError, match="CC_ML_TOKEN"):
+        create_app(Registry(stub=True), start_warmup=False)
+
+def test_startup_allows_explicit_anonymous(monkeypatch):
+    monkeypatch.delenv("CC_ML_TOKEN", raising=False)
+    monkeypatch.setenv("CC_ML_ALLOW_ANONYMOUS", "1")
+    app = create_app(Registry(stub=True), start_warmup=False)
+    assert app is not None
+
+def test_body_too_large_rejected_before_parsing(client):
+    # Валидный по схеме текст сюда не доходит: Content-Length > лимита /v1/mask.
+    import json
+
+    payload = json.dumps({"text": "я" * 700_000})
+    response = client.post(
+        "/v1/mask",
+        content=payload.encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 413
+    assert _detail(response)["code"] == "payload_too_large"
+
+def test_health_error_has_no_details(registry):
+    from fastapi.testclient import TestClient
+
+    registry._status = "error"  # noqa: SLF001
+    registry._error = "OSError: /home/user/.cache/huggingface/secret"  # noqa: SLF001
+    with TestClient(create_app(registry, start_warmup=False)) as client:
+        body = client.get("/health").json()
+    assert body["error"] is True
+    assert "secret" not in str(body)
+    assert "huggingface" not in str(body)
+
+# --- NER: длинный текст, окна и честный degraded -------------------------
+
+def _fake_masker(pipe) -> HybridMasker:
+    """HybridMasker без torch: подменяем только pipeline."""
+    import threading
+
+    masker = object.__new__(HybridMasker)
+    masker._pipe = pipe  # noqa: SLF001
+    masker._lock = threading.Lock()  # noqa: SLF001
+    masker._broken = False  # noqa: SLF001
+    return masker
+
+def _name_pipe(chunk: str) -> list[dict]:
+    pos = chunk.find("Петров")
+    return [] if pos < 0 else [{"entity_group": "LAST_NAME", "start": pos, "end": pos + 6}]
+
+def test_ner_chunks_cover_long_text():
+    from models import NER_CHUNK_CHARS, NER_CHUNK_OVERLAP
+
+    text = ("Пациент пришёл на приём. " * 300) + "Петров Пётр. Конец."
+    assert len(text) > 2 * NER_CHUNK_CHARS
+    chunks = HybridMasker._chunks(text)
+    assert chunks[0][0] == 0 and chunks[-1][1] == len(text)
+    for start, end in chunks:
+        assert end - start <= NER_CHUNK_CHARS
+    for (_, prev_end), (next_start, _) in zip(chunks, chunks[1:]):
+        # Перекрытие есть и близко к NER_CHUNK_OVERLAP (начало сдвигается
+        # вперёд до границы слова, поэтому чуть меньше номинала).
+        assert 0 < prev_end - next_start
+        assert prev_end - next_start >= NER_CHUNK_OVERLAP - 100
+    # Хвост текста (имя) обязан попасть в последнее окно целиком.
+    assert "Петров" in text[chunks[-1][0] : chunks[-1][1]]
+
+def test_ner_finds_name_in_last_chunk():
+    text = ("Пациент пришёл на приём. " * 300) + "Петров Пётр. Конец."
+    masker = _fake_masker(_name_pipe)
+    body = masker.mask(text, [])
+    assert body["model"] == "hybrid"
+    assert body["degraded"] is False
+    assert [s["category"] for s in body["spans"]].count("FIO") == 1
+    assert "Петров" not in body["text"]
+    assert "[ФИО]" in body["text"]
+
+def test_ner_failure_is_degraded_and_sticky():
+    def boom(chunk: str) -> list[dict]:
+        raise RuntimeError("CUDA out of memory")
+
+    masker = _fake_masker(boom)
+    text = "Пациент Петров Пётр, тел. +7 916 123-45-67."
+    body = masker.mask(text, [])
+    assert body["model"] == "regex"
+    assert body["degraded"] is True
+    assert body["spans"], "regex-спаны должны остаться"
+    assert masker._broken is True  # noqa: SLF001
+    # После сбоя NER не пытаемся снова: запрос всё равно degraded.
+    again = masker.mask(text, [])
+    assert again["degraded"] is True
+    assert again["model"] == "regex"
+
+def test_health_hides_model_paths():
+    # Локальный путь из env не должен уходить в /health даже после загрузки.
+    from models import public_model_name
+
+    assert public_model_name("/home/user/weights/rubert") == "rubert"
+    assert public_model_name("~/cache/model") == "model"
+    assert public_model_name("BAAI/bge-reranker-v2-m3") == "BAAI/bge-reranker-v2-m3"
+
+    reg = Registry(stub=True, rerank_model="/srv/secret/rerank", mask_model="/srv/secret/ner")
+    reg._reranker = object()  # noqa: SLF001 — как будто загружен
+    reg._masker = object()  # noqa: SLF001
+    body = reg.status()
+    assert body["models"]["rerank"] == "rerank"
+    assert body["models"]["mask"] == "ner"
+    assert "/srv" not in str(body)
