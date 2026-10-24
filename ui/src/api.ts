@@ -308,7 +308,8 @@ export const api = {
     }),
   recordAdherence: (body: {
     medication_id?: string; medication?: string;
-    status: "taken" | "partial" | "missed"; note?: string;
+    status: "taken" | "partial" | "missed" | "not_scheduled";
+    partial_kind?: PartialKind; note?: string;
   }) =>
     req<Report["adherence"]["records"][number]>("/api/v1/me/adherence", {
       method: "POST",
@@ -530,11 +531,18 @@ export interface DiaryEntry {
   tags: string[];
   created_at: string;
 }
+// Уточнение «частично» (FR-27): доля принятого приёма.
+export type PartialKind =
+  | "quarter" | "half" | "three_quarters"
+  | "one_of_two" | "two_of_three"
+  | "less_than_prescribed" | "self_changed";
+
 export interface AdherenceRecord {
   id: string;
   medication_id: string | null;
   medication: string | null;
-  status: string;
+  status: "taken" | "partial" | "missed" | "not_scheduled";
+  partial_kind: PartialKind | null;
   note: string | null;
   created_at: string;
 }
@@ -552,6 +560,7 @@ export interface AdherenceMedication {
   taken: number;
   partial: number;
   missed: number;
+  not_scheduled: number;
   score: number;
   pct: number | null;
 }
@@ -568,6 +577,7 @@ export interface AdherenceSummary {
   taken: number;
   partial: number;
   missed: number;
+  not_scheduled: number;
   excluded: { count: number; items: AdherenceRecord[] };
   items: AdherenceRecord[];
   today: AdherenceRecord | null;
@@ -773,7 +783,7 @@ export interface Report {
     window: { from: string; to: string };
     // weighted: сумма score / сумма expected по назначениям с режимом.
     pct: number | null; score: number; expected: number;
-    total: number; taken: number; partial: number; missed: number;
+    total: number; taken: number; partial: number; missed: number; not_scheduled: number;
     medications: AdherenceMedication[];
     excluded_count: number;
     records: AdherenceRecord[];

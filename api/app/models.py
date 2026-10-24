@@ -400,8 +400,10 @@ class AdverseEvent(Base):
 class AdherenceRecord(Base):
     """Приверженность лечению (задача кейса 7). Спецкатегория ПДн (152-ФЗ).
 
-    Пациент ежедневно отмечает приём назначенного препарата: taken/partial/missed.
-    Врач видит агрегат (% приверженности за окно) в карточке. medication_id —
+    Пациент ежедневно отмечает приём назначенного препарата: taken/partial/missed
+    либо not_scheduled (сегодня не назначено). У «частично» уточняется
+    partial_kind — сколько принято. Врач видит агрегат (% приверженности за
+    окно) в карточке. medication_id —
     FK на назначение (FR-27): по нему считается ожидаемое число приёмов из
     режима (PatientMedication.times_per_day). medication — свободный текст
     названия для отображения и для исторических записей без связи (backfill
@@ -418,12 +420,33 @@ class AdherenceRecord(Base):
     medication_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("patient_medications.id", ondelete="SET NULL"), index=True, nullable=True,
     )
-    status: Mapped[str] = mapped_column(String(16))   # taken | partial | missed
+    # taken | partial | missed | not_scheduled. not_scheduled — препарат сегодня
+    # не принимается по расписанию (перерыв/по требованию): в числитель и
+    # знаменатель процента не входит, показывается отдельным счётчиком.
+    status: Mapped[str] = mapped_column(String(16))
+    # Уточнение «частичного» приёма (жалоба врача-психиатра): сколько именно
+    # принято. Обязателен при status='partial' и запрещён при остальных
+    # статусах — инвариант держат CHECK-констрейнты ниже.
+    partial_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
     note: Mapped[str | None] = mapped_column(EncryptedText())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)
 
     __table_args__ = (
-        CheckConstraint("status in ('taken','partial','missed')", name="adherence_records_status"),
+        CheckConstraint(
+            "status in ('taken','partial','missed','not_scheduled')",
+            name="adherence_records_status",
+        ),
+        CheckConstraint(
+            "partial_kind is null or partial_kind in ("
+            "'quarter','half','three_quarters','one_of_two','two_of_three',"
+            "'less_than_prescribed','self_changed')",
+            name="adherence_records_partial_kind",
+        ),
+        # kind только для partial и обязателен для него.
+        CheckConstraint(
+            "(status = 'partial') = (partial_kind is not null)",
+            name="adherence_records_partial_kind_required",
+        ),
     )
 
 

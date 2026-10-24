@@ -524,12 +524,13 @@ async def delete_visit(
 
 
 async def create_adherence(
-    db: AsyncSession, patient_id, medication_id, medication: str | None, status: str, note: str | None,
+    db: AsyncSession, patient_id, medication_id, medication: str | None, status: str,
+    note: str | None, partial_kind: str | None = None, legacy_partial: bool = False,
 ) -> dict:
     """Пациент отмечает приверженность лечению (FR-27). Consent-гейт у роутера."""
     return await adherence_service.create_record(
         db, patient_id, medication_id=medication_id, medication=medication,
-        status=status, note=note,
+        status=status, note=note, partial_kind=partial_kind, legacy_partial=legacy_partial,
     )
 
 

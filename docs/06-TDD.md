@@ -223,7 +223,13 @@
 | `test_expected_is_calendar_days_not_weekdays` | тот же режим, окна 7 и 14 дней | знаменатель — все календарные дни активности; выходные не исключаются |
 | `test_ended_on_cuts_expected_days` | `started_on` = −9 дн, `ended_on` = −3 дн, окно 7 дней | `active_days=4`, `expected=4`, 2 `taken` → 50% |
 | `test_overall_pct_is_weighted_not_average` | препарат A 2/2, препарат B 0/1 | общий 67% (2/3), не среднее 50% |
-| `test_partial_counts_half` | 3 `partial` при режиме 2×день | `score=1.5`, `pct=75` |
+| `test_partial_counts_half` | 3 `partial` без `partial_kind` (legacy) при режиме 2×день | `partial_kind=less_than_prescribed`, `score=1.5`, `pct=75` |
+| `test_partial_kind_contributes_its_share` (7 кодов) | по одной `partial`-отметке на режим 1×день | `score` = 0,25 / 0,5 / 0,75 / 0,5 / 0,667 / 0,5 / 0,5; `pct` = 25/50/75/50/67/50/50 |
+| `test_not_scheduled_outside_denominator_and_not_a_miss` | `taken` + `not_scheduled` при режиме 2×день | `expected=2`, `score=1`, `pct=50`, `not_scheduled=1`, `missed=0` |
+| `test_legacy_partial_without_kind_still_accepted` | старый клиент: `partial` без поля `partial_kind` | 201, `partial_kind=less_than_prescribed`, доля 0,5 |
+| `test_partial_with_explicit_null_kind_422` | `partial` + явный `partial_kind: null` | 422 `PARTIAL_KIND_REQUIRED` |
+| `test_partial_kind_rejected_for_other_statuses` | `taken`/`missed`/`not_scheduled` + `partial_kind=half` | 422 `PARTIAL_KIND_INVALID` |
+| `test_unknown_partial_kind_422` | `partial` + `partial_kind=most` | 422 (валидация схемы) |
 | `test_no_schedule_means_no_percent` | `times_per_day IS NULL`, отметка привязана | `pct=null`, `expected=0`, отметка в `excluded` |
 | `test_no_medications_gives_empty_aggregate` | нет назначений | `medications=[]`, `summary.pct=null` |
 | `test_legacy_records_are_outside_denominator` | отметка без `medication_id` рядом со связанной | 100% по назначению, legacy-отметка только в `excluded`/`total` |
