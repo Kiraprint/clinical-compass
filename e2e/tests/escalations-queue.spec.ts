@@ -205,3 +205,32 @@ test("история закрытых сигналов: status=resolved|all, к�
 
   await asStaff.dispose();
 });
+
+test("очередь: переключатель «Показать закрытые» показывает разбор без действий", async ({ page }) => {
+  await registerPatient(page, freshPatientEmail("queue-toggle"));
+  await page.getByRole("button", { name: "Даю согласие" }).click();
+  await expect(page.getByText("Согласие активно")).toBeVisible();
+  const sessionId = await riskCheckin(page);
+
+  await openQueue(page);
+  const item = await findInQueue(page, sessionId);
+  const row = page.locator(`tr[data-escalation="${item.id}"]`);
+  await expect(row).toBeVisible();
+  await row.getByRole("button", { name: /Закрыть сигнал/ }).click();
+  await expect(row).toHaveCount(0);
+  await expect(page.getByText("Открытых сигналов нет")).toBeVisible();
+
+  // Карточка остаётся на месте: без открытых сигналов она даёт доступ к истории.
+  await page.getByRole("button", { name: "Показать закрытые" }).click();
+  const closedRow = page.locator(`tr[data-escalation="${item.id}"]`);
+  await expect(closedRow).toBeVisible();
+  await expect(closedRow).toContainText("без комментария");
+  // История — только чтение: закрывать в ней нечего.
+  await expect(closedRow.getByRole("button")).toHaveCount(0);
+  await expect(page.getByRole("columnheader", { name: "Закрыт" })).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "Комментарий" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Только открытые" }).click();
+  await expect(page.locator(`tr[data-escalation="${item.id}"]`)).toHaveCount(0);
+  await expect(page.getByText("Открытых сигналов нет")).toBeVisible();
+});

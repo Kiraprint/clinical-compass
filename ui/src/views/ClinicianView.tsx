@@ -85,6 +85,34 @@ function EscalationsQueue({
 }) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState("");
+  // История закрытых сигналов (status=resolved) — только чтение, по запросу.
+  const [showClosed, setShowClosed] = useState(false);
+  const [closed, setClosed] = useState<Escalation[]>([]);
+  const [closedError, setClosedError] = useState("");
+  const [closedLoading, setClosedLoading] = useState(false);
+  useEffect(() => {
+    if (!showClosed) return;
+    let cancelled = false;
+    setClosedLoading(true);
+    setClosedError("");
+    api
+      .openEscalations("resolved")
+      .then((resp) => {
+        if (!cancelled) setClosed(resp.items);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setClosed([]);
+          setClosedError("Не удалось загрузить закрытые сигналы");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setClosedLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showClosed]);
   const closeSignal = async (id: string) => {
     setBusyId(id);
     setError("");
@@ -102,75 +130,143 @@ function EscalationsQueue({
       setBusyId(null);
     }
   };
-  if (items.length === 0) return null;
+  // Карточка видна всегда: без открытых сигналов она даёт доступ к истории разбора.
   return (
     <div className="card">
       <h2>Очередь эскалаций ({items.length})</h2>
       <p style={{ color: "#5a6478", fontSize: 13 }}>
         Открытые сигналы чек-инов и скринингов, включая пациентов без закреплённого врача.
       </p>
+      <p style={{ marginBottom: 12 }}>
+        <button onClick={() => setShowClosed((v) => !v)}>
+          {showClosed ? "Только открытые" : "Показать закрытые"}
+        </button>
+      </p>
       {error && <p style={{ color: "#b3261e", fontSize: 13 }}>{error}</p>}
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Дата</th>
-              <th>Пациент</th>
-              <th>Тип</th>
-              <th>Риск</th>
-              <th>Ответы риска</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.map((e) => (
-              <tr key={e.id} data-escalation={e.id}>
-                <td>{e.created_at ? new Date(e.created_at).toLocaleString("ru-RU") : "—"}</td>
-                <td>
-                  {e.in_roster ? (
-                    <a
-                      href={"#patient=" + e.patient_id}
-                      style={{ color: "#2f6fed", textDecoration: "none", fontWeight: 600 }}
-                    >
-                      {e.patient_fio ?? "Пациент"}
-                    </a>
-                  ) : (
-                    <span style={{ fontWeight: 600 }}>{e.patient_fio ?? "Пациент"}</span>
-                  )}
-                </td>
-                <td>
-                  <span
-                    className={`badge ${
-                      e.kind === "CHECKIN_RISK_URGENT" || e.kind === "SUICIDAL" ? "RED" : "YELLOW"
-                    }`}
-                  >
-                    {ESCALATION_KINDS[e.kind] ?? e.kind}
-                  </span>
-                </td>
-                <td>{e.safety ?? "—"}</td>
-                <td style={{ fontSize: 13 }}>
-                  {RISK_ITEM_IDS.filter((id) => e.risk_answers?.[id] != null)
-                    .map((id) => `${id} ${e.risk_answers?.[id] ? "Да" : "Нет"}`)
-                    .join(" · ") || "—"}
-                </td>
-                <td>
-                  <button
-                    onClick={() => closeSignal(e.id)}
-                    disabled={busyId === e.id}
-                    aria-label={`Закрыть сигнал ${e.patient_fio ?? e.patient_id}`}
-                  >
-                    {busyId === e.id ? "Закрываем…" : "Закрыть сигнал"}
-                  </button>
-                </td>
+      {showClosed ? (
+        <>
+          {closedError && <p style={{ color: "#b3261e", fontSize: 13 }}>{closedError}</p>}
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Закрыт</th>
+                  <th>Пациент</th>
+                  <th>Тип</th>
+                  <th>Риск</th>
+                  <th>Комментарий</th>
+                </tr>
+              </thead>
+              <tbody>
+                {closedLoading ? (
+                  <tr>
+                    <td colSpan={5}>Загрузка…</td>
+                  </tr>
+                ) : closed.length === 0 && !closedError ? (
+                  <tr>
+                    <td colSpan={5}>Закрытых сигналов нет</td>
+                  </tr>
+                ) : (
+                  closed.map((e) => (
+                    <tr key={e.id} data-escalation={e.id}>
+                      <td>{e.resolved_at ? new Date(e.resolved_at).toLocaleString("ru-RU") : "—"}</td>
+                      <td>
+                        {e.in_roster ? (
+                          <a
+                            href={"#patient=" + e.patient_id}
+                            style={{ color: "#2f6fed", textDecoration: "none", fontWeight: 600 }}
+                          >
+                            {e.patient_fio ?? "Пациент"}
+                          </a>
+                        ) : (
+                          <span style={{ fontWeight: 600 }}>{e.patient_fio ?? "Пациент"}</span>
+                        )}
+                      </td>
+                      <td>
+                        <span
+                          className={`badge ${
+                            e.kind === "CHECKIN_RISK_URGENT" || e.kind === "SUICIDAL" ? "RED" : "YELLOW"
+                          }`}
+                        >
+                          {ESCALATION_KINDS[e.kind] ?? e.kind}
+                        </span>
+                      </td>
+                      <td>{e.safety ?? "—"}</td>
+                      <td style={{ fontSize: 13 }}>{e.resolution?.trim() ? e.resolution : "без комментария"}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Дата</th>
+                <th>Пациент</th>
+                <th>Тип</th>
+                <th>Риск</th>
+                <th>Ответы риска</th>
+                <th></th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {items.length === 0 && (
+                <tr>
+                  <td colSpan={6}>Открытых сигналов нет</td>
+                </tr>
+              )}
+              {items.map((e) => (
+                <tr key={e.id} data-escalation={e.id}>
+                  <td>{e.created_at ? new Date(e.created_at).toLocaleString("ru-RU") : "—"}</td>
+                  <td>
+                    {e.in_roster ? (
+                      <a
+                        href={"#patient=" + e.patient_id}
+                        style={{ color: "#2f6fed", textDecoration: "none", fontWeight: 600 }}
+                      >
+                        {e.patient_fio ?? "Пациент"}
+                      </a>
+                    ) : (
+                      <span style={{ fontWeight: 600 }}>{e.patient_fio ?? "Пациент"}</span>
+                    )}
+                  </td>
+                  <td>
+                    <span
+                      className={`badge ${
+                        e.kind === "CHECKIN_RISK_URGENT" || e.kind === "SUICIDAL" ? "RED" : "YELLOW"
+                      }`}
+                    >
+                      {ESCALATION_KINDS[e.kind] ?? e.kind}
+                    </span>
+                  </td>
+                  <td>{e.safety ?? "—"}</td>
+                  <td style={{ fontSize: 13 }}>
+                    {RISK_ITEM_IDS.filter((id) => e.risk_answers?.[id] != null)
+                      .map((id) => `${id} ${e.risk_answers?.[id] ? "Да" : "Нет"}`)
+                      .join(" · ") || "—"}
+                  </td>
+                  <td>
+                    <button
+                      onClick={() => closeSignal(e.id)}
+                      disabled={busyId === e.id}
+                      aria-label={`Закрыть сигнал ${e.patient_fio ?? e.patient_id}`}
+                    >
+                      {busyId === e.id ? "Закрываем…" : "Закрыть сигнал"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
-
 
 export default function ClinicianView() {
   const [section, setSection] = useState<"patients" | "chats" | "library">("patients");
