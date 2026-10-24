@@ -269,3 +269,26 @@ small { color: #8a94a8; }
   .reminder-actions button { padding: 6px 10px; font-size: 12px; }
   .chat-view { overflow-x: hidden; }
 }
+
+/* FR-35: правовые страницы (/legal/terms, /legal/consent) — статические, без входа. */
+.legal { max-width: 760px; }
+.legal .legal-doc { background: #fff; border: 1px solid #e2e6ee; border-radius: 10px; padding: 20px 24px; }
+.legal h2 { font-size: 20px; margin: 4px 0 4px; }
+.legal h3 { font-size: 15px; margin: 18px 0 6px; color: #23425e; }
+.legal p, .legal li { font-size: 14px; line-height: 1.55; }
+.legal ul { padding-left: 20px; margin: 6px 0; }
+.legal li { margin-bottom: 4px; }
+.legal .legal-meta { color: #5a6478; font-size: 13px; margin: 0 0 6px; }
+.legal .placeholder { background: #fdf3d8; border-radius: 4px; padding: 0 4px; }
+.legal code { background: #f1f3f7; border-radius: 4px; padding: 0 4px; font-size: 13px; }
+.legal .legal-back { margin: 12px 0 24px; text-align: center; }
+.legal a { color: #2f6fed; }
+.legal-nav { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; }
+.legal-nav a { color: #c9d4e6; text-decoration: none; border-bottom: 1px solid transparent; }
+.legal-nav a[aria-current="page"] { color: #fff; border-bottom-color: #479e97; }
+
+@media (max-width: 700px) {
+  .legal .legal-doc { padding: 14px 14px 16px; }
+  .legal h2 { font-size: 18px; }
+  .legal ul { padding-left: 18px; }
+}
