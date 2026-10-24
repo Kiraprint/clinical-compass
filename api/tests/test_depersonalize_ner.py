@@ -95,11 +95,11 @@ def test_fake_natasha_module_extracts_per(monkeypatch):
         sys.modules.pop("natasha", None)
 
 
-def test_scrub_for_llm_uses_ner_names(monkeypatch):
-    """NER-имена доливаются в deny-list: маскируются и в падеже, без ростра."""
+def test_scrub_for_llm_uses_ner_spans(monkeypatch):
+    """NER-спаны маскируются напрямую (падеж, без deny-list ростра)."""
     from app.services.agent import scrub_for_llm
 
-    settings.depersonalize_ner = True
+    settings.depersonalize_ner = "hybrid"
 
     import app.services.depersonalize as mod
 
@@ -107,12 +107,15 @@ def test_scrub_for_llm_uses_ner_names(monkeypatch):
         def extract(self, text):
             return ["Сидоров Пётр"]
 
+        def extract_spans(self, text):
+            start = text.find("Сидорову")
+            return [("FIO", start, start + len("Сидорову Петру"))] if start >= 0 else []
+
     mod._extractor = _NER()
     query, ctx, report = scrub_for_llm(
         "к Сидорову Петру заходить", patient_context=None, names=[]
     )
-    assert "[ФИО]" in query
-    assert "Сидоров" not in query
+    assert query == "к [ФИО] заходить"
     assert "FIO" in report["masked"]
 
 
@@ -189,7 +192,7 @@ def test_ner_backend_selector():
         ("off", "off"), ("false", "off"), ("", "off"),
         ("true", "natasha"), ("1", "natasha"), ("natasha", "natasha"),
         (True, "natasha"), (False, "off"),
-        ("rubert", "rubert"), ("RUBERT", "rubert"),
+        ("rubert", "rubert"), ("RUBERT", "rubert"), ("hybrid", "hybrid"),
         ("garbage", "off"),
     ]:
         settings.depersonalize_ner = value

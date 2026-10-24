@@ -96,9 +96,11 @@ def _enabled() -> bool:
     return bool(settings.assistant_llm_url.strip())
 
 
-def _request(payload: dict) -> dict:
+def _request(payload: dict, *, timeout: float | None = None) -> dict:
     """POST /chat/completions к OpenAI-совместимому шлюзу.
 
+    timeout — переопределение settings.assistant_llm_timeout для длинных
+    задач (FR-31: извлечение фактов отвечает 12–13 с и иногда дольше).
     Исключения urllib/json не ловим — их обрабатывает вызывающий (fallback без LLM).
     """
     data = json.dumps(payload).encode("utf-8")
@@ -108,11 +110,15 @@ def _request(payload: dict) -> dict:
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     req = urllib.request.Request(url, data=data, headers=headers)
-    with urllib.request.urlopen(req, timeout=settings.assistant_llm_timeout) as resp:
+    with urllib.request.urlopen(
+        req, timeout=timeout or settings.assistant_llm_timeout
+    ) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def chat_completion(messages: list[dict], *, temperature: float = 0.0) -> dict:
+def chat_completion(
+    messages: list[dict], *, temperature: float = 0.0, timeout: float | None = None
+) -> dict:
     """Сырой POST /chat/completions для других LLM-задач (FR-31, docs/17).
 
     Транспорт общий с роутером топиков: таймаут/ключ/URL берутся из settings.
@@ -123,7 +129,8 @@ def chat_completion(messages: list[dict], *, temperature: float = 0.0) -> dict:
             "model": settings.assistant_llm_model,
             "messages": messages,
             "temperature": temperature,
-        }
+        },
+        timeout=timeout,
     )
 
 

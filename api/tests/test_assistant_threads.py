@@ -583,3 +583,32 @@ def test_agent_offload_uses_dedicated_limiter(monkeypatch):
 
     assert anyio.run(assistant_chat._invoke_agent, "вопрос")["answer"] == "ответ"
     assert seen["limiter"] is assistant_chat.AGENT_LIMITER
+
+def test_clinician_own_fio_masked_without_ner(client, db_session, monkeypatch):
+    """ФИО самого врача в запросе маскируется deny-list'ом, а не только NER.
+
+    Регресс ревью PR #40: `answer_query` брал только ростер, поэтому имя врача
+    держалось исключительно на ML-детекции (при `CC_DEPERSONALIZE_NER=off` —
+    никак).
+    """
+    import uuid
+
+    from app.models import User
+    from app.services import assistant_chat
+
+    ch, cid = clinician_ctx(client, "th-clin-own@test.ru")
+    db_session.get(User, uuid.UUID(cid)).fio = "Смирнова Ольга Петровна"
+    db_session.commit()
+
+    llm = _fake_llm(monkeypatch, "Какой порог тяжёлой депрессии по PHQ-9?")
+    monkeypatch.setattr(assistant_chat, "shared_factory", lambda: _SpyAgent())
+
+    resp = client.post(
+        "/api/v1/assistant/ask",
+        json={"query": "Смирнова Ольга Петровна спрашивает: какой порог PHQ-9?"},
+        headers=ch,
+    )
+    assert resp.status_code == 200, resp.text
+    sent = str(llm)
+    assert "Смирнова" not in sent and "Петровна" not in sent
+

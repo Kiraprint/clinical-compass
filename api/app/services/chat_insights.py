@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import re
+import time
 from datetime import datetime, timedelta, timezone
 
 import anyio
@@ -23,12 +24,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.errors import Problem
-from app.models import ChatInsight, ChatMessage, User
+from app.models import ChatInsight, ChatMessage
 
 from . import llm_router
 from .agent import scrub_for_llm
 from .audit import record as audit_record
-from .clinician import require_patient_consent, require_roster, roster_names
+from .clinician import require_patient_consent, require_roster
+from .depersonalize import deny_names as deny_names_for_llm
 
 logger = logging.getLogger(__name__)
 
@@ -101,16 +103,25 @@ async def _recent_messages(db: AsyncSession, patient_id) -> list[ChatMessage]:
     return list(reversed(rows))
 
 
-def _dialogue_text(messages: list[ChatMessage]) -> str:
-    """Хронологическая переписка: каждое сообщение ≤500, вся — ≤6000 символов.
+def _dialogue_text(messages: list[ChatMessage], names: list[str]) -> str:
+    """Хронологические сообщения ПАЦИЕНТА: маскирование → обрезка → лента.
 
-    Переполнение отрезает самые старые строки: свежая часть диалога важнее.
+    Реплики врача и шаблонные ответы помощника («Спасибо, что поделились…»)
+    в LLM не уходят: факты извлекаются только из явных утверждений пациента,
+    а служебные фразы — шум, провоцирующий выдуманные факты. Переполнение
+    отрезает самые старые строки: свежая часть важнее.
+
+    Порядок важен: сначала scrub_for_llm по полному тексту, потом обрезка.
+    Обрезка до маскирования разрезала бы телефон/ФИО пополам, и хвост ушёл бы
+    в LLM немаскированным.
     """
-    labels = {"PATIENT": "Пациент", "CLINICIAN": "Врач", "SYSTEM": "Помощник"}
-    lines = [
-        f"{labels.get(m.sender, 'Пациент')}: {m.content.strip()[:MESSAGE_CHARS]}"
-        for m in messages
-    ]
+    lines: list[str] = []
+    for m in messages:
+        content = (m.content or "").strip()
+        if m.sender != "PATIENT" or not content:
+            continue
+        masked, _, _ = scrub_for_llm(content, None, names=names)
+        lines.append(f"Пациент: {masked[:MESSAGE_CHARS]}")
     kept: list[str] = []
     total = 0
     for line in reversed(lines):
@@ -123,13 +134,8 @@ def _dialogue_text(messages: list[ChatMessage]) -> str:
 
 
 async def _deny_names(db: AsyncSession, clinician_id, patient_id) -> list[str]:
-    """ФИО пациента и врача + ростер врача — deny-list деперсонализации."""
-    names = await roster_names(db, clinician_id)
-    for uid in (patient_id, clinician_id):
-        fio = await db.scalar(select(User.fio).where(User.id == uid))
-        if fio and fio.strip() and fio not in names:
-            names.append(fio)
-    return names
+    """ФИО пациента и врача + ростер врача — общий хелпер egress-путей."""
+    return await deny_names_for_llm(db, clinician_id, patient_id, clinician_id)
 
 
 def _normalize(text: str) -> str:
@@ -180,21 +186,48 @@ def _parse_facts(content: str) -> list[dict]:
     return facts
 
 
+def _is_timeout(exc: BaseException) -> bool:
+    """Таймаут urllib/socket (в т.ч. завёрнутый в URLError)."""
+    if isinstance(exc, TimeoutError):
+        return True
+    return isinstance(getattr(exc, "reason", None), TimeoutError)
+
+
 def _ask_llm(dialogue: str) -> list[dict]:
-    """Один вызов chat/completions. Любая ошибка → 503, в БД ничего не пишем."""
-    try:
-        resp = llm_router.chat_completion([
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": f"Переписка:\n{dialogue}\n\nВерни JSON-массив фактов."},
-        ])
-        content = resp["choices"][0]["message"].get("content") or ""
-    except Problem:
-        raise
-    except Exception as exc:  # таймаут, сеть, неожиданный формат ответа
-        logger.warning("chat_insights: LLM unavailable (%s)", type(exc).__name__)
-        raise Problem(
-            503, "CHAT_INSIGHTS_UNAVAILABLE", "Модель недоступна — факты не сохранены"
-        ) from exc
+    """Вызов chat/completions с одним повтором на таймаут → 503.
+
+    Живой шлюз отвечает 12–13 с, но иногда выходит за прежние 30 с; профиль
+    CC_CHAT_INSIGHTS_TIMEOUT (default 60) + один ретрай убирают ложные 503.
+    В лог — только тип ошибки и длительность, без текста переписки.
+    """
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": f"Сообщения пациента:\n{dialogue}\n\nВерни JSON-массив фактов."},
+    ]
+    timeout = settings.chat_insights_timeout
+    for attempt in (1, 2):
+        started = time.monotonic()
+        try:
+            resp = llm_router.chat_completion(messages, timeout=timeout)
+            content = resp["choices"][0]["message"].get("content") or ""
+            break
+        except Problem:
+            raise
+        except Exception as exc:
+            elapsed = time.monotonic() - started
+            if attempt == 1 and _is_timeout(exc):
+                logger.warning(
+                    "chat_insights: LLM timeout after %.1fs (timeout=%.0fs), retry",
+                    elapsed, timeout,
+                )
+                continue
+            logger.warning(
+                "chat_insights: LLM unavailable after %.1fs (%s)",
+                elapsed, type(exc).__name__,
+            )
+            raise Problem(
+                503, "CHAT_INSIGHTS_UNAVAILABLE", "Модель недоступна — факты не сохранены"
+            ) from exc
     return _parse_facts(content)
 
 
@@ -208,16 +241,22 @@ async def analyze(db: AsyncSession, clinician_id, patient_id, ip: str | None = N
     if not messages:
         raise Problem(409, "CHAT_INSIGHTS_EMPTY", "Переписки с пациентом нет — анализировать нечего")
 
-    dialogue = _dialogue_text(messages)
     # Сырое ФИО в LLM не уходит: маскируем пациента, врача и остальной ростер.
     names = await _deny_names(db, clinician_id, patient_id)
-    # Деперсонализация (regexp по всей переписке) и HTTP к LLM — блокирующие:
-    # в event loop FastAPI их пускать нельзя.
-    dialogue, _, _ = await anyio.to_thread.run_sync(
-        lambda: scrub_for_llm(dialogue, None, names=names)
+    # Деперсонализация каждой реплики ДО обрезки (regexp+Ner) — блокирующая:
+    # в event loop FastAPI её пускать нельзя.
+    dialogue = await anyio.to_thread.run_sync(
+        lambda: _dialogue_text(messages, names)
     )
+    if not dialogue:
+        raise Problem(
+            409, "CHAT_INSIGHTS_EMPTY",
+            "Сообщений пациента нет — анализировать нечего",
+        )
     facts = await anyio.to_thread.run_sync(_ask_llm, dialogue)
-    source_ids = [str(m.id) for m in messages]
+    # Источники факта — только реплики пациента: ответы помощника/врача в LLM
+    # не уходили и фактов не порождают.
+    source_ids = [str(m.id) for m in messages if m.sender == "PATIENT"]
     existing = set(
         (await db.scalars(
             select(ChatInsight.dedupe_hash).where(ChatInsight.patient_id == patient_id)
