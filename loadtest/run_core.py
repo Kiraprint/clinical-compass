@@ -1,11 +1,16 @@
-"""Микробенчмарк ядра: чистые функции clinical-compass без БД и сети.
+"""Микробенчмарк ядра: скоринг, триаж, чек-ины, RAG-сборка, эмбеддер.
 
-Числа: ops/s на одно ядро, p50/p95 в микросекундах, масштабирование по
-процессам (движок детерминированный, без общего состояния).
+Скоринг, триаж, чек-ины и деперсонализация — без БД и сети. `build_corpus`
+замеряется по TTL-кешу (drugs читаются из БД один раз на сборку снимка).
+Дополнительно замеряется реальный путь агента in-process: AgentFactory.invoke →
+гибридный поиск Qdrant → build_rag_answer (LLM выключен; нужен провижененный
+стенд, иначе замер помечается skipped). Числа: ops/s на одно ядро, p50/p95
+в микросекундах, масштабирование по процессам.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import statistics
@@ -21,6 +26,8 @@ sys.path.insert(0, str(common.CORE_DIR))
 PHQ_ANSWERS = {"q1": 2, "q2": 2, "q3": 1, "q4": 2, "q5": 1, "q6": 1, "q7": 2, "q8": 1, "q9": 0}
 GAD_ANSWERS = {"q1": 2, "q2": 2, "q3": 1, "q4": 2, "q5": 1, "q6": 1, "q7": 1}
 CHECKIN_ANSWERS = {"MO1": 2, "TR1": 1, "SL1": 2, "IN1": 1, "EN1": 2, "FU1": 1, "HR4": 0}
+
+AGENT_QUERY = "Что говорят исследования о КПТ при генерализованном тревожном расстройстве?"
 DOC_TEXT = (
     "Пациент Иванов Иван Иванович, телефон +7 916 123-45-67, email ivanov@example.ru, "
     "паспорт 4510 123456, адрес г. Москва, ул. Тверская, д. 1, кв. 2. "
@@ -95,7 +102,7 @@ def _payloads() -> dict:
         "rag.detect_redline+build_answer": rag,
         "depersonalize.regex_400chars": lambda: depersonalize(DOC_TEXT),
         "embeddings.hash.dense+sparse": _embed,
-        "kb_seed.build_corpus (на запрос агента)": _corpus,
+        "kb_seed.build_corpus (кеш TTL-снимка)": _corpus,
     }
 
 
@@ -174,12 +181,45 @@ def scalable(name: str, total_ops: int = 40_000) -> dict:
     return result
 
 
+def agent_path(n: int = 50, repeats: int = 2) -> dict:
+    """Реальный путь агента без HTTP: поиск в Qdrant + сборка ответа (LLM off)."""
+    collection = common.resolve_collection()
+    try:
+        from app.services.agent import AgentFactory
+        from qdrant_client import QdrantClient
+
+        client = QdrantClient(url=common.QDRANT_URL)
+        if not client.collection_exists(collection):
+            return {
+                "status": "skipped",
+                "reason": f"коллекция {collection!r} не найдена — нужен provision",
+            }
+    except Exception as exc:  # noqa: BLE001 — замер опционален, ядро — нет
+        return {
+            "status": "skipped",
+            "reason": f"{type(exc).__name__}: {exc}",
+        }
+    factory = AgentFactory(client)
+
+    def fn() -> dict:
+        return factory.invoke(AGENT_QUERY, limit=5)
+
+    fn()  # прогрев: компиляция графа, кеш корпуса, прогрев Qdrant
+    return {
+        "status": "ok",
+        "collection": collection,
+        "query": AGENT_QUERY,
+        "llm": "disabled",
+        **measure(fn, n, repeats),
+    }
+
+
 def run() -> dict:
-    os.environ.update(common.setup_env())
+    common.apply_env()
     from app import db
 
     if db.sync_engine is None:
-        db.setup(common.DB_URL)
+        db.setup(common.db_url())
     sizes = {
         "scoring.phq9": 60_000,
         "scoring.gad7": 60_000,
@@ -190,8 +230,7 @@ def run() -> dict:
         "rag.detect_redline+build_answer": 20_000,
         "checkin.plan+planned_items": 60_000,
         "depersonalize.regex_400chars": 10_000,
-        "embeddings.hash.dense+sparse": 10_000,
-        "kb_seed.build_corpus (на запрос агента)": 2_000,
+        "kb_seed.build_corpus (кеш TTL-снимка)": 2_000,
     }
     payloads = _payloads()
     results = {}
@@ -205,14 +244,40 @@ def run() -> dict:
         "pipeline": scalable("pipeline.score→flags→triage→routing"),
         "depersonalize": scalable("depersonalize.regex_400chars", 10_000),
     }
+    agent = agent_path()
+    if agent["status"] == "ok":
+        print(f"agent.AgentFactory.invoke {agent['ops_per_s']:>8.0f} ops/s  "
+              f"p50={agent['us_p50']:.1f}µs p95={agent['us_p95']:.1f}µs")
+    else:
+        print(f"agent.AgentFactory.invoke: {agent['reason']}")
     payload = {
         "cpu_count": os.cpu_count(),
         "functions": results,
         "scaling_ops_per_s_by_processes": scaling,
+        "agent_path": agent,
     }
     common.write_json("core.json", payload)
     return payload
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Микробенчмарк ядра Clinical Compass")
+    parser.add_argument("--db", default=None, help="БД (allowlist: compass_load*)")
+    parser.add_argument(
+        "--collection", default=None, help="коллекция Qdrant (allowlist: kb_load*)"
+    )
+    parser.add_argument("--embedder", default="hash", choices=["hash", "bge-m3"])
+    args = parser.parse_args(argv)
+    try:
+        common.apply_env(
+            embedder=args.embedder, collection=args.collection, db=args.db
+        )
+    except common.SafetyRefusal as exc:
+        print(f"ОТКАЗ: {exc}", file=sys.stderr)
+        return common.SafetyRefusal.exit_code
     print(json.dumps(run(), ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

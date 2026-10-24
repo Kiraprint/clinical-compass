@@ -14,7 +14,7 @@ class ApiServer:
         self,
         *,
         embedder: str = "hash",
-        collection: str = common.QDRANT_COLLECTION,
+        collection: str | None = None,
         port: int = common.API_PORT,
         pool_size: int = 0,
     ):
@@ -24,6 +24,7 @@ class ApiServer:
         self.base_url = f"http://127.0.0.1:{port}"
         self.proc: subprocess.Popen | None = None
         self.log_path = common.RESULTS_DIR / "api.log"
+        self.collection = common.resolve_collection(collection)
         self.pool_size = pool_size
 
     def start(self, timeout: float = 120.0) -> "ApiServer":
