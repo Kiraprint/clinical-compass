@@ -24,12 +24,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.errors import Problem
-from app.models import ChatInsight, ChatMessage, User
+from app.models import ChatInsight, ChatMessage
 
 from . import llm_router
 from .agent import scrub_for_llm
 from .audit import record as audit_record
-from .clinician import require_patient_consent, require_roster, roster_names
+from .clinician import require_patient_consent, require_roster
+from .depersonalize import deny_names as deny_names_for_llm
 
 logger = logging.getLogger(__name__)
 
@@ -102,19 +103,25 @@ async def _recent_messages(db: AsyncSession, patient_id) -> list[ChatMessage]:
     return list(reversed(rows))
 
 
-def _dialogue_text(messages: list[ChatMessage]) -> str:
-    """Хронологические сообщения ПАЦИЕНТА: каждое ≤500, вся лента ≤6000.
+def _dialogue_text(messages: list[ChatMessage], names: list[str]) -> str:
+    """Хронологические сообщения ПАЦИЕНТА: маскирование → обрезка → лента.
 
     Реплики врача и шаблонные ответы помощника («Спасибо, что поделились…»)
     в LLM не уходят: факты извлекаются только из явных утверждений пациента,
     а служебные фразы — шум, провоцирующий выдуманные факты. Переполнение
     отрезает самые старые строки: свежая часть важнее.
+
+    Порядок важен: сначала scrub_for_llm по полному тексту, потом обрезка.
+    Обрезка до маскирования разрезала бы телефон/ФИО пополам, и хвост ушёл бы
+    в LLM немаскированным.
     """
-    lines = [
-        f"Пациент: {m.content.strip()[:MESSAGE_CHARS]}"
-        for m in messages
-        if m.sender == "PATIENT" and (m.content or "").strip()
-    ]
+    lines: list[str] = []
+    for m in messages:
+        content = (m.content or "").strip()
+        if m.sender != "PATIENT" or not content:
+            continue
+        masked, _, _ = scrub_for_llm(content, None, names=names)
+        lines.append(f"Пациент: {masked[:MESSAGE_CHARS]}")
     kept: list[str] = []
     total = 0
     for line in reversed(lines):
@@ -127,13 +134,8 @@ def _dialogue_text(messages: list[ChatMessage]) -> str:
 
 
 async def _deny_names(db: AsyncSession, clinician_id, patient_id) -> list[str]:
-    """ФИО пациента и врача + ростер врача — deny-list деперсонализации."""
-    names = await roster_names(db, clinician_id)
-    for uid in (patient_id, clinician_id):
-        fio = await db.scalar(select(User.fio).where(User.id == uid))
-        if fio and fio.strip() and fio not in names:
-            names.append(fio)
-    return names
+    """ФИО пациента и врача + ростер врача — общий хелпер egress-путей."""
+    return await deny_names_for_llm(db, clinician_id, patient_id, clinician_id)
 
 
 def _normalize(text: str) -> str:
@@ -239,19 +241,18 @@ async def analyze(db: AsyncSession, clinician_id, patient_id, ip: str | None = N
     if not messages:
         raise Problem(409, "CHAT_INSIGHTS_EMPTY", "Переписки с пациентом нет — анализировать нечего")
 
-    dialogue = _dialogue_text(messages)
+    # Сырое ФИО в LLM не уходит: маскируем пациента, врача и остальной ростер.
+    names = await _deny_names(db, clinician_id, patient_id)
+    # Деперсонализация каждой реплики ДО обрезки (regexp+Ner) — блокирующая:
+    # в event loop FastAPI её пускать нельзя.
+    dialogue = await anyio.to_thread.run_sync(
+        lambda: _dialogue_text(messages, names)
+    )
     if not dialogue:
         raise Problem(
             409, "CHAT_INSIGHTS_EMPTY",
             "Сообщений пациента нет — анализировать нечего",
         )
-    # Сырое ФИО в LLM не уходит: маскируем пациента, врача и остальной ростер.
-    names = await _deny_names(db, clinician_id, patient_id)
-    # Деперсонализация (regexp+Ner по ленте) и HTTP к LLM — блокирующие:
-    # в event loop FastAPI их пускать нельзя.
-    dialogue, _, _ = await anyio.to_thread.run_sync(
-        lambda: scrub_for_llm(dialogue, None, names=names)
-    )
     facts = await anyio.to_thread.run_sync(_ask_llm, dialogue)
     # Источники факта — только реплики пациента: ответы помощника/врача в LLM
     # не уходили и фактов не порождают.

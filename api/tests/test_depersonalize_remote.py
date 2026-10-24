@@ -300,3 +300,58 @@ def test_remote_lowercase_fio_misses_match_hybrid(fake_ml):
                 assert gold["value"] in out  # известный промах, не регресс
             elif gold["kind"] != "AGE":
                 assert gold["value"] not in out, (row["id"], gold, out)
+
+@pytest.mark.parametrize(
+    "spans",
+    [
+        [{"category": "FIO", "start": "0", "end": 6}],       # строковые смещения
+        [{"category": "FIO", "start": 0, "end": 9999}],      # вне текста
+        [{"category": "UNKNOWN", "start": 0, "end": 6}],     # чужая категория
+        [{"category": "FIO", "start": 4, "end": 2}],         # перевёрнутый диапазон
+        ["не объект"],                                        # мусор в списке
+    ],
+)
+def test_malformed_sidecar_spans_fail_closed_in_prod(monkeypatch, spans):
+    """Битый ответ сайдкара не должен давать «успешное» немаскирование.
+
+    Раньше такие элементы молча выбрасывались, и текст уходил в LLM как есть.
+    """
+    from app.services import ml_client
+
+    monkeypatch.setattr(
+        ml_client, "mask",
+        lambda text, names=None: {"text": text, "spans": spans, "model": "fake"},
+    )
+    settings.prod_mode = True
+    settings.depersonalize_ner = "remote"
+    settings.ml_url = "http://ml.invalid"
+    with pytest.raises(DepersonalizationUnavailable) as err:
+        scrub_text("Иванов Пётр, звоните +79261234567")
+    assert err.value.status == 503
+
+def test_malformed_sidecar_response_degrades_outside_prod(monkeypatch):
+    from app.services import ml_client
+
+    monkeypatch.setattr(
+        ml_client, "mask",
+        lambda text, names=None: {"text": text, "spans": [{"category": "NOPE", "start": 0, "end": 3}]},
+    )
+    settings.prod_mode = False
+    settings.depersonalize_ner = "remote"
+    settings.ml_url = "http://ml.invalid"
+    out = scrub_text("Звоните +79261234567").text
+    assert "[ТЕЛЕФОН]" in out  # regex-путь продолжает работать
+
+def test_deny_list_capped_before_sidecar(monkeypatch):
+    """Ростер на 200 ФИО не раздувает egress-запрос: клиент режет до 128."""
+    from app.services import ml_client
+
+    seen: list[int] = []
+
+    def fake_post(path, payload):
+        seen.append(len(payload["names"]))
+        return {"text": payload["text"], "spans": [], "model": "fake"}
+
+    monkeypatch.setattr(ml_client, "_post", fake_post)
+    ml_client.mask("текст", [f"Фамилия{i} Имя Отчество" for i in range(200)])
+    assert seen == [128]

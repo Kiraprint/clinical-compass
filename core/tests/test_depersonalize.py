@@ -225,3 +225,112 @@ def test_age_combo_requires_fio():
     assert "[ВОЗРАСТ]" in masked.text
     plain = depersonalize(text)
     assert plain.text == text
+
+
+def test_partial_overlap_keeps_tail_masked():
+    """Пересекающиеся спаны: хвост второго не должен остаться открытым.
+
+    Регресс ревью PR #40: раньше второй спан выбрасывался целиком, и «Иванович»
+    после уже замаскированного «Иванов Пётр» уезжал в LLM.
+    """
+    from compass.depersonalize import Span, mask_spans, resolve_spans
+
+    text = "Иванов Пётр Иванович"
+    spans = [Span("FIO", 0, 11), Span("FIO", 7, 21)]
+    masked = mask_spans(text, resolve_spans(spans, text)).text
+    assert "Иванович" not in masked
+    assert masked.count("[ФИО]") == 2
+
+
+def test_unknown_span_kind_gets_generic_placeholder():
+    """Неизвестный вид (например, новая категория сайдкара) не должен падать."""
+    from compass.depersonalize import Span, mask_spans
+
+    out = mask_spans("секрет", [Span("SOMETHING_NEW", 0, 6)]).text
+    assert out == "[СКРЫТО]"
+
+
+# --------------------------------------------- валидаторы и структурные спаны
+
+def test_snils_checksum_branches():
+    from compass.depersonalize import snils_checksum, snils_valid
+
+    assert snils_checksum("112233445") < 100          # сумма < 100
+    assert snils_checksum("999999999") in (0, 1, 2)   # 100/101 → 0, иначе %101
+    assert snils_valid("112-233-445 95")
+    assert not snils_valid("112-233-445 94")
+    assert not snils_valid("112-233-44")
+
+
+def test_inn_checksum_10_and_12_digits():
+    from compass.depersonalize import inn_valid
+
+    assert inn_valid("7707083893")            # ЮЛ, верная контрольная
+    assert not inn_valid("7707083894")
+    assert not inn_valid("123456")            # длина не 10/12
+    assert inn_valid("500100732259")          # ФЛ, верные две контрольные
+    assert not inn_valid("500100732258")
+
+
+def test_oms_plausibility():
+    from compass.depersonalize import oms_valid
+
+    base = "123456789012345"
+    good = base + str(sum(int(c) for c in base[0::2]) % 10)
+    assert oms_valid(good)
+    assert not oms_valid(good[:-1] + str((int(good[-1]) + 1) % 10))
+    assert not oms_valid("12345")
+
+
+def test_digit_runs_with_and_without_markers():
+    from compass.depersonalize import depersonalize
+
+    assert "1234567890123456" not in depersonalize("полис 1234567890123456").text
+    # 16 цифр без валидной контрольной и без маркера — не полис, остаётся
+    plain = "карта лояльности 1234567890123456"
+    assert depersonalize(plain).text == plain
+    assert "7707083893" not in depersonalize("ИНН 7707083893 плательщика").text
+    # 11 цифр: «8XXXXXXXXXX» — телефон, «СНИЛС …» — документ
+    assert "89261234567" not in depersonalize("звоните 89261234567").text
+    assert "11223344595" not in depersonalize("СНИЛС 11223344595").text
+
+
+def test_passport_and_medcard_forms():
+    from compass.depersonalize import depersonalize
+
+    assert "4510 123456" not in depersonalize("паспорт 4510 123456 выдан").text
+    assert "4510123456" not in depersonalize("паспорт: 4510123456").text
+    assert "456123" not in depersonalize("медкарта № 456123").text
+    assert "12345" not in depersonalize("ИБ 12345 открыта").text
+
+
+def test_dob_month_name_and_iso_forms():
+    from compass.depersonalize import depersonalize
+
+    assert "12 марта 1954" not in depersonalize("д.р. 12 марта 1954 года").text
+    assert "1954-03-12" not in depersonalize("дата рождения 1954-03-12").text
+    # Несуществующая дата с маркером всё равно маскируется: лучше скрыть лишнее,
+    # чем пропустить ДР из-за опечатки (docs/12).
+    assert "31.02.1954" not in depersonalize("д.р. 31.02.1954").text
+
+
+def test_extract_spans_public_api_and_tuple_extras():
+    from compass.depersonalize import Span, extract_spans
+
+    text = "Иванов Пётр, +79261234567, 64 года"
+    spans = extract_spans(text, ["Иванов Пётр"], extra_spans=[("ADDRESS", 30, 36)])
+    kinds = [s.kind for s in spans]
+    assert "FIO" in kinds and "PHONE" in kinds
+    # невалидный кортеж (вне текста) отфильтрован
+    assert all(0 <= s.start < s.end <= len(text) for s in spans)
+    assert extract_spans("", None) == []
+    assert extract_spans("текст", None, extra_spans=[Span("FIO", 0, 5)])[0].kind == "FIO"
+
+
+def test_single_word_lowercase_is_not_person():
+    from compass.depersonalize import Span, is_plausible_person_span
+
+    text = "принимает амлодипин"
+    assert not is_plausible_person_span(text, Span("FIO", 10, 20))
+    assert is_plausible_person_span("Иванов", Span("FIO", 0, 6))
+    assert is_plausible_person_span("сидорова галина", Span("FIO", 0, 15))

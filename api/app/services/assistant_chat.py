@@ -35,6 +35,7 @@ from app.models import (
 )
 from app.services import audit, clinician, llm_router
 from app.services.agent import scrub_for_llm, shared_factory
+from app.services.depersonalize import deny_names as deny_names_for_llm
 
 MAX_THREAD_PATIENTS = 10
 # Потолок одновременных прогонов агента на процесс. RAG блокирующий и дорогой
@@ -279,7 +280,9 @@ async def answer_query(
 ) -> dict:
     """Одиночный запрос к ассистенту (POST /assistant/ask): карты пациентов +
     деперсонализация + RAG. Общий путь с тредом (FR-21), без истории."""
-    names = await clinician.roster_names(db, clinician_id)
+    # Ростер + ФИО самого врача: без этого его собственное ФИО в запросе
+    # маскировалось только ML-детекцией, т.е. зависело от backend'а.
+    names = await deny_names_for_llm(db, clinician_id, clinician_id)
     patient_contexts = [
         await clinician.patient_context(db, clinician_id, pid, ip=ip) for pid in patient_ids or []
     ]
@@ -329,7 +332,7 @@ async def post_message(
     # embedding НЕ конкатенируется (ФИО/redline-реплики сдвигали поиск), а в LLM
     # уходит только после scrub_for_llm. Читаем её до вставки текущего вопроса —
     # это прошлые реплики, не он сам.
-    names = await clinician.roster_names(db, clinician_id)
+    names = await deny_names_for_llm(db, clinician_id, clinician_id)
     history = await _history_for_llm(db, thread.id, names)
 
     question = AssistantMessage(

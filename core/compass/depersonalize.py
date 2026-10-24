@@ -340,7 +340,12 @@ def _doc_spans(text: str) -> list[Span]:
                 _add(out, DOC, a, b, SNILS)
                 claimed.append((a, b))
         elif len(val) == 10:
-            if val[0] == "9" and not _marker_before(text, a, r"ИНН"):
+            if _marker_before(text, a, r"паспорт"):
+                # «паспорт: 4510123456» — серия и номер без пробела: маскируем
+                # по маркеру, не полагаясь на контрольную сумму ИНН.
+                _add(out, DOC, a, b, PASSPORT)
+                claimed.append((a, b))
+            elif val[0] == "9" and not _marker_before(text, a, r"ИНН"):
                 _add(out, PHONE, a, b)
                 claimed.append((a, b))
             elif inn_valid(val) or _marker_before(text, a, r"ИНН"):
@@ -539,6 +544,12 @@ def resolve_spans(spans: Iterable[Span], text: str) -> list[Span]:
     last_end = -1
     for s in ordered:
         if s.start < last_end:
+            if s.end > last_end:
+                # Частичное перекрытие: хвост ещё не замаскирован. Режем начало,
+                # а не выбрасываем спан целиком — иначе третье слово ФИО или
+                # хвост телефона уехали бы в LLM открытым текстом.
+                kept.append(Span(s.kind, last_end, s.end, s.category))
+                last_end = s.end
             continue
         kept.append(s)
         last_end = s.end
@@ -552,7 +563,7 @@ def mask_spans(text: str, spans: Sequence[Span], *, mode: str = "replace") -> De
     pos = 0
     for s in spans:
         out.append(text[pos:s.start])
-        out.append("" if mode == "redact" else _PLACEHOLDER[s.kind])
+        out.append("" if mode == "redact" else _PLACEHOLDER.get(s.kind, "[СКРЫТО]"))
         findings.append(Finding(s.kind, s.start, s.end, text[s.start:s.end],
                                 s.category))
         pos = s.end

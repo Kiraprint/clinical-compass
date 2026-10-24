@@ -33,6 +33,7 @@ log = logging.getLogger(__name__)
 # Таймаут на повтор: после первой ошибки ждать полный ml_timeout бессмысленно.
 _RETRY_DELAY = 0.2
 _MAX_BODY = 8 * 1024 * 1024  # потолок ответа: эмбеддинги пачки чанков
+_MAX_NAMES = 128  # потолок deny-list в /v1/mask
 
 class MlUnavailable(RuntimeError):
     """Сайдкар не сконфигурирован, недоступен или ответил ошибкой."""
@@ -65,12 +66,14 @@ def _post(path: str, payload: dict) -> dict:
                 raise MlUnavailable(f"сайдкар {path}: ожидался JSON-объект")
             return data
         except urllib.error.HTTPError as exc:
-            detail = exc.read(2048).decode("utf-8", "replace")[:300]
-            last = MlUnavailable(f"сайдкар {path}: HTTP {exc.code} {detail}")
+            # Тело ошибки не логируем и не тащим в текст исключения: сайдкар
+            # обрабатывает ПДн, и его 4xx-диагностика может содержать фрагмент
+            # входного текста. Наружу — только код и путь.
+            last = MlUnavailable(f"сайдкар {path}: HTTP {exc.code}")
             if exc.code < 500:
-                raise last from exc  # 4xx — ошибка запроса, повтор не поможет
+                raise last from None  # 4xx — ошибка запроса, повтор не поможет
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-            last = MlUnavailable(f"сайдкар {path}: {exc}")
+            last = MlUnavailable(f"сайдкар {path}: {type(exc).__name__}")
         if attempt == 0:
             import time
 
@@ -126,8 +129,12 @@ def rerank(query: str, documents: list[str], *, top_k: int | None = None) -> lis
     return [float(s) for s in scores]
 
 def mask(text: str, names: list[str] | None = None) -> dict:
-    """Маскирование ПДн: {text, spans:[{category,start,end}], model}."""
-    data = _post("/v1/mask", {"text": text, "names": list(names or [])})
+    """Маскирование ПДн: {text, spans:[{category,start,end}], model}.
+
+    Deny-list обрезается до 128 записей: у врача с большой выборкой ростер
+    иначе раздувает каждый egress-запрос.
+    """
+    data = _post("/v1/mask", {"text": text, "names": list(names or [])[:_MAX_NAMES]})
     if not isinstance(data.get("text"), str) or not isinstance(data.get("spans"), list):
         raise MlUnavailable("сайдкар /v1/mask: ответ без text/spans")
     return data

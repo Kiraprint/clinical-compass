@@ -288,24 +288,31 @@ _REMOTE_KIND: dict[str, tuple[str, str | None]] = {
 
 
 def _spans_from_remote(text: str, payload: object) -> list[Span]:
-    """Ответ sidecar'а -> Span'ы ядра; мусорные/вне диапазона пропускаются."""
+    """Ответ sidecar'а -> Span'ы ядра. Строго: мусор = ошибка, а не пропуск.
+
+    Раньше битые элементы молча выбрасывались, и в прод-режиме сайдкар,
+    вернувший, например, строковые смещения, давал пустой набор спанов —
+    текст уходил в LLM немаскированным при «успешном» ответе. Теперь любое
+    несоответствие контракту — исключение, и `_remote_spans` переводит его в
+    политику `_backend_unavailable` (prod: 503 до вызова LLM).
+    """
     if not isinstance(payload, dict):
         raise TypeError(f"неожиданный ответ /v1/mask: {type(payload).__name__}")
+    raw_spans = payload.get("spans")
+    if not isinstance(raw_spans, list):
+        raise TypeError("ответ /v1/mask без списка spans")
     out: list[Span] = []
-    for item in payload.get("spans") or []:
+    for index, item in enumerate(raw_spans):
         if not isinstance(item, dict):
-            continue
-        try:
-            start, end = int(item["start"]), int(item["end"])
-        except (KeyError, TypeError, ValueError):
-            continue
+            raise TypeError(f"span[{index}] не объект")
+        start, end = item.get("start"), item.get("end")
+        if isinstance(start, bool) or isinstance(end, bool) or not isinstance(start, int) or not isinstance(end, int):
+            raise TypeError(f"span[{index}] без целых start/end")
         if not 0 <= start < end <= len(text):
-            continue
-        mapped = _REMOTE_KIND.get(
-            str(item.get("category", "")).strip().upper()
-        )
+            raise ValueError(f"span[{index}] вне диапазона текста")
+        mapped = _REMOTE_KIND.get(str(item.get("category", "")).strip().upper())
         if mapped is None:
-            continue
+            raise ValueError(f"span[{index}] с неизвестной категорией")
         kind, category = mapped
         span = Span(kind, start, end, category)
         if is_plausible_person_span(text, span):
@@ -425,3 +432,26 @@ def scrub_text(text: str, names: list[str] | None = None, *,
     return core_depersonalize(
         text, names=names, mode=mode, extra_spans=extract_pii_spans(text, names)
     )
+
+async def deny_names(db, clinician_id, *user_ids) -> list[str]:
+    """Deny-list для egress: ростер врача + ФИО самого врача и пациентов.
+
+    Общий хелпер для всех LLM-путей: раньше `chat_insights` добавлял ФИО
+    пациента и врача, а `assistant_chat` — только ростер, поэтому ФИО самого
+    врача в его же запросе уходило в LLM открытым (оставаясь на месте только
+    за счёт ML-детекции, т.е. зависело от backend'а).
+    """
+    from sqlalchemy import select
+
+    from app.models import User
+
+    from .clinician import roster_names
+
+    names = await roster_names(db, clinician_id)
+    for uid in user_ids:
+        if uid is None:
+            continue
+        fio = await db.scalar(select(User.fio).where(User.id == uid))
+        if fio and fio.strip() and fio not in names:
+            names.append(fio.strip())
+    return names

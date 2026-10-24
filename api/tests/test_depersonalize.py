@@ -257,7 +257,8 @@ def test_dialogue_only_patient_messages_chronological():
         _msg("PATIENT", "Здравствуйте, меня зовут Иванов Пётр"),
         _msg("PATIENT", "Температура 38, пью ибупрофен"),
     ]
-    dialogue = chat_insights._dialogue_text(msgs)
+    # names=[] — deny-list пуст; маскирование структурных ПДн идёт внутри.
+    dialogue = chat_insights._dialogue_text(msgs, [])
     assert "Помощник" not in dialogue and "диктовка" not in dialogue
     assert dialogue.index("Иванов") < dialogue.index("Температура")
 
@@ -268,15 +269,11 @@ def test_insights_prompt_has_no_phi_and_no_noise(monkeypatch, fake_extractor):
     start = text.index("Иванов")
     fake_extractor.spans = [("FIO", start, start + len("Иванов Пётр Сергеевич"))]
 
-    from app.services.agent import scrub_for_llm
-
-    dialogue, _, _ = scrub_for_llm(
-        chat_insights._dialogue_text([
-            _msg("SYSTEM", "Помощник: Спасибо, что поделились."),
-            _msg("PATIENT", text),
-        ]),
-        None, names=[],
-    )
+    # scrub уже внутри _dialogue_text: до LLM доходит маскированная лента.
+    dialogue = chat_insights._dialogue_text([
+        _msg("SYSTEM", "Помощник: Спасибо, что поделились."),
+        _msg("PATIENT", text),
+    ], [])
     sent: list[dict] = []
     monkeypatch.setattr(
         chat_insights.llm_router, "chat_completion",

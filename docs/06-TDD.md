@@ -6,7 +6,7 @@
 
 ## 1. Стратегия
 
-- Пирамида (фактически достигнуто на 2026-10-24, см. `core/tests` + `api/tests`): unit (ядро) 148, integration (API+БД) 611 (из них 78 — обогащение КБ, FR-20; 18 — rate limiter на общем Redis-счётчике, docs/03 §12; 40 — деперсонализация/NER/remote, docs/12; 9 — клиент ML-сайдкара, docs/08 §4), e2e (UI-флоу) 42. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
+- Пирамида (фактически достигнуто на 2026-10-24, см. `core/tests` + `api/tests`): unit (ядро) 158, integration (API+БД) 637 (из них 78 — обогащение КБ, FR-20; 18 — rate limiter на общем Redis-счётчике, docs/03 §12; 40 — деперсонализация/NER/remote, docs/12; 9 — клиент ML-сайдкара, docs/08 §4), e2e (UI-флоу) 42. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
 - Ядро: 100% детерминированные чистые функции — табличные параметризованные тесты порогов.
 - Интеграция: реальные HTTP-запросы к тестовому Postgres (отдельная БД), не мок-эхо.
 - Запрещены тесты «на копирование»: только поведение контрактов (вход → выход/инвариант/ошибка).
@@ -89,6 +89,11 @@
 
 | remote_mask | фейковый `/v1/mask` (без GPU) + `CC_DEPERSONALIZE_NER=remote` | scrub_text() | те же плейсхолдеры, что hybrid; `names` и `X-CC-ML-Token` доходят |
 | remote_fail_closed | prod + недоступный sidecar | scrub_text() | 503 `DEPERSONALIZATION_UNAVAILABLE`, ноль вызовов LLM |
+| remote_malformed_response | sidecar отдаёт строковые/вне диапазона/неизвестные спаны | scrub_text() в prod / вне prod | 503 до LLM в prod; regex-деградация вне prod (без «успешного» немаскирования) |
+| deny_list_capped | deny-list на 200 ФИО | `ml_client.mask` | в сайдкар уходит 128 записей |
+| partial_overlap_masks_tail | спаны 0–11 и 7–21 по «Иванов Пётр Иванович» | resolve_spans + mask_spans | хвост второго спана тоже `[ФИО]` |
+| insights_scrub_before_truncate | телефон на границе 500 символов | `_dialogue_text` → prompt | в prompt нет ни полного номера, ни обрезка `+7926` |
+| clinician_own_fio_masked | `CC_DEPERSONALIZE_NER=off`, ФИО врача в вопросе | `/assistant/ask` | ФИО маскируется deny-list'ом (не зависит от NER) |
 
 ## 3. Интеграционные тесты (api/tests, реальный Postgres)
 
