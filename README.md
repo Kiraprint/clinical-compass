@@ -178,6 +178,32 @@ DDL, а второй дожидается первого.
 `CC_RATE_REDIS_TIMEOUT` (0.3 с) ограничивает ожидание мёртвого Redis, после
 чего limiter fail-open переходит в memory (docs/03 §12, docs/10 R24).
 
+## ML-сайдкар (GPU): эмбеддинги, реранк, маскирование ПДн
+
+Тяжёлые модели вынесены в отдельный GPU-сервис `ml` (`ml/`): эмбеддер БЗ
+(`qwen3-0.6b` по умолчанию, `e5-large-instruct` альтернативой), cross-encoder
+`bge-reranker-v2-m3` и гибридное маскирование ПДн (`compass.depersonalize` +
+`rubert-base-pii-ner`). Образ `api` остаётся torch-free; контракт —
+`api/app/services/ml_client.py`, детали — [docs/08 §4.1](docs/08-база-знаний.md)
+и [ml/README.md](ml/README.md).
+
+```bash
+# только на хосте с NVIDIA GPU (иначе профиль gpu не поднимается)
+docker compose -f infra/docker-compose.yml --profile gpu up -d ml
+docker compose -f infra/docker-compose.yml --profile gpu logs -f ml
+# порт наружу не публикуется: health читаем изнутри контейнера
+docker compose -f infra/docker-compose.yml --profile gpu exec ml python -c "import json,urllib.request; print(json.load(urllib.request.urlopen('http://127.0.0.1:8080/health')))"
+
+# тесты без GPU/torch
+python -m pytest ml/tests -q
+```
+
+Первый старт скачивает ~4 ГБ весов в том `ml-models` (разовый egress), дальше
+сервис работает офлайн. Без `--profile gpu` стек не меняется:
+`CC_EMBEDDER=hash`, `CC_DEPERSONALIZE_NER=off`; на не-GPU хосте задайте
+`CC_ML_URL=` (пусто), чтобы api даже не пытался ходить в отсутствующий `ml`.
+Замеры латентности/VRAM — [REPORT-ml-sidecar.md](REPORT-ml-sidecar.md).
+
 ## Обогащение базы знаний (kb-enrichment)
 
 Внешние источники (PubMed, гайдлайны ВОЗ/IRIS) забирает отдельный сервис;

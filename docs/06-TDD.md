@@ -6,7 +6,7 @@
 
 ## 1. Стратегия
 
-- Пирамида (фактически достигнуто на 2026-10-24, см. `core/tests` + `api/tests`): unit (ядро) 141, integration (API+БД) 562 (из них 78 — обогащение КБ, FR-20; 18 — rate limiter на общем Redis-счётчике, docs/03 §12), e2e (UI-флоу) 42. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
+- Пирамида (фактически достигнуто на 2026-10-24, см. `core/tests` + `api/tests` + `ml/tests`): unit (ядро) 141, integration (API+БД) 562 (из них 78 — обогащение КБ, FR-20; 18 — rate limiter на общем Redis-счётчике, docs/03 §12), ML-сайдкар в stub-режиме (без БД/GPU/torch) 22, e2e (UI-флоу) 42. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
 - Ядро: 100% детерминированные чистые функции — табличные параметризованные тесты порогов.
 - Интеграция: реальные HTTP-запросы к тестовому Postgres (отдельная БД), не мок-эхо.
 - Запрещены тесты «на копирование»: только поведение контрактов (вход → выход/инвариант/ошибка).
@@ -300,6 +300,32 @@
 | `test_agent_offload_uses_dedicated_limiter` | `AGENT_LIMITER` = `CC_ASSISTANT_THREAD_LIMIT` (8) | offload `_invoke_agent` | `to_thread.run_sync` получает `limiter=AGENT_LIMITER` — общий пул AnyIO не занимается |
 | `test_assistant_ask_deadline_is_503_with_retry_after` (`test_assistant.py`) | медленный агент | POST `/assistant/ask` | 503 `ASSISTANT_TIMEOUT` + `Retry-After: 5`, без traceback — тот же маппинг, что у треда |
 | `test_assistant_ask_validation_code_unchanged` | пустой `query` | POST `/assistant/ask` | прежний код `422 VALIDATION` (коды ошибок не сдвинулись) |
+
+### 3.3 ML-сайдкар (stub, `ml/tests`)
+
+`python -m pytest ml/tests -q` — 22 теста без Postgres, Qdrant, torch и GPU
+(`CC_ML_STUB=1`, детерминированные заглушки той же формы, что реальные
+модели). Контракт — `api/app/services/ml_client.py`, docs/08 §4.1.
+
+| Тест | Сценарий | Ожидание |
+|---|---|---|
+| `test_health_loading` | до загрузки моделей | 200, `status=loading`, `device=stub` |
+| `test_endpoints_503_while_loading` | три эндпоинта до `warmup()` | 503 `model_loading` + `Retry-After` |
+| `test_health_ready` | загрузка завершена | `status=ready`, дефолтный профиль и список загруженных |
+| `test_invalid_default_profile_rejected` | опечатка в `CC_ML_DEFAULT_PROFILE` | старт падает, а не 500 в запросе |
+| `test_models_unavailable_code` | упавшая загрузка | 503 `model_unavailable` |
+| `test_token_missing_401` / `_wrong_403` / `_ok` | `CC_ML_TOKEN` задан | 401 без заголовка, 403 с неверным, 200 с верным |
+| `test_embeddings_shape_and_dims` | batch, `kind=query` | `profile`, `dense_size=1024`, L2≈1, len=1024 |
+| `test_embeddings_*_profile` / `query_and_passage_differ` | смена профиля, префиксы | профиль в ответе; query≠passage |
+| `test_embeddings_unknown_profile` | неизвестный профиль | 404 `unknown_profile` |
+| `test_embeddings_caps` / `test_rerank_caps` / `test_mask_cap` | >64 текстов, >256 документов, >20000 символов, `top_k` вне диапазона | 422 `invalid_request` |
+| `test_rerank_alignment` | 3 документа | `len(scores)==len(documents)`, порядок сохранён |
+| `test_mask_spans_and_text` | ФИО+телефон+ДР+СНИЛС | `model=hybrid`, спаны по `start`, категории FIO/PHONE/DOB/DOC, исходные ПДн заменены |
+| `test_mask_without_names_keeps_regex_only` | только телефон | regex-путь не трогает время «15:00» |
+
+Реальные модели на GPU проверяются отдельным прогоном (не в CI):
+`REPORT-ml-sidecar.md` — холодная загрузка, VRAM, p50/p95 всех четырёх
+эндпоинтов и фактически замаскированный текст.
 
 ## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/`)
 
