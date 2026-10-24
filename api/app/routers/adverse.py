@@ -31,7 +31,9 @@ def _moscow_today() -> date:
 
 class PatientEventBody(BaseModel):
     event_text: str = Field(min_length=1, max_length=1000)
-    severity: str = Field(pattern="^(mild|moderate|severe)$")
+    # Тяжесть пациент не оценивает: NULL до проверки врачом. Поле оставлено
+    # ради старых/внешних клиентов, значение принимается только валидное.
+    severity: str | None = Field(default=None, pattern="^(mild|moderate|severe)$")
     onset_date: date
     medication_id: uuid.UUID | None = None
     # Справочный препарат пациент не выбирает: связь ставит врач при проверке.

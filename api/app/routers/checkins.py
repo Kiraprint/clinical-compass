@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +25,16 @@ class AnswersBody(BaseModel):
 @router.get("/checkins/today")
 async def today(user: User = Depends(require_consent), db: AsyncSession = Depends(get_db)):
     return await checkin_service.today(db, user.id)
+
+
+@router.get("/checkins/history")
+async def history(
+    days: int = Query(default=90, ge=1, le=365),
+    user: User = Depends(require_consent),
+    db: AsyncSession = Depends(get_db),
+):
+    """Тренд чек-инов: агрегат по завершённым сеансам (FR-33), без сырых ответов."""
+    return {"items": await checkin_service.history(db, user.id, days)}
 
 
 @router.post("/checkins")

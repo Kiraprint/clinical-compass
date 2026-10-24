@@ -114,12 +114,12 @@ async def report_patient_event(
     patient: User,
     *,
     event_text: str,
-    severity: str,
+    severity: str | None = None,
     onset_date: date,
     medication_id: uuid.UUID | None = None,
     ip: str | None = None,
 ) -> dict:
-    """Пациент сообщает о НЯ: status='pending', проверки ещё не было."""
+    """Пациент сообщает о НЯ: status='pending', severity пока не оценена (None)."""
     await _validate_medication(db, patient.id, medication_id)
     ev = AdverseEvent(
         patient_id=patient.id, clinician_id=None,

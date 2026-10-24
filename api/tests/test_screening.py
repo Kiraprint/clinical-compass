@@ -78,8 +78,9 @@ def test_answers_unknown_item_422(client):
 def test_finish_incomplete_422(client):
     h, _ = patient_ctx(client, "inc@test.ru")
     run_id = client.post("/api/v1/screenings", json={}, headers=h).json()["run_id"]
+    # Пациенту предъявляются q1..q8 (q9 скрыт); не хватает q8 → прогон неполный.
     resp = client.post(
-        f"/api/v1/runs/{run_id}/answers", json={"answers": {f"q{i}": 0 for i in range(1, 9)}}, headers=h
+        f"/api/v1/runs/{run_id}/answers", json={"answers": {f"q{i}": 0 for i in range(1, 8)}}, headers=h
     )
     assert resp.status_code == 204
     resp = client.post(f"/api/v1/runs/{run_id}/finish", headers=h)

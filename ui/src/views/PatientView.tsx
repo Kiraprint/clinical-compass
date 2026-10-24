@@ -937,7 +937,8 @@ function ChatTab() {
     if (!input.trim()) return;
     const reply = await api.postChat(input);
     setInput("");
-    setAlert(reply.reply.help_resources.length ? "Рекомендуем связаться со специалистом" : null);
+    // FR-34: помощник отвечает не чаще одного раза в сутки — reply может быть null.
+    setAlert(reply.reply?.help_resources.length ? "Рекомендуем связаться со специалистом" : null);
     await load();
   };
 

@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
@@ -309,3 +309,37 @@ async def submit(
             "Уведомление врачу: положительный риск-ответ в ежедневном чек-ине",
         )
     return await _serialize(db, session)
+
+# --- История для тренда пациента (FR-33) -------------------------------------
+
+#: Пункты ядра с числовой шкалой 0–4. Gate HR4 не входит в индекс самочувствия.
+WELLBEING_ITEMS = ("MO1", "TR1", "SL1", "IN1", "EN1", "FU1")
+
+async def history(db: AsyncSession, patient_id: uuid.UUID, days: int = 90) -> list[dict]:
+    """Завершённые чек-ины за окно: только агрегат, без расшифровки ответов.
+
+    Индекс самочувствия — среднее по пунктам ядра (0–4). Сырые ответы — PHI,
+    наружу для тренда не отдаются.
+    """
+    since = moscow_date() - timedelta(days=days - 1)
+    rows = (await db.scalars(
+        select(CheckinSession)
+        .where(
+            CheckinSession.patient_id == patient_id,
+            CheckinSession.status == "completed",
+            CheckinSession.checkin_date >= since,
+        )
+        .order_by(CheckinSession.checkin_date)
+    )).all()
+    items: list[dict] = []
+    for session in rows:
+        answers = session.answers
+        values = [answers[key] for key in WELLBEING_ITEMS if key in answers]
+        if not values:
+            continue
+        items.append({
+            "date": session.checkin_date.isoformat(),
+            "wellbeing": round(sum(values) / len(values), 2),
+            "safety": session.safety,
+        })
+    return items
