@@ -38,7 +38,9 @@ test.describe("ИИ-ассистент врача", () => {
 
     await page.getByLabel("Вопрос").fill("Какая дозировка Авиандра?");
     await page.getByRole("button", { name: "Спросить" }).click();
-    await expect(page.getByText("По базе знаний найдено следующее:")).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText("По базе знаний найдено следующее:")).toBeVisible({
+      timeout: 30000,
+    });
     // Цитата чанка препарата (АВИАНДР).
     await expect(page.locator(".assistant-sources").getByText(/АВИАНДР/i).first()).toBeVisible();
   });
@@ -51,8 +53,9 @@ test.describe("ИИ-ассистент врача", () => {
     await page.getByTitle("Добавить в контекст").first().click();
     await page.getByLabel("Вопрос").fill("Какая динамика пациента по шкале PHQ-9?");
     await page.getByRole("button", { name: "Спросить" }).click();
-    await expect(
-      page.locator(".assistant-sources").getByText(/Карта пациента/),
-    ).toBeVisible({ timeout: 15000 });
+    // 30 с: ответ идёт через LLM-шлюз, 15 с не хватало на медленном ответе.
+    await expect(page.locator(".assistant-sources").getByText(/Карта пациента/)).toBeVisible({
+      timeout: 30000,
+    });
   });
 });
