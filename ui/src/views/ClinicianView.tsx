@@ -1195,7 +1195,217 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
   );
 }
 
+// FR-28: ручное сообщение врача о НЯ. Живёт внутри блока проверки сообщений
+// пациента — второй конкурирующей формы «зарегистрировать НЯ» в карточке нет.
+function ReportAdverseEvent({ patientId, onCreated }: {
+  patientId: string;
+  onCreated: (created: ClinicianAdverseEvent) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const [severity, setSeverity] = useState<AdverseSeverity>("mild");
+  const [onsetDate, setOnsetDate] = useState(new Date().toISOString().slice(0, 10));
+  const [drug, setDrug] = useState("");
+  const [action, setAction] = useState("monitoring");
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState("");
 
+  const submit = async () => {
+    if (!text.trim()) return;
+    setErr("");
+    setBusy(true);
+    try {
+      const created = await api.createAdverseEvent(patientId, {
+        event_text: text.trim(),
+        severity,
+        onset_date: onsetDate,
+        suspected_drug: drug.trim() || undefined,
+        action_taken: action,
+      });
+      onCreated(created);
+      setText("");
+      setDrug("");
+      setSaved(true);
+      setOpen(false);
+    } catch (e: unknown) {
+      setErr(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <button className="ghost" onClick={() => setOpen((v) => !v)}>
+          {open ? "Свернуть сообщение о НЯ" : "Сообщить о НЯ"}
+        </button>
+        {saved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
+      </div>
+      {open && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, maxWidth: 560, marginTop: 8 }}>
+          <textarea
+            rows={2}
+            placeholder="Описание НЯ"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+          />
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <select
+              aria-label="Тяжесть НЯ"
+              value={severity}
+              onChange={(e) => setSeverity(e.target.value as AdverseSeverity)}
+            >
+              <option value="mild">лёгкое</option>
+              <option value="moderate">умеренное</option>
+              <option value="severe">тяжёлое</option>
+            </select>
+            <input
+              type="date"
+              aria-label="Дата начала НЯ"
+              value={onsetDate}
+              onChange={(e) => setOnsetDate(e.target.value)}
+              style={{ width: "auto" }}
+            />
+            <input
+              placeholder="Препарат (напр. Авиандр)"
+              value={drug}
+              onChange={(e) => setDrug(e.target.value)}
+            />
+            <select
+              aria-label="Действие при НЯ"
+              value={action}
+              onChange={(e) => setAction(e.target.value)}
+            >
+              <option value="none">нет действия</option>
+              <option value="monitoring">наблюдение</option>
+              <option value="dose_reduced">снижение дозы</option>
+              <option value="stopped">отмена</option>
+              <option value="referred">направление</option>
+            </select>
+          </div>
+          <div>
+            <button onClick={submit} disabled={busy || !text.trim()}>
+              Сохранить НЯ
+            </button>
+          </div>
+          {err && <p className="error">{err}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// FR-28: проверка сообщения пациента. Решение выбирается кнопкой, поля
+// (тяжесть, назначение, препарат ГРЛС, действие, заметка) применяются при
+// сохранении. После сохранения строка уходит из очереди «на проверке».
+function VerifyAdverseEvent({ event, medications, drugs, onOpenLibrary, onVerified }: {
+  event: ClinicianAdverseEvent;
+  medications: Report["adherence"]["medications"];
+  drugs: Drug[];
+  onOpenLibrary: () => void;
+  onVerified: (updated: ClinicianAdverseEvent) => void;
+}) {
+  const [decision, setDecision] = useState<"confirmed" | "rejected">("confirmed");
+  const [severity, setSeverity] = useState(event.severity);
+  const [medId, setMedId] = useState(event.medication_id ?? "");
+  const [drugId, setDrugId] = useState(event.drug_id ?? "");
+  const [action, setAction] = useState(event.action_taken ?? "monitoring");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const drug = drugs.find((d) => d.drug_id === drugId);
+
+  const save = async () => {
+    setErr("");
+    setBusy(true);
+    try {
+      onVerified(await api.verifyAdverseEvent(event.patient_id, event.id, {
+        status: decision,
+        severity,
+        medication_id: medId || undefined,
+        drug_id: drugId || undefined,
+        action_taken: action,
+        verification_note: note.trim() || undefined,
+      }));
+    } catch (e: unknown) {
+      setErr(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className="msg"
+      style={{ borderLeft: `3px solid ${event.severity === "severe" ? "#d64545" : "#c9a227"}`, paddingLeft: 10 }}
+    >
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", fontSize: 13 }}>
+        <b>{event.onset_date}</b>
+        <span className={`badge ${event.severity === "severe" ? "RED" : event.severity === "moderate" ? "YELLOW" : "GREEN"}`}>
+          {event.severity}
+        </span>
+        <span>{event.event_text}</span>
+        {event.medication_title && (
+          <span style={{ color: "#5a6478" }}>· назначение: {event.medication_title}</span>
+        )}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginTop: 8 }}>
+        <button
+          className={decision === "confirmed" ? "active" : ""}
+          onClick={() => setDecision("confirmed")}
+        >
+          Подтвердить
+        </button>
+        <button
+          className={decision === "rejected" ? "active" : ""}
+          onClick={() => setDecision("rejected")}
+        >
+          Отклонить
+        </button>
+        <select aria-label="Тяжесть при проверке" value={severity} onChange={(e) => setSeverity(e.target.value as AdverseSeverity)}>
+          <option value="mild">лёгкое</option>
+          <option value="moderate">умеренное</option>
+          <option value="severe">тяжёлое</option>
+        </select>
+        <select aria-label="Связь с назначением" value={medId} onChange={(e) => setMedId(e.target.value)}>
+          <option value="">назначение не выбрано</option>
+          {medications.map((m) => (
+            <option key={m.id} value={m.id}>{m.title}</option>
+          ))}
+        </select>
+        <select aria-label="Препарат из справочника" value={drugId} onChange={(e) => setDrugId(e.target.value)}>
+          <option value="">справочник ГРЛС</option>
+          {drugs.map((d) => (
+            <option key={d.drug_id} value={d.drug_id}>{d.trade_name}</option>
+          ))}
+        </select>
+        <select aria-label="Действие при проверке" value={action} onChange={(e) => setAction(e.target.value)}>
+          <option value="none">действий не требуется</option>
+          <option value="monitoring">наблюдение</option>
+          <option value="dose_reduced">доза снижена</option>
+          <option value="stopped">препарат отменён</option>
+          <option value="referred">направлен к врачу</option>
+        </select>
+        <input placeholder="Заметка врача" value={note} onChange={(e) => setNote(e.target.value)} style={{ maxWidth: 260 }} />
+        <button onClick={save} disabled={busy}>
+          {busy ? "Сохранение…" : "Сохранить проверку"}
+        </button>
+      </div>
+      {drug && (
+        <p style={{ fontSize: 12, color: "#5a6478", marginBottom: 0 }}>
+          В справочнике ГРЛС: {drug.adverse_events.slice(0, 240)}
+          {drug.adverse_events.length > 240 ? "…" : ""}{" "}
+          <a href="#library" onClick={onOpenLibrary} style={{ color: "#2f6fed" }}>
+            открыть справочник
+          </a>
+        </p>
+      )}
+      {err && <p className="error">{err}</p>}
+    </div>
+  );
+}
 
 // FR-25: блок «ЕМИАС» в карточке врача — только чтение (связка, назначения, приёмы).
 function EmiasBlock({ patientId }: { patientId: string }) {
@@ -1242,9 +1452,566 @@ function EmiasBlock({ patientId }: { patientId: string }) {
 }
 
 // FR-22: контакты пациента. Полный телефон отдаёт только endpoint контактов
+// (аудит READ_PATIENT_CONTACTS); в списке и карте телефон маскирован.
+function ContactsBlock({ patientId, hasConsent }: { patientId: string; hasConsent: boolean }) {
+  const [contacts, setContacts] = useState<PatientContacts | null>(null);
+  const [phone, setPhone] = useState("");
+  const [birthDate, setBirthDate] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState("");
 
+  useEffect(() => {
+    if (!hasConsent) return;
+    api
+      .clinicianContacts(patientId)
+      .then((c) => {
+        setContacts(c);
+        setPhone(c.phone ?? "");
+        setBirthDate(c.birth_date ?? "");
+      })
+      .catch((e) => setErr(e instanceof ApiError ? e.detail : String(e)));
+  }, [patientId, hasConsent]);
 
+  if (!hasConsent) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <h3 style={{ margin: 0 }}>Контакты</h3>
+        <p style={{ color: "#5a6478", fontSize: 13, margin: 0 }}>
+          Нет активного согласия пациента — контакты недоступны (152-ФЗ).
+        </p>
+      </div>
+    );
+  }
 
+  const save = async () => {
+    setErr("");
+    setSaved(false);
+    try {
+      const c = await api.clinicianContactsUpdate(patientId, {
+        phone: phone.trim() === "" ? null : phone.trim(),
+        birth_date: birthDate.trim() === "" ? null : birthDate.trim(),
+      });
+      setContacts(c);
+      setPhone(c.phone ?? "");
+      setBirthDate(c.birth_date ?? "");
+      setSaved(true);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.detail : String(e));
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <h3 style={{ margin: 0 }}>Контакты</h3>
+      <div className="row" style={{ alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <label htmlFor="contact-phone" style={{ fontSize: 14 }}>Телефон</label>
+        <input
+          id="contact-phone"
+          value={phone}
+          placeholder="+7XXXXXXXXXX"
+          onChange={(e) => setPhone(e.target.value)}
+          style={{ maxWidth: 220 }}
+        />
+        <label htmlFor="contact-birth" style={{ fontSize: 14 }}>Дата рождения</label>
+        <input
+          id="contact-birth"
+          type="date"
+          value={birthDate}
+          onChange={(e) => setBirthDate(e.target.value)}
+          style={{ maxWidth: 180 }}
+        />
+        <button onClick={save}>Сохранить контакты</button>
+        {saved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
+      </div>
+      {contacts && (
+        <div style={{ color: "#5a6478", fontSize: 13 }}>
+          {contacts.age !== null && <>Возраст: {contacts.age}</>}
+          {contacts.adult === false && <> · несовершеннолетний</>}
+        </div>
+      )}
+      {err && <p className="error">{err}</p>}
+    </div>
+  );
+}
+
+// FR-23: назначения препаратов в карточке. Импорт ЕМИАС — только чтение,
+// локальные назначения врач останавливает/удаляет.
+function MedicationsBlock({ patientId }: { patientId: string }) {
+  const [items, setItems] = useState<PatientMedication[]>([]);
+  const [title, setTitle] = useState("");
+  const [dosage, setDosage] = useState("");
+  const [startedOn, setStartedOn] = useState(new Date().toISOString().slice(0, 10));
+  const [notes, setNotes] = useState("");
+  // FR-27: режим приёма — знаменатель приверженности (1..6 раз в день).
+  const [timesPerDay, setTimesPerDay] = useState(1);
+  const [editId, setEditId] = useState<string | null>(null);
+  const [editTimes, setEditTimes] = useState(1);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  // Защита от гонки: ответ устаревшего запроса не перезаписывает свежий список.
+  const reqRef = useRef(0);
+
+  const load = () => {
+    const token = ++reqRef.current;
+    api.clinicianMedications(patientId)
+      .then((r) => { if (token === reqRef.current) setItems(r.items); })
+      .catch((e) => { if (token === reqRef.current) setErr(e instanceof ApiError ? e.detail : String(e)); });
+  };
+  useEffect(() => {
+    reqRef.current += 1;
+    setItems([]);
+    setErr("");
+    load();
+  }, [patientId]);
+
+  const add = async () => {
+    if (!title.trim()) return;
+    setBusy(true);
+    setErr("");
+    try {
+      await api.createMedication(patientId, {
+        title: title.trim(),
+        dosage: dosage.trim() || undefined,
+        started_on: startedOn || undefined,
+        times_per_day: timesPerDay,
+        notes: notes.trim() || undefined,
+      });
+      setTitle("");
+      setDosage("");
+      setNotes("");
+      setTimesPerDay(1);
+      load();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const stop = async (medId: string) => {
+    setErr("");
+    try {
+      await api.stopMedication(patientId, medId);
+      load();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.detail : String(e));
+    }
+  };
+
+  const remove = async (medId: string) => {
+    if (!window.confirm("Удалить назначение? Запись будет удалена без возможности восстановления.")) return;
+    setErr("");
+    try {
+      await api.deleteMedication(patientId, medId);
+      load();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.detail : String(e));
+    }
+  };
+
+  const saveTimes = async (medId: string) => {
+    setErr("");
+    try {
+      await api.updateMedication(patientId, medId, { times_per_day: editTimes });
+      setEditId(null);
+      load();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.detail : String(e));
+    }
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <h3>Назначения (FR-23)</h3>
+      {items.length > 0 ? (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Препарат</th><th>Дозировка</th><th>Режим</th><th>С</th><th>По</th><th>Статус</th><th>Заметка</th><th></th></tr>
+            </thead>
+            <tbody>
+              {items.map((m) => (
+                <tr key={m.id}>
+                  <td>
+                    {m.title}{" "}
+                    {m.source === "emias" && (
+                      <span style={{
+                        fontSize: 11, color: "#5a6478", border: "1px solid #cfd6e4",
+                        borderRadius: 4, padding: "0 4px", whiteSpace: "nowrap",
+                      }}>ЕМИАС</span>
+                    )}
+                  </td>
+                  <td>{m.dosage ?? "—"}</td>
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    {editId === m.id ? (
+                      <>
+                        <select
+                          aria-label="Раз в день"
+                          value={editTimes}
+                          onChange={(e) => setEditTimes(Number(e.target.value))}
+                        >
+                          {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n}</option>)}
+                        </select>
+                        <button className="link" style={{ fontSize: 12 }} onClick={() => saveTimes(m.id)}>
+                          Сохранить
+                        </button>
+                      </>
+                    ) : m.times_per_day != null ? (
+                      `${m.times_per_day} р/день`
+                    ) : (
+                      <span style={{ color: "#5a6478", fontSize: 12 }}>не задан</span>
+                    )}
+                  </td>
+                  <td>{m.started_on ?? "—"}</td>
+                  <td>{m.ended_on ?? "—"}</td>
+                  <td>{MED_STATUS_LABELS[m.status] ?? m.status}</td>
+                  <td style={{ whiteSpace: "pre-wrap" }}>{m.notes ?? "—"}</td>
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    {m.editable ? (
+                      <>
+                        {m.status !== "stopped" && (
+                          <button className="link" style={{ fontSize: 12 }} onClick={() => stop(m.id)}>
+                            Остановить
+                          </button>
+                        )}
+                        {m.editable && editId !== m.id && m.source === "clinician" && (
+                          <button
+                            className="link"
+                            style={{ fontSize: 12, marginLeft: 8 }}
+                            onClick={() => { setEditId(m.id); setEditTimes(m.times_per_day ?? 1); }}
+                          >Режим</button>
+                        )}
+                        <button
+                          className="link"
+                          style={{ color: "#c62828", fontSize: 12, marginLeft: 8 }}
+                          onClick={() => remove(m.id)}
+                        >Удалить</button>
+                      </>
+                    ) : (
+                      <span style={{ color: "#5a6478", fontSize: 12 }}>только чтение</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p style={{ color: "#5a6478", fontSize: 13 }}>Назначений пока нет.</p>
+      )}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", maxWidth: 760 }}>
+        <input placeholder="Препарат" value={title} onChange={(e) => setTitle(e.target.value)} style={{ maxWidth: 200 }} />
+        <input placeholder="Дозировка" value={dosage} onChange={(e) => setDosage(e.target.value)} style={{ maxWidth: 150 }} />
+        <input type="date" aria-label="Дата начала" value={startedOn} onChange={(e) => setStartedOn(e.target.value)} />
+        <label style={{ fontSize: 13, color: "#3d4657" }}>
+          Раз в день:{" "}
+          <select aria-label="Раз в день" value={timesPerDay} onChange={(e) => setTimesPerDay(Number(e.target.value))}>
+            {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </label>
+        <input placeholder="Заметка" value={notes} onChange={(e) => setNotes(e.target.value)} style={{ maxWidth: 240 }} />
+        <button onClick={add} disabled={busy || !title.trim()}>Назначить</button>
+      </div>
+      {err && <p className="error">{err}</p>}
+    </div>
+  );
+}
+
+const HISTORY_CHIPS: { value: HistoryType; label: string }[] = [
+  { value: "visit", label: "Приёмы" },
+  { value: "medication", label: "Назначения" },
+  { value: "screening", label: "Скрининги" },
+  { value: "adverse", label: "Нежелательные явления" },
+];
+
+const HISTORY_LABELS: Record<HistoryType, string> = {
+  visit: "приём",
+  medication: "назначение",
+  screening: "скрининг",
+  adverse: "НЯ",
+};
+
+const HISTORY_SOURCE_LABELS: Record<string, string> = {
+  clinician: "врач",
+  emias: "ЕМИАС",
+  patient: "пациент",
+};
+
+// FR-23: единая хронология карточки. Фильтр по типам — чипы, подгрузка курсором.
+function HistoryBlock({ patientId }: { patientId: string }) {
+  const [types, setTypes] = useState<HistoryType[]>(HISTORY_CHIPS.map((c) => c.value));
+  const [items, setItems] = useState<PatientHistoryItem[]>([]);
+  const [next, setNext] = useState<string | null>(null);
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+  const key = types.join(",");
+  // Смена пациента или фильтра инвалидирует старые ответы и курсор.
+  const reqRef = useRef(0);
+
+  const load = async (before?: string) => {
+    const token = ++reqRef.current;
+    if (types.length === 0) {
+      setItems([]);
+      setNext(null);
+      return;
+    }
+    setLoading(true);
+    setErr("");
+    try {
+      const r = await api.clinicianHistory(patientId, { types: key, limit: 50, before });
+      if (token !== reqRef.current) return;
+      setItems((prev) => (before ? [...prev, ...r.items] : r.items));
+      setNext(r.next_before);
+    } catch (e) {
+      if (token !== reqRef.current) return;
+      setErr(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      if (token === reqRef.current) setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    reqRef.current += 1;
+    setItems([]);
+    setNext(null);
+    setErr("");
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [patientId, key]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <h3>История пациента (FR-23)</h3>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+        {HISTORY_CHIPS.map((chip) => {
+          const on = types.includes(chip.value);
+          return (
+            <button
+              key={chip.value}
+              onClick={() => setTypes((prev) => (
+                prev.includes(chip.value) ? prev.filter((x) => x !== chip.value) : [...prev, chip.value]
+              ))}
+              aria-pressed={on}
+              style={{
+                fontSize: 13, padding: "2px 10px", borderRadius: 12,
+                border: "1px solid #cfd6e4", cursor: "pointer",
+                background: on ? "#e8eefc" : "transparent",
+                color: on ? "#1b3a8a" : "#5a6478",
+              }}
+            >{chip.label}</button>
+          );
+        })}
+        <button className="link" style={{ fontSize: 13 }} onClick={() => load()} disabled={loading}>
+          Обновить
+        </button>
+      </div>
+      {items.length > 0 ? (
+        <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+          {items.map((it) => (
+            <li key={`${it.type}:${it.ref_id}`} style={{ borderLeft: "3px solid #cfd6e4", paddingLeft: 10 }}>
+              <div style={{ fontSize: 12, color: "#5a6478" }}>
+                {it.at.slice(0, 16).replace("T", " ")} · {HISTORY_LABELS[it.type]} ·{" "}
+                {HISTORY_SOURCE_LABELS[it.source] ?? it.source}
+              </div>
+              <div style={{ fontWeight: 600 }}>{it.title}</div>
+              <div style={{ fontSize: 13, whiteSpace: "pre-wrap" }}>{it.summary}</div>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p style={{ color: "#5a6478", fontSize: 13 }}>
+          {types.length === 0
+            ? "Выберите хотя бы один тип событий."
+            : loading ? "Загрузка…" : "Событий нет."}
+        </p>
+      )}
+      {next && (
+        <div>
+          <button onClick={() => load(next)} disabled={loading}>Показать ещё</button>
+        </div>
+      )}
+      {err && <p className="error">{err}</p>}
+    </div>
+  );
+}
+
+const REMINDER_KINDS: { value: ClinicianReminder["kind"]; label: string }[] = [
+  { value: "call", label: "Позвонить" },
+  { value: "write", label: "Написать" },
+  { value: "appointment", label: "Назначить приём" },
+  { value: "custom", label: "Другое" },
+];
+
+// Порядок групп в панели: сначала просроченное, затем сегодня/скоро/позже.
+const REMINDER_GROUPS: { key: NonNullable<ClinicianReminder["due_state"]>; label: string }[] = [
+  { key: "overdue", label: "Просрочено" },
+  { key: "today", label: "Сегодня" },
+  { key: "soon", label: "Ближайшие 7 дней" },
+  { key: "later", label: "Позже" },
+];
+const REMINDER_STATE_LABELS: Record<string, string> = {
+  overdue: "просрочено",
+  today: "сегодня",
+  soon: "скоро",
+  later: "позже",
+};
+
+function nextHourLocal(): string {
+  const d = new Date(Date.now() + 3600_000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function fmtDue(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+// FR-24: напоминания выбранного пациента — прямо в карточке (п.3 фидбека).
+function PatientReminders({ patientId }: { patientId: string }) {
+  const [data, setData] = useState<RemindersResponse>({ items: [], overdue: 0 });
+  const [formOpen, setFormOpen] = useState(false);
+  const [kind, setKind] = useState<ClinicianReminder["kind"]>("call");
+  const [note, setNote] = useState("");
+  const [due, setDue] = useState(nextHourLocal);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const reload = () => {
+    api
+      .clinicianPatientReminders(patientId)
+      .then((r) => {
+        setData(r);
+        setErr("");
+      })
+      .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)));
+  };
+
+  useEffect(() => {
+    reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [patientId]);
+
+  const create = async () => {
+    if (!due) {
+      setErr("Укажите срок");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.createReminder({
+        patient_id: patientId,
+        kind,
+        note: note.trim() || null,
+        due_at: new Date(due).toISOString(),
+      });
+      setNote("");
+      setFormOpen(false);
+      reload();
+    } catch (e: unknown) {
+      setErr(e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const act = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    try {
+      await fn();
+      reload();
+    } catch (e: unknown) {
+      setErr(e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const snooze = (r: ClinicianReminder) => {
+    const next = new Date(r.due_at);
+    next.setDate(next.getDate() + 1);
+    return act(() => api.patchReminder(r.id, { due_at: next.toISOString() }));
+  };
+
+  return (
+    <div className="reminders-block">
+      <div className="row">
+        <button className="ghost" onClick={() => setFormOpen((v) => !v)}>
+          {formOpen ? "Скрыть форму" : "Добавить напоминание"}
+        </button>
+        <span className="muted small">
+          {data.overdue > 0 ? `Просрочено: ${data.overdue}` : "Просроченных нет"}
+        </span>
+      </div>
+      {formOpen && (
+        <div className="reminder-form">
+          <select
+            aria-label="Вид напоминания"
+            value={kind}
+            onChange={(e) => setKind(e.target.value as ClinicianReminder["kind"])}
+          >
+            {REMINDER_KINDS.map((k) => (
+              <option key={k.value} value={k.value}>
+                {k.label}
+              </option>
+            ))}
+          </select>
+          <input
+            type="datetime-local"
+            aria-label="Срок напоминания"
+            value={due}
+            onChange={(e) => setDue(e.target.value)}
+          />
+          <input
+            placeholder="Комментарий"
+            aria-label="Комментарий к напоминанию"
+            value={note}
+            maxLength={2000}
+            onChange={(e) => setNote(e.target.value)}
+          />
+          <button onClick={() => void create()} disabled={busy || !due}>
+            Создать
+          </button>
+        </div>
+      )}
+      {data.items.length === 0 ? (
+        <p className="muted small">Напоминаний по пациенту нет.</p>
+      ) : (
+        <ul className="reminder-list">
+          {data.items.map((r) => (
+            <li key={r.id} className={`reminder-item ${r.due_state ?? ""}`}>
+              <div className="reminder-main">
+                <strong>{r.kind_label}</strong>
+                <span className="muted small"> · {fmtDue(r.due_at)}</span>
+                {r.due_state && (
+                  <span className="reminder-state">{REMINDER_STATE_LABELS[r.due_state]}</span>
+                )}
+                {r.note && <div className="reminder-note">{r.note}</div>}
+              </div>
+              <div className="reminder-actions">
+                <button className="ghost" disabled={busy} onClick={() => void act(() => api.doneReminder(r.id))}>
+                  Выполнено
+                </button>
+                <button className="ghost" disabled={busy} onClick={() => void snooze(r)}>
+                  Сдвинуть на день
+                </button>
+                <button className="ghost" disabled={busy} onClick={() => void act(() => api.cancelReminder(r.id))}>
+                  Отменить
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+      {err && <p className="error">{err}</p>}
+    </div>
+  );
+}
 
 function RemindersPanel({ cards, onChanged }: { cards: PatientCard[]; onChanged: () => void }) {
   const [data, setData] = useState<RemindersResponse>({ items: [], overdue: 0 });
