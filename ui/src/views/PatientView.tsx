@@ -10,6 +10,7 @@ import {
   Consent,
   DiaryEntry,
   MoodScale,
+  PartialKind,
   Questionnaire,
   Timeline,
   MyAdverseEvent,
@@ -250,7 +251,82 @@ function ScreeningTab() {
   );
 }
 
-const ADH_LABELS: Record<string, string> = { taken: "Принял", partial: "Частично", missed: "Пропустил" };
+const ADH_LABELS: Record<string, string> = {
+  taken: "Принял",
+  partial: "Частично",
+  missed: "Не принял",
+  not_scheduled: "Не назначено сегодня",
+};
+type AdherenceStatus = "taken" | "partial" | "missed" | "not_scheduled";
+const ADH_STATUSES: AdherenceStatus[] = ["taken", "partial", "missed", "not_scheduled"];
+
+// FR-27: уточнение «частично» — пациент выбирает конкретную долю, а не 0,5 вслепую.
+const PARTIAL_GROUPS: { title: string; options: { kind: PartialKind; label: string }[] }[] = [
+  {
+    title: "Часть таблетки",
+    options: [
+      { kind: "quarter", label: "1/4 таблетки" },
+      { kind: "half", label: "1/2 таблетки" },
+      { kind: "three_quarters", label: "3/4 таблетки" },
+    ],
+  },
+  {
+    title: "Часть доз",
+    options: [
+      { kind: "one_of_two", label: "1 из 2 доз" },
+      { kind: "two_of_three", label: "2 из 3 доз" },
+    ],
+  },
+  {
+    title: "Другое",
+    options: [
+      { kind: "less_than_prescribed", label: "Принял меньше, чем назначено" },
+      { kind: "self_changed", label: "Изменил дозу сам" },
+    ],
+  },
+];
+const partialKindLabel = (kind: string | null) => {
+  if (!kind) return "";
+  for (const group of PARTIAL_GROUPS) {
+    const found = group.options.find((o) => o.kind === kind);
+    if (found) return found.label;
+  }
+  return kind;
+};
+// Крупные кнопки-варианты: доступная отметка без слайдеров и эмодзи.
+const ADH_BUTTON_STYLE = { padding: "10px 14px", fontSize: 15, minHeight: 44 };
+
+function PartialPicker({
+  value, onChange,
+}: { value: PartialKind | null; onChange: (kind: PartialKind) => void }) {
+  return (
+    <fieldset style={{ border: "1px solid #d5dae4", borderRadius: 8, padding: 10, margin: "8px 0" }}>
+      <legend style={{ fontSize: 14 }}>Сколько принято</legend>
+      {PARTIAL_GROUPS.map((group) => (
+        <div
+          key={group.title}
+          role="group"
+          aria-label={group.title}
+          style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}
+        >
+          <span style={{ fontSize: 13, color: "#5a6478", minWidth: 110 }}>{group.title}</span>
+          {group.options.map((option) => (
+            <button
+              key={option.kind}
+              type="button"
+              className={value === option.kind ? "active" : "ghost"}
+              aria-pressed={value === option.kind}
+              style={ADH_BUTTON_STYLE}
+              onClick={() => onChange(option.kind)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      ))}
+    </fieldset>
+  );
+}
 
 const sameDay = (iso: string, ref: Date) => new Date(iso).toDateString() === ref.toDateString();
 
@@ -453,7 +529,8 @@ function TodayTab() {
   const [mood, setMood] = useState<number | null>(null);
   const [sleep, setSleep] = useState(7);
   const [entriesToday, setEntriesToday] = useState<DiaryEntry[]>([]);
-  const [status, setStatus] = useState<"taken" | "partial" | "missed" | null>(null);
+  const [status, setStatus] = useState<AdherenceStatus | null>(null);
+  const [partialKind, setPartialKind] = useState<PartialKind | null>(null);
   const [medication, setMedication] = useState("");
   const [adhNote, setAdhNote] = useState("");
   const [adhMeds, setAdhMeds] = useState<AdherenceSummary["active_medications"]>([]);
@@ -477,6 +554,10 @@ function TodayTab() {
   }, []);
 
   const save = async () => {
+    if (status === "partial" && !partialKind) {
+      setErr("Укажите, сколько принято: часть таблетки, часть доз или другое.");
+      return;
+    }
     setErr("");
     setSaved("");
     setBusy(true);
@@ -497,10 +578,13 @@ function TodayTab() {
           medication_id: adhMedId || undefined,
           medication: adhMedId ? undefined : medication.trim() || undefined,
           status,
+          partial_kind: status === "partial" ? partialKind ?? undefined : undefined,
           note: adhNote.trim() || undefined,
         });
         setMedication("");
         setAdhNote("");
+        setStatus(null);
+        setPartialKind(null);
         parts.push("приём лекарств");
       }
       await load();
@@ -575,17 +659,34 @@ function TodayTab() {
       {markedTodayForSelected ? (
         <p style={{ color: "#2e7d32", fontWeight: 600 }}>
           За сегодня отмечено: {ADH_LABELS[markedTodayForSelected.status] ?? markedTodayForSelected.status}
+          {markedTodayForSelected.status === "partial" && markedTodayForSelected.partial_kind
+            ? ` — ${partialKindLabel(markedTodayForSelected.partial_kind)}`
+            : ""}
           {markedTodayForSelected.medication ? ` (${markedTodayForSelected.medication})` : ""}
         </p>
       ) : (
         <>
-          <div style={{ display: "flex", gap: 8, margin: "8px 0" }}>
-            {(["taken", "partial", "missed"] as const).map((s) => (
-              <button key={s} className={status === s ? "active" : "ghost"} onClick={() => setStatus(s)}>
+          <div
+            role="group"
+            aria-label="Отметка приёма"
+            style={{ display: "flex", gap: 8, margin: "8px 0", flexWrap: "wrap" }}
+          >
+            {ADH_STATUSES.map((s) => (
+              <button
+                key={s}
+                className={status === s ? "active" : "ghost"}
+                aria-pressed={status === s}
+                style={ADH_BUTTON_STYLE}
+                onClick={() => {
+                  setStatus(s);
+                  if (s !== "partial") setPartialKind(null);
+                }}
+              >
                 {ADH_LABELS[s]}
               </button>
             ))}
           </div>
+          {status === "partial" && <PartialPicker value={partialKind} onChange={setPartialKind} />}
           {adhMeds.length === 0 && (
             <input
               placeholder="Препарат (напр. Авиандр) — необязательно"
@@ -645,7 +746,8 @@ function AdherenceTab() {
   const [data, setData] = useState<AdherenceSummary | null>(null);
   const [days, setDays] = useState(30);
   const [medId, setMedId] = useState("");
-  const [status, setStatus] = useState<"taken" | "partial" | "missed" | null>(null);
+  const [status, setStatus] = useState<AdherenceStatus | null>(null);
+  const [partialKind, setPartialKind] = useState<PartialKind | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [saved, setSaved] = useState("");
@@ -665,6 +767,10 @@ function AdherenceTab() {
 
   const mark = async () => {
     if (!status) return;
+    if (status === "partial" && !partialKind) {
+      setErr("Укажите, сколько принято: часть таблетки, часть доз или другое.");
+      return;
+    }
     setErr("");
     setSaved("");
     setBusy(true);
@@ -672,8 +778,10 @@ function AdherenceTab() {
       await api.recordAdherence({
         medication_id: medId || undefined,
         status,
+        partial_kind: status === "partial" ? partialKind ?? undefined : undefined,
       });
       setStatus(null);
+      setPartialKind(null);
       setSaved("Отметка сохранена");
       await load();
     } catch (e: unknown) {
@@ -694,7 +802,9 @@ function AdherenceTab() {
       <h2>Приверженность лечению</h2>
       <p style={{ color: "#5a6478", fontSize: 14 }}>
         Процент считается от ожидаемых приёмов по назначенному режиму (сколько раз в день
-        принимать), а не от числа отметок. Частичный приём = 0,5.
+        принимать), а не от числа отметок. Доля «частично» зависит от уточнения:
+        1/4 = 0,25 · 1/2 = 0,5 · 3/4 = 0,75 · 1 из 2 = 0,5 · 2 из 3 ≈ 0,67.
+        «Не назначено сегодня» в числитель и знаменатель не входит.
       </p>
       <div style={{ display: "flex", gap: 8, margin: "8px 0" }}>
         {[7, 30].map((n) => (
@@ -730,7 +840,8 @@ function AdherenceTab() {
             <div style={{ color: "#3d4657", fontSize: 13 }}>
               принято {fmtScore(m.score)} из {m.expected} ({m.pct}%) · режим {doseWord(m.times_per_day)}
               <span style={{ color: "#5a6478" }}>
-                {" "}— принято {m.taken}, частично {m.partial}, пропущено {m.missed}
+                {" "}— принято {m.taken}, частично {m.partial}, пропущено {m.missed},
+                не назначено {m.not_scheduled}
               </span>
             </div>
           )}
@@ -753,13 +864,27 @@ function AdherenceTab() {
               </option>
             ))}
           </select>
-          <div style={{ display: "flex", gap: 8, margin: "8px 0" }}>
-            {(["taken", "partial", "missed"] as const).map((s) => (
-              <button key={s} className={status === s ? "active" : "ghost"} onClick={() => setStatus(s)}>
+          <div
+            role="group"
+            aria-label="Отметка приёма"
+            style={{ display: "flex", gap: 8, margin: "8px 0", flexWrap: "wrap" }}
+          >
+            {ADH_STATUSES.map((s) => (
+              <button
+                key={s}
+                className={status === s ? "active" : "ghost"}
+                aria-pressed={status === s}
+                style={ADH_BUTTON_STYLE}
+                onClick={() => {
+                  setStatus(s);
+                  if (s !== "partial") setPartialKind(null);
+                }}
+              >
                 {ADH_LABELS[s]}
               </button>
             ))}
           </div>
+          {status === "partial" && <PartialPicker value={partialKind} onChange={setPartialKind} />}
           {selected && selected.times_per_day == null && (
             <p style={{ color: "#5a6478", fontSize: 13 }}>
               У этого назначения режим не задан: отметка сохранится, но в процент не войдёт.
@@ -783,6 +908,7 @@ function AdherenceTab() {
         {items.map((r) => (
           <div key={r.id} className="msg">
             <b>{ADH_LABELS[r.status] ?? r.status}</b>
+            {r.status === "partial" && r.partial_kind ? ` — ${partialKindLabel(r.partial_kind)}` : ""}
             {r.medication ? ` · ${r.medication}` : ""}
             {r.medication_id ? "" : " · без привязки к назначению"}
             {r.note ? ` · ${r.note}` : ""}

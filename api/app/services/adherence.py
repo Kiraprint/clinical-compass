@@ -4,10 +4,16 @@
 назначения с заданным режимом (times_per_day) знаменатель —
 `times_per_day × число дней окна, когда назначение действовало`
 (started_on..min(ended_on, today), по московским датам). Числитель —
-score = taken + 0.5 × partial.
+score = taken + сумма долей partial по `partial_kind` (1/4=0.25, 1/2=0.5,
+3/4=0.75, 1 из 2=0.5, 2 из 3≈0.667; less_than_prescribed/self_changed — 0.5,
+как раньше).
 
 Общий процент — weighted: сумма score / сумма expected по назначениям
 с расписанием, никогда не среднее процентов по препаратам.
+
+Отметки `not_scheduled` («сегодня не назначено»: перерыв, приём по
+требованию) не входят ни в числитель, ни в знаменатель процента — это не
+пропуск; они показываются отдельным счётчиком.
 
 Отметки без medication_id (исторические — backfill не делался) и отметки на
 назначения без режима/вне окна попадают в «вне расчёта» и в знаменатель
@@ -27,16 +33,37 @@ from app.models import AdherenceRecord, PatientMedication
 
 MOSCOW = ZoneInfo("Europe/Moscow")
 
+# Доля принятого приёма для уточнения «частично». Коды — домен CHECK
+# adherence_records_partial_kind; NULL у partial быть не может (констрейнт
+# required), но `.get` оставляет защиту чтения старых/ручных строк.
+PARTIAL_SHARE: dict[str, float] = {
+    "quarter": 0.25,
+    "half": 0.5,
+    "three_quarters": 0.75,
+    "one_of_two": 0.5,
+    "two_of_three": 2 / 3,
+    "less_than_prescribed": 0.5,
+    "self_changed": 0.5,
+}
+
+# Старые клиенты присылали partial без уточнения. Прежняя семантика «частично»
+# = принял меньше назначенного, поэтому им проставляется этот код (0.5).
+LEGACY_PARTIAL_KIND = "less_than_prescribed"
+
+
 def _today() -> date:
     return datetime.now(MOSCOW).date()
+
 
 def _window(days: int) -> tuple[date, date]:
     """Окно из `days` календарных дней включительно, заканчивается сегодня."""
     end = _today()
     return end - timedelta(days=days - 1), end
 
+
 def _window_start_dt(start: date) -> datetime:
     return datetime.combine(start, time.min, tzinfo=MOSCOW)
+
 
 def adherence_dict(r: AdherenceRecord) -> dict:
     return {
@@ -44,12 +71,16 @@ def adherence_dict(r: AdherenceRecord) -> dict:
         "medication_id": str(r.medication_id) if r.medication_id else None,
         "medication": r.medication,
         "status": r.status,
+        "partial_kind": r.partial_kind,
         "note": r.note,
         "created_at": r.created_at.isoformat(),
     }
 
-def _score(rows: list[AdherenceRecord]) -> float:
-    return sum(1.0 if r.status == "taken" else 0.5 if r.status == "partial" else 0.0 for r in rows)
+
+def _partial_score(rows: list[AdherenceRecord]) -> float:
+    """Вклад partial-отметок: доля приёма по уточнению, 0.5 при неизвестном коде."""
+    return sum(PARTIAL_SHARE.get(r.partial_kind, 0.5) for r in rows if r.status == "partial")
+
 
 def _expected_days(med: PatientMedication, start: date, end: date) -> int:
     """Дни окна, когда назначение действовало.
@@ -68,8 +99,10 @@ def _expected_days(med: PatientMedication, start: date, end: date) -> int:
     last = min(med.ended_on, end) if med.ended_on else end
     return max(0, (last - first).days + 1)
 
+
 def _pct(score: float, expected: int) -> int | None:
     return round(score / expected * 100) if expected > 0 else None
+
 
 async def compute(db: AsyncSession, patient_id, days: int = 14) -> dict:
     """Единый агрегат для витрины пациента и карточки врача (roster/consent — у вызывающих)."""
@@ -99,7 +132,10 @@ async def compute(db: AsyncSession, patient_id, days: int = 14) -> dict:
         taken = sum(1 for r in own if r.status == "taken")
         partial = sum(1 for r in own if r.status == "partial")
         missed = sum(1 for r in own if r.status == "missed")
-        score = taken + 0.5 * partial
+        # not_scheduled — не приём и не пропуск: вне числителя и знаменателя,
+        # только отдельный счётчик.
+        not_scheduled = sum(1 for r in own if r.status == "not_scheduled")
+        score = taken + _partial_score(own)
         med_by_id[med.id] = med
         included.append({
             "id": str(med.id),
@@ -113,6 +149,7 @@ async def compute(db: AsyncSession, patient_id, days: int = 14) -> dict:
             "taken": taken,
             "partial": partial,
             "missed": missed,
+            "not_scheduled": not_scheduled,
             "score": score,
             "pct": _pct(score, expected),
         })
@@ -127,6 +164,8 @@ async def compute(db: AsyncSession, patient_id, days: int = 14) -> dict:
     expected = sum(m["expected"] for m in included)
     taken = sum(1 for r in rows if r.status == "taken")
     partial = sum(1 for r in rows if r.status == "partial")
+    missed = sum(1 for r in rows if r.status == "missed")
+    not_scheduled = sum(1 for r in rows if r.status == "not_scheduled")
 
     active_meds = (await db.scalars(
         select(PatientMedication)
@@ -151,11 +190,13 @@ async def compute(db: AsyncSession, patient_id, days: int = 14) -> dict:
         "total": len(rows),
         "taken": taken,
         "partial": partial,
-        "missed": len(rows) - taken - partial,
+        "missed": missed,
+        "not_scheduled": not_scheduled,
         "excluded": {"count": len(excluded), "items": [adherence_dict(r) for r in excluded]},
         "items": [adherence_dict(r) for r in rows],
         "today": today_record(rows),
     }
+
 
 def summary_payload(data: dict) -> dict:
     """Форма агрегата для карточки врача (report.adherence и /clinician/.../adherence)."""
@@ -170,16 +211,53 @@ def summary_payload(data: dict) -> dict:
         "taken": data["taken"],
         "partial": data["partial"],
         "missed": data["missed"],
+        "not_scheduled": data["not_scheduled"],
         "medications": data["medications"],
         "excluded_count": data["excluded"]["count"],
         "records": data["items"][:10],
     }
 
+
+def _normalize_partial_kind(
+    status: str, partial_kind: str | None, legacy_partial: bool,
+) -> str | None:
+    """Инвариант kind ↔ status: kind только для partial и обязателен для него.
+
+    `legacy_partial` — старый клиент, не приславший поле вовсе: принимаем и
+    трактуем прежнюю семантику (принял меньше назначенного, 0.5). Явный null
+    в новом контракте — ошибка клиента, 422 PARTIAL_KIND_REQUIRED.
+    """
+    if status != "partial":
+        if partial_kind is not None:
+            raise Problem(
+                422, "PARTIAL_KIND_INVALID",
+                "partial_kind допустим только при status=partial",
+            )
+        return None
+    if partial_kind is None:
+        if legacy_partial:
+            return LEGACY_PARTIAL_KIND
+        raise Problem(
+            422, "PARTIAL_KIND_REQUIRED",
+            "Для status=partial укажите partial_kind: quarter | half | three_quarters | "
+            "one_of_two | two_of_three | less_than_prescribed | self_changed",
+        )
+    if partial_kind not in PARTIAL_SHARE:
+        raise Problem(
+            422, "PARTIAL_KIND_INVALID",
+            "Неизвестный partial_kind: quarter | half | three_quarters | one_of_two | "
+            "two_of_three | less_than_prescribed | self_changed",
+        )
+    return partial_kind
+
+
 async def create_record(
     db: AsyncSession, patient_id, medication_id=None, medication: str | None = None,
-    status: str = "taken", note: str | None = None,
+    status: str = "taken", note: str | None = None, partial_kind: str | None = None,
+    legacy_partial: bool = False,
 ) -> dict:
     """Отметка пациента. consent-гейт у роутера, владение назначением — здесь."""
+    partial_kind = _normalize_partial_kind(status, partial_kind, legacy_partial)
     med = None
     if medication_id is not None:
         med = await db.get(PatientMedication, medication_id)
@@ -195,11 +273,13 @@ async def create_record(
         medication_id=med.id if med is not None else None,
         medication=medication,
         status=status,
+        partial_kind=partial_kind,
         note=note,
     )
     db.add(rec)
     await db.commit()
     return adherence_dict(rec)
+
 
 def today_record(rows: list[AdherenceRecord]) -> dict | None:
     today = _today()

@@ -426,7 +426,17 @@ class AdherenceBody(BaseModel):
     # необязателен только для исторических/внеплановых отметок — они вне расчёта.
     medication_id: uuid.UUID | None = None
     medication: str | None = None
-    status: str = Field(pattern="^(taken|partial|missed)$")
+    # not_scheduled — «не назначено сегодня»: вне числителя и знаменателя.
+    status: str = Field(pattern="^(taken|partial|missed|not_scheduled)$")
+    # Уточнение частичного приёма; обязательно для status=partial и запрещено
+    # при других статусах (сервис отдаёт 422 PARTIAL_KIND_REQUIRED/INVALID).
+    partial_kind: str | None = Field(
+        default=None,
+        pattern=(
+            "^(quarter|half|three_quarters|one_of_two|two_of_three|"
+            "less_than_prescribed|self_changed)$"
+        ),
+    )
     note: str | None = None
 
 @me_router.get("/me/adherence")
@@ -447,6 +457,11 @@ async def record_adherence(
     user: User = Depends(require_consent), db: AsyncSession = Depends(get_db),
 ):
     """Пациент отмечает приверженность лечению (задача кейса 7). consent-гейт."""
+    # Поле отсутствует в запросе → старый клиент: сохраняем обратную
+    # совместимость и трактуем partial как «принял меньше назначенного» (0.5).
+    # Явный `partial_kind: null` — новый клиент с ошибкой → 422.
+    legacy_partial = "partial_kind" not in body.model_fields_set
     return await services.clinician.create_adherence(
         db, user.id, body.medication_id, body.medication, body.status, body.note,
+        body.partial_kind, legacy_partial,
     )

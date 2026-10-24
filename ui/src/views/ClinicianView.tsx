@@ -10,6 +10,23 @@ const MED_STATUS_LABELS: Record<string, string> = {
   stopped: "отменено",
 };
 
+// FR-27: человекочитаемые подписи отметок приёма и уточнений «частично».
+const ADH_STATUS_LABELS: Record<string, string> = {
+  taken: "Принял",
+  partial: "Частично",
+  missed: "Не принял",
+  not_scheduled: "Не назначено сегодня",
+};
+const ADH_PARTIAL_LABELS: Record<string, string> = {
+  quarter: "1/4 таблетки",
+  half: "1/2 таблетки",
+  three_quarters: "3/4 таблетки",
+  one_of_two: "1 из 2 доз",
+  two_of_three: "2 из 3 доз",
+  less_than_prescribed: "Принял меньше, чем назначено",
+  self_changed: "Изменил дозу сам",
+};
+
 // FR-31: подписи видов фактов из переписки (в карточку попадают только accepted).
 const INSIGHT_KIND_LABELS: Record<string, string> = {
   symptom: "Симптом",
@@ -815,7 +832,7 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
               <thead>
                 <tr>
                   <th>Препарат</th><th>Режим</th><th>Принято</th><th>Частично</th>
-                  <th>Пропущено</th><th>Ожидалось</th><th>%</th>
+                  <th>Пропущено</th><th>Не назначено</th><th>Ожидалось</th><th>%</th>
                 </tr>
               </thead>
               <tbody>
@@ -826,6 +843,7 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
                     <td>{m.taken}</td>
                     <td>{m.partial}</td>
                     <td>{m.missed}</td>
+                    <td>{m.not_scheduled}</td>
                     <td>{m.expected}</td>
                     <td>{m.pct != null ? `${m.pct}%` : "—"}</td>
                   </tr>
@@ -836,8 +854,10 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
           <p style={{ fontSize: 13, marginTop: 6 }}>
             <b>Общий процент: {report.adherence.pct}%</b>{" "}
             <span style={{ color: "#5a6478" }}>
-              — это сумма (принято + 0,5 × частично) по назначениям с заданным режимом,
-              делённая на сумму ожидаемых приёмов; не среднее процентов по препаратам.
+              — это сумма (принято + доля каждого «частично»: 1/4 = 0,25, 1/2 = 0,5,
+              3/4 = 0,75, 1 из 2 = 0,5, 2 из 3 ≈ 0,67; «меньше/изменил сам» = 0,5)
+              по назначениям с заданным режимом, делённая на сумму ожидаемых приёмов;
+              не среднее процентов по препаратам. «Не назначено сегодня» в расчёт не входит.
               {report.adherence.excluded_count > 0
                 ? ` Вне расчёта ${report.adherence.excluded_count} отметок без привязки к назначению или у назначений без режима.`
                 : ""}
@@ -852,7 +872,12 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
                     <tr key={r.id}>
                       <td>{r.created_at.slice(0, 10)}</td>
                       <td>{r.medication ?? "—"}</td>
-                      <td>{r.status}</td>
+                      <td>
+                        {ADH_STATUS_LABELS[r.status] ?? r.status}
+                        {r.status === "partial" && r.partial_kind
+                          ? ` — ${ADH_PARTIAL_LABELS[r.partial_kind] ?? r.partial_kind}`
+                          : ""}
+                      </td>
                       <td>{r.note ?? "—"}</td>
                     </tr>
                   ))}
