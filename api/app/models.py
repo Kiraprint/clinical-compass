@@ -503,6 +503,9 @@ class Drug(Base):
     contraindications: Mapped[str] = mapped_column(Text)
     adverse_events: Mapped[str] = mapped_column(Text)
     special_notes: Mapped[str] = mapped_column(Text)
+    # Провенанс: URL записей ГРЛС и инструкций, по которым заполнены поля.
+    # Пустой список — источник известен только на уровне файла drugs.json.
+    source_urls: Mapped[list] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
 
 

@@ -104,6 +104,22 @@ export default function DrugLibraryTab() {
             <p>{picked.special_notes}</p>
           </>
         )}
+
+        {picked.source_urls.length > 0 && (
+          <>
+            {/* Провенанс: по какой записи ГРЛС и инструкции заполнены поля. */}
+            <h3>Источники</h3>
+            <ul style={{ fontSize: 13, paddingLeft: 18 }}>
+              {picked.source_urls.map((url) => (
+                <li key={url}>
+                  <a href={url} target="_blank" rel="noreferrer">
+                    {url}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
       </div>
     );
   }

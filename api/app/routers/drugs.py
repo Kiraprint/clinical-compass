@@ -31,6 +31,7 @@ def _drug_dict(d: Drug) -> dict:
         "contraindications": d.contraindications,
         "adverse_events": d.adverse_events,
         "special_notes": d.special_notes,
+        "source_urls": d.source_urls or [],
     }
 
 

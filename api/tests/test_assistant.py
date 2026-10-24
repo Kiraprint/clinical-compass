@@ -29,14 +29,25 @@ pytestmark = pytest.mark.skipif(not _qdrant_available(), reason="Qdrant недо
 
 
 @pytest.fixture(scope="module")
-def kb_collection():
-    """Индексирует тестовую коллекцию и убирает её после модуля."""
+def kb_collection(engine):
+    """Индексирует тестовую коллекцию и убирает её после модуля.
+
+    Модульная фикстура создаётся раньше function-scoped `clean`, поэтому
+    справочник препаратов сеем здесь же: иначе чанки раздела ЛЕКАРСТВА
+    (kb_seed._drug_docs читает таблицу drugs) в индекс не попадут.
+    """
     from qdrant_client import QdrantClient
 
-    from app.kb_seed import build_corpus
+    from app import db
+    from app.kb_seed import build_corpus, clear_corpus_cache
+    from app.seed import _seed_drugs
     from app.services import kb
     from app.services.embeddings import HashEmbedder
 
+    with db.SyncSessionLocal() as s:
+        _seed_drugs(s)
+        s.commit()
+    clear_corpus_cache()
     client = QdrantClient(url=settings.qdrant_url)
     if client.collection_exists(kb.COLLECTION):
         client.delete_collection(kb.COLLECTION)
@@ -53,16 +64,22 @@ def test_assistant_requires_clinician(client):
 
 
 def test_kb_corpus_includes_drugs_and_guidelines():
-    """Корпус KB: шкалы + триаж + красные линии + препараты (Авиандр) + КР Минздрава."""
+    """Корпус KB: шкалы + триаж + красные линии + препараты (Авиандр, Золофт,
+    Эсциталопрам Канон) + КР Минздрава."""
     docs = build_corpus()
     gids = {d["guideline_id"] for d in docs}
     topics = {d["topic"] for d in docs}
-    assert "drug-aviandr" in gids and "drug-aviandr-safety" in gids
     assert "kr-gtr-f41-1" in gids
     assert "ЛЕКАРСТВА" in topics
-    # Чанк Авиандра цитирует регистрационное удостоверение (усл.7 кейса — ГРЛС).
-    aviandr = next(d for d in docs if d["guideline_id"] == "drug-aviandr")
-    assert "РУ" in aviandr["text"] and "ЛП-" in aviandr["text"]
+    # Каждый препарат справочника даёт основной чанк и чанк безопасности.
+    for slug in ("aviandr", "zoloft", "escitalopram-canon"):
+        assert f"drug-{slug}" in gids and f"drug-{slug}-safety" in gids, slug
+    # Чанки цитируют регистрационное удостоверение (усл.7 кейса — ГРЛС).
+    for slug in ("aviandr", "zoloft", "escitalopram-canon"):
+        chunk = next(d for d in docs if d["guideline_id"] == f"drug-{slug}")
+        assert "РУ" in chunk["text"] and "ЛП-" in chunk["text"]
+    zoloft = next(d for d in docs if d["guideline_id"] == "drug-zoloft")
+    assert "сертралин" in zoloft["text"].lower()
 
 def test_kb_corpus_includes_articles():
     """Научные статьи (docs/13) входят отдельным разделом; в чанках — только
@@ -76,6 +93,33 @@ def test_kb_corpus_includes_articles():
     for a in articles:
         assert set(a) == {"guideline_id", "source_title", "topic", "text"}, a["guideline_id"]
 
+def test_kb_search_finds_new_drugs(client, kb_collection):
+    """Запрос «сертралин дозировка» находит чанк препарата в разделе ЛЕКАРСТВА.
+
+    Проверяется слой KB (hybrid_search), а не /ask: дозировка — красная линия
+    лечения, ассистент отвечает отказом и в поиск не ходит. В чанке препарата
+    поле называется «Режим дозирования», поэтому лексическое совпадение идёт по
+    МНН «сертралин».
+    """
+    from qdrant_client import QdrantClient
+
+    from app.services import kb
+    from app.services.embeddings import HashEmbedder
+
+    qdrant_client = QdrantClient(url=settings.qdrant_url)
+    hits = kb.hybrid_search(
+        qdrant_client, HashEmbedder(), "сертралин дозировка", limit=5
+    )
+    drug_hits = [h for h in hits if h["topic"] == "ЛЕКАРСТВА"]
+    assert drug_hits, [h["guideline_id"] for h in hits]
+    assert "сертралин" in drug_hits[0]["text"].lower()
+    assert any(h["guideline_id"].startswith("drug-zoloft") for h in drug_hits), drug_hits
+
+    hits2 = kb.hybrid_search(
+        qdrant_client, HashEmbedder(), "эсциталопрам противопоказания", limit=5
+    )
+    ids2 = {h["guideline_id"] for h in hits2 if h["topic"] == "ЛЕКАРСТВА"}
+    assert "drug-escitalopram-canon-safety" in ids2, ids2
 
 def test_assistant_grounded_answer_with_citations(client, kb_collection):
     h, _ = clinician_ctx(client, "c-assist@test.ru")
