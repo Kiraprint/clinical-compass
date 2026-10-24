@@ -8,10 +8,15 @@ from fastapi.responses import JSONResponse
 
 
 class Problem(Exception):
-    def __init__(self, status: int, code: str, detail: str):
+    """RFC 7807-ошибка домена. `headers` — для 503 (Retry-After) и подобных."""
+
+    def __init__(
+        self, status: int, code: str, detail: str, headers: dict[str, str] | None = None
+    ):
         self.status = status
         self.code = code
         self.detail = detail
+        self.headers = headers or {}
         super().__init__(detail)
 
 
@@ -32,6 +37,7 @@ async def problem_handler(request: Request, exc: Problem) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status,
         content=_problem(exc.status, exc.code, exc.detail, str(request.url.path)),
+        headers=exc.headers or None,
     )
 
 

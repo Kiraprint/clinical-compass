@@ -268,6 +268,10 @@
 | `test_push_failure_log_has_no_capability_token` (`test_push.py`) | endpoint с токеном в пути | `_endpoint_host` | в лог попадает только хост, токена нет |
 | `test_ip_budget_blocks_spray_of_distinct_emails` (`test_ratelimit.py`) | `CC_RATE_IP_MAX` неудачных попыток с одного IP по разным email | проверка входа с этого IP / с другого | отказ с `retry_after ≥ 1`; другой IP не затронут |
 | `test_migrations_do_not_disable_application_loggers` (`test_async_db.py`) | после `init_db()` (alembic `fileConfig`) | запись в логгер `app.services.push` | логгер не отключён, запись доходит до handler'а |
+| `test_thread_message_deadline_is_503_without_assistant_message` (`test_assistant_threads.py`) | агент-заглушка спит дольше `CC_ASSISTANT_DEADLINE_S` | POST сообщения в тред | 503 `ASSISTANT_TIMEOUT`, `Retry-After: 5`, RFC 7807 `instance` = путь; ответ ассистента не персистится (в треде только вопрос) |
+| `test_agent_offload_uses_dedicated_limiter` | `AGENT_LIMITER` = `CC_ASSISTANT_THREAD_LIMIT` (8) | offload `_invoke_agent` | `to_thread.run_sync` получает `limiter=AGENT_LIMITER` — общий пул AnyIO не занимается |
+| `test_assistant_ask_deadline_is_503_with_retry_after` (`test_assistant.py`) | медленный агент | POST `/assistant/ask` | 503 `ASSISTANT_TIMEOUT` + `Retry-After: 5`, без traceback — тот же маппинг, что у треда |
+| `test_assistant_ask_validation_code_unchanged` | пустой `query` | POST `/assistant/ask` | прежний код `422 VALIDATION` (коды ошибок не сдвинулись) |
 
 ## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/`)
 

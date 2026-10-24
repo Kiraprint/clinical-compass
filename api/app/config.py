@@ -1,6 +1,6 @@
 """Конфигурация API (pydantic-settings). Префикс env: CC_"""
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 # Демо-секреты, запрещённые по умолчанию (F3). Чтобы стартовать с ними,
@@ -64,6 +64,14 @@ class Settings(BaseSettings):
     # CC_ASSISTANT_LLM_API_KEY: Bearer-токен OpenAI-совместимого шлюза (omniroute).
     # Пусто → заголовок Authorization не отправляется (llama-server без ключа).
     assistant_llm_api_key: str = ""
+    # CC_ASSISTANT_THREAD_LIMIT: потолок одновременных прогонов RAG-агента на
+    # процесс. У агента свой лимитер (services.assistant_chat.AGENT_LIMITER), а не
+    # общий пул AnyIO на 40 потоков: всплеск ассистента ждёт на лимитере, оставляя
+    # пул push/эмбеддингам/Qdrant других ручек (docs/03 §12).
+    assistant_thread_limit: int = Field(default=8, ge=1)
+    # CC_ASSISTANT_DEADLINE_S: дедлайн на весь прогон агента — ожидание лимитера +
+    # retrieval + LLM. По истечении — 503 ASSISTANT_TIMEOUT (Retry-After: 5).
+    assistant_deadline_s: float = Field(default=60.0, gt=0)
     # FR-31: анализ переписки с пациентом (факты-черновики). Выключен по умолчанию.
     # Требует и этот флаг, и CC_ASSISTANT_LLM_URL: текст переписки уходит в LLM
     # только при явном включении и (рекомендуется) локальной модели — docs/17, docs/10.

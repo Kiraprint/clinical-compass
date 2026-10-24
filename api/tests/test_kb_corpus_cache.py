@@ -173,3 +173,23 @@ def test_request_path_drug_docs_are_not_cached(queries):
         {"guideline_id": "drug-req-2", "source_title": "Req", "topic": "ЛЕКАРСТВА", "text": "ВТОРОЙ"}
     )
     assert not any(d["guideline_id"] == "drug-req-2" for d in docs), "переданный список не живёт в кеше"
+
+
+def test_hash_rerank_without_drugs_never_opens_sync_session(queries):
+    """Лексический fallback агента не ходит в БД: `corpus_drugs is None` = «нет препаратов».
+
+    `_hash_rerank` исполняется в рабочем потоке offload'а агента, где sync-сессия
+    запрещена (docs/03 §12): препараты грузит вызывающий через async-сессию
+    запроса (`load_drug_docs`), а None не должен превращаться в поход в БД.
+    """
+    from app.services.agent import _hash_rerank
+
+    clear_corpus_cache()
+    build_corpus(drug_docs=[])  # прогрев статики без препаратов
+    queries.clear()
+
+    hits = _hash_rerank("порог PHQ-9", [], 5, topic=None, exclude_ids=None, corpus_drugs=None)
+
+    assert hits, "статическая часть корпуса должна находиться лексически"
+    assert not any(h["guideline_id"].startswith("drug-") for h in hits)
+    assert queries == [], f"sync-сессия в потоке агента запрещена: {queries}"
