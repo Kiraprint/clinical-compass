@@ -71,9 +71,17 @@ def _validate_url(url: str, *, allowed_host: str = IRIS_HOST) -> None:
             f"WHO IRIS: хост {host or '—'} вне белого списка (только {allowed_host}): "
             f"{_redact_url(url)}"
         )
-    if parts.port not in (None, 443):
+    try:
+        port = parts.port
+    except ValueError as exc:
+        # urlsplit не валидирует порт: «https://iris.who.int:abc/» падает только
+        # при чтении .port — это тоже отказ, а не трейсбек наружу.
         raise SourceError(
-            f"WHO IRIS: порт {parts.port} запрещён (только 443): {_redact_url(url)}"
+            f"WHO IRIS: некорректный порт в URL: {_redact_url(url)}"
+        ) from exc
+    if port not in (None, 443):
+        raise SourceError(
+            f"WHO IRIS: порт {port} запрещён (только 443): {_redact_url(url)}"
         )
 
 class _IRISRedirectHandler(urllib.request.HTTPRedirectHandler):

@@ -178,7 +178,7 @@ def load_jsonl(path: Path) -> list[dict]:
 def seed_qdrant(collection: str | None = None) -> dict:
     """Index app KB + bench golden corpus into the isolated collection."""
     # Проверяем ровно ту коллекцию, которую получили, а не резолвим заново из env.
-    _, collection = common.assert_destructive(collection, action="seed_qdrant")
+    _, collection = common.assert_destructive(collection=collection, action="seed_qdrant")
     from qdrant_client import QdrantClient
 
     from app.kb_seed import build_corpus

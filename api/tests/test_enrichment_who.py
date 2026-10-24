@@ -195,6 +195,8 @@ class _RedirectChainOpener:
         "https://127.0.0.1/x",
         "https://iris.who.int.evil.example/x",  # суффиксная подделка хоста
         "https://evil.example/x",
+        "https://iris.who.int:8443/x",  # нестандартный порт
+        "https://iris.who.int:abc/x",  # порт, который urlsplit не парсит
     ],
 )
 def test_request_rejects_untrusted_url_before_network(url, monkeypatch):
