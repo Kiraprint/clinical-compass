@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   AssistantThread,
@@ -8,17 +8,8 @@ import {
   PatientCard,
 } from "../api";
 
-const chipStyle = (active: boolean): CSSProperties => ({
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 6,
-  background: active ? "#eef2ff" : "#f6f7fb",
-  border: `1px solid ${active ? "#c7d2fe" : "#d4d8e3"}`,
-  borderRadius: 12,
-  padding: "2px 10px",
-  fontSize: 13,
-  cursor: "pointer",
-});
+// FR-32: чипы пациентов в контексте диалога. Класс .chip задаёт и цвет текста —
+// раньше inline-фон перекрывал белую inherited-надпись от глобального button.
 
 export default function AssistantTab() {
   // FR-21: сессии ассистента — треды с persistent-контекстом и пациентами.
@@ -342,7 +333,7 @@ export default function AssistantTab() {
                     return (
                       <button
                         key={p.patient_id}
-                        style={chipStyle(active)}
+                        className={`chip${active ? " active" : ""}`}
                         disabled={busy}
                         onClick={() => void togglePatient(p.patient_id)}
                         title={active ? "Убрать из контекста" : "Добавить в контекст"}

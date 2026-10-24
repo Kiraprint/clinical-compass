@@ -333,7 +333,17 @@ async def import_history(
     ip = request.client.host if request.client else None
     return await services.clinician.import_history(db, user.id, patient_id, body.text, body.template_name, ip=ip)
 
+# --- FR-32: карточка врача в кабинете (личный кабинет) ----------------------
 
+@router.get("/clinician/me")
+async def clinician_me(user: User = Depends(require_clinician)) -> dict:
+    """Свой профиль для кабинета врача: ФИО, e-mail, роли. Без ПДн пациентов."""
+    return {
+        "fio": user.fio,
+        "email": user.email,
+        "role": user.role,
+        "roles": [user.role],
+    }
 
 # --- FR-24: напоминания врача по пациентам ---------------------------------
 

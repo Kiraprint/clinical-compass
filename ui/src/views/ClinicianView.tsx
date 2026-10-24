@@ -1,5 +1,25 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { api, AdverseSeverity, ApiError, Assessment, ClinicianAdverseEvent, ClinicianReminder, Drug, EmiasSummary, Escalation, HistoryType, ImportHistoryResult, PatientCard, PatientChatMessage, PatientContacts, PatientHistoryItem, PatientMedication, RemindersResponse, Report, Visit } from "../api";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import {
+  api,
+  AdverseSeverity,
+  ApiError,
+  Assessment,
+  ClinicianAdverseEvent,
+  ClinicianProfile,
+  ClinicianReminder,
+  Drug,
+  Escalation,
+  HistoryType,
+  ImportHistoryResult,
+  PatientCard,
+  PatientChat,
+  PatientContacts,
+  PatientHistoryItem,
+  PatientMedication,
+  RemindersResponse,
+  Report,
+  Visit,
+} from "../api";
 import TrendChart from "../TrendChart";
 import ChatsView from "./ChatsView";
 import DrugLibraryTab from "./DrugLibraryTab";
@@ -38,6 +58,32 @@ const INSIGHT_KIND_LABELS: Record<string, string> = {
   other: "Другое",
 };
 
+// FR-32: видимые подписи врачебного интерфейса. Слово «триаж» в UI не
+// используется — только «риск» (внутренние поля API остаются triage).
+const RISK_LABELS: Record<string, string> = {
+  RED: "высокий",
+  YELLOW: "средний",
+  GREEN: "низкий",
+};
+
+const ROLE_LABELS: Record<string, string> = {
+  PATIENT: "Пациент",
+  CLINICIAN: "Врач",
+  ADMIN: "Администратор",
+};
+
+// FR-32: подсветка совпавшей части в подсказке препарата (autocomplete).
+function Highlight({ text, query }: { text: string; query: string }) {
+  const at = query ? text.toLowerCase().indexOf(query.toLowerCase()) : -1;
+  if (at < 0) return <>{text}</>;
+  return (
+    <>
+      {text.slice(0, at)}
+      <mark>{text.slice(at, at + query.length)}</mark>
+      {text.slice(at + query.length)}
+    </>
+  );
+}
 
 // Сворачиваемый блок карточки врача: состояние раскрытия запоминаем в localStorage,
 // чтобы врач не терял привычный вид между визитами (отзыв эксперта: шкала Гамильтона
@@ -46,16 +92,19 @@ function Collapsible({
   storageKey,
   summary,
   children,
+  defaultOpen = true,
 }: {
   storageKey: string;
   summary: ReactNode;
   children: ReactNode;
+  defaultOpen?: boolean;
 }) {
   const [open, setOpen] = useState(() => {
     try {
-      return localStorage.getItem(storageKey) !== "0";
+      const saved = localStorage.getItem(storageKey);
+      return saved === null ? defaultOpen : saved !== "0";
     } catch {
-      return true;
+      return defaultOpen;
     }
   });
   return (
@@ -71,9 +120,7 @@ function Collapsible({
         }
       }}
     >
-      <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: 16, marginBottom: 8 }}>
-        {summary}
-      </summary>
+      <summary className="collapse-summary">{summary}</summary>
       {children}
     </details>
   );
@@ -147,146 +194,610 @@ function EscalationsQueue({
       setBusyId(null);
     }
   };
-  // Карточка видна всегда: без открытых сигналов она даёт доступ к истории разбора.
+  // Блок виден всегда: даже без открытых сигналов он даёт доступ к истории разбора.
   return (
     <div className="card">
-      <h2>Очередь эскалаций ({items.length})</h2>
-      <p style={{ color: "#5a6478", fontSize: 13 }}>
-        Открытые сигналы чек-инов и скринингов, включая пациентов без закреплённого врача.
-      </p>
-      <p style={{ marginBottom: 12 }}>
-        <button onClick={() => setShowClosed((v) => !v)}>
-          {showClosed ? "Только открытые" : "Показать закрытые"}
-        </button>
-      </p>
-      {error && <p style={{ color: "#b3261e", fontSize: 13 }}>{error}</p>}
-      {showClosed ? (
-        <>
-          {closedError && <p style={{ color: "#b3261e", fontSize: 13 }}>{closedError}</p>}
+      <Collapsible
+        storageKey="cc.clinician.escalationsOpen"
+        summary={<>Очередь эскалаций ({items.length})</>}
+      >
+        <p className="muted small">
+          Зачем это нужно: здесь сигналы, требующие вашего разбора, — риск по чек-ину,
+          RED-риск скрининга и тяжёлые нежелательные явления; сигналы видны даже по
+          пациентам без закреплённого врача.
+        </p>
+        <p style={{ marginBottom: 12 }}>
+          <button onClick={() => setShowClosed((v) => !v)}>
+            {showClosed ? "Только открытые" : "Показать закрытые"}
+          </button>
+        </p>
+        {error && <p style={{ color: "#b3261e", fontSize: 13 }}>{error}</p>}
+        {showClosed ? (
+          <>
+            {closedError && <p style={{ color: "#b3261e", fontSize: 13 }}>{closedError}</p>}
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Закрыт</th>
+                    <th>Пациент</th>
+                    <th>Тип</th>
+                    <th>Риск</th>
+                    <th>Комментарий</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {closedLoading ? (
+                    <tr>
+                      <td colSpan={5}>Загрузка…</td>
+                    </tr>
+                  ) : closed.length === 0 && !closedError ? (
+                    <tr>
+                      <td colSpan={5}>Закрытых сигналов нет</td>
+                    </tr>
+                  ) : (
+                    closed.map((e) => (
+                      <tr key={e.id} data-escalation={e.id}>
+                        <td>{e.resolved_at ? new Date(e.resolved_at).toLocaleString("ru-RU") : "—"}</td>
+                        <td>
+                          {e.in_roster ? (
+                            <a
+                              href={"#patient=" + e.patient_id}
+                              style={{ color: "#2f6fed", textDecoration: "none", fontWeight: 600 }}
+                            >
+                              {e.patient_fio ?? "Пациент"}
+                            </a>
+                          ) : (
+                            <span style={{ fontWeight: 600 }}>{e.patient_fio ?? "Пациент"}</span>
+                          )}
+                        </td>
+                        <td>
+                          <span
+                            className={`badge ${
+                              e.kind === "CHECKIN_RISK_URGENT" || e.kind === "SUICIDAL" ? "RED" : "YELLOW"
+                            }`}
+                          >
+                            {ESCALATION_KINDS[e.kind] ?? e.kind}
+                          </span>
+                        </td>
+                        <td>{e.safety ?? "—"}</td>
+                        <td style={{ fontSize: 13 }}>{e.resolution?.trim() ? e.resolution : "без комментария"}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </>
+        ) : (
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Закрыт</th>
+                  <th>Дата</th>
                   <th>Пациент</th>
                   <th>Тип</th>
                   <th>Риск</th>
-                  <th>Комментарий</th>
+                  <th>Ответы риска</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
-                {closedLoading ? (
+                {items.length === 0 && (
                   <tr>
-                    <td colSpan={5}>Загрузка…</td>
+                    <td colSpan={6}>Открытых сигналов нет</td>
                   </tr>
-                ) : closed.length === 0 && !closedError ? (
-                  <tr>
-                    <td colSpan={5}>Закрытых сигналов нет</td>
-                  </tr>
-                ) : (
-                  closed.map((e) => (
-                    <tr key={e.id} data-escalation={e.id}>
-                      <td>{e.resolved_at ? new Date(e.resolved_at).toLocaleString("ru-RU") : "—"}</td>
-                      <td>
-                        {e.in_roster ? (
-                          <a
-                            href={"#patient=" + e.patient_id}
-                            style={{ color: "#2f6fed", textDecoration: "none", fontWeight: 600 }}
-                          >
-                            {e.patient_fio ?? "Пациент"}
-                          </a>
-                        ) : (
-                          <span style={{ fontWeight: 600 }}>{e.patient_fio ?? "Пациент"}</span>
-                        )}
-                      </td>
-                      <td>
-                        <span
-                          className={`badge ${
-                            e.kind === "CHECKIN_RISK_URGENT" || e.kind === "SUICIDAL" ? "RED" : "YELLOW"
-                          }`}
-                        >
-                          {ESCALATION_KINDS[e.kind] ?? e.kind}
-                        </span>
-                      </td>
-                      <td>{e.safety ?? "—"}</td>
-                      <td style={{ fontSize: 13 }}>{e.resolution?.trim() ? e.resolution : "без комментария"}</td>
-                    </tr>
-                  ))
                 )}
+                {items.map((e) => (
+                  <tr key={e.id} data-escalation={e.id}>
+                    <td>{e.created_at ? new Date(e.created_at).toLocaleString("ru-RU") : "—"}</td>
+                    <td>
+                      {e.in_roster ? (
+                        <a
+                          href={"#patient=" + e.patient_id}
+                          style={{ color: "#2f6fed", textDecoration: "none", fontWeight: 600 }}
+                        >
+                          {e.patient_fio ?? "Пациент"}
+                        </a>
+                      ) : (
+                        <span style={{ fontWeight: 600 }}>{e.patient_fio ?? "Пациент"}</span>
+                      )}
+                    </td>
+                    <td>
+                      <span
+                        className={`badge ${
+                          e.kind === "CHECKIN_RISK_URGENT" || e.kind === "SUICIDAL" ? "RED" : "YELLOW"
+                        }`}
+                      >
+                        {ESCALATION_KINDS[e.kind] ?? e.kind}
+                      </span>
+                    </td>
+                    <td>{e.safety ?? "—"}</td>
+                    <td style={{ fontSize: 13 }}>
+                      {RISK_ITEM_IDS.filter((id) => e.risk_answers?.[id] != null)
+                        .map((id) => `${id} ${e.risk_answers?.[id] ? "Да" : "Нет"}`)
+                        .join(" · ") || "—"}
+                    </td>
+                    <td>
+                      <button
+                        onClick={() => closeSignal(e.id)}
+                        disabled={busyId === e.id}
+                        aria-label={`Закрыть сигнал ${e.patient_fio ?? e.patient_id}`}
+                      >
+                        {busyId === e.id ? "Закрываем…" : "Закрыть сигнал"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
+        )}
+      </Collapsible>
+    </div>
+  );
+}
+
+// FR-24: напоминания врача. Один компактный список для кабинета и расписания.
+const REMINDER_KINDS: { value: ClinicianReminder["kind"]; label: string }[] = [
+  { value: "call", label: "Позвонить" },
+  { value: "write", label: "Написать" },
+  { value: "appointment", label: "Назначить приём" },
+  { value: "custom", label: "Другое" },
+];
+
+// Порядок групп в панели: сначала просроченное, затем сегодня/скоро/позже.
+const REMINDER_GROUPS: { key: NonNullable<ClinicianReminder["due_state"]>; label: string }[] = [
+  { key: "overdue", label: "Просрочено" },
+  { key: "today", label: "Сегодня" },
+  { key: "soon", label: "Ближайшие 7 дней" },
+  { key: "later", label: "Позже" },
+];
+const REMINDER_STATE_LABELS: Record<string, string> = {
+  overdue: "просрочено",
+  today: "сегодня",
+  soon: "скоро",
+  later: "позже",
+};
+
+function nextHourLocal(): string {
+  const d = new Date(Date.now() + 3600_000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function fmtDue(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+// FR-24: список напоминаний с действиями. Компактный вид — для кабинета,
+// полный (с заметкой и отменой) — для расписания.
+function ReminderList({
+  items,
+  compact = false,
+  onChanged,
+  onOpenPatient,
+}: {
+  items: ClinicianReminder[];
+  compact?: boolean;
+  onChanged: () => void;
+  onOpenPatient?: (patientId: string) => void;
+}) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState("");
+
+  const act = async (id: string, fn: (id: string) => Promise<unknown>) => {
+    setBusyId(id);
+    setError("");
+    try {
+      await fn(id);
+      onChanged();
+    } catch (e: unknown) {
+      setError(e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const snooze = (r: ClinicianReminder) => {
+    const next = new Date(r.due_at);
+    next.setDate(next.getDate() + 1);
+    return act(r.id, () => api.patchReminder(r.id, { due_at: next.toISOString() }));
+  };
+
+  if (items.length === 0) {
+    return <p className="muted small">Открытых напоминаний нет.</p>;
+  }
+  return (
+    <div>
+      {error && <p className="error">{error}</p>}
+      <ul className="reminder-list">
+        {items.map((r) => (
+          <li key={r.id} className={`reminder-item ${r.due_state ?? ""}`}>
+            <div className="reminder-main">
+              <strong>{r.kind_label}</strong>
+              {" · "}
+              {onOpenPatient ? (
+                <button
+                  type="button"
+                  className="link-patient"
+                  onClick={() => onOpenPatient(r.patient_id)}
+                >
+                  {r.patient_fio}
+                </button>
+              ) : (
+                <span>{r.patient_fio}</span>
+              )}
+              <span className="muted small"> · срок {fmtDue(r.due_at)}</span>
+              {r.due_state && <span className="reminder-state">{REMINDER_STATE_LABELS[r.due_state]}</span>}
+              {!compact && r.note && <div className="reminder-note">{r.note}</div>}
+            </div>
+            <div className="reminder-actions">
+              <button
+                className="ghost"
+                disabled={busyId === r.id}
+                onClick={() => void act(r.id, api.doneReminder)}
+              >
+                Выполнено
+              </button>
+              <button className="ghost" disabled={busyId === r.id} onClick={() => void snooze(r)}>
+                +1 день
+              </button>
+              {!compact && (
+                <button
+                  className="ghost"
+                  disabled={busyId === r.id}
+                  onClick={() => void act(r.id, () => api.cancelReminder(r.id))}
+                >
+                  Отменить
+                </button>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function DoctorProfileCard({ profile }: { profile: ClinicianProfile | null }) {
+  return (
+    <div className="card">
+      <h2>Личный кабинет</h2>
+      {profile ? (
+        <>
+          <p style={{ margin: "2px 0" }}>
+            <b>{profile.fio ?? "ФИО не указано"}</b>
+          </p>
+          <p className="muted small" style={{ margin: "2px 0" }}>
+            {profile.email}
+          </p>
+          <p className="muted small" style={{ margin: "2px 0" }}>
+            Роли: {profile.roles.map((r) => ROLE_LABELS[r] ?? r).join(", ")}
+          </p>
         </>
       ) : (
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Дата</th>
-                <th>Пациент</th>
-                <th>Тип</th>
-                <th>Риск</th>
-                <th>Ответы риска</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.length === 0 && (
-                <tr>
-                  <td colSpan={6}>Открытых сигналов нет</td>
-                </tr>
-              )}
-              {items.map((e) => (
-                <tr key={e.id} data-escalation={e.id}>
-                  <td>{e.created_at ? new Date(e.created_at).toLocaleString("ru-RU") : "—"}</td>
-                  <td>
-                    {e.in_roster ? (
-                      <a
-                        href={"#patient=" + e.patient_id}
-                        style={{ color: "#2f6fed", textDecoration: "none", fontWeight: 600 }}
-                      >
-                        {e.patient_fio ?? "Пациент"}
-                      </a>
-                    ) : (
-                      <span style={{ fontWeight: 600 }}>{e.patient_fio ?? "Пациент"}</span>
-                    )}
-                  </td>
-                  <td>
-                    <span
-                      className={`badge ${
-                        e.kind === "CHECKIN_RISK_URGENT" || e.kind === "SUICIDAL" ? "RED" : "YELLOW"
-                      }`}
-                    >
-                      {ESCALATION_KINDS[e.kind] ?? e.kind}
-                    </span>
-                  </td>
-                  <td>{e.safety ?? "—"}</td>
-                  <td style={{ fontSize: 13 }}>
-                    {RISK_ITEM_IDS.filter((id) => e.risk_answers?.[id] != null)
-                      .map((id) => `${id} ${e.risk_answers?.[id] ? "Да" : "Нет"}`)
-                      .join(" · ") || "—"}
-                  </td>
-                  <td>
-                    <button
-                      onClick={() => closeSignal(e.id)}
-                      disabled={busyId === e.id}
-                      aria-label={`Закрыть сигнал ${e.patient_fio ?? e.patient_id}`}
-                    >
-                      {busyId === e.id ? "Закрываем…" : "Закрыть сигнал"}
-                    </button>
-                  </td>
-                </tr>
+        <p className="muted small">Загрузка профиля…</p>
+      )}
+      <p className="profile-links">
+        <a href="/legal/terms">Пользовательское соглашение</a>
+        <a href="/legal/consent">Согласие на обработку персональных данных</a>
+      </p>
+    </div>
+  );
+}
+
+function DashboardChats({
+  chats,
+  onOpenChats,
+}: {
+  chats: PatientChat[];
+  onOpenChats: (patientId: string) => void;
+}) {
+  return (
+    <div className="card">
+      <h2>Чаты с пациентами</h2>
+      {chats.length === 0 ? (
+        <p className="muted small">Сообщений от пациентов пока нет.</p>
+      ) : (
+        <ul className="chat-list-items dash-chat-list">
+          {chats.slice(0, 6).map((c) => (
+            <li key={c.patient_id}>
+              <button className="chat-item" onClick={() => onOpenChats(c.patient_id)}>
+                <span className="chat-item-title">{c.fio ?? "Пациент"}</span>
+                <span className="preview">{c.preview}</span>
+                <span className="meta">
+                  {fmtDue(c.last_at)}
+                  {c.last_sender === "PATIENT" ? " · ждёт ответа" : ""}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <button className="ghost" onClick={() => onOpenChats("")}>
+        Все чаты
+      </button>
+    </div>
+  );
+}
+
+function Dashboard({
+  fio,
+  cards,
+  escalations,
+  pendingAe,
+  reminders,
+  chats,
+  profile,
+  onResolved,
+  onChanged,
+  onOpenChats,
+}: {
+  fio: string | null;
+  cards: PatientCard[];
+  escalations: Escalation[];
+  pendingAe: ClinicianAdverseEvent[];
+  reminders: ClinicianReminder[];
+  chats: PatientChat[];
+  profile: ClinicianProfile | null;
+  onResolved: (id: string) => void;
+  onChanged: () => void;
+  onOpenChats: (patientId: string) => void;
+}) {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(new Date()), 30000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  const hour = now.getHours();
+  const greeting =
+    hour < 6 ? "Доброй ночи" : hour < 12 ? "Доброе утро" : hour < 18 ? "Добрый день" : "Добрый вечер";
+  const worse = cards
+    .filter((c) => c.last_triage === "RED" || c.open_escalations > 0)
+    .sort((a, b) => b.open_escalations - a.open_escalations);
+  const overdue = reminders.filter((r) => r.due_state === "overdue").length;
+  const openPatient = (patientId: string) => {
+    window.location.hash = "patient=" + patientId;
+  };
+
+  return (
+    <div className="dash">
+      <div className="dash-main">
+        <div className="card dash-hello">
+          <h2>
+            {greeting}
+            {fio ? `, ${fio}` : ""}
+          </h2>
+          <p className="muted">
+            {now.toLocaleDateString("ru-RU", {
+              weekday: "long",
+              day: "numeric",
+              month: "long",
+              year: "numeric",
+            })}
+            {" · "}
+            {now.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}
+          </p>
+          <p className="muted small">
+            Пациентов в наблюдении: {cards.length} · открытых сигналов: {escalations.length} ·
+            напоминаний: {reminders.length}
+            {pendingAe.length > 0 ? ` · НЯ на проверке: ${pendingAe.length}` : ""}
+          </p>
+        </div>
+
+        {worse.length > 0 ? (
+          <div className="alert-danger">
+            <b>Пациенты, которым стало хуже ({worse.length})</b>
+            <ul className="dash-alert-list">
+              {worse.slice(0, 5).map((c) => (
+                <li key={c.patient_id}>
+                  <a href={"#patient=" + c.patient_id}>{c.fio ?? c.email}</a>{" "}
+                  {c.last_triage && <span className={`badge ${c.last_triage}`}>{c.last_triage}</span>}{" "}
+                  {c.open_escalations > 0 && (
+                    <span className="muted small">открытых сигналов: {c.open_escalations}</span>
+                  )}
+                </li>
               ))}
-            </tbody>
-          </table>
+            </ul>
+            {worse.length > 5 && <p className="small">…и ещё {worse.length - 5}.</p>}
+            <p className="small">
+              Красный риск скрининга или открытые эскалации — разберите в очереди ниже.
+            </p>
+          </div>
+        ) : (
+          <div className="alert-info">
+            Ухудшений нет: красных рисков и открытых сигналов не зафиксировано.
+          </div>
+        )}
+
+        {pendingAe.length > 0 && (
+          <div className="alert-warn">
+            <strong>НЯ на проверке: {pendingAe.length}</strong>
+            <div className="small">
+              {pendingAe.slice(0, 3).map((e) => e.patient_fio ?? "Пациент").join(", ")}
+              {pendingAe.length > 3 ? " …" : ""} — откройте карточку пациента.
+            </div>
+          </div>
+        )}
+
+        <EscalationsQueue items={escalations} onResolved={onResolved} />
+        <DoctorProfileCard profile={profile} />
+      </div>
+
+      <aside className="dash-side" aria-label="Напоминания и чаты">
+        <div className="card">
+          <h2>
+            Напоминания{" "}
+            {overdue > 0 && <span className="badge RED">{overdue} просрочено</span>}
+          </h2>
+          <ReminderList items={reminders} compact onChanged={onChanged} onOpenPatient={openPatient} />
+        </div>
+        <DashboardChats chats={chats} onOpenChats={onOpenChats} />
+      </aside>
+    </div>
+  );
+}
+
+// FR-24/FR-32: «Расписание» — планирование созвонов и приёмов. Использует те же
+// напоминания врача (kind=appointment для приёма), отдельного календаря нет.
+function ScheduleView({
+  cards,
+  version,
+  onChanged,
+}: {
+  cards: PatientCard[];
+  version: number;
+  onChanged: () => void;
+}) {
+  const [items, setItems] = useState<ClinicianReminder[]>([]);
+  const [patientId, setPatientId] = useState("");
+  const [kind, setKind] = useState<ClinicianReminder["kind"]>("appointment");
+  const [due, setDue] = useState(nextHourLocal());
+  const [note, setNote] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    if (!patientId && cards.length > 0) setPatientId(cards[0].patient_id);
+  }, [cards, patientId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .clinicianReminders()
+      .then((r) => {
+        if (!cancelled) setItems(r.items);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setErr(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [version]);
+
+  const create = async () => {
+    if (!patientId || !due) {
+      setErr("Выберите пациента и срок");
+      return;
+    }
+    setBusy(true);
+    setErr("");
+    setSaved(false);
+    try {
+      await api.createReminder({
+        patient_id: patientId,
+        kind,
+        note: note.trim() || null,
+        due_at: new Date(due).toISOString(),
+      });
+      setNote("");
+      setSaved(true);
+      onChanged();
+    } catch (e: unknown) {
+      setErr(e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card">
+      <h2>Расписание</h2>
+      <p className="muted small">
+        Планируйте созвоны и приёмы: напоминание появится в кабинете и в списке ниже.
+        «Назначить приём» — это запись пациента на приём.
+      </p>
+      <div className="row" style={{ alignItems: "flex-end", gap: 8, flexWrap: "wrap" }}>
+        <label style={{ minWidth: 200 }}>
+          Пациент
+          <select value={patientId} onChange={(e) => setPatientId(e.target.value)}>
+            {cards.map((c) => (
+              <option key={c.patient_id} value={c.patient_id}>
+                {c.fio ?? c.email}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Вид
+          <select value={kind} onChange={(e) => setKind(e.target.value as ClinicianReminder["kind"])}>
+            {REMINDER_KINDS.map((k) => (
+              <option key={k.value} value={k.value}>
+                {k.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Срок
+          <input type="datetime-local" value={due} onChange={(e) => setDue(e.target.value)} />
+        </label>
+        <label style={{ flex: 1, minWidth: 220 }}>
+          Заметка (необязательно, шифруется)
+          <input value={note} maxLength={2000} onChange={(e) => setNote(e.target.value)} />
+        </label>
+        <button onClick={() => void create()} disabled={busy || !patientId || !due}>
+          Запланировать
+        </button>
+      </div>
+      {saved && <p style={{ color: "#2e7d32", fontSize: 13 }}>Добавлено в расписание</p>}
+      {err && <p className="error">{err}</p>}
+
+      {items.length === 0 ? (
+        <p className="muted small">Открытых напоминаний нет.</p>
+      ) : (
+        <div className="schedule-groups">
+          {REMINDER_GROUPS.map((g) => {
+            const group = items.filter((r) => (r.due_state ?? "later") === g.key);
+            if (group.length === 0) return null;
+            return (
+              <div key={g.key} className="schedule-group">
+                <h3>
+                  {g.label} ({group.length})
+                </h3>
+                <ReminderList items={group} onChanged={onChanged} />
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
 
+type Section = "dashboard" | "patients" | "assistant" | "chats" | "schedule" | "library";
+
+const NAV_ITEMS: { id: Section; label: string }[] = [
+  { id: "dashboard", label: "Кабинет" },
+  { id: "patients", label: "Пациенты" },
+  { id: "assistant", label: "Ассистент" },
+  { id: "chats", label: "Чаты с пациентами" },
+  { id: "schedule", label: "Расписание" },
+  { id: "library", label: "Библиотека" },
+];
+
 export default function ClinicianView() {
-  const [section, setSection] = useState<"patients" | "chats" | "library">("patients");
+  // FR-32: разделы кабинета. Меню слева под «три полоски»; состояние храним,
+  // чтобы врач не открывал его каждый раз.
+  const [section, setSection] = useState<Section>("dashboard");
+  const [navOpen, setNavOpen] = useState(() => {
+    try {
+      return localStorage.getItem("cc.clinician.navOpen") === "1";
+    } catch {
+      return false;
+    }
+  });
   // FR-29: выбранный пациент на экране «Чаты» (deep-link #chats=patient:<id>).
   const [chatPatient, setChatPatient] = useState<string | null>(null);
   const [filter, setFilter] = useState<(typeof TRIAGE_FILTERS)[number]>("");
@@ -294,26 +805,83 @@ export default function ClinicianView() {
   const [selected, setSelected] = useState<string | null>(null);
   const [report, setReport] = useState<Report | null>(null);
   const [reportError, setReportError] = useState("");
-  // Счётчик перезагрузки: врачебная оценка меняет триаж/эскалации, и карточка
-  // с списком должны показать это сразу, без ручного F5.
+  // Счётчик перезагрузки: врачебная оценка меняет риск/эскалации, и карточка
+  // со списком должны показать это сразу, без ручного F5.
   const [reportVersion, setReportVersion] = useState(0);
-  // FR-24: панель напоминаний и бейдж просроченных в шапке врача.
-  const [showReminders, setShowReminders] = useState(false);
-  const [overdueCount, setOverdueCount] = useState(0);
   const [reminderVersion, setReminderVersion] = useState(0);
+  const [reminders, setReminders] = useState<ClinicianReminder[]>([]);
+  const [profile, setProfile] = useState<ClinicianProfile | null>(null);
+  const [chats, setChats] = useState<PatientChat[]>([]);
   // Общая очередь эскалаций — не только свои пациенты (docs/16 §3).
   const [escalations, setEscalations] = useState<Escalation[]>([]);
   // FR-28: НЯ, сообщённые пациентами и ждущие проверки врача.
   const [pendingAe, setPendingAe] = useState<ClinicianAdverseEvent[]>([]);
+
+  const toggleNav = () => {
+    setNavOpen((v) => {
+      const next = !v;
+      try {
+        localStorage.setItem("cc.clinician.navOpen", next ? "1" : "0");
+      } catch {
+        // приватный режим — не запоминаем
+      }
+      return next;
+    });
+  };
+
+  const openSection = (next: Section) => {
+    setSection(next);
+    if (next !== "patients") setSelected(null);
+    if (window.innerWidth <= 900) setNavOpen(false);
+  };
+
   useEffect(() => {
+    let cancelled = false;
+    api
+      .clinicianMe()
+      .then((p) => {
+        if (!cancelled) setProfile(p);
+      })
+      .catch(() => {
+        if (!cancelled) setProfile(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
     api
       .clinicianReminders()
-      .then((r) => setOverdueCount(r.overdue))
-      .catch(() => setOverdueCount(0));
+      .then((r) => {
+        if (!cancelled) setReminders(r.items);
+      })
+      .catch(() => {
+        if (!cancelled) setReminders([]);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [reminderVersion, reportVersion]);
 
   useEffect(() => {
-    if (selected) return;
+    let cancelled = false;
+    api
+      .clinicianPatients(filter || undefined)
+      .then((data) => {
+        if (!cancelled) setCards(data.items);
+      })
+      .catch(() => {
+        if (!cancelled) setCards([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [filter, reportVersion]);
+
+  useEffect(() => {
+    if (section !== "dashboard") return;
     let cancelled = false;
     api
       .openEscalations()
@@ -326,11 +894,10 @@ export default function ClinicianView() {
     return () => {
       cancelled = true;
     };
-  }, [selected, reportVersion]);
-
+  }, [section, reportVersion]);
 
   useEffect(() => {
-    if (selected) return;
+    if (section !== "dashboard") return;
     let cancelled = false;
     api
       .adverseQueue("pending")
@@ -343,16 +910,23 @@ export default function ClinicianView() {
     return () => {
       cancelled = true;
     };
-  }, [selected, reportVersion]);
-
-  const load = async (f: string) => {
-    const data = await api.clinicianPatients(f || undefined);
-    setCards(data.items);
-  };
+  }, [section, reportVersion]);
 
   useEffect(() => {
-    load(filter);
-  }, [filter, reportVersion]);
+    if (section !== "dashboard" && section !== "chats") return;
+    let cancelled = false;
+    api
+      .clinicianChats()
+      .then((r) => {
+        if (!cancelled) setChats(r.items);
+      })
+      .catch(() => {
+        if (!cancelled) setChats([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [section, reportVersion]);
 
   // Карточка пациента — отдельная ссылка (#patient=<id>): синхронизируем с hash,
   // чтобы клик по уведомлению об эскалации открывал нужного пациента.
@@ -400,105 +974,163 @@ export default function ClinicianView() {
     };
   }, [selected, reportVersion]);
 
-  // FR-29: навигация врача — Пациенты · Чаты · Библиотека · Напоминания.
+  const openPatient = (patientId: string) => {
+    window.location.hash = "patient=" + patientId;
+  };
+
+  const openChats = (patientId?: string | null) => {
+    openSection("chats");
+    setChatPatient(patientId || null);
+    if (patientId) window.location.hash = `chats=patient:${patientId}`;
+  };
+
+  const bump = () => setReminderVersion((v) => v + 1);
+
   const nav = (
-    <div className="tabs top-tabs">
+    <>
       <button
-        className={section === "patients" && !showReminders ? "active" : ""}
-        onClick={() => {
-          setSection("patients");
-          setShowReminders(false);
-        }}
+        className="nav-toggle"
+        aria-label="Меню"
+        aria-expanded={navOpen}
+        aria-controls="clinician-nav"
+        onClick={toggleNav}
       >
-        Пациенты
+        <span aria-hidden="true">☰</span> Меню
       </button>
-      <button className={section === "chats" ? "active" : ""} onClick={() => setSection("chats")}>
-        Чаты
-      </button>
-      <button
-        className={section === "library" ? "active" : ""}
-        onClick={() => setSection("library")}
+      {navOpen && (
+        <div className="nav-backdrop" aria-hidden="true" onClick={() => setNavOpen(false)} />
+      )}
+      <nav
+        id="clinician-nav"
+        className={`clinician-nav${navOpen ? " open" : ""}`}
+        aria-label="Разделы кабинета врача"
+        aria-hidden={!navOpen}
       >
-        Библиотека
-      </button>
-      <button
-        className={`push-right${section === "patients" && showReminders ? " active" : ""}`}
-        onClick={() => {
-          setSection("patients");
-          setShowReminders((v) => !v);
-        }}
-      >
-        Напоминания
-        {overdueCount > 0 && <span className="count-badge">{overdueCount}</span>}
-      </button>
-    </div>
+        <div className="nav-head">
+          <span>Кабинет врача</span>
+          <button
+            className="icon-btn ghost nav-close"
+            aria-label="Скрыть меню"
+            onClick={() => setNavOpen(false)}
+          >
+            ✕
+          </button>
+        </div>
+        {NAV_ITEMS.map((item) => (
+          <button
+            key={item.id}
+            className={`nav-item${section === item.id ? " active" : ""}`}
+            aria-current={section === item.id ? "page" : undefined}
+            onClick={() => openSection(item.id)}
+          >
+            {item.label}
+            {item.id === "schedule" &&
+              reminders.filter((r) => r.due_state === "overdue").length > 0 && (
+                <span className="count-badge">
+                  {reminders.filter((r) => r.due_state === "overdue").length}
+                </span>
+              )}
+          </button>
+        ))}
+      </nav>
+    </>
   );
 
-  if (section === "chats") {
-    return (
-      <>
-        {nav}
+  const content = (() => {
+    if (section === "assistant") {
+      return (
         <ChatsView
+          mode="assistant"
+          onSelectPatient={(id) => setChatPatient(id)}
+          onModeChange={(m) => setSection(m)}
+        />
+      );
+    }
+    if (section === "chats") {
+      return (
+        <ChatsView
+          mode="patients"
           patientId={chatPatient}
           onSelectPatient={(id) => {
             setChatPatient(id);
             if (id) window.location.hash = `chats=patient:${id}`;
           }}
+          onModeChange={(m) => setSection(m)}
         />
-      </>
-    );
-  }
-
-  if (section === "library") {
+      );
+    }
+    if (section === "library") {
+      return <DrugLibraryTab />;
+    }
+    if (section === "schedule") {
+      return <ScheduleView cards={cards} version={reminderVersion} onChanged={bump} />;
+    }
+    if (section === "dashboard") {
+      return (
+        <Dashboard
+          fio={profile?.fio ?? null}
+          cards={cards}
+          escalations={escalations}
+          pendingAe={pendingAe}
+          reminders={reminders}
+          chats={chats}
+          profile={profile}
+          onResolved={(id) => setEscalations((prev) => prev.filter((e) => e.id !== id))}
+          onChanged={bump}
+          onOpenChats={(pid) => openChats(pid || null)}
+        />
+      );
+    }
+    if (selected) {
+      return (
+        <ReportView
+          report={report}
+          error={reportError}
+          onBack={() => {
+            window.location.hash = "";
+          }}
+          onRefresh={() => setReportVersion((v) => v + 1)}
+          onOpenLibrary={() => openSection("library")}
+          onOpenChats={(pid) => openChats(pid)}
+        />
+      );
+    }
     return (
       <>
-        {nav}
-        <DrugLibraryTab />
-      </>
-    );
-  }
-
-  return (
-    <>
-      {nav}
-      <div className="tabs">
-        {TRIAGE_FILTERS.map((f) => (
-          <button key={f} className={filter === f ? "active" : ""} onClick={() => setFilter(f)}>
-            {f === "" ? "Все" : f}
-          </button>
-        ))}
-      </div>
-      {showReminders && (
-        <RemindersPanel cards={cards} onChanged={() => setReminderVersion((v) => v + 1)} />
-      )}
-      {!selected && pendingAe.length > 0 && (
-        <div className="alert-warn" style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-          <strong>НЯ на проверке: {pendingAe.length}</strong>
-          <span style={{ fontSize: 13 }}>
-            {pendingAe.slice(0, 3).map((e) => e.patient_fio ?? "Пациент").join(", ")}
-            {pendingAe.length > 3 ? " …" : ""} — откройте карточку пациента.
-          </span>
+        <div className="tabs">
+          {TRIAGE_FILTERS.map((f) => (
+            <button
+              key={f}
+              className={filter === f ? "active" : ""}
+              aria-pressed={filter === f}
+              onClick={() => setFilter(f)}
+            >
+              {f === "" ? "Все" : f}
+            </button>
+          ))}
         </div>
-      )}
-      {!selected && (
-        <EscalationsQueue
-          items={escalations}
-          onResolved={(id) => setEscalations((prev) => prev.filter((e) => e.id !== id))}
-        />
-      )}
-      {!selected ? (
+        <p className="muted small">
+          Риск: GREEN — низкий, YELLOW — средний, RED — высокий. Сначала красные: выше —
+          больше открытых эскалаций и более свежая оценка.
+        </p>
+        {pendingAe.length > 0 && (
+          <div className="alert-warn">
+            <strong>НЯ на проверке: {pendingAe.length}</strong>
+            <div className="small">
+              {pendingAe.slice(0, 3).map((e) => e.patient_fio ?? "Пациент").join(", ")}
+              {pendingAe.length > 3 ? " …" : ""} — откройте карточку пациента.
+            </div>
+          </div>
+        )}
         <div className="card">
           <h2>Мои пациенты ({cards.length})</h2>
-          <p className="muted small">
-            Сначала красные: выше — больше открытых эскалаций и более свежая оценка.
-          </p>
           {cards.length === 0 && <p className="muted">Нет пациентов в выбранном фильтре.</p>}
           <div className="table-wrap">
             <table className="patients">
               <thead>
                 <tr>
                   <th>Пациент</th>
-                  <th>Триаж</th>
+                  <th>Риск</th>
                   <th>Балл</th>
                   <th>Эскалации</th>
                   <th></th>
@@ -523,16 +1155,17 @@ export default function ClinicianView() {
                         </>
                       )}
                     </td>
-                    <td>{c.last_triage ? <span className={`badge ${c.last_triage}`}>{c.last_triage}</span> : "—"}</td>
+                    <td>
+                      {c.last_triage ? (
+                        <span className={`badge ${c.last_triage}`}>{c.last_triage}</span>
+                      ) : (
+                        <span className="badge GREEN">без наблюдений</span>
+                      )}
+                    </td>
                     <td>{c.last_score ?? "—"}</td>
                     <td>{c.open_escalations}</td>
                     <td>
-                      <button
-                        className="ghost"
-                        onClick={() => {
-                          window.location.hash = "patient=" + c.patient_id;
-                        }}
-                      >
+                      <button className="ghost" onClick={() => openPatient(c.patient_id)}>
                         Открыть
                       </button>
                     </td>
@@ -542,17 +1175,15 @@ export default function ClinicianView() {
             </table>
           </div>
         </div>
-      ) : (
-        <ReportView
-          report={report}
-          error={reportError}
-          onBack={() => { window.location.hash = ""; }}
-          onRefresh={() => setReportVersion((v) => v + 1)}
-          onOpenLibrary={() => { setSelected(null); setSection("library"); }}
-          onOpenChats={(pid) => { window.location.hash = `chats=patient:${pid}`; }}
-        />
-      )}
-    </>
+      </>
+    );
+  })();
+
+  return (
+    <div className={`clinician-app${navOpen ? " nav-open" : ""}`}>
+      {nav}
+      <div className="clinician-content">{content}</div>
+    </div>
   );
 }
 
@@ -566,7 +1197,6 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
   const [aeList, setAeList] = useState<Report["adverse_events"]>([]);
   // FR-28: справочник ГРЛС для связи НЯ с препаратом (доступ врачу).
   const [drugs, setDrugs] = useState<Drug[]>([]);
-  const [chatMsgs, setChatMsgs] = useState<PatientChatMessage[]>([]);
   const [histText, setHistText] = useState("");
   const [histResult, setHistResult] = useState<ImportHistoryResult | null>(null);
   const [assessCode, setAssessCode] = useState("");
@@ -588,14 +1218,6 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
     setAssessAnswers({});
     setAssessResult(null);
     setAssessErr("");
-  }, [report]);
-  useEffect(() => {
-    if (!report) return;
-    let cancelled = false;
-    api.clinicianChatList(report.patient_id)
-      .then((r) => { if (!cancelled) setChatMsgs(r.items); })
-      .catch(() => { if (!cancelled) setChatMsgs([]); });
-    return () => { cancelled = true; };
   }, [report]);
 
   useEffect(() => {
@@ -690,6 +1312,10 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
     }
   };
 
+  const jump = (id: string) => {
+    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
   if (error) {
     return (
       <div className="card">
@@ -702,8 +1328,14 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
   }
   if (!report) return <div className="card">Загрузка…</div>;
   const last = report.last_assessment;
+  // PHQ-9 q9 пациенту не задаётся: в отчёте это NOT_ASSESSED, а не «риска нет».
+  const notAssessed = (
+    last as { risk_flags?: { kind: string; item_key?: string | null }[] } | null
+  )?.risk_flags?.some((f) => f.kind === "NOT_ASSESSED");
   const pendingAeCount = aeList.filter((e) => e.status === "pending").length;
   const assessScale = report.available_scales.find((s) => s.code === assessCode);
+  const clinicianScales = report.available_scales.filter((s) => s.audience === "CLINICIAN");
+  const patientScales = report.available_scales.filter((s) => s.audience === "PATIENT");
   // Итог в summary свёрнутой карточки: свежая оценка из формы или последняя сохранённая.
   const assessFmt = (score: number, sev: string, at: string) =>
     `${score} · ${sev} · ${new Date(at).toLocaleDateString("ru-RU")}`;
@@ -712,6 +1344,17 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
     : report.last_assessment
       ? `последняя ${assessFmt(report.last_assessment.total_score, report.last_assessment.severity, report.last_assessment.computed_at)}`
       : "";
+  const checkinReviewed = report.checkin.recent.filter((c) => c.safety !== "none");
+  const checkinSummary =
+    report.checkin.recent.length === 0
+      ? "Чек-ин: данных нет"
+      : checkinReviewed.length > 0
+        ? "Чек-ин: есть риск"
+        : "Чек-ин: нет риска";
+  const triage = last?.triage ?? null;
+  const highRisk = triage === "RED" || report.open_escalations.length > 0;
+  const adherencePct = report.adherence.pct;
+
   return (
     <div className="card">
       <button className="ghost" onClick={onBack}>
@@ -724,59 +1367,116 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
         )}
       </h2>
 
+      <div className="patient-actions">
+        <button className="ghost" onClick={() => jump("clinician-visits")}>
+          Приёмы
+        </button>
+        <button className="ghost" onClick={() => jump("clinician-medications")}>
+          Назначения
+        </button>
+        <button className="ghost" onClick={() => onOpenChats(report.patient_id)}>
+          Открыть в чатах
+        </button>
+      </div>
+
+      <div className="patient-risk">
+        <div>
+          <span className="muted small">Риск по последней оценке: </span>
+          {triage ? (
+            <span className={`badge ${triage}`}>
+              {triage} — {RISK_LABELS[triage] ?? ""}
+            </span>
+          ) : (
+            <span className="badge GREEN">нет оценки</span>
+          )}
+          {last && (
+            <span className="muted small">
+              {" "}
+              · балл {last.total_score} · {last.severity} · {last.computed_at.slice(0, 10)}
+            </span>
+          )}
+        </div>
+        {notAssessed && (
+          <div className="risk-note">
+            Пункт 9 не задавался · риск не оценён
+          </div>
+        )}
+        <div style={{ marginTop: 6 }}>
+          {report.routing ? (
+            <>
+              <span className="muted small">Маршрутизация: </span>
+              <b>{report.routing.label}</b>
+              <span className="muted small"> · {report.routing.target} · {report.routing.reason}</span>
+            </>
+          ) : (
+            <span className="muted small">Маршрутизация: не требуется — динамическое наблюдение</span>
+          )}
+        </div>
+      </div>
+
+      {highRisk && (
+        <div className="alert-danger">
+          <b>Высокий риск: требуется разбор.</b>{" "}
+          {report.open_escalations.length > 0
+            ? `Открытых сигналов: ${report.open_escalations.length} — они в «Очереди эскалаций» кабинета.`
+            : "Последняя оценка — RED."}
+        </div>
+      )}
+
       <ContactsBlock patientId={report.patient_id} hasConsent={report.contacts !== null} />
+
       <Collapsible storageKey="cc.clinician.reminders" summary="Напоминания">
         <PatientReminders patientId={report.patient_id} />
       </Collapsible>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        <Collapsible storageKey="cc.clinician.screening-scales" summary="Шкалы скрининга">
-          <table className="scale-table" style={{ fontSize: 14 }}>
-            <tbody>
-              {report.available_scales.filter((s) => s.audience === "PATIENT").map((s) => (
-                <tr key={s.code}>
-                  <td style={{ textAlign: "left" }}>
-                    <label htmlFor={s.code}>{s.title}</label>
-                  </td>
-                  <td style={{ textAlign: "right", width: 44, whiteSpace: "nowrap" }}>
-                    <input
-                      id={s.code}
-                      type="checkbox"
-                      checked={picked.includes(s.code)}
-                      onChange={() =>
-                        setPicked((cur) =>
-                          cur.includes(s.code) ? cur.filter((c) => c !== s.code) : [...cur, s.code],
-                        )
-                      }
-                    />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, alignItems: "center" }}>
-            <button onClick={saveScale} disabled={picked.length === 0}>Назначить</button>
-            {scaleSaved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
-          </div>
-        </Collapsible>
-      </div>
-      {scaleError && <p className="error">{scaleError}</p>}
+      <Collapsible
+        storageKey="cc.clinician.screening-scales"
+        summary={
+          <>
+            Назначить скрининг
+            {assessSummary && (
+              <span className="muted small" style={{ fontWeight: 400 }}>
+                {" "}· оценка врача: {assessSummary}
+              </span>
+            )}
+          </>
+        }
+      >
+        <h4 className="subhead">Шкалы для пациента</h4>
+        <table className="scale-table" style={{ fontSize: 14 }}>
+          <tbody>
+            {patientScales.map((s) => (
+              <tr key={s.code}>
+                <td style={{ textAlign: "left" }}>
+                  <label htmlFor={s.code}>{s.title}</label>
+                </td>
+                <td style={{ textAlign: "right", width: 44, whiteSpace: "nowrap" }}>
+                  <input
+                    id={s.code}
+                    type="checkbox"
+                    checked={picked.includes(s.code)}
+                    onChange={() =>
+                      setPicked((cur) =>
+                        cur.includes(s.code) ? cur.filter((c) => c !== s.code) : [...cur, s.code],
+                      )
+                    }
+                  />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, alignItems: "center" }}>
+          <button onClick={saveScale} disabled={picked.length === 0}>Назначить</button>
+          {scaleSaved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
+        </div>
+        {scaleError && <p className="error">{scaleError}</p>}
 
-      {report.available_scales.some((s) => s.audience === "CLINICIAN") && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <Collapsible
-            storageKey="cc.clinician.assessment"
-            summary={
-              <>
-                Оценка врачом: {assessScale?.code ?? "—"}
-                {assessSummary && (
-                  <span style={{ color: "#5a6478", fontSize: 13, fontWeight: 400 }}>
-                    {" "}· {assessSummary}
-                  </span>
-                )}
-              </>
-            }
-          >
+        {clinicianScales.length > 0 && (
+          <>
+            <h4 className="subhead" style={{ marginTop: 14 }}>
+              Заполнить шкалу врача (доступно только врачу)
+            </h4>
             <select
               aria-label="Шкала врачебной оценки"
               value={assessCode}
@@ -786,7 +1486,7 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
                 setAssessResult(null);
               }}
             >
-              {report.available_scales.filter((s) => s.audience === "CLINICIAN").map((s) => (
+              {clinicianScales.map((s) => (
                 <option key={s.code} value={s.code}>{s.title}</option>
               ))}
             </select>
@@ -824,232 +1524,215 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
               )}
             </div>
             {assessErr && <p className="error">{assessErr}</p>}
-          </Collapsible>
-        </div>
-      )}
+          </>
+        )}
+      </Collapsible>
 
-      {report.checkin.recent.length > 0 && (
-        <div className="card">
-          <b>Чек-ины</b>{" "}
-          <span style={{ color: "#5a6478", fontSize: 12 }}>
-            правила {report.checkin.rules_version ?? "—"}
-          </span>
-          {report.checkin.recent.map((c) => {
-            const safety =
-              c.safety === "signal"
-                ? "срочный сигнал"
-                : c.safety === "review"
-                  ? "требует рассмотрения"
-                  : c.safety === "unassessed"
-                    ? "риск не оценён"
-                    : "нет";
-            const answers = Object.entries(c.answers)
-              .map(([k, v]) => `${k} ${v}`)
-              .join(" · ");
-            const included = c.modules.filter((m) => m.included);
-            return (
-              <div key={c.session_id} style={{ marginTop: 10, fontSize: 13 }}>
-                <div>
-                  <b>{c.date}</b> · {c.status === "completed" ? "завершён" : "в процессе"} · риск:{" "}
-                  <span style={{ color: c.safety === "none" ? "#2f7a4b" : "#a3282d", fontWeight: 600 }}>
-                    {safety}
-                  </span>
-                </div>
-                {answers && <div style={{ color: "#3d4657" }}>{answers}</div>}
-                {included.length > 0 && (
-                  <div style={{ color: "#5a6478" }}>
-                    Модули: {included.map((m) => m.code).join(", ")} —{" "}
-                    {included.map((m) => m.reason).join("; ")}
+      <Collapsible storageKey="cc.clinician.checkin" summary={checkinSummary}>
+        {report.checkin.recent.length === 0 ? (
+          <p className="muted small">Пациент ещё не проходил чек-ин.</p>
+        ) : (
+          <>
+            <p className="muted small">Правила: {report.checkin.rules_version ?? "—"}</p>
+            {report.checkin.recent.map((c) => {
+              const safety =
+                c.safety === "signal"
+                  ? "срочный сигнал"
+                  : c.safety === "review"
+                    ? "требует рассмотрения"
+                    : c.safety === "unassessed"
+                      ? "риск не оценён"
+                      : "нет";
+              const answers = Object.entries(c.answers)
+                .map(([k, v]) => `${k} ${v}`)
+                .join(" · ");
+              const included = c.modules.filter((m) => m.included);
+              return (
+                <div key={c.session_id} style={{ marginTop: 10, fontSize: 13 }}>
+                  <div>
+                    <b>{c.date}</b> · {c.status === "completed" ? "завершён" : "в процессе"} · риск:{" "}
+                    <span style={{ color: c.safety === "none" ? "#2f7a4b" : "#a3282d", fontWeight: 600 }}>
+                      {safety}
+                    </span>
                   </div>
-                )}
-              </div>
-            );
-          })}
-          <div style={{ color: "#5a6478", fontSize: 12, marginTop: 8 }}>
-            Ответы не суммируются и не являются диагнозом: это черновик для пилота.
-          </div>
-        </div>
-      )}
-      {report.open_escalations.length > 0 && (
-        <div className="alert-danger">
-          <b>Открытые эскалации:</b>{" "}
-          {report.open_escalations.map((e) => `${e.kind}${e.notified_at ? ` (${e.notified_at.slice(0, 10)})` : ""}`).join(", ")}
-        </div>
-      )}
+                  {answers && <div style={{ color: "#3d4657" }}>{answers}</div>}
+                  {included.length > 0 && (
+                    <div style={{ color: "#5a6478" }}>
+                      Модули: {included.map((m) => m.code).join(", ")} —{" "}
+                      {included.map((m) => m.reason).join("; ")}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            <div style={{ color: "#5a6478", fontSize: 12, marginTop: 8 }}>
+              Ответы не суммируются и не являются диагнозом: это черновик для пилота.
+            </div>
+          </>
+        )}
+      </Collapsible>
 
-      {report.routing && report.routing.category !== "NONE" && (
-        <div className={report.routing.category === "REQUIRED" ? "alert-danger" : "alert-warn"}>
-          <b>Маршрутизация: {report.routing.label} — направление к {report.routing.target}</b>
-          <div style={{ fontSize: 13, marginTop: 4 }}>{report.routing.reason}</div>
-        </div>
-      )}
-      {report.routing && report.routing.category === "NONE" && (
-        <div className="row" style={{ color: "#5a6478", fontSize: 13 }}>
-          Маршрутизация: не требуется — динамическое наблюдение
-        </div>
-      )}
-
-      {last && (
-        <div className="row">
-          <span className={`badge ${last.triage}`}>{last.triage}</span>
-          <span>
-            Последний скрининг: балл {last.total_score} · {last.severity} · {last.computed_at.slice(0, 10)}
-          </span>
-        </div>
-      )}
-
-      <h3>Приверженность лечению (FR-27, 14 дней)</h3>
-      {report.adherence.medications.length > 0 ? (
-        <>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Препарат</th><th>Режим</th><th>Принято</th><th>Частично</th>
-                  <th>Пропущено</th><th>Не назначено</th><th>Ожидалось</th><th>%</th>
-                </tr>
-              </thead>
-              <tbody>
-                {report.adherence.medications.map((m) => (
-                  <tr key={m.id}>
-                    <td>{m.title}</td>
-                    <td>{m.times_per_day != null ? `${m.times_per_day} р/день` : "не задан"}</td>
-                    <td>{m.taken}</td>
-                    <td>{m.partial}</td>
-                    <td>{m.missed}</td>
-                    <td>{m.not_scheduled}</td>
-                    <td>{m.expected}</td>
-                    <td>{m.pct != null ? `${m.pct}%` : "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <p style={{ fontSize: 13, marginTop: 6 }}>
-            <b>Общий процент: {report.adherence.pct}%</b>{" "}
-            <span style={{ color: "#5a6478" }}>
-              — это сумма (принято + доля каждого «частично»: 1/4 = 0,25, 1/2 = 0,5,
-              3/4 = 0,75, 1 из 2 = 0,5, 2 из 3 ≈ 0,67; «меньше/изменил сам» = 0,5)
-              по назначениям с заданным режимом, делённая на сумму ожидаемых приёмов;
-              не среднее процентов по препаратам. «Не назначено сегодня» в расчёт не входит.
-              {report.adherence.excluded_count > 0
-                ? ` Вне расчёта ${report.adherence.excluded_count} отметок без привязки к назначению или у назначений без режима.`
-                : ""}
-            </span>
-          </p>
-          {report.adherence.records.length > 0 && (
+      <Collapsible
+        storageKey="cc.clinician.adherence"
+        summary={
+          <>
+            Приверженность лечению за последние {report.adherence.days} дней
+            {adherencePct != null ? `: ${adherencePct}%` : ""}
+          </>
+        }
+      >
+        {report.adherence.medications.length > 0 ? (
+          <>
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Дата</th><th>Препарат</th><th>Статус</th><th>Заметка</th></tr></thead>
+                <thead>
+                  <tr>
+                    <th>Препарат</th><th>Режим</th><th>Принято</th><th>Частично</th>
+                    <th>Пропущено</th><th>Не назначено</th><th>Ожидалось</th><th>%</th>
+                  </tr>
+                </thead>
                 <tbody>
-                  {report.adherence.records.map((r) => (
-                    <tr key={r.id}>
-                      <td>{r.created_at.slice(0, 10)}</td>
-                      <td>{r.medication ?? "—"}</td>
-                      <td>
-                        {ADH_STATUS_LABELS[r.status] ?? r.status}
-                        {r.status === "partial" && r.partial_kind
-                          ? ` — ${ADH_PARTIAL_LABELS[r.partial_kind] ?? r.partial_kind}`
-                          : ""}
-                      </td>
-                      <td>{r.note ?? "—"}</td>
+                  {report.adherence.medications.map((m) => (
+                    <tr key={m.id}>
+                      <td>{m.title}</td>
+                      <td>{m.times_per_day != null ? `${m.times_per_day} р/день` : "не задан"}</td>
+                      <td>{m.taken}</td>
+                      <td>{m.partial}</td>
+                      <td>{m.missed}</td>
+                      <td>{m.not_scheduled}</td>
+                      <td>{m.expected}</td>
+                      <td>{m.pct != null ? `${m.pct}%` : "—"}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-          )}
-        </>
-      ) : (
-        <p style={{ color: "#5a6478", fontSize: 13 }}>
-          Процент не считается: ни у одного назначения не задан режим приёма (сколько раз в день).
-          {report.adherence.total > 0 && ` Отметок за 14 дней: ${report.adherence.total}, все вне расчёта.`}
-        </p>
-      )}
-
-      <h3>Нежелательные явления</h3>
-      {/* FR-28: единый блок — проверка сообщений пациента и ручное сообщение врача. */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 12 }}>
-        {pendingAeCount > 0 && (
-          <>
-            <strong style={{ fontSize: 14 }}>На проверке: {pendingAeCount}</strong>
-            {aeList
-              .filter((e) => e.status === "pending")
-              .map((e) => (
-                <VerifyAdverseEvent
-                  key={e.id}
-                  event={e}
-                  medications={report.adherence.medications}
-                  drugs={drugs}
-                  onOpenLibrary={onOpenLibrary}
-                  onVerified={(updated) => {
-                    setAeList((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
-                    onRefresh();
-                  }}
-                />
-              ))}
+            <p style={{ fontSize: 13, marginTop: 6 }}>
+              <b>
+                Общий процент за последние {report.adherence.days} дней: {adherencePct}%
+              </b>
+            </p>
+            <details className="hint">
+              <summary>Как считается процент</summary>
+              <p>
+                Принято + доля каждого «частично» (1/4 = 0,25, 1/2 = 0,5, 3/4 = 0,75,
+                1 из 2 = 0,5, 2 из 3 ≈ 0,67; «меньше/изменил сам» = 0,5), делённое на сумму
+                ожидаемых приёмов по назначениям с заданным режимом; это не среднее
+                процентов по препаратам. «Не назначено сегодня» в расчёт не входит.
+                {report.adherence.excluded_count > 0
+                  ? ` Вне расчёта ${report.adherence.excluded_count} отметок без привязки к назначению или у назначений без режима.`
+                  : ""}
+              </p>
+            </details>
+            {report.adherence.records.length > 0 && (
+              <div className="table-wrap">
+                <table>
+                  <thead><tr><th>Дата</th><th>Препарат</th><th>Статус</th><th>Заметка</th></tr></thead>
+                  <tbody>
+                    {report.adherence.records.map((r) => (
+                      <tr key={r.id}>
+                        <td>{r.created_at.slice(0, 10)}</td>
+                        <td>{r.medication ?? "—"}</td>
+                        <td>
+                          {ADH_STATUS_LABELS[r.status] ?? r.status}
+                          {r.status === "partial" && r.partial_kind
+                            ? ` — ${ADH_PARTIAL_LABELS[r.partial_kind] ?? r.partial_kind}`
+                            : ""}
+                        </td>
+                        <td>{r.note ?? "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </>
+        ) : (
+          <p style={{ color: "#5a6478", fontSize: 13 }}>
+            Процент не считается: ни у одного назначения не задан режим приёма (сколько раз в день).
+            {report.adherence.total > 0 && ` Отметок за ${report.adherence.days} дней: ${report.adherence.total}, все вне расчёта.`}
+          </p>
         )}
+      </Collapsible>
+
+      <Collapsible
+        storageKey="cc.clinician.adverse"
+        summary={
+          <>
+            Нежелательные явления
+            {pendingAeCount > 0 ? ` (${pendingAeCount} на проверке)` : ""}
+          </>
+        }
+      >
+        {/* FR-28: единый блок — проверка сообщений пациента и ручное сообщение врача. */}
+        {pendingAeCount > 0 && (
+          <div className="alert-warn">
+            <strong style={{ fontSize: 14 }}>На проверке: {pendingAeCount}</strong>
+          </div>
+        )}
+        {aeList.filter((e) => e.status === "pending").map((event) => (
+          <VerifyAdverseEvent
+            key={event.id}
+            event={event}
+            medications={report.adherence.medications}
+            drugs={drugs}
+            onOpenLibrary={onOpenLibrary}
+            onVerified={(updated) =>
+              setAeList((cur) => cur.map((e) => (e.id === updated.id ? updated : e)))
+            }
+          />
+        ))}
         <ReportAdverseEvent
           patientId={report.patient_id}
-          onCreated={(created) => {
-            setAeList((prev) => [created, ...prev]);
-            onRefresh();
-          }}
+          onCreated={(created) => setAeList((cur) => [created, ...cur])}
         />
-      </div>
-      {aeList.length > 0 ? (
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr><th>Дата</th><th>Событие</th><th>Тяжесть</th><th>Статус</th><th>Препарат</th><th>Действие</th></tr>
-            </thead>
-            <tbody>
-              {aeList.map((e) => (
-                <tr key={e.id}>
-                  <td>{e.onset_date}</td>
-                  <td>{e.event_text}</td>
-                  <td><span className={`badge ${e.severity === "severe" ? "RED" : e.severity === "moderate" ? "YELLOW" : "GREEN"}`}>{e.severity}</span></td>
-                  <td>
-                    <span className={`badge ${e.status === "confirmed" ? "GREEN" : e.status === "pending" ? "YELLOW" : ""}`}>
-                      {e.status === "confirmed" ? "подтверждено" : e.status === "pending" ? "на проверке" : "отклонено"}
-                    </span>
-                    {e.reported_by === "patient" && (
-                      <div style={{ color: "#5a6478", fontSize: 12 }}>сообщил пациент</div>
-                    )}
-                  </td>
-                  <td>
-                    {e.suspected_drug ?? e.drug_trade_name ?? "—"}
-                    {e.reference && (
-                      <div style={{ color: "#5a6478", fontSize: 12 }} title={e.reference.adverse_events}>
-                        ГРЛС: {e.reference.adverse_events.slice(0, 80)}
-                        {e.reference.adverse_events.length > 80 ? "…" : ""}
-                      </div>
-                    )}
-                  </td>
-                  <td>{e.action_taken ?? "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <p style={{ color: "#5a6478", fontSize: 13 }}>Нежелательные явления не зарегистрированы.</p>
-      )}
-      <h3>Переписка с пациентом</h3>
-      <div className="chat-mini">
-        {chatMsgs.length > 0 ? chatMsgs.slice(-3).map((m) => (
-          <div key={m.id} className={`msg ${m.sender === "SYSTEM" ? "system" : ""}`}>
-            <b>{m.sender === "CLINICIAN" ? "Врач: " : m.sender === "SYSTEM" ? "Помощник: " : "Пациент: "}</b>
-            {m.content}
+        {aeList.length > 0 ? (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Дата</th><th>Событие</th><th>Тяжесть</th><th>Статус</th><th>Препарат</th><th>Действие</th></tr>
+              </thead>
+              <tbody>
+                {aeList.map((e) => (
+                  <tr key={e.id}>
+                    <td>{e.onset_date}</td>
+                    <td>{e.event_text}</td>
+                    <td>
+                      {e.severity ? (
+                        <span className={`badge ${e.severity === "severe" ? "RED" : e.severity === "moderate" ? "YELLOW" : "GREEN"}`}>
+                          {e.severity}
+                        </span>
+                      ) : (
+                        <span className="badge">не оценена</span>
+                      )}
+                    </td>
+                    <td>
+                      <span className={`badge ${e.status === "confirmed" ? "GREEN" : e.status === "pending" ? "YELLOW" : ""}`}>
+                        {e.status === "confirmed" ? "подтверждено" : e.status === "pending" ? "на проверке" : "отклонено"}
+                      </span>
+                      {e.reported_by === "patient" && (
+                        <div style={{ color: "#5a6478", fontSize: 12 }}>сообщил пациент</div>
+                      )}
+                    </td>
+                    <td>
+                      {e.suspected_drug ?? e.drug_trade_name ?? "—"}
+                      {e.reference && (
+                        <div style={{ color: "#5a6478", fontSize: 12 }} title={e.reference.adverse_events}>
+                          ГРЛС: {e.reference.adverse_events.slice(0, 80)}
+                          {e.reference.adverse_events.length > 80 ? "…" : ""}
+                        </div>
+                      )}
+                    </td>
+                    <td>{e.action_taken ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        )) : <p className="muted small">Переписки пока нет.</p>}
-      </div>
-      <div className="row">
-        <button className="ghost" onClick={() => onOpenChats(report.patient_id)}>
-          Открыть в чатах
-        </button>
-      </div>
+        ) : (
+          <p style={{ color: "#5a6478", fontSize: 13 }}>Нежелательные явления не зарегистрированы.</p>
+        )}
+      </Collapsible>
 
       {report.chat_insights.length > 0 && (
         <>
@@ -1072,11 +1755,21 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
         </>
       )}
 
-      <h3>Приёмы (запись беседы врач-пациент)</h3>
-      <div style={{ display: "flex", flexDirection: "column", gap: 6, maxWidth: 560, marginTop: 8 }}>
+      <h3 id="clinician-visits">Приёмы (запись беседы врач-пациент)</h3>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <input type="date" value={visitDate} onChange={(e) => setVisitDate(e.target.value)} />
-          <select aria-label="Тип приёма" value={visitType} onChange={(e) => setVisitType(e.target.value as "in_person" | "online" | "phone")}>
+          <input
+            type="date"
+            aria-label="Дата приёма"
+            value={visitDate}
+            onChange={(e) => setVisitDate(e.target.value)}
+            style={{ width: 170 }}
+          />
+          <select
+            aria-label="Тип приёма"
+            value={visitType}
+            onChange={(e) => setVisitType(e.target.value as "in_person" | "online" | "phone")}
+          >
             <option value="in_person">Очный</option>
             <option value="online">Онлайн</option>
             <option value="phone">Телефон</option>
@@ -1125,60 +1818,72 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
       ) : (
         <p style={{ color: "#5a6478", fontSize: 13 }}>Записей о приёмах пока нет.</p>
       )}
-      <EmiasBlock patientId={report.patient_id} />
-      <MedicationsBlock patientId={report.patient_id} />
-      <HistoryBlock patientId={report.patient_id} />
 
-      <h3>Импорт истории болезни (метрика кейса 2)</h3>
-      <p style={{ color: "#5a6478", fontSize: 13 }}>
-        Вставьте текст истории болезни (любой шаблон) — система извлечёт ключевые поля
-        в черновик. Подтвердите перед использованием в клинической модели.
-      </p>
-      <textarea rows={5} placeholder="Жалобы: …\nАнамнез: …\nДиагноз: F41.1\nЛечение: Авиандр 20 мг"
-        value={histText} onChange={(e) => setHistText(e.target.value)} />
-      <div style={{ marginTop: 8 }}>
-        <button onClick={runImport} disabled={!histText.trim()}>Разобрать</button>
+      <div id="clinician-medications">
+        <MedicationsBlock patientId={report.patient_id} />
       </div>
-      {histErr && <p className="error">{histErr}</p>}
-      {histResult && (
-        <div className="alert-info" style={{ marginTop: 10 }}>
-          <b>Черновик (требует подтверждения)</b> · шаблон: {histResult.template}, полей: {histResult.fields_found}
-          {histResult.complaints && <div><b>Жалобы:</b> {histResult.complaints}</div>}
-          {histResult.anamnesis && <div><b>Анамнез:</b> {histResult.anamnesis}</div>}
-          {histResult.diagnosis_codes.length > 0 && <div><b>Коды МКБ-10:</b> {histResult.diagnosis_codes.join(", ")}</div>}
-          {histResult.therapy.length > 0 && <div><b>Терапия:</b> {histResult.therapy.join("; ")}</div>}
-          {histResult.scale_scores.length > 0 && <div><b>Баллы шкал:</b> {histResult.scale_scores.join("; ")}</div>}
+
+      <div id="clinician-history">
+        <HistoryBlock patientId={report.patient_id} />
+        <h4 className="subhead">Импорт истории болезни (черновик полей)</h4>
+        <p style={{ color: "#5a6478", fontSize: 13 }}>
+          Вставьте текст истории болезни (любой шаблон) — система извлечёт ключевые поля
+          в черновик. Подтвердите перед использованием в клинической модели.
+        </p>
+        <textarea rows={5} placeholder="Жалобы: …\nАнамнез: …\nДиагноз: F41.1\nЛечение: Авиандр 20 мг"
+          value={histText} onChange={(e) => setHistText(e.target.value)} />
+        <div style={{ marginTop: 8 }}>
+          <button onClick={runImport} disabled={!histText.trim()}>Разобрать</button>
         </div>
-      )}
-
-      <h3>Динамика (90 дней)</h3>
-      <TrendChart timeline={{ runs: report.history, trend: report.trend }} />
-
-      <h3>История скринингов</h3>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Дата</th>
-              <th>Балл</th>
-              <th>Severity</th>
-              <th>Триаж</th>
-            </tr>
-          </thead>
-          <tbody>
-            {report.history.map((h, i) => (
-              <tr key={i}>
-                <td>{h.computed_at.slice(0, 10)}</td>
-                <td>{h.total_score}</td>
-                <td>{h.severity}</td>
-                <td>
-                  <span className={`badge ${h.triage}`}>{h.triage}</span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        {histErr && <p className="error">{histErr}</p>}
+        {histResult && (
+          <div className="alert-info" style={{ marginTop: 10 }}>
+            <b>Черновик (требует подтверждения)</b> · шаблон: {histResult.template}, полей: {histResult.fields_found}
+            {histResult.complaints && <div><b>Жалобы:</b> {histResult.complaints}</div>}
+            {histResult.anamnesis && <div><b>Анамнез:</b> {histResult.anamnesis}</div>}
+            {histResult.diagnosis_codes.length > 0 && <div><b>Коды МКБ-10:</b> {histResult.diagnosis_codes.join(", ")}</div>}
+            {histResult.therapy.length > 0 && <div><b>Терапия:</b> {histResult.therapy.join("; ")}</div>}
+            {histResult.scale_scores.length > 0 && <div><b>Баллы шкал:</b> {histResult.scale_scores.join("; ")}</div>}
+          </div>
+        )}
       </div>
+
+      <Collapsible
+        storageKey="cc.clinician.dynamics"
+        summary="Динамика (90 дней)"
+        defaultOpen={false}
+      >
+        <TrendChart timeline={{ runs: report.history, trend: report.trend }} />
+      </Collapsible>
+
+      <Collapsible
+        storageKey="cc.clinician.screening-history"
+        summary="История скринингов"
+        defaultOpen={false}
+      >
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Дата</th>
+                <th>Балл</th>
+                <th>Severity</th>
+                <th>Риск</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.history.map((h, i) => (
+                <tr key={i}>
+                  <td>{h.computed_at.slice(0, 10)}</td>
+                  <td>{h.total_score}</td>
+                  <td>{h.severity}</td>
+                  <td>{h.triage}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Collapsible>
 
       <h3>Дневник пациента</h3>
       {report.diary.length === 0 && <p style={{ color: "#5a6478" }}>Записей нет</p>}
@@ -1296,7 +2001,6 @@ function ReportAdverseEvent({ patientId, onCreated }: {
     </div>
   );
 }
-
 // FR-28: проверка сообщения пациента. Решение выбирается кнопкой, поля
 // (тяжесть, назначение, препарат ГРЛС, действие, заметка) применяются при
 // сохранении. После сохранения строка уходит из очереди «на проверке».
@@ -1308,7 +2012,7 @@ function VerifyAdverseEvent({ event, medications, drugs, onOpenLibrary, onVerifi
   onVerified: (updated: ClinicianAdverseEvent) => void;
 }) {
   const [decision, setDecision] = useState<"confirmed" | "rejected">("confirmed");
-  const [severity, setSeverity] = useState(event.severity);
+  const [severity, setSeverity] = useState<AdverseSeverity | "">(event.severity ?? "");
   const [medId, setMedId] = useState(event.medication_id ?? "");
   const [drugId, setDrugId] = useState(event.drug_id ?? "");
   const [action, setAction] = useState(event.action_taken ?? "monitoring");
@@ -1323,7 +2027,7 @@ function VerifyAdverseEvent({ event, medications, drugs, onOpenLibrary, onVerifi
     try {
       onVerified(await api.verifyAdverseEvent(event.patient_id, event.id, {
         status: decision,
-        severity,
+        severity: severity || undefined,
         medication_id: medId || undefined,
         drug_id: drugId || undefined,
         action_taken: action,
@@ -1339,12 +2043,12 @@ function VerifyAdverseEvent({ event, medications, drugs, onOpenLibrary, onVerifi
   return (
     <div
       className="msg"
-      style={{ borderLeft: `3px solid ${event.severity === "severe" ? "#d64545" : "#c9a227"}`, paddingLeft: 10 }}
+      style={{ borderLeft: `3px solid ${event.severity === "severe" ? "#d64545" : event.severity ? "#c9a227" : "#cfd6e2"}`, paddingLeft: 10 }}
     >
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", fontSize: 13 }}>
         <b>{event.onset_date}</b>
-        <span className={`badge ${event.severity === "severe" ? "RED" : event.severity === "moderate" ? "YELLOW" : "GREEN"}`}>
-          {event.severity}
+        <span className={`badge ${event.severity === "severe" ? "RED" : event.severity === "moderate" ? "YELLOW" : event.severity ? "GREEN" : ""}`}>
+          {event.severity ?? "не оценена"}
         </span>
         <span>{event.event_text}</span>
         {event.medication_title && (
@@ -1364,7 +2068,8 @@ function VerifyAdverseEvent({ event, medications, drugs, onOpenLibrary, onVerifi
         >
           Отклонить
         </button>
-        <select aria-label="Тяжесть при проверке" value={severity} onChange={(e) => setSeverity(e.target.value as AdverseSeverity)}>
+        <select aria-label="Тяжесть при проверке" value={severity} onChange={(e) => setSeverity(e.target.value as AdverseSeverity | "")}>
+          <option value="">не оценена</option>
           <option value="mild">лёгкое</option>
           <option value="moderate">умеренное</option>
           <option value="severe">тяжёлое</option>
@@ -1406,52 +2111,6 @@ function VerifyAdverseEvent({ event, medications, drugs, onOpenLibrary, onVerifi
     </div>
   );
 }
-
-// FR-25: блок «ЕМИАС» в карточке врача — только чтение (связка, назначения, приёмы).
-function EmiasBlock({ patientId }: { patientId: string }) {
-  const [data, setData] = useState<EmiasSummary | null>(null);
-  const [err, setErr] = useState("");
-  useEffect(() => {
-    let cancelled = false;
-    setErr("");
-    setData(null);
-    api.clinicianEmias(patientId)
-      .then((r) => { if (!cancelled) setData(r); })
-      .catch((e) => { if (!cancelled) setErr(e instanceof Error ? e.message : "нет данных"); });
-    return () => { cancelled = true; };
-  }, [patientId]);
-
-  if (err) {
-    return (
-      <div>
-        <h3>ЕМИАС</h3>
-        <p style={{ color: "#5a6478", fontSize: 13 }}>Данные недоступны: {err}</p>
-      </div>
-    );
-  }
-  if (!data) return null;
-  if (!data.linked) {
-    return (
-      <div>
-        <h3>ЕМИАС</h3>
-        <p style={{ color: "#5a6478", fontSize: 13 }}>Пациент не связан с ЕМИАС.</p>
-      </div>
-    );
-  }
-  return (
-    <div>
-      <h3>ЕМИАС</h3>
-      <p style={{ color: "#5a6478", fontSize: 13 }}>
-        приёмов: {data.encounters} ·
-        последняя синхронизация: {data.last_sync ? data.last_sync.slice(0, 16).replace("T", " ") : "—"}
-        {data.enabled ? "" : " · интеграция отключена (показаны сохранённые данные)"}
-      </p>
-      {/* назначения (включая импортированные) — в блоке «Назначения» (FR-23) */}
-    </div>
-  );
-}
-
-// FR-22: контакты пациента. Полный телефон отдаёт только endpoint контактов
 // (аудит READ_PATIENT_CONTACTS); в списке и карте телефон маскирован.
 function ContactsBlock({ patientId, hasConsent }: { patientId: string; hasConsent: boolean }) {
   const [contacts, setContacts] = useState<PatientContacts | null>(null);
@@ -1533,7 +2192,6 @@ function ContactsBlock({ patientId, hasConsent }: { patientId: string; hasConsen
     </div>
   );
 }
-
 // FR-23: назначения препаратов в карточке. Импорт ЕМИАС — только чтение,
 // локальные назначения врач останавливает/удаляет.
 function MedicationsBlock({ patientId }: { patientId: string }) {
@@ -1550,6 +2208,55 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
   const [busy, setBusy] = useState(false);
   // Защита от гонки: ответ устаревшего запроса не перезаписывает свежий список.
   const reqRef = useRef(0);
+  // FR-32: автодополнение препарата из справочника ГРЛС (GET /drugs).
+  const [drugs, setDrugs] = useState<Drug[]>([]);
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  const [suggestIdx, setSuggestIdx] = useState(-1);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.drugs()
+      .then((r) => { if (!cancelled) setDrugs(r.items); })
+      .catch(() => { if (!cancelled) setDrugs([]); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const drugQuery = title.trim().toLowerCase();
+  const suggestions = drugQuery.length >= 2
+    ? drugs
+        .filter((d) =>
+          [d.trade_name, d.inn, d.inn_en ?? ""].some((v) => v.toLowerCase().includes(drugQuery)),
+        )
+        .slice(0, 8)
+    : [];
+
+  const pickDrug = (d: Drug) => {
+    setTitle(d.trade_name);
+    setSuggestOpen(false);
+    setSuggestIdx(-1);
+  };
+
+  const onDrugKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Escape") {
+      setSuggestOpen(false);
+      setSuggestIdx(-1);
+      return;
+    }
+    if (suggestions.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setSuggestOpen(true);
+      setSuggestIdx((i) => (i + 1) % suggestions.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setSuggestOpen(true);
+      setSuggestIdx((i) => (i <= 0 ? suggestions.length - 1 : i - 1));
+    } else if (e.key === "Enter" && suggestOpen && suggestIdx >= 0) {
+      // Enter выбирает подсказку, а не отправляет форму.
+      e.preventDefault();
+      pickDrug(suggestions[suggestIdx]);
+    }
+  };
 
   const load = () => {
     const token = ++reqRef.current;
@@ -1699,7 +2406,58 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
         <p style={{ color: "#5a6478", fontSize: 13 }}>Назначений пока нет.</p>
       )}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", maxWidth: 760 }}>
-        <input placeholder="Препарат" value={title} onChange={(e) => setTitle(e.target.value)} style={{ maxWidth: 200 }} />
+        <div className="drug-autocomplete">
+          <input
+            placeholder="Препарат"
+            role="combobox"
+            aria-label="Препарат"
+            aria-autocomplete="list"
+            aria-expanded={suggestOpen && suggestions.length > 0}
+            aria-controls="drug-suggestions"
+            aria-activedescendant={
+              suggestOpen && suggestIdx >= 0 ? `drug-option-${suggestIdx}` : undefined
+            }
+            autoComplete="off"
+            value={title}
+            onChange={(e) => {
+              setTitle(e.target.value);
+              setSuggestOpen(true);
+              setSuggestIdx(-1);
+            }}
+            onFocus={() => setSuggestOpen(true)}
+            onBlur={() => window.setTimeout(() => setSuggestOpen(false), 120)}
+            onKeyDown={onDrugKeyDown}
+          />
+          {suggestOpen && suggestions.length > 0 && (
+            <ul
+              id="drug-suggestions"
+              className="drug-suggestions"
+              role="listbox"
+              aria-label="Препараты из справочника"
+            >
+              {suggestions.map((d, idx) => (
+                <li
+                  key={d.drug_id}
+                  id={`drug-option-${idx}`}
+                  role="option"
+                  aria-selected={idx === suggestIdx}
+                  className={`drug-suggestion${idx === suggestIdx ? " active" : ""}`}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    pickDrug(d);
+                  }}
+                >
+                  <Highlight text={d.trade_name} query={drugQuery} />
+                  <span className="muted">
+                    {d.inn}
+                    {d.inn_en ? ` · ${d.inn_en}` : ""}
+                    {d.form ? ` · ${d.form}` : ""}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
         <input placeholder="Дозировка" value={dosage} onChange={(e) => setDosage(e.target.value)} style={{ maxWidth: 150 }} />
         <input type="date" aria-label="Дата начала" value={startedOn} onChange={(e) => setStartedOn(e.target.value)} />
         <label style={{ fontSize: 13, color: "#3d4657" }}>
@@ -1715,7 +2473,6 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
     </div>
   );
 }
-
 const HISTORY_CHIPS: { value: HistoryType; label: string }[] = [
   { value: "visit", label: "Приёмы" },
   { value: "medication", label: "Назначения" },
@@ -1833,45 +2590,6 @@ function HistoryBlock({ patientId }: { patientId: string }) {
     </div>
   );
 }
-
-const REMINDER_KINDS: { value: ClinicianReminder["kind"]; label: string }[] = [
-  { value: "call", label: "Позвонить" },
-  { value: "write", label: "Написать" },
-  { value: "appointment", label: "Назначить приём" },
-  { value: "custom", label: "Другое" },
-];
-
-// Порядок групп в панели: сначала просроченное, затем сегодня/скоро/позже.
-const REMINDER_GROUPS: { key: NonNullable<ClinicianReminder["due_state"]>; label: string }[] = [
-  { key: "overdue", label: "Просрочено" },
-  { key: "today", label: "Сегодня" },
-  { key: "soon", label: "Ближайшие 7 дней" },
-  { key: "later", label: "Позже" },
-];
-const REMINDER_STATE_LABELS: Record<string, string> = {
-  overdue: "просрочено",
-  today: "сегодня",
-  soon: "скоро",
-  later: "позже",
-};
-
-function nextHourLocal(): string {
-  const d = new Date(Date.now() + 3600_000);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-function fmtDue(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString("ru-RU", {
-    day: "2-digit",
-    month: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
 // FR-24: напоминания выбранного пациента — прямо в карточке (п.3 фидбека).
 function PatientReminders({ patientId }: { patientId: string }) {
   const [data, setData] = useState<RemindersResponse>({ items: [], overdue: 0 });
@@ -2009,158 +2727,6 @@ function PatientReminders({ patientId }: { patientId: string }) {
         </ul>
       )}
       {err && <p className="error">{err}</p>}
-    </div>
-  );
-}
-
-function RemindersPanel({ cards, onChanged }: { cards: PatientCard[]; onChanged: () => void }) {
-  const [data, setData] = useState<RemindersResponse>({ items: [], overdue: 0 });
-  const [patientId, setPatientId] = useState("");
-  const [kind, setKind] = useState<ClinicianReminder["kind"]>("call");
-  const [note, setNote] = useState("");
-  // datetime-local ждёт локальное время без зоны: YYYY-MM-DDTHH:MM.
-  const [due, setDue] = useState(() => {
-    const d = new Date(Date.now() + 3600_000);
-    const pad = (n: number) => String(n).padStart(2, "0");
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  });
-  const [err, setErr] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  const reload = () => {
-    api
-      .clinicianReminders()
-      .then((r) => {
-        setData(r);
-        setErr("");
-      })
-      .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)));
-  };
-
-  useEffect(() => {
-    reload();
-  }, []);
-
-  useEffect(() => {
-    // Список пациентов грузится асинхронно — подставляем первого, когда он появился.
-    if (!patientId && cards.length > 0) setPatientId(cards[0].patient_id);
-  }, [cards, patientId]);
-
-  const create = async () => {
-    if (!patientId || !due) {
-      setErr("Выберите пациента и срок");
-      return;
-    }
-    setBusy(true);
-    try {
-      await api.createReminder({
-        patient_id: patientId,
-        kind,
-        note: note.trim() || null,
-        due_at: new Date(due).toISOString(),
-      });
-      setNote("");
-      reload();
-      onChanged();
-    } catch (e: unknown) {
-      setErr(e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const act = async (fn: (id: string) => Promise<unknown>, id: string) => {
-    try {
-      await fn(id);
-      reload();
-      onChanged();
-    } catch (e: unknown) {
-      setErr(e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  return (
-    <div className="card">
-      <h2>Напоминания {data.overdue > 0 && <span className="badge RED">{data.overdue} просрочено</span>}</h2>
-      <div className="row" style={{ alignItems: "flex-end", gap: 8, flexWrap: "wrap" }}>
-        <label>
-          Пациент
-          <select value={patientId} onChange={(e) => setPatientId(e.target.value)}>
-            {cards.map((c) => (
-              <option key={c.patient_id} value={c.patient_id}>
-                {c.fio ?? c.email}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Вид
-          <select value={kind} onChange={(e) => setKind(e.target.value as ClinicianReminder["kind"])}>
-            {REMINDER_KINDS.map((k) => (
-              <option key={k.value} value={k.value}>
-                {k.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Срок
-          <input type="datetime-local" value={due} onChange={(e) => setDue(e.target.value)} />
-        </label>
-        <label style={{ flex: 1, minWidth: 220 }}>
-          Заметка (необязательно, шифруется)
-          <input
-            value={note}
-            maxLength={2000}
-            onChange={(e) => setNote(e.target.value)}
-            placeholder="например, уточнить дозу"
-          />
-        </label>
-        <button disabled={busy} onClick={create}>
-          Добавить
-        </button>
-      </div>
-      {err && <p className="error">{err}</p>}
-      {data.items.length === 0 && <p style={{ color: "#5a6478" }}>Открытых напоминаний нет.</p>}
-      {REMINDER_GROUPS.map((group) => {
-        const items = data.items.filter((r) => r.due_state === group.key);
-        if (items.length === 0) return null;
-        return (
-          <div key={group.key} style={{ marginTop: 12 }}>
-            <h3 style={{ fontSize: 15, margin: "8px 0" }}>
-              {group.label} ({items.length})
-            </h3>
-            {items.map((r) => (
-              <div
-                key={r.id}
-                className="row"
-                style={{ alignItems: "center", gap: 8, flexWrap: "wrap", padding: "4px 0" }}
-              >
-                <a
-                  href={"#patient=" + r.patient_id}
-                  style={{ color: "#2f6fed", textDecoration: "none", fontWeight: 600 }}
-                >
-                  {r.patient_fio}
-                </a>
-                <span>{r.kind_label}</span>
-                <small style={{ color: "#5a6478" }}>
-                  {new Date(r.due_at).toLocaleString("ru-RU")}
-                  {group.key === "overdue" && r.overdue_minutes > 0
-                    ? ` · просрочено ${Math.floor(r.overdue_minutes / 60)} ч ${r.overdue_minutes % 60} мин`
-                    : ""}
-                </small>
-                {r.note && <small style={{ color: "#5a6478" }}>— {r.note}</small>}
-                <button className="ghost" onClick={() => act(api.doneReminder, r.id)}>
-                  Готово
-                </button>
-                <button className="ghost" onClick={() => act(api.cancelReminder, r.id)}>
-                  Отменить
-                </button>
-              </div>
-            ))}
-          </div>
-        );
-      })}
     </div>
   );
 }

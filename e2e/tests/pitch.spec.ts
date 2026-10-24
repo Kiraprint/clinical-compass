@@ -7,6 +7,7 @@ import {
   login,
   openPatientChat,
   openScreening,
+  openSection,
 } from "./helpers";
 
 const BASE = process.env.CC_E2E_URL ?? "http://127.0.0.1:8090";
@@ -82,6 +83,7 @@ test.describe("Питч-сценарий", () => {
 
   test("врач: входит с 2FA и видит RED-пациентов", async ({ page }) => {
     await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
+    await openSection(page, "Пациенты");
     await expect(page.getByRole("button", { name: "Все" })).toBeVisible();
 
     await page.getByRole("button", { name: "RED", exact: true }).click();
@@ -90,6 +92,6 @@ test.describe("Питч-сценарий", () => {
     await expect(cards.first().locator(".badge.RED")).toBeVisible();
 
     await cards.first().getByRole("button", { name: "Открыть" }).click();
-    await expect(page.getByText("Последний скрининг")).toBeVisible();
+    await expect(page.getByText("Риск по последней оценке:")).toBeVisible();
   });
 });
