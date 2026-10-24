@@ -36,14 +36,20 @@ def _psycopg():
 
 def reset_database(db_name: str | None = None) -> None:
     db_name, _ = common.assert_destructive(db_name, action="reset_database")
+    from psycopg import sql
+
     psycopg = _psycopg()
     dsn = (
         f"host={common.PG_HOST} port={common.PG_PORT} user={common.PG_USER} "
         f"password={common.PG_PASSWORD} dbname=postgres"
     )
     with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
-        conn.execute(f'CREATE DATABASE "{db_name}"')
+        # Identifier, а не f-строка: имя приходит из CLI/env, allowlist проверяет
+        # только префикс, а simple query protocol выполнит и второй оператор.
+        conn.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+            sql.Identifier(db_name)
+        ))
+        conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(db_name)))
 
 
 def init_schema() -> None:
@@ -169,9 +175,10 @@ def load_jsonl(path: Path) -> list[dict]:
     ]
 
 
-def seed_qdrant() -> dict:
+def seed_qdrant(collection: str | None = None) -> dict:
     """Index app KB + bench golden corpus into the isolated collection."""
-    _, collection = common.assert_destructive(action="seed_qdrant")
+    # Проверяем ровно ту коллекцию, которую получили, а не резолвим заново из env.
+    _, collection = common.assert_destructive(collection, action="seed_qdrant")
     from qdrant_client import QdrantClient
 
     from app.kb_seed import build_corpus
@@ -226,7 +233,7 @@ def provision(
     init_schema()
     creds = seed_users_and_data()
     drugs = seed_drugs()
-    qdrant = seed_qdrant()
+    qdrant = seed_qdrant(coll)
     payload = {
         "database": db_name,
         "collection": coll,

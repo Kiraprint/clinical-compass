@@ -15,20 +15,25 @@ class ApiServer:
         *,
         embedder: str = "hash",
         collection: str | None = None,
+        db: str | None = None,
         port: int = common.API_PORT,
         pool_size: int = 0,
     ):
         self.embedder = embedder
         self.collection = collection
+        self.db = db
         self.port = port
         self.base_url = f"http://127.0.0.1:{port}"
         self.proc: subprocess.Popen | None = None
         self.log_path = common.RESULTS_DIR / "api.log"
         self.collection = common.resolve_collection(collection)
+        self.db = common.resolve_db(db)
         self.pool_size = pool_size
 
     def start(self, timeout: float = 120.0) -> "ApiServer":
-        env = common.setup_env(embedder=self.embedder, collection=self.collection)
+        env = common.setup_env(
+            embedder=self.embedder, collection=self.collection, db=self.db
+        )
         env["CC_LOADTEST_POOL_SIZE"] = str(self.pool_size)
         env["PYTHONPATH"] = f"{common.ROOT}:{env['PYTHONPATH']}"
         log = self.log_path.open("w", encoding="utf-8")

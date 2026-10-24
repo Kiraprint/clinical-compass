@@ -40,7 +40,8 @@ def _dense_mismatch(actual: int, expected: int) -> IndexConfigError:
         f"Коллекция '{COLLECTION}' построена с dense={actual}, а эмбеддер даёт "
         f"{expected}. Dense-вектора разных моделей несравнимы: пересоздайте индекс "
         f"`python -m app.kb_seed --reset` с текущим CC_EMBEDDER (это переиндексация "
-        f"всего корпуса) или верните прежний CC_EMBEDDER."
+        f"всего корпуса; после неё верните опубликованные гайдлайны и статьи "
+        f"`python -m app.enrichment reindex`) или верните прежний CC_EMBEDDER."
     )
 
 

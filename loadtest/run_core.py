@@ -215,7 +215,8 @@ def agent_path(n: int = 50, repeats: int = 2) -> dict:
 
 
 def run() -> dict:
-    common.apply_env()
+    # env уже применён точкой входа (main/run_all): повторный apply_env затёр бы
+    # --db/--collection/--embedder дефолтами.
     from app import db
 
     if db.sync_engine is None:

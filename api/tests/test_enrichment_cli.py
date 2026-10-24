@@ -12,7 +12,7 @@ import uuid
 
 import pytest
 
-from app.enrichment import cli, index
+from app.enrichment import CRITERIA_VERSION, cli, index
 from app.models import KBWork
 
 pytest.importorskip("qdrant_client")
@@ -22,7 +22,13 @@ def _args(*argv: str):
     return cli.build_parser().parse_args(["reindex", *argv])
 
 
-def _work(db_session, *, status: str = "approved", guideline_id: str | None = None) -> KBWork:
+def _work(
+    db_session,
+    *,
+    status: str = "approved",
+    guideline_id: str | None = None,
+    criteria_version: str = CRITERIA_VERSION,
+) -> KBWork:
     guideline = guideline_id or f"who-test-{uuid.uuid4().hex[:10]}"
     work = KBWork(
         kind="guideline",
@@ -34,6 +40,7 @@ def _work(db_session, *, status: str = "approved", guideline_id: str | None = No
         status=status,
         title="WHO guideline for depression",
         full_text="Recommendation text for depression and anxiety. " * 50,
+        criteria={"version": criteria_version, "verdicts": {}},
         meta={
             "license": "CC BY-NC-SA 3.0 IGO",
             "url": f"https://iris.who.int/handle/{guideline}",
@@ -145,6 +152,18 @@ def test_cli_exposes_reindex_command(capsys):
         cli.main(["reindex", "--help"])
     assert sub.value.code == 0
     assert "--work-id" in capsys.readouterr().out
+
+def test_reindex_skips_works_with_stale_criteria_version(db_session, published, capsys):
+    """Работу, одобренную под старые критерии, вслепую не переопубликовываем."""
+    work = _work(db_session, criteria_version="0.9.0")
+
+    code = asyncio.run(cli._cmd_reindex(_args("--work-id", str(work.id))))
+
+    assert code == 0
+    assert published == []
+    captured = capsys.readouterr()
+    assert "переиндексировано 0, пропущено 1" in captured.out
+    assert "критерии устарели" in captured.err
 
 
 def test_reindex_rejects_malformed_work_id():

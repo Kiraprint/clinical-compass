@@ -71,6 +71,10 @@ def _validate_url(url: str, *, allowed_host: str = IRIS_HOST) -> None:
             f"WHO IRIS: хост {host or '—'} вне белого списка (только {allowed_host}): "
             f"{_redact_url(url)}"
         )
+    if parts.port not in (None, 443):
+        raise SourceError(
+            f"WHO IRIS: порт {parts.port} запрещён (только 443): {_redact_url(url)}"
+        )
 
 class _IRISRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Проверяет каждый хоп: Location обязан остаться https://iris.who.int."""

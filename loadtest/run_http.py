@@ -335,7 +335,7 @@ def run(
 
 
 def run_cliff(credentials: dict, *, quick: bool = False, embedder: str = "hash",
-              collection: str | None = None) -> dict:
+              collection: str | None = None, db: str | None = None) -> dict:
     """Проверка обрыва на высокой конкуренции: дефолтный пул и увеличенный.
 
     Каждый уровень — на свежем процессе API, чтобы исключить влияние
@@ -357,7 +357,7 @@ def run_cliff(credentials: dict, *, quick: bool = False, embedder: str = "hash",
     results = []
     for pool_size, concurrency in plan:
         server = serve.ApiServer(embedder=embedder, collection=collection,
-                                 pool_size=pool_size)
+                                 db=db, pool_size=pool_size)
         server.start()
         try:
             result = asyncio.run(

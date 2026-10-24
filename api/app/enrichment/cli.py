@@ -22,7 +22,7 @@ from sqlalchemy import select, text
 
 from app import db as db_module
 from app.config import settings
-from app.enrichment import pipeline, review
+from app.enrichment import CRITERIA_VERSION, pipeline, review
 from app.enrichment.config import EnrichmentConfig
 from app.models import KBRun, KBWork
 
@@ -206,9 +206,16 @@ async def _cmd_reindex(args) -> int:
     reindexed = 0
     skipped = 0
     errors: list[str] = []
+    stale: list[str] = []
     for work in rows:
         if work.status != "approved":
             # Возможно только с --work-id: без него статус отфильтрован в SQL.
+            skipped += 1
+            continue
+        # Вердикты критериев хранятся на момент ингеста: работу, одобренную до
+        # появления нового жёсткого критерия, нельзя переопубликовать вслепую.
+        if (work.criteria or {}).get("version") != CRITERIA_VERSION:
+            stale.append(f"{work.guideline_id}: критерии {((work.criteria or {}).get('version') or '—')} != {CRITERIA_VERSION}")
             skipped += 1
             continue
         if args.dry_run:
@@ -233,8 +240,12 @@ async def _cmd_reindex(args) -> int:
 
     if args.dry_run:
         print(f"dry-run: будет переиндексировано {reindexed}, пропущено {skipped}")
+        for note in stale:
+            print(f"критерии устарели: {note}", file=sys.stderr)
         return 0
     print(f"переиндексировано {reindexed}, пропущено {skipped}, ошибок {len(errors)}")
+    for note in stale:
+        print(f"критерии устарели: {note} — нужен повторный run", file=sys.stderr)
     for error in errors:
         print(f"ошибка: {error}", file=sys.stderr)
     return 1 if errors else 0

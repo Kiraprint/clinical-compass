@@ -71,7 +71,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     credentials = provision.load_credentials()
 
-    server = serve.ApiServer(embedder=args.embedder, collection=args.collection)
+    server = serve.ApiServer(
+        embedder=args.embedder, collection=args.collection, db=args.db
+    )
     server.start()
     meta["server"] = {
         "startup_s": round(server.startup_s, 2),
@@ -94,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_http:
         run_http.run_cliff(
             credentials, quick=args.quick,
-            embedder=args.embedder, collection=args.collection,
+            embedder=args.embedder, collection=args.collection, db=args.db,
         )
     common.write_json("meta.json", meta)
     from . import report

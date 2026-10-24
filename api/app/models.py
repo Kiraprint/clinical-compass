@@ -161,11 +161,12 @@ class Escalation(Base):
             unique=True,
             postgresql_where=text("checkin_session_id IS NOT NULL"),
         ),
-        # Очередь открытых сигналов: выборка по (resolved_at is null, created_at).
+        # Очередь открытых сигналов: `resolved_at IS NULL`, сортировка
+        # `created_at DESC NULLS LAST` (created_at nullable) — тот же индекс,
+        # что создаёт миграция e5f6a7b8c9d0.
         Index(
             "escalations_open_queue",
-            "resolved_at",
-            "created_at",
+            text("created_at DESC NULLS LAST"),
             postgresql_where=text("resolved_at IS NULL"),
         ),
     )

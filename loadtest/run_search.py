@@ -90,7 +90,8 @@ def _score_query(ranked: list[str], qrels: list[str]) -> dict:
 
 def direct_search_metrics() -> dict:
     """Гибридный поиск (Qdrant RRF) без HTTP, без агентского gate/fallback."""
-    common.apply_env()
+    # env уже применён точкой входа (main/run_all): повторный apply_env затёр бы
+    # --db/--collection/--embedder дефолтами.
 
     from app.services import kb
     from app.services.embeddings import build_embedder

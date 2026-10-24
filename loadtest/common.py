@@ -19,6 +19,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import statistics
 import subprocess
 import sys
@@ -92,10 +93,17 @@ def redacted_db_url(name: str | None = None) -> str:
 
 
 def _check_name(kind: str, value: str, prefix: str, env_var: str, flag: str) -> str:
+    # Только [a-z0-9_] и длина ≤ 48: имя подставляется в DDL (DROP DATABASE),
+    # поэтому кавычки/точки с запятой должны отсекаться до любого соединения.
     if not value.startswith(prefix):
         raise SafetyRefusal(
             f"{kind} {value!r} не разрешено: имя должно начинаться с {prefix!r} "
             f"(по умолчанию {prefix}test). Исправьте {env_var} или {flag}."
+        )
+    if not re.fullmatch(r"[a-z0-9_]{1,48}", value):
+        raise SafetyRefusal(
+            f"{kind} {value!r} не разрешено: только строчные латинские буквы, "
+            f"цифры и подчёркивание (≤48 символов)."
         )
     return value
 
@@ -299,6 +307,10 @@ def setup_env(
             "CC_DATABASE_URL": db_url(db_name),
             "CC_QDRANT_URL": QDRANT_URL,
             "CC_QDRANT_COLLECTION": coll,
+            # Явные имена целей: дочерние процессы (uvicorn, замеры) обязаны
+            # резолвить ту же БД/коллекцию, что и provision.
+            "CC_LOADTEST_DB": db_name,
+            "CC_LOADTEST_COLLECTION": coll,
             "CC_EMBEDDER": embedder,
             "CC_ALLOW_DEMO_SECRETS": "true",
             "CC_JWT_SECRET": JWT_SECRET,

@@ -252,22 +252,35 @@ def test_partial_kind_contributes_its_share(client, kind: str, share: float):
     assert body["medications"][0]["score"] == pytest.approx(share)
     assert body["summary"]["pct"] == round(share * 100)
 
-def test_not_scheduled_outside_denominator_and_not_a_miss(client):
-    """«Не назначено сегодня» — не приём и не пропуск: только отдельный счётчик."""
+def test_not_scheduled_removes_expected_doses_of_that_day(client):
+    """«Не назначено сегодня» снимает ожидаемые приёмы дня: и из числителя, и из знаменателя."""
     ph, pid, c = _setup(client, "adh-notsched@test.ru")
-    med = _med(client, c, pid, times_per_day=2, started_on=_iso())
+    med = _med(client, c, pid, times_per_day=2, started_on=_iso(6))
     _mark(client, ph, "taken", med["id"])
     rec = _mark(client, ph, "not_scheduled", med["id"])
     assert rec["status"] == "not_scheduled" and rec["partial_kind"] is None
 
     body = _stats(client, ph, days=7)
-    assert body["summary"]["expected"] == 2  # знаменатель — только режим
+    # Режим 2×день × 7 дней = 14, день «не назначено» убирает 2 → 12.
+    assert body["summary"]["expected"] == 12
     assert body["summary"]["score"] == 1
-    assert body["summary"]["pct"] == 50
+    assert body["summary"]["pct"] == round(1 / 12 * 100)
     assert body["not_scheduled"] == 1
     assert body["missed"] == 0
     (row,) = body["medications"]
     assert row["not_scheduled"] == 1 and row["missed"] == 0
+
+def test_all_days_not_scheduled_leaves_no_denominator(client):
+    """Если все дни «не назначено», знаменателя нет и процент не выдумывается."""
+    ph, pid, c = _setup(client, "adh-allnotsched@test.ru")
+    med = _med(client, c, pid, times_per_day=1, started_on=_iso())
+    _mark(client, ph, "not_scheduled", med["id"])
+
+    body = _stats(client, ph, days=1)
+    assert body["summary"]["expected"] == 0
+    assert body["summary"]["pct"] is None
+    assert body["not_scheduled"] == 1
+
 
 def test_legacy_partial_without_kind_still_accepted(client):
     """Старый клиент шлёт partial без kind — 201, прежняя доля 0.5."""

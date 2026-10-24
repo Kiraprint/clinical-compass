@@ -160,6 +160,7 @@
 | `test_detect_license_scans_whole_document` | строка лицензии на ~50 000-м символе документа | `CC BY-NC-SA 3.0 IGO` → `met` (раньше документ отвергался) |
 | `test_parse_rejects_dtd_before_parsing`, `test_request_caps_body_size` | XML с `DOCTYPE`/`ENTITY`; ответ PubMed > 8 MiB | `SourceError` до разбора; тело сверх лимита не принимается |
 | `test_reindex_republishes_only_approved`, `test_reindex_failure_does_not_abort_the_rest` | `reindex` после сброса коллекции Qdrant (фейковый `index`) | публикуются только `approved`; сбой одной работы не отменяет остальные; итог `переиндексировано N, пропущено M, ошибок K` |
+| `test_reindex_skips_works_with_stale_criteria_version` | работа `approved` с `criteria.version=0.9.0` | не публикуется, в stderr «критерии устарели», нужен повторный `run` |
 | `test_fetch_documents_labels_non_english_stream` | выбран русский TEXT bitstream IRIS | документ получает `language="ru"`, а не `en` |
 | `test_thread_create_message_and_read_back` | тред с 2 пациентами → вопрос → чтение | оба сообщения и цитаты в истории, карты обоих пациентов в ответе, дедуп `patient_ids` |
 | `test_foreign_thread_is_404` | чужой тред: GET/PATCH/POST/DELETE | 404 `THREAD_NOT_FOUND`, чужой тред не виден в списке |
@@ -233,7 +234,8 @@
 | `test_overall_pct_is_weighted_not_average` | препарат A 2/2, препарат B 0/1 | общий 67% (2/3), не среднее 50% |
 | `test_partial_counts_half` | 3 `partial` без `partial_kind` (legacy) при режиме 2×день | `partial_kind=less_than_prescribed`, `score=1.5`, `pct=75` |
 | `test_partial_kind_contributes_its_share` (7 кодов) | по одной `partial`-отметке на режим 1×день | `score` = 0,25 / 0,5 / 0,75 / 0,5 / 0,667 / 0,5 / 0,5; `pct` = 25/50/75/50/67/50/50 |
-| `test_not_scheduled_outside_denominator_and_not_a_miss` | `taken` + `not_scheduled` при режиме 2×день | `expected=2`, `score=1`, `pct=50`, `not_scheduled=1`, `missed=0` |
+| `test_not_scheduled_removes_expected_doses_of_that_day` | `taken` + `not_scheduled` при режиме 2×день и 7 днях | `expected=12`, `score=1`, `pct=8`, `not_scheduled=1`, `missed=0` |
+| `test_all_days_not_scheduled_leaves_no_denominator` | все дни «не назначено» | `expected=0`, `pct=null` |
 | `test_legacy_partial_without_kind_still_accepted` | старый клиент: `partial` без поля `partial_kind` | 201, `partial_kind=less_than_prescribed`, доля 0,5 |
 | `test_partial_with_explicit_null_kind_422` | `partial` + явный `partial_kind: null` | 422 `PARTIAL_KIND_REQUIRED` |
 | `test_partial_kind_rejected_for_other_statuses` | `taken`/`missed`/`not_scheduled` + `partial_kind=half` | 422 `PARTIAL_KIND_INVALID` |

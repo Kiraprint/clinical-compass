@@ -127,14 +127,15 @@ async def compute(db: AsyncSession, patient_id, days: int = 14) -> dict:
         active_days = _expected_days(med, start, end)
         if med.times_per_day is None or active_days <= 0:
             continue
-        expected = med.times_per_day * active_days
         own = [r for r in rows if r.medication_id == med.id]
         taken = sum(1 for r in own if r.status == "taken")
         partial = sum(1 for r in own if r.status == "partial")
         missed = sum(1 for r in own if r.status == "missed")
-        # not_scheduled — не приём и не пропуск: вне числителя и знаменателя,
-        # только отдельный счётчик.
+        # «Не назначено сегодня» — не приём и не пропуск: снимает ожидаемые
+        # приёмы этого дня с назначения (перерыв/приём по требованию), поэтому
+        # вычитается и из числителя, и из знаменателя.
         not_scheduled = sum(1 for r in own if r.status == "not_scheduled")
+        expected = max(0, med.times_per_day * active_days - not_scheduled * med.times_per_day)
         score = taken + _partial_score(own)
         med_by_id[med.id] = med
         included.append({
