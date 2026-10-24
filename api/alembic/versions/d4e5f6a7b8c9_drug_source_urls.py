@@ -22,7 +22,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision = "d4e5f6a7b8c9"
-down_revision = "c8d9e0f1a2b3"
+down_revision = "d1a2b3c4e5f6"
 branch_labels = None
 depends_on = None
 
