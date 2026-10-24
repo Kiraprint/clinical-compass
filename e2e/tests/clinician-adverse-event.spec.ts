@@ -43,16 +43,18 @@ test.describe("Нежелательные явления", () => {
     await row.getByRole("button", { name: "Открыть" }).click();
     await expect(page.getByRole("heading", { name: "Нежелательные явления", exact: true })).toBeVisible();
 
-    // Пустое описание → кнопка неактивна.
-    await expect(page.getByRole("button", { name: "Зарегистрировать НЯ" })).toBeDisabled();
+    // Форма одна и живёт внутри блока проверки: сначала раскрываем «Сообщить о НЯ».
+    await page.getByRole("button", { name: "Сообщить о НЯ" }).click();
+    // Пустое описание → сохранение неактивно.
+    await expect(page.getByRole("button", { name: "Сохранить НЯ" })).toBeDisabled();
 
     // Заполняем НЯ: текст, тяжесть «тяжёлое», препарат, действие.
     const eventText = `Головокружение e2e ${Date.now()}`;
-    await page.getByPlaceholder("Описание нежелательного явления").fill(eventText);
+    await page.getByPlaceholder("Описание НЯ").fill(eventText);
     await page.getByLabel("Тяжесть НЯ").selectOption("severe");
     await page.getByPlaceholder("Препарат (напр. Авиандр)").fill("Авиандр");
     await page.getByLabel("Действие при НЯ").selectOption("referred");
-    await page.getByRole("button", { name: "Зарегистрировать НЯ" }).click();
+    await page.getByRole("button", { name: "Сохранить НЯ" }).click();
 
     // НЯ появилось в таблице с бейджем тяжести RED (severe).
     const aeRow = page.locator("tbody tr", { hasText: eventText }).first();

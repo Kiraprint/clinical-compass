@@ -102,6 +102,34 @@ function EscalationsQueue({
 }) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState("");
+  // История закрытых сигналов (status=resolved) — только чтение, по запросу.
+  const [showClosed, setShowClosed] = useState(false);
+  const [closed, setClosed] = useState<Escalation[]>([]);
+  const [closedError, setClosedError] = useState("");
+  const [closedLoading, setClosedLoading] = useState(false);
+  useEffect(() => {
+    if (!showClosed) return;
+    let cancelled = false;
+    setClosedLoading(true);
+    setClosedError("");
+    api
+      .openEscalations("resolved")
+      .then((resp) => {
+        if (!cancelled) setClosed(resp.items);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setClosed([]);
+          setClosedError("Не удалось загрузить закрытые сигналы");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setClosedLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showClosed]);
   const closeSignal = async (id: string) => {
     setBusyId(id);
     setError("");
@@ -119,75 +147,143 @@ function EscalationsQueue({
       setBusyId(null);
     }
   };
-  if (items.length === 0) return null;
+  // Карточка видна всегда: без открытых сигналов она даёт доступ к истории разбора.
   return (
     <div className="card">
       <h2>Очередь эскалаций ({items.length})</h2>
       <p style={{ color: "#5a6478", fontSize: 13 }}>
         Открытые сигналы чек-инов и скринингов, включая пациентов без закреплённого врача.
       </p>
+      <p style={{ marginBottom: 12 }}>
+        <button onClick={() => setShowClosed((v) => !v)}>
+          {showClosed ? "Только открытые" : "Показать закрытые"}
+        </button>
+      </p>
       {error && <p style={{ color: "#b3261e", fontSize: 13 }}>{error}</p>}
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Дата</th>
-              <th>Пациент</th>
-              <th>Тип</th>
-              <th>Риск</th>
-              <th>Ответы риска</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.map((e) => (
-              <tr key={e.id} data-escalation={e.id}>
-                <td>{e.created_at ? new Date(e.created_at).toLocaleString("ru-RU") : "—"}</td>
-                <td>
-                  {e.in_roster ? (
-                    <a
-                      href={"#patient=" + e.patient_id}
-                      style={{ color: "#2f6fed", textDecoration: "none", fontWeight: 600 }}
-                    >
-                      {e.patient_fio ?? "Пациент"}
-                    </a>
-                  ) : (
-                    <span style={{ fontWeight: 600 }}>{e.patient_fio ?? "Пациент"}</span>
-                  )}
-                </td>
-                <td>
-                  <span
-                    className={`badge ${
-                      e.kind === "CHECKIN_RISK_URGENT" || e.kind === "SUICIDAL" ? "RED" : "YELLOW"
-                    }`}
-                  >
-                    {ESCALATION_KINDS[e.kind] ?? e.kind}
-                  </span>
-                </td>
-                <td>{e.safety ?? "—"}</td>
-                <td style={{ fontSize: 13 }}>
-                  {RISK_ITEM_IDS.filter((id) => e.risk_answers?.[id] != null)
-                    .map((id) => `${id} ${e.risk_answers?.[id] ? "Да" : "Нет"}`)
-                    .join(" · ") || "—"}
-                </td>
-                <td>
-                  <button
-                    onClick={() => closeSignal(e.id)}
-                    disabled={busyId === e.id}
-                    aria-label={`Закрыть сигнал ${e.patient_fio ?? e.patient_id}`}
-                  >
-                    {busyId === e.id ? "Закрываем…" : "Закрыть сигнал"}
-                  </button>
-                </td>
+      {showClosed ? (
+        <>
+          {closedError && <p style={{ color: "#b3261e", fontSize: 13 }}>{closedError}</p>}
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Закрыт</th>
+                  <th>Пациент</th>
+                  <th>Тип</th>
+                  <th>Риск</th>
+                  <th>Комментарий</th>
+                </tr>
+              </thead>
+              <tbody>
+                {closedLoading ? (
+                  <tr>
+                    <td colSpan={5}>Загрузка…</td>
+                  </tr>
+                ) : closed.length === 0 && !closedError ? (
+                  <tr>
+                    <td colSpan={5}>Закрытых сигналов нет</td>
+                  </tr>
+                ) : (
+                  closed.map((e) => (
+                    <tr key={e.id} data-escalation={e.id}>
+                      <td>{e.resolved_at ? new Date(e.resolved_at).toLocaleString("ru-RU") : "—"}</td>
+                      <td>
+                        {e.in_roster ? (
+                          <a
+                            href={"#patient=" + e.patient_id}
+                            style={{ color: "#2f6fed", textDecoration: "none", fontWeight: 600 }}
+                          >
+                            {e.patient_fio ?? "Пациент"}
+                          </a>
+                        ) : (
+                          <span style={{ fontWeight: 600 }}>{e.patient_fio ?? "Пациент"}</span>
+                        )}
+                      </td>
+                      <td>
+                        <span
+                          className={`badge ${
+                            e.kind === "CHECKIN_RISK_URGENT" || e.kind === "SUICIDAL" ? "RED" : "YELLOW"
+                          }`}
+                        >
+                          {ESCALATION_KINDS[e.kind] ?? e.kind}
+                        </span>
+                      </td>
+                      <td>{e.safety ?? "—"}</td>
+                      <td style={{ fontSize: 13 }}>{e.resolution?.trim() ? e.resolution : "без комментария"}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Дата</th>
+                <th>Пациент</th>
+                <th>Тип</th>
+                <th>Риск</th>
+                <th>Ответы риска</th>
+                <th></th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {items.length === 0 && (
+                <tr>
+                  <td colSpan={6}>Открытых сигналов нет</td>
+                </tr>
+              )}
+              {items.map((e) => (
+                <tr key={e.id} data-escalation={e.id}>
+                  <td>{e.created_at ? new Date(e.created_at).toLocaleString("ru-RU") : "—"}</td>
+                  <td>
+                    {e.in_roster ? (
+                      <a
+                        href={"#patient=" + e.patient_id}
+                        style={{ color: "#2f6fed", textDecoration: "none", fontWeight: 600 }}
+                      >
+                        {e.patient_fio ?? "Пациент"}
+                      </a>
+                    ) : (
+                      <span style={{ fontWeight: 600 }}>{e.patient_fio ?? "Пациент"}</span>
+                    )}
+                  </td>
+                  <td>
+                    <span
+                      className={`badge ${
+                        e.kind === "CHECKIN_RISK_URGENT" || e.kind === "SUICIDAL" ? "RED" : "YELLOW"
+                      }`}
+                    >
+                      {ESCALATION_KINDS[e.kind] ?? e.kind}
+                    </span>
+                  </td>
+                  <td>{e.safety ?? "—"}</td>
+                  <td style={{ fontSize: 13 }}>
+                    {RISK_ITEM_IDS.filter((id) => e.risk_answers?.[id] != null)
+                      .map((id) => `${id} ${e.risk_answers?.[id] ? "Да" : "Нет"}`)
+                      .join(" · ") || "—"}
+                  </td>
+                  <td>
+                    <button
+                      onClick={() => closeSignal(e.id)}
+                      disabled={busyId === e.id}
+                      aria-label={`Закрыть сигнал ${e.patient_fio ?? e.patient_id}`}
+                    >
+                      {busyId === e.id ? "Закрываем…" : "Закрыть сигнал"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
-
 
 export default function ClinicianView() {
   const [section, setSection] = useState<"patients" | "chats" | "library">("patients");
@@ -467,13 +563,6 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
   const [picked, setPicked] = useState<string[]>([]);
   const [scaleSaved, setScaleSaved] = useState<number | null>(null);
   const [scaleError, setScaleError] = useState("");
-  const [aeText, setAeText] = useState("");
-  const [aeSeverity, setAeSeverity] = useState("mild");
-  const [aeDate, setAeDate] = useState(new Date().toISOString().slice(0, 10));
-  const [aeDrug, setAeDrug] = useState("");
-  const [aeAction, setAeAction] = useState("monitoring");
-  const [aeSaved, setAeSaved] = useState<number | null>(null);
-  const [aeError, setAeError] = useState("");
   const [aeList, setAeList] = useState<Report["adverse_events"]>([]);
   // FR-28: справочник ГРЛС для связи НЯ с препаратом (доступ врачу).
   const [drugs, setDrugs] = useState<Drug[]>([]);
@@ -590,22 +679,6 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
     }
   };
 
-  const addAdverseEvent = async () => {
-    if (!report || !aeText.trim()) return;
-    setAeError("");
-    try {
-      const ev = await api.createAdverseEvent(report.patient_id, {
-        event_text: aeText.trim(), severity: aeSeverity, onset_date: aeDate,
-        suspected_drug: aeDrug.trim() || undefined, action_taken: aeAction,
-      });
-      setAeList([ev, ...aeList]);
-      setAeText(""); setAeDrug(""); setAeSaved(Date.now());
-    } catch (e: unknown) {
-      setAeError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-
   const runImport = async () => {
     if (!report || !histText.trim()) return;
     setHistErr("");
@@ -629,6 +702,7 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
   }
   if (!report) return <div className="card">Загрузка…</div>;
   const last = report.last_assessment;
+  const pendingAeCount = aeList.filter((e) => e.status === "pending").length;
   const assessScale = report.available_scales.find((s) => s.code === assessCode);
   // Итог в summary свёрнутой карточки: свежая оценка из формы или последняя сохранённая.
   const assessFmt = (score: number, sev: string, at: string) =>
@@ -894,28 +968,36 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
       )}
 
       <h3>Нежелательные явления</h3>
-      {aeList.filter((e) => e.status === "pending").length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 12 }}>
-          <strong style={{ fontSize: 14 }}>
-            На проверке: {aeList.filter((e) => e.status === "pending").length}
-          </strong>
-          {aeList
-            .filter((e) => e.status === "pending")
-            .map((e) => (
-              <VerifyAdverseEvent
-                key={e.id}
-                event={e}
-                medications={report.adherence.medications}
-                drugs={drugs}
-                onOpenLibrary={onOpenLibrary}
-                onVerified={(updated) => {
-                  setAeList((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
-                  onRefresh();
-                }}
-              />
-            ))}
-        </div>
-      )}
+      {/* FR-28: единый блок — проверка сообщений пациента и ручное сообщение врача. */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 12 }}>
+        {pendingAeCount > 0 && (
+          <>
+            <strong style={{ fontSize: 14 }}>На проверке: {pendingAeCount}</strong>
+            {aeList
+              .filter((e) => e.status === "pending")
+              .map((e) => (
+                <VerifyAdverseEvent
+                  key={e.id}
+                  event={e}
+                  medications={report.adherence.medications}
+                  drugs={drugs}
+                  onOpenLibrary={onOpenLibrary}
+                  onVerified={(updated) => {
+                    setAeList((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
+                    onRefresh();
+                  }}
+                />
+              ))}
+          </>
+        )}
+        <ReportAdverseEvent
+          patientId={report.patient_id}
+          onCreated={(created) => {
+            setAeList((prev) => [created, ...prev]);
+            onRefresh();
+          }}
+        />
+      </div>
       {aeList.length > 0 ? (
         <div className="table-wrap">
           <table>
@@ -954,27 +1036,6 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
       ) : (
         <p style={{ color: "#5a6478", fontSize: 13 }}>Нежелательные явления не зарегистрированы.</p>
       )}
-      <div style={{ display: "flex", flexDirection: "column", gap: 6, maxWidth: 560, marginTop: 8 }}>
-        <input placeholder="Описание нежелательного явления" value={aeText} onChange={(e) => setAeText(e.target.value)} />
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <select aria-label="Тяжесть НЯ" value={aeSeverity} onChange={(e) => setAeSeverity(e.target.value)}>
-            <option value="mild">лёгкое</option><option value="moderate">умеренное</option><option value="severe">тяжёлое</option>
-          </select>
-          <input type="date" value={aeDate} onChange={(e) => setAeDate(e.target.value)} style={{ width: "auto" }} />
-          <input placeholder="Препарат (напр. Авиандр)" value={aeDrug} onChange={(e) => setAeDrug(e.target.value)} />
-          <select aria-label="Действие при НЯ" value={aeAction} onChange={(e) => setAeAction(e.target.value)}>
-            <option value="none">нет действия</option><option value="monitoring">наблюдение</option>
-            <option value="dose_reduced">снижение дозы</option><option value="stopped">отмена</option>
-            <option value="referred">направление</option>
-          </select>
-        </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <button onClick={addAdverseEvent} disabled={!aeText.trim()}>Зарегистрировать НЯ</button>
-          {aeSaved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
-        </div>
-      </div>
-      {aeError && <p className="error">{aeError}</p>}
-
       <h3>Переписка с пациентом</h3>
       <div className="chat-mini">
         {chatMsgs.length > 0 ? chatMsgs.slice(-3).map((m) => (
@@ -1130,6 +1191,108 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
             : ""}
         </div>
       ))}
+    </div>
+  );
+}
+
+// FR-28: ручное сообщение врача о НЯ. Живёт внутри блока проверки сообщений
+// пациента — второй конкурирующей формы «зарегистрировать НЯ» в карточке нет.
+function ReportAdverseEvent({ patientId, onCreated }: {
+  patientId: string;
+  onCreated: (created: ClinicianAdverseEvent) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const [severity, setSeverity] = useState<AdverseSeverity>("mild");
+  const [onsetDate, setOnsetDate] = useState(new Date().toISOString().slice(0, 10));
+  const [drug, setDrug] = useState("");
+  const [action, setAction] = useState("monitoring");
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async () => {
+    if (!text.trim()) return;
+    setErr("");
+    setBusy(true);
+    try {
+      const created = await api.createAdverseEvent(patientId, {
+        event_text: text.trim(),
+        severity,
+        onset_date: onsetDate,
+        suspected_drug: drug.trim() || undefined,
+        action_taken: action,
+      });
+      onCreated(created);
+      setText("");
+      setDrug("");
+      setSaved(true);
+      setOpen(false);
+    } catch (e: unknown) {
+      setErr(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <button className="ghost" onClick={() => setOpen((v) => !v)}>
+          {open ? "Свернуть сообщение о НЯ" : "Сообщить о НЯ"}
+        </button>
+        {saved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
+      </div>
+      {open && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, maxWidth: 560, marginTop: 8 }}>
+          <textarea
+            rows={2}
+            placeholder="Описание НЯ"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+          />
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <select
+              aria-label="Тяжесть НЯ"
+              value={severity}
+              onChange={(e) => setSeverity(e.target.value as AdverseSeverity)}
+            >
+              <option value="mild">лёгкое</option>
+              <option value="moderate">умеренное</option>
+              <option value="severe">тяжёлое</option>
+            </select>
+            <input
+              type="date"
+              aria-label="Дата начала НЯ"
+              value={onsetDate}
+              onChange={(e) => setOnsetDate(e.target.value)}
+              style={{ width: "auto" }}
+            />
+            <input
+              placeholder="Препарат (напр. Авиандр)"
+              value={drug}
+              onChange={(e) => setDrug(e.target.value)}
+            />
+            <select
+              aria-label="Действие при НЯ"
+              value={action}
+              onChange={(e) => setAction(e.target.value)}
+            >
+              <option value="none">нет действия</option>
+              <option value="monitoring">наблюдение</option>
+              <option value="dose_reduced">снижение дозы</option>
+              <option value="stopped">отмена</option>
+              <option value="referred">направление</option>
+            </select>
+          </div>
+          <div>
+            <button onClick={submit} disabled={busy || !text.trim()}>
+              Сохранить НЯ
+            </button>
+          </div>
+          {err && <p className="error">{err}</p>}
+        </div>
+      )}
     </div>
   );
 }
