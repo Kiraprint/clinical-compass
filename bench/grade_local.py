@@ -57,9 +57,15 @@ def main() -> None:
     ap.add_argument("--pool", default=str(kb.DATA / "kb_pool_merged.jsonl"))
     ap.add_argument("--model", default="Qwen/Qwen3-4B-Instruct-2507")
     ap.add_argument("--out", default=str(kb.DATA / "qrels.jsonl"))
+    ap.add_argument("--corpus", default=str(kb.CORPUS), help="снапшот КБ (под чанкер)")
     ap.add_argument("--batch", type=int, default=12, help="сколько промптов в одном generate")
     ap.add_argument("--per-prompt", type=int, default=40, help="кандидатов на один промпт")
     ap.add_argument("--chunk-chars", type=int, default=280)
+    ap.add_argument(
+        "--keep-header",
+        action="store_true",
+        help="не срезать метаданный заголовок источника (по умолчанию срезается)",
+    )
     ap.add_argument("--max-new-tokens", type=int, default=1600)
     ap.add_argument("--limit", type=int, default=0, help="только первые N запросов (отладка)")
     args = ap.parse_args()
@@ -67,7 +73,7 @@ def main() -> None:
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    corpus = {r["id"]: r for r in load_jsonl(kb.CORPUS)}
+    corpus = {r["id"]: r for r in load_jsonl(Path(args.corpus))}
     queries = {r["id"]: r for r in load_jsonl(kb.QUERIES)}
     pool = load_jsonl(Path(args.pool))
     out_path = Path(args.out)
@@ -90,9 +96,24 @@ def main() -> None:
         for i in range(0, len(cands), args.per_prompt):
             jobs.append((p["qid"], cands[i : i + args.per_prompt]))
 
+    def body(text: str) -> str:
+        """Тело чанка без метаданного заголовка источника.
+
+        Заголовок («…ВОЗ, редакция… Лицензия… Источник…») одинаков у всех чанков
+        работы и не несёт релевантности; при truncation он съедал весь бюджет
+        символов, и судья оценивал заголовок вместо текста (найденный дефект:
+        разметка 1800-знаковых чанков при --chunk-chars 280 видела ~50 знаков тела).
+        """
+        if args.keep_header:
+            return text
+        head, sep, tail = text.partition("\n\n")
+        if sep and ("Лицензия:" in head or "Источник:" in head):
+            return tail or text
+        return text
+
     def build(qid: str, cands: list[str]) -> str:
         blocks = "\n\n".join(
-            f"[{n + 1}] " + " ".join(corpus[cid]["text"][: args.chunk_chars].split())
+            f"[{n + 1}] " + " ".join(body(corpus[cid]["text"])[: args.chunk_chars].split())
             for n, cid in enumerate(cands)
             if cid in corpus
         )

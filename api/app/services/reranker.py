@@ -18,6 +18,7 @@ Qdrant уже фильтрует такие точки, но реранк при
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from typing import Protocol
 
@@ -27,6 +28,38 @@ log = logging.getLogger(__name__)
 
 # Сколько чанков отдавать кросс-энкодеру за раз (память GPU × длина пары).
 _BATCH = 8
+
+
+def _query_prefixes(query: str) -> set[str]:
+    """Стем-префиксы слов запроса (5 символов) — грубая замена стеммеру.
+
+    Нужны только для выбора окна чанка: «сертралина» и «сертралин» дают общий
+    префикс «сертр», поэтому окно находится без словаря/морфологии.
+    """
+    words = [w for w in re.findall(r"[\w-]{4,}", (query or "").lower()) if len(w) >= 4]
+    return {w[:5] for w in words}
+
+
+def best_window(text: str, query: str, width: int) -> str:
+    """Окно чанка, лучше всего совпадающее с запросом (CC_RERANK_WINDOW).
+
+    Кросс-энкодер с max_length 512 видит ~512 токенов: у чанка 1800 знаков хвост
+    с ответом отбрасывается. Скользим окном width с шагом width/2 и берём
+    максимум по числу префиксов слов запроса внутри окна (тай-брейк — раньше).
+    """
+    if width <= 0 or len(text) <= width:
+        return text
+    prefixes = _query_prefixes(query)
+    if not prefixes:
+        return text[:width]
+    step = max(width // 2, 1)
+    best, best_hits = text[:width], -1
+    for start in range(0, len(text) - width + 1, step):
+        frag = text[start : start + width].lower()
+        hits = sum(1 for p in prefixes if p in frag)
+        if hits > best_hits:
+            best, best_hits = text[start : start + width], hits
+    return best
 
 
 class Reranker(Protocol):
@@ -60,10 +93,15 @@ class CrossEncoderReranker:
         resolved = None if (device or "auto") == "auto" else device
         self._m = CrossEncoder(model_id, device=resolved, max_length=max_length)
         self._batch = _BATCH
+        # CC_RERANK_WINDOW: 0 — CE видит начало чанка; >0 — лучшее окно такой
+        # ширины (docs/08 §4.8). Длинные чанки без окна теряют ответ в хвосте.
+        self._window = max(int(settings.rerank_window or 0), 0)
 
     def score(self, query: str, texts: list[str]) -> list[float]:
         if not texts:
             return []
+        if self._window:
+            texts = [best_window(t, query, self._window) for t in texts]
         out = self._m.predict(
             [(query, t) for t in texts],
             batch_size=self._batch,

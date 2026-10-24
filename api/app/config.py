@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     # CC_RERANKER: off | id кросс-энкодера (BAAI/bge-reranker-v2-m3 и др.).
     # Требует extra `rerank`; без него — предупреждение и порядок RRF (docs/08 §4).
     reranker: str = "off"
+    # CC_RERANK_WINDOW: ширина окна чанка, которое видит кросс-энкодер
+    # (0 — начало чанка; 700 — лучшее по словам запроса окно, docs/08 §4.8).
+    rerank_window: int = 0
     # CC_RETRIEVAL_CANDIDATES: глубина пула до реранка/отсечки (0 → max(limit*3, 10)).
     retrieval_candidates: int = 0
     # CC_RRF_K: константа RRF-слияния dense+sparse (Qdrant RrfQuery, docs/08 §4).
@@ -79,6 +82,12 @@ class Settings(BaseSettings):
     # зовёт clear_corpus_cache), поэтому TTL — единственная runtime-инвалидация.
     # 0 → кеш выключен.
     kb_corpus_ttl_seconds: float = 60.0
+    # CC_KB_CHUNK_CHARS / CC_KB_CHUNK_OVERLAP: нарезка чанков КБ — общий
+    # контракт kb_seed (сид) и enrichment/index.py (гайдлайны ВОЗ, статьи).
+    # 1800/120 — исторический дефолт; 600/120 измеренно поднимает Hit@3
+    # поиска (bench/REPORT-retrieval.md §6), но требует переиндексации.
+    kb_chunk_chars: int = 1800
+    kb_chunk_overlap: int = 120
     # CC_ASSISTANT_LLM_URL: OpenAI-совместимый /v1 (llama-server, vLLM, Ollama).
     # Пусто → LLM-роутинг топиков выключен (поиск по всем разделам). LLM получает
     # только очищенный от ПДн запрос и выбирает тулзу search_<раздел> (docs/12).

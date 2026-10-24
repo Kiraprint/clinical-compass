@@ -134,17 +134,21 @@ def _guideline_docs(with_full_text: bool = False) -> list[dict]:
             cache = _GUIDELINES_CACHE / f"{g['id']}.txt"
             if cache.exists():
                 full = cache.read_text(encoding="utf-8")
-                for i in range(0, len(full), 1800):
-                    chunk = full[i : i + 1800].strip()
-                    if chunk:
-                        docs.append(
-                            {
-                                "guideline_id": f"kr-{g['id']}-t{i // 1800}",
-                                "source_title": g["title"],
-                                "topic": "РЕКОМЕНДАЦИИ",
-                                "text": chunk,
-                            }
-                        )
+                # Нарезка та же, что у enrichment/index.py: параметры CC_KB_CHUNK_*
+                # (docs/08 §3), чтобы сид и гайдлайны ВОЗ индексировались одинаково.
+                from app.enrichment.index import chunk_text
+
+                for idx, chunk in enumerate(
+                    chunk_text(full, settings.kb_chunk_chars, settings.kb_chunk_overlap)
+                ):
+                    docs.append(
+                        {
+                            "guideline_id": f"kr-{g['id']}-t{idx}",
+                            "source_title": g["title"],
+                            "topic": "РЕКОМЕНДАЦИИ",
+                            "text": chunk,
+                        }
+                    )
     return docs
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from app.config import settings
 from app.enrichment.who import WHO_HANDLES, WHOHandle
 
 # Продуктовый скоуп (docs/13 §2): тревога/депрессия + коморбидность, ТРД,
@@ -113,7 +114,10 @@ class EnrichmentConfig:
             timeout=timeout,
             interval_hours=float(_env_int("CC_ENRICH_INTERVAL_HOURS", 24)),
             run_on_start=_env_bool("CC_ENRICH_RUN_ON_START", True),
-            chunk_chars=_env_int("CC_ENRICH_CHUNK_CHARS", 1800),
-            chunk_overlap=_env_int("CC_ENRICH_CHUNK_OVERLAP", 120),
+            # Дефолты — общие с сидом (CC_KB_CHUNK_*, docs/08 §3), чтобы
+            # гайдлайны ВОЗ и остальная КБ резались одинаково; CC_ENRICH_CHUNK_*
+            # остаётся точечным переопределением для обогащения.
+            chunk_chars=_env_int("CC_ENRICH_CHUNK_CHARS", settings.kb_chunk_chars),
+            chunk_overlap=_env_int("CC_ENRICH_CHUNK_OVERLAP", settings.kb_chunk_overlap),
             user_agent=agent,
         )

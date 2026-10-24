@@ -19,9 +19,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -140,7 +142,41 @@ class CrossEncoderReranker:
 
     def score(self, query: str, texts: list[str]) -> np.ndarray:
         cut = [t[: self.chars] if self.chars else t for t in texts]
+        if getattr(self, "window", 0):
+            cut = [best_window(t, query, self.window) for t in cut]
         return np.asarray(self._m.predict([(query, t) for t in cut], show_progress_bar=False))
+
+
+def _terms(text: str) -> set[str]:
+    """Стем-префиксы содержательных слов запроса (5 символов, длина слова >= 4).
+
+    Грубая, но устойчивая к словоформам замена стеммеру: «сертралина» и
+    «сертралин» дают общий префикс «сертр», латиница работает так же.
+    """
+    words = [w for w in re.findall(r"[\w-]{4,}", text.lower()) if len(w) >= 4]
+    return {w[:5] for w in words}
+
+
+def best_window(text: str, query: str, width: int) -> str:
+    """Лучшее окно чанка по лексическому совпадению с запросом.
+
+    Кросс-энкодер с max_length 512 видит ~512 токенов: у длинного чанка хвост с
+    ответом отбрасывается. Скользим окном `width` с шагом width/2 и берём
+    максимум по числу слов запроса внутри окна (тай-брейк — более раннее окно).
+    """
+    if width <= 0 or len(text) <= width:
+        return text
+    terms = _terms(query)
+    if not terms:
+        return text[:width]
+    step = max(width // 2, 1)
+    best, best_hits = text[:width], -1
+    for start in range(0, len(text) - width + 1, step):
+        frag = text[start : start + width].lower()
+        hits = sum(1 for t in terms if t in frag)
+        if hits > best_hits:
+            best, best_hits = text[start : start + width], hits
+    return best
 
 
 class Qwen3Reranker:
@@ -166,9 +202,13 @@ class Qwen3Reranker:
         self._suffix = "<|im_end|>\n<|im_start|>assistant\n"
         self._instruct = "Given a clinical question, retrieve relevant passages that answer the question"
 
+    window = 0
+
     def score(self, query: str, texts: list[str]) -> np.ndarray:
         import torch
 
+        if self.window:
+            texts = [best_window(t, query, self.window) for t in texts]
         # Микро-батчи: один forward на 100 документов по 2048 токенов не влезает
         # в 24 ГБ рядом с эмбеддером (OOM 11.9 ГБ), а по 8 — стабильно.
         out: list[float] = []
@@ -225,8 +265,23 @@ def load_embedder(name: str):
                       max_length=spec.get("max_length", 512))
 
 
+_CORPUS_TAG = ""
+
+
+def _corpus_tag(corpus: list[dict]) -> str:
+    """Отпечаток снапшота: кэш векторов нельзя переиспользовать между разными
+    корпусами (нарезка 600 vs 1800 давала IndexError: плотная матрица 998 строк
+    против корпуса 3366)."""
+    h = hashlib.sha1()
+    h.update(str(len(corpus)).encode())
+    for r in (corpus[0], corpus[-1]) if corpus else ():
+        h.update(r["id"].encode())
+        h.update(r["text"][:200].encode())
+    return h.hexdigest()[:8]
+
+
 def embedder_cache_path(name: str) -> Path:
-    return CACHE / f"{name}.npz"
+    return CACHE / f"{name}-{_CORPUS_TAG}.npz"
 
 
 def build_dense(name: str, corpus: list[dict], *, need_sparse: bool, need_colbert: bool,
@@ -243,19 +298,20 @@ def build_dense(name: str, corpus: list[dict], *, need_sparse: bool, need_colber
         if name == "hash":
             dense = np.asarray([emb.dense(t) for t in texts], dtype=np.float32)
         else:
-            dense = emb.encode_passages(texts, batch_size=batch_size)
+            encode = getattr(emb, "encode_passages", None) or emb.dense_passages
+            dense = encode(texts, batch_size=batch_size)
         np.savez_compressed(path, dense=dense)
     sparse = None
     colbert = None
     if need_sparse and name == "bge-m3":
-        sp_path = CACHE / f"{name}.sparse.json"
+        sp_path = CACHE / f"{name}-{_CORPUS_TAG}.sparse.json"
         if sp_path.exists():
             sparse = json.loads(sp_path.read_text())
         else:
             sparse = emb.sparse_weights(texts, batch_size=batch_size)
             sp_path.write_text(json.dumps(sparse))
     if need_colbert and name == "bge-m3":
-        cb_path = CACHE / f"{name}.colbert.npz"
+        cb_path = CACHE / f"{name}-{_CORPUS_TAG}.colbert.npz"
         if cb_path.exists():
             loaded = np.load(cb_path, allow_pickle=True)["vecs"]
             colbert = list(loaded)
@@ -328,6 +384,7 @@ def main() -> None:
     ap.add_argument("--rrf-k", type=int, default=60)
     ap.add_argument("--rerank-depth", type=int, default=50)
     ap.add_argument("--rerank-chars", type=int, default=0, help="обрезать фрагмент перед CE (0 — целиком)")
+    ap.add_argument("--rerank-window", type=int, default=0, help="CE видит лучшее окно чанка такой ширины (0 — начало)")
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--limit", type=int, default=10)
     ap.add_argument("--dump-pools", default="", help="путь JSONL для пула кандидатов")
@@ -336,6 +393,8 @@ def main() -> None:
     args = ap.parse_args()
 
     corpus = kbb.load_corpus(Path(args.corpus))
+    global _CORPUS_TAG
+    _CORPUS_TAG = _corpus_tag(corpus)
     queries = [json.loads(x) for x in Path(args.queries).read_text(encoding="utf-8").splitlines() if x.strip()]
     if args.only_queries:
         keep = {x.strip() for x in Path(args.only_queries).read_text().split() if x.strip()}
@@ -379,8 +438,12 @@ def main() -> None:
             t0 = time.perf_counter()
             if kind == "ce":
                 reranker = CrossEncoderReranker(model_id, chars=args.rerank_chars, **kwargs)
+                if args.rerank_window:
+                    reranker.window = args.rerank_window
             else:
                 reranker = Qwen3Reranker(model_id)
+                if args.rerank_window:
+                    reranker.window = args.rerank_window
             print(f"[{sname}] reranker {model_id} loaded in {time.perf_counter() - t0:.1f}s", file=sys.stderr)
 
         # прогрев: первый вызов грузит ядра CUDA и инициализирует кэши — в латентность не идёт
