@@ -17,7 +17,9 @@ e2e/test-results/
 
 # Bench (эмбеддеры): venv и производные данные бенчмарка в git не тащим
 bench/.venv/
-bench/data/
+bench/data/*
+!bench/data/qrels.jsonl
+!bench/data/kb_queries.jsonl
 bench/sources/
 bench/ner/data/
 bench/__pycache__/

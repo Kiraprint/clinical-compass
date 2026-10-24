@@ -164,16 +164,20 @@ LLM-асессора по пулу из восьми стеков.
 # 1) снимок корпуса из Qdrant + набор запросов (LLM-генерация + 30 ручных)
 .venv/bin/python bench/build_kb_bench.py --export
 
-# 2) разметка пула (идемпотентно, докачивается; см. отчёт §7 про воркеры)
-.venv/bin/python bench/eval_retrieval.py --stacks all --dump-pools bench/data/kb_pool.jsonl
-.venv/bin/python bench/grade_kb_qrels.py --pool bench/data/kb_pool.jsonl --workers 4
+# 2) разметка пула локальной instruct-моделью на GPU (батчи, идемпотентно,
+#    докачивается построчно; ~17 с/запрос на RTX 5090)
+../bench/.venv/bin/python bench/eval_retrieval.py --stacks all --dump-pools bench/data/kb_pool.jsonl
+../bench/.venv/bin/python bench/grade_local.py --pool bench/data/kb_pool.jsonl
+# альтернатива — шлюзовой асессор (медленнее: 60–120 с на вызов):
+# .venv/bin/python bench/grade_kb_qrels.py --pool bench/data/kb_pool.jsonl --workers 4
 
 # 3) проверки набора (анти-предвзятость, детерминированные)
-.venv/bin/python bench/qa_qrels.py
+.venv/bin/python bench/qa_qrels.py --qrels bench/data/qrels.jsonl
 
-# 4) матрица стеков: эмбеддеры + реранк, метрики/латентность/VRAM
-.venv/bin/python bench/eval_retrieval.py --stacks all --json-out bench/data/eval_all.json
-.venv/bin/python bench/report_table.py bench/data/eval_all.json
+# 4) матрица стеков: эмбеддеры, RRF-k, реранк; метрики/латентность/VRAM
+.venv/bin/python bench/eval_retrieval.py --stacks all --qrels bench/data/qrels.jsonl \
+  --json-out bench/data/eval_all.json
+.venv/bin/python bench/report_table.py bench/data/eval_all.json --qrels bench/data/qrels.jsonl
 
 # 5) валидация победной конфигурации на продовом пути (kb.hybrid_search)
 CC_EMBEDDER=bge-m3 CC_QDRANT_COLLECTION=kb_eval_prod \

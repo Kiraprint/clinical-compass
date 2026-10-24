@@ -372,7 +372,8 @@ def main() -> None:
         for q in queries:
             t0 = time.perf_counter()
             qv = emb.encode_query(q["q"])
-            cand = max(args.candidates, args.rerank_depth if spec.get("reranker") else 0)
+            depth = int(spec.get("rerank_depth", args.rerank_depth))
+            cand = max(args.candidates, depth if spec.get("reranker") else 0)
             rrf_k = int(spec.get("rrf_k", args.rrf_k))
             if need_sparse:
                 if name == "bge-m3":
@@ -395,17 +396,19 @@ def main() -> None:
             ranked = [corpus[i]["id"] for i in order[: args.limit]]
             rankings[q["id"]] = ranked
             lat.append(time.perf_counter() - t0)
-            pools[q["id"]].update(corpus[i]["id"] for i in order[: args.rerank_depth])
+            pools[q["id"]].update(corpus[i]["id"] for i in order[:depth])
         vram_peak = torch.cuda.max_memory_allocated() / 2**20 if torch.cuda.is_available() else 0.0
         vram_res = torch.cuda.memory_allocated() / 2**20 if torch.cuda.is_available() else 0.0
         vram = vram_peak
         stats = {"p50_ms": 1000 * kbb.percentile(lat, 0.5), "p95_ms": 1000 * kbb.percentile(lat, 0.95),
+                 "p99_ms": 1000 * kbb.percentile(lat, 0.99),
                  "mean_ms": 1000 * sum(lat) / len(lat), "vram_mb": vram_peak,
                  "vram_resident_mb": vram_res}
         entry = {"stack": sname, "spec": {k: v for k, v in spec.items()}, "latency": stats,
                  "rankings": rankings}
         if qrels:
             entry["metrics"] = kbb.evaluate(rankings, qrels)
+            entry["metrics_covered"] = kbb.evaluate_covered(rankings, qrels)
             entry["per_query"] = kbb.per_query_report(rankings, qrels)
         results[sname] = entry
         if qrels:
@@ -430,7 +433,7 @@ def main() -> None:
 
 def define_stacks(args) -> dict[str, dict]:
     """Именованные стеки. `all` — полный замер для отчёта."""
-    return {
+    stacks = {
         # --- baseline: что в проде сейчас ---
         "hash-dense+sparse": {"embedder": "hash", "sparse": True, "rrf_k": 60},
         # --- эмбеддеры, dense-only ---
@@ -445,15 +448,26 @@ def define_stacks(args) -> dict[str, dict]:
         "bge-m3-dense+sparse+colbert": {"embedder": "bge-m3", "sparse": True, "colbert": True},
         # --- реранк пула: база × кросс-энкодер (глубина пула — --rerank-depth) ---
         "bge-m3-dense+rerank-bge": {"embedder": "bge-m3", "reranker": "bge-reranker-v2-m3"},
-        "bge-m3-dense+rerank-jina": {"embedder": "bge-m3", "reranker": "jina-reranker-v2"},
-        "bge-m3-dense+rerank-qwen3": {"embedder": "bge-m3", "reranker": "qwen3-reranker-0.6b"},
         "bge-m3-dense+rerank-dity": {"embedder": "bge-m3", "reranker": "dity-ru-msmarco"},
-        "qwen3-0.6b-dense+rerank-bge": {"embedder": "qwen3-0.6b", "reranker": "bge-reranker-v2-m3"},
-        "qwen3-0.6b-dense+rerank-jina": {"embedder": "qwen3-0.6b", "reranker": "jina-reranker-v2"},
-        "qwen3-0.6b-dense+rerank-qwen3": {"embedder": "qwen3-0.6b", "reranker": "qwen3-reranker-0.6b"},
-        "qwen3-0.6b-dense+rerank-dity": {"embedder": "qwen3-0.6b", "reranker": "dity-ru-msmarco"},
         "bge-m3-hybrid+rerank-bge": {"embedder": "bge-m3", "sparse": True, "reranker": "bge-reranker-v2-m3"},
     }
+    # свип RRF: k задаёт вклад лексического канала в слияние
+    for k in (10, 30, 100):
+        stacks[f"bge-m3-dense+sparse-k{k}"] = {"embedder": "bge-m3", "sparse": True, "rrf_k": k}
+    # реранк: топ-2 эмбеддера × 3 кросс-энкодера × глубина пула 20/50/100
+    for short, model in (
+        ("bge", "bge-reranker-v2-m3"),
+        ("jina", "jina-reranker-v2"),
+        ("qwen3", "qwen3-reranker-0.6b"),
+    ):
+        for base in ("bge-m3", "qwen3-0.6b"):
+            for depth in (20, 50, 100):
+                stacks[f"{base}-dense+rerank-{short}-d{depth}"] = {
+                    "embedder": base,
+                    "reranker": model,
+                    "rerank_depth": depth,
+                }
+    return stacks
 
 
 if __name__ == "__main__":

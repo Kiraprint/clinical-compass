@@ -171,6 +171,12 @@ def precision_at(ranked: list[str], grades: dict[str, int], k: int, *, min_grade
     return sum(1 for d in ranked[:k] if grades.get(d, 0) >= min_grade) / k
 
 
+def hit_at(ranked: list[str], grades: dict[str, int], k: int, *, min_grade: int = 2) -> float:
+    """Строгий hit@k: попал ли в top-k хоть один чанк нужной градации."""
+    return 1.0 if any(grades.get(d, 0) >= min_grade for d in ranked[:k]) else 0.0
+
+
+
 def percentile(values: list[float], q: float) -> float:
     if not values:
         return 0.0
@@ -193,11 +199,29 @@ def evaluate(rankings: dict[str, list[str]], qrels: dict[str, dict[str, int]]) -
             add(f"Recall@{k}", recall_at(ranked, grades, k))
             add(f"Recall2@{k}", recall_at(ranked, grades, k, min_grade=2))
         add("MRR@10", mrr_at(ranked, grades, 10))
+        add("Hit3", hit_at(ranked, grades, 3))
+        add("Hit5", hit_at(ranked, grades, 5))
         if grades:
             add("judged", float(len(grades)))
     return {name: sum(vals) / len(vals) for name, vals in metrics.items()} | {
         "queries": float(len(qrels))
     }
+
+
+def evaluate_covered(
+    rankings: dict[str, list[str]], qrels: dict[str, dict[str, int]]
+) -> dict:
+    """Метрики только по запросам, у которых в KB есть ответ (grade=2 в пуле).
+
+    Запросы без grade=2 выпадают из знаменателя (KB не покрывает тему), но их
+    доля возвращается как `coverage` — честная шапка отчёта.
+    """
+    covered = {qid: g for qid, g in qrels.items() if any(v >= 2 for v in g.values())}
+    out = evaluate(rankings, covered)
+    out["coverage"] = len(covered) / max(1, len(qrels))
+    out["uncovered"] = sorted(set(qrels) - set(covered))
+    return out
+
 
 
 def per_query_report(rankings: dict[str, list[str]], qrels: dict[str, dict[str, int]]) -> list[dict]:
