@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="348 230 564 564" width="64" height="64" role="img" aria-label="Компас">
+  <title>Компас</title>
+  <!-- Источник: amigdala-logo.svg (знак без текстового логотипа, C2PA-метаданные удалены). -->
+  <rect x="348" y="230" width="564" height="564" rx="112" fill="#ffffff"/>
+  <defs>
+    <style>
+      .navy { fill: #23425e; }
+      .teal { fill: #479e97; }
+    </style>
+  </defs>
+
+  <!-- Head -->
+  <circle class="teal" cx="628" cy="327" r="73"/>
+
+  <!-- Left leaf (navy) -->
+  <path class="navy" d="M437,308 C446,303 452,314 458,326 C480,372 520,396 560,418 C603,442 621,482 621,530 V770 C520,755 372,680 372,505 C372,430 405,365 432,314 C433,310 435,309 437,308 Z"/>
+  <!-- Left leaf vein (white) -->
+  <path fill="#fff" d="M427,410 C428,440 445,462 485,478 C535,497 595,515 620,580 L620,590 C598,548 570,530 520,517 C470,505 430,478 427,410 Z"/>
+
+  <!-- Right leaf (teal) -->
+  <path class="teal" d="M815,308 C806,303 800,314 795,324 C772,370 735,392 700,412 C655,438 634,478 634,530 V770 C668,770 886,700 888,510 C888,440 855,370 823,314 C821,310 818,309 815,308 Z"/>
+
+  <!-- Circuit lines and nodes -->
+  <g fill="none" stroke="#fff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M642,766 C682,735 692,700 685,660 C676,605 688,560 718,528 C742,503 768,483 790,466"/>
+    <path d="M697,666 C712,640 745,610 788,574"/>
+  </g>
+  <circle cx="795" cy="460" r="25" fill="#fff"/>
+  <circle cx="795" cy="460" r="13" class="teal"/>
+  <circle cx="797" cy="570" r="25" fill="#fff"/>
+  <circle cx="797" cy="570" r="13" class="teal"/>
+</svg>

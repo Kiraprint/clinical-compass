@@ -543,6 +543,22 @@ export default function AdminView() {
           выполняется через симулятор/API.
         </p>
       </div>
+
+      {/* FR-35: правовые документы — статические страницы, открываются без входа. */}
+      <div className="card">
+        <h2>Правовые документы</h2>
+        <p style={{ color: "#5a6478", fontSize: 13, margin: "0 0 8px" }}>
+          Шаблоны для юридической проверки; реквизиты оператора не заполнены.
+        </p>
+        <ul style={{ margin: 0, paddingLeft: 20, fontSize: 14 }}>
+          <li>
+            <a href="/legal/terms">Пользовательское соглашение</a>
+          </li>
+          <li>
+            <a href="/legal/consent">Согласие на обработку персональных данных</a>
+          </li>
+        </ul>
+      </div>
     </>
   );
 }
