@@ -145,3 +145,83 @@ def test_findings_coordinates_match_original():
     f = r.findings[0]
     assert f.original == "+7 999 123-45-67"
     assert original[f.start:f.end] == f.original
+
+# --- структурные формы и валидаторы (docs/12, бенчмарк clinical_contexts) ---
+
+def test_phone_all_real_world_forms():
+    for text in ("9261234567", "926 123-45-67", "8-926-123-45-67",
+                 "8 (926) 123-45-67", "+79261234567"):
+        r = depersonalize(text)
+        assert r.text == "[ТЕЛЕФОН]", text
+        assert r.findings[0].kind == PHONE
+
+
+def test_oms_with_spaces_and_continuous():
+    for text in ("полис 1234 5678 9012 3456", "1234 5678 9012 3456"):
+        r = depersonalize(text)
+        assert "[ДОКУМЕНТ]" in r.text, text
+        assert r.findings[-1].category == "OMS"
+
+
+def test_medcard_and_history_number_forms():
+    for text, number in (("Медкарта № 456123", "456123"),
+                         ("ИБ № 45678/2024", "45678/2024"),
+                         ("история болезни 987654", "987654"),
+                         ("медкарта № 77-004521", "77-004521")):
+        r = depersonalize(text)
+        assert r.text.endswith("[ДОКУМЕНТ]"), text
+        assert r.findings[-1].category == "MEDCARD"
+        assert r.findings[-1].original == number
+
+
+def test_dob_formats():
+    for text in ("дата рождения 12.03.1954",
+                 "Д.Р. 12-03-1954",
+                 "родился 1985-04-17",
+                 "дата рождения 9 августа 1949",
+                 "12.03.1954 г.р."):
+        r = depersonalize(text)
+        assert "[ДАТА РОЖДЕНИЯ]" in r.text, text
+        assert r.findings[-1].kind == DOB
+
+
+def test_structural_validators():
+    from compass.depersonalize import inn_valid, normalize_date, normalize_phone, oms_valid, snils_valid
+
+    assert snils_valid("112-233-445 95")  # контрольное число алгоритма ПФР
+    assert not snils_valid("123-456-789 01")  # формат верный, контрольное — нет
+    assert inn_valid("7707083893")
+    assert not inn_valid("1234567890")
+    assert inn_valid("500100732259")
+    assert oms_valid("1234567890123454")
+    assert normalize_phone("8 (926) 123-45-67") == "+79261234567"
+    assert normalize_phone("9261234567") == "+79261234567"
+    assert normalize_phone("+7 916 555-77-33") == "+79165557733"
+    assert normalize_date("9 августа 1949") == "1949-08-09"
+    assert normalize_date("12/03/54") == "1954-03-12"
+    assert normalize_date("1985-04-17") == "1985-04-17"
+
+
+def test_span_level_masking_handles_overlaps():
+    from compass.depersonalize import Span
+
+    text = "Иванов Пётр Сергеевич, +79261234567"
+    # частичный и полный спан ФИО + телефон от NER — один плейсхолдер на сущность
+    r = depersonalize(text, extra_spans=[
+        Span("FIO", 0, 6),
+        Span("FIO", 0, len("Иванов Пётр Сергеевич")),
+        Span("PHONE", 24, 36),
+    ])
+    assert r.text == "[ФИО], [ТЕЛЕФОН]"
+    assert len(r.findings) == 2
+
+
+def test_age_combo_requires_fio():
+    from compass.depersonalize import Span
+
+    text = "Пациентка Петрова Анна, 64 года"
+    start = text.index("Петрова")
+    masked = depersonalize(text, extra_spans=[Span("FIO", start, start + len("Петрова Анна"))])
+    assert "[ВОЗРАСТ]" in masked.text
+    plain = depersonalize(text)
+    assert plain.text == text
