@@ -48,9 +48,10 @@ python -m loadtest.provision --db compass --dry-run   # exit 2
    поиск Qdrant → `build_rag_answer` (LLM выключен). Если коллекции нет,
    замер помечается `skipped` с причиной.
 4. **Предел пула** (`run_http.run_cliff`): свежий процесс API на каждую точку,
-   C=56–128 на async-пуле по умолчанию (20+20) и C=64/96 на пуле 80+20.
-   Пул 80+20 = 100 соединений упирается в `max_connections=100`, поэтому его
-   высокие C не являются целевым режимом.
+   C=56–128 на async-пуле по умолчанию (20+20) и C=64/96 на увеличенном пуле
+   60+15 = 75 соединений. Больший пул стартовать не может: `validate_pool_budget`
+   требует `workers × (pool + overflow + 2) ≤ max_connections` (100 по умолчанию),
+   поэтому прежняя точка 80+20 недостижима и не является целевым режимом.
 
 Результаты: `loadtest/results/*.json` (в git не коммитятся), сводка —
 `loadtest/REPORT.md` (генерируется `report.py`, коммитится).
@@ -60,6 +61,10 @@ python -m loadtest.provision --db compass --dry-run   # exit 2
 - Postgres и Qdrant демо-стека: `docker compose -f infra/docker-compose.yml up -d postgres qdrant`
   (порты `127.0.0.1:5432` и `127.0.0.1:6333`).
 - Python 3.12 с зависимостями API (прод-образ `api/Dockerfile` — python:3.12-slim).
+  Асинхронный рантайм требует `greenlet`: без него `import app.db` падает с
+  `ImportError: SQLAlchemy asyncio module requires greenlet`. Ставьте
+  `uv pip install --python <venv>/bin/python greenlet` (или `uv sync`),
+  иначе provision упадёт на `init_schema`.
 - `bench/data/{queries,corpus}.jsonl`: `bench/data` не коммитится, соберите
   набор или укажите `CC_LOADTEST_BENCH_DATA=/path/to/bench/data`.
 

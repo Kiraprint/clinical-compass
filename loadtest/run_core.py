@@ -140,11 +140,14 @@ def measure(fn, n: int, repeats: int = 3) -> dict:
             }
         )
     ops = sorted(run["ops_per_s"] for run in runs)
-    chosen = runs[[r["ops_per_s"] for r in runs].index(statistics.median(ops))]
+    median_ops = statistics.median(ops)
+    # При чётном числе прогонов медиана — среднее двух значений и в списке её нет;
+    # берём ближайший прогон для перцентилей, а ops/s отдаём как медиану.
+    chosen = min(runs, key=lambda run: abs(run["ops_per_s"] - median_ops))
     return {
         "n": n,
         "repeats": repeats,
-        "ops_per_s": round(chosen["ops_per_s"], 0),
+        "ops_per_s": round(median_ops, 0),
         "ops_per_s_min": round(min(ops), 0),
         "ops_per_s_max": round(max(ops), 0),
         "us_p50": round(chosen["us_p50"], 2),

@@ -372,9 +372,9 @@ def build() -> Path:
                     f"{point['error_rate']:.2%} | {kinds} |")
             add("")
 
-            add("> `pool_size=80` даёт 80+20 = 100 соединений — ровно "
-                "`max_connections=100` без запаса, поэтому C≥96 упирается в лимит "
-                "Postgres, а не в приложение.")
+            add("> Увеличенный пул в плане — 60+15 = 75 соединений: `validate_pool_budget` "
+                "требует `workers × (pool + overflow + 2) ≤ max_connections`, поэтому "
+                "прежняя точка 80+20 = 100 при `max_connections=100` стартовать не может ")
             add("")
         low_concurrency = [
             point
@@ -435,9 +435,9 @@ def build() -> Path:
             limited = [p for p in enlarged if p["error_rate"] > 0.01]
             if limited:
                 worst = max(limited, key=lambda p: p["concurrency"])
-                add(f"- Ошибки на пуле {worst['pool_size']} при C={worst['concurrency']} — "
-                    f"похоже на упор в `max_connections=100` Postgres (пул 80+20 "
-                    f"не оставляет запаса), а не дефект приложения.")
+                add(f"- Ошибки на пуле {worst['pool_size']} при C={worst['concurrency']}: "
+                    f"проверьте тип ошибок — упор в `max_connections` Postgres даёт "
+                    f"`TimeoutError`/`DB_UNAVAILABLE`, а не дефект приложения.")
         if ask_rps:
             add(f"- RAG-ответ врачу (Qdrant + аудит, детерминированная сборка): "
                 f"**{_num(ask_rps)} RPS**; время ответа p50 "

@@ -93,6 +93,8 @@ def direct_search_metrics() -> dict:
     # env уже применён точкой входа (main/run_all): повторный apply_env затёр бы
     # --db/--collection/--embedder дефолтами.
 
+    from qdrant_client import QdrantClient
+
     from app.services import kb
     from app.services.embeddings import build_embedder
 

@@ -35,6 +35,10 @@ class ApiServer:
             embedder=self.embedder, collection=self.collection, db=self.db
         )
         env["CC_LOADTEST_POOL_SIZE"] = str(self.pool_size)
+        # В изолированном контуре не запущены reminders-worker/kb-enrichment,
+        # поэтому их пулы не резервируем: иначе validate_pool_budget откажет
+        # старту при увеличенном пуле API.
+        env["CC_DB_BACKGROUND_PROCESSES"] = "0"
         env["PYTHONPATH"] = f"{common.ROOT}:{env['PYTHONPATH']}"
         log = self.log_path.open("w", encoding="utf-8")
         self._log = log

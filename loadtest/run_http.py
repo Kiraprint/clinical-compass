@@ -346,12 +346,15 @@ def run_cliff(credentials: dict, *, quick: bool = False, embedder: str = "hash",
     default_pool = int(os.environ.get("CC_DB_POOL_SIZE", "20")) + int(
         os.environ.get("CC_DB_MAX_OVERFLOW", "20")
     )
+    # Пул 80+20 = 100 упирается в max_connections=100 (плюс служебные соединения),
+    # а validate_pool_budget теперь отказывает старту — точка (80, …) недостижима
+    # и не является целевым режимом. Проверяем «щедрый, но влезающий» пул 60+15.
     plan = (
-        [(0, 60), (0, 96), (80, 96)]
+        [(0, 60), (0, 96), (60, 96)]
         if quick
         else [
             (0, 56), (0, 60), (0, 64), (0, 96), (0, 128),
-            (80, 64), (80, 96),
+            (60, 64), (60, 96),
         ]
     )
     results = []
