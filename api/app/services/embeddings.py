@@ -369,30 +369,46 @@ class RemoteEmbedder:
             )
         self.dense_size = size
 
-    def _vector(self, text: str, kind: str) -> list[float]:
-        key = (kind, text)
-        hit = self._cache.get(key)
-        if hit is not None:
-            return hit
+    def _vectors(self, texts: list[str], kind: str) -> list[list[float]]:
+        """Батч векторов: недостающие считаются ОДНИМ HTTP-запросом к сайдкару.
+
+        Ре-сид индексирует тысячи чанков; по одному POST на текст это ~3362
+        запроса вместо ~14 пачек. Кеш — тот же, что у одиночного пути.
+        """
         from app.services import ml_client
         from app.services.ml_client import MlUnavailable
 
-        vectors = ml_client.embed([text], kind=kind, profile=self.profile_id)
-        if not vectors or not isinstance(vectors[0], list):
-            raise MlUnavailable("/v1/embeddings: пустой ответ")
-        vec = [float(v) for v in vectors[0]]
-        if len(vec) != self.dense_size:
-            raise MlUnavailable(
-                f"/v1/embeddings: размерность {len(vec)} != {self.dense_size} (профиль '{self.profile_id}')"
-            )
-        if len(self._cache) >= _CACHE_SIZE:
-            self._cache.pop(next(iter(self._cache)))
-        self._cache[key] = vec
-        return vec
+        missing = [t for t in dict.fromkeys(texts) if (kind, t) not in self._cache]
+        if missing:
+            vectors = ml_client.embed(missing, kind=kind, profile=self.profile_id)
+            if not vectors or len(vectors) != len(missing):
+                raise MlUnavailable(
+                    f"/v1/embeddings: {len(vectors or [])} векторов на {len(missing)} текстов"
+                )
+            for text, raw in zip(missing, vectors):
+                if not isinstance(raw, list):
+                    raise MlUnavailable("/v1/embeddings: пустой ответ")
+                vec = [float(v) for v in raw]
+                if len(vec) != self.dense_size:
+                    raise MlUnavailable(
+                        f"/v1/embeddings: размерность {len(vec)} != {self.dense_size} "
+                        f"(профиль '{self.profile_id}')"
+                    )
+                if len(self._cache) >= _CACHE_SIZE:
+                    self._cache.pop(next(iter(self._cache)))
+                self._cache[(kind, text)] = vec
+        return [self._cache[(kind, t)] for t in texts]
+
+    def _vector(self, text: str, kind: str) -> list[float]:
+        return self._vectors([text], kind)[0]
 
     def dense(self, text: str) -> list[float]:
         """Вектор ПАССАЖА (индексация)."""
         return self._vector(text, "passage")
+
+    def dense_batch(self, texts: list[str]) -> list[list[float]]:
+        """Векторы ПАССАЖЕЙ пачкой — путь индексации (kb.upsert_documents)."""
+        return self._vectors(texts, "passage")
 
     def query_dense(self, text: str) -> list[float]:
         """Вектор ЗАПРОСА (асимметричные модели на сайдкаре применяют префиксы сами)."""

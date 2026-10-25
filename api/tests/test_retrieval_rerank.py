@@ -70,6 +70,21 @@ class _Reranker:
         return list(reversed(hits))[:limit]
 
 
+class _SpyClient:
+    """Фейк Qdrant: запоминает kwargs query_points, точек не возвращает."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def query_points(self, **kwargs):
+        self.calls.append(kwargs)
+
+        class _Res:
+            points: list = []
+
+        return _Res()
+
+
 # --------------------------------------------------------------- off-path
 def test_reranker_off_is_none(monkeypatch):
     """CC_RERANKER=off (дефолт) — реранкера нет, модель не грузится."""
@@ -84,36 +99,32 @@ def test_reranker_off_is_none(monkeypatch):
         reset_reranker()
 
 
-@needs_qdrant
 def test_off_path_is_byte_identical(monkeypatch):
-    """Без реранкера выдача та же, что при явных исторических параметрах."""
-    from qdrant_client import QdrantClient
+    """CC_RERANKER=off и незаданный CC_RRF_K → ровно допираровская форма запроса.
 
-    probe = "kb_test_rerank_off"
-    client = QdrantClient(url=settings.qdrant_url, timeout=10)
-    if client.collection_exists(probe):
-        client.delete_collection(probe)
-    monkeypatch.setattr(kb, "COLLECTION", probe)
-    try:
-        kb.upsert_documents(client, HashEmbedder(), DOCS)
-        legacy = kb.hybrid_search(client, HashEmbedder(), "порог тяжёлой депрессии PHQ-9", limit=2)
-        explicit = kb.hybrid_search(
-            client,
-            HashEmbedder(),
-            "порог тяжёлой депрессии PHQ-9",
-            limit=2,
-            candidates=None,
-            reranker=None,
-            rrf_k=settings.rrf_k,
-        )
-        assert legacy == explicit
-        assert legacy and legacy[0]["guideline_id"] == "g-phq"
-    finally:
-        monkeypatch.undo()
-        client.delete_collection(probe)
+    Проверяем сам объект, уходящий в Qdrant: `FusionQuery(Fusion.RRF)` — то, что
+    слал main. `RrfQuery(k=60)` здесь означал бы молчаливую смену выдачи
+    hash-профиля (P1 ревью), поэтому ассерт — точная форма, а не «новый дефолт
+    равен самому себе».
+    """
+    from qdrant_client.http import models as qm
+
+    client = _SpyClient()
+    monkeypatch.setattr(settings, "rrf_k", None)
+    kb.hybrid_search(
+        client, HashEmbedder(), "порог тяжёлой депрессии PHQ-9", limit=2, candidates=None, reranker=None
+    )
+    sent = client.calls[0]["query"]
+    assert isinstance(sent, qm.FusionQuery) and sent.fusion == qm.Fusion.RRF
+    assert not isinstance(sent, qm.RrfQuery)
+
+    # Явный профиль (CC_RRF_K=60) — единственный способ включить qm.RrfQuery.
+    client.calls.clear()
+    kb.hybrid_search(client, HashEmbedder(), "порог тяжёлой депрессии PHQ-9", limit=2, rrf_k=60)
+    sent = client.calls[0]["query"]
+    assert isinstance(sent, qm.RrfQuery) and sent.rrf.k == 60
 
 
-# ------------------------------------------------------------- exclude_ids
 def test_cross_encoder_reranker_drops_excluded_before_scoring():
     """Реранкер фильтрует исключённые источники сам (до скоринга)."""
     rr = CrossEncoderReranker.__new__(CrossEncoderReranker)  # без загрузки весов
@@ -176,40 +187,58 @@ def test_profile_default_scores_are_per_profile(monkeypatch):
 
 
 def test_agent_uses_profile_gate_and_explicit_override(monkeypatch):
-    """search_kb режет выдачу порогом профиля; CC_KB_MIN_SCORE перекрывает его."""
+    """search_kb передаёт порог профиля в hybrid_search; CC_KB_MIN_SCORE перекрывает.
+
+    Сам порог применяется в hybrid_search ко всему пулу (тест ниже) — агент
+    отвечает только за значение: дефолт профиля / явный override.
+    """
     from app.services import agent as agent_mod
 
     class DenseOnly(HashEmbedder):
         use_sparse = False
 
-    def _hits(score: float) -> list[dict]:
+    seen: dict = {}
+
+    def _search(*args, **kwargs):
+        seen.update(kwargs)
         return [
             {
                 "guideline_id": "g-phq",
                 "source_title": "Шкала PHQ-9",
                 "topic": "ШКАЛЫ",
-                "text": "порог тяжёлой депрессии 20 баллов",
-                "score": score,
+                "text": "Шкала PHQ-9, порог 20 баллов",
+                "score": 0.5,
             }
         ]
 
-    monkeypatch.setattr(agent_mod, "get_embedder", lambda: DenseOnly())
+    monkeypatch.setattr(
+        agent_mod,
+        "get_embedder",
+        lambda: HashEmbedder() if settings.embedder == "hash" else DenseOnly(),
+    )
     monkeypatch.setattr(agent_mod, "get_reranker", lambda: None)
-    monkeypatch.setattr(agent_mod.kb_store, "hybrid_search", lambda *a, **kw: _hits(0.5))
+    monkeypatch.setattr(agent_mod.kb_store, "hybrid_search", _search)
     monkeypatch.setattr(settings, "kb_min_score", None)
     factory = agent_mod.AgentFactory(client=None)
 
     monkeypatch.setattr(settings, "embedder", "bge-m3")  # профиль-дефолт 0.45
     assert factory.search_kb("шкала депрессии") != []
+    assert seen["min_score"] == 0.45
 
-    monkeypatch.setattr(settings, "embedder", "user-bge-m3")  # 0.55 > 0.5
-    assert factory.search_kb("шкала депрессии") == []
+    monkeypatch.setattr(settings, "embedder", "user-bge-m3")  # профиль-дефолт 0.55
+    factory.search_kb("шкала депрессии")
+    assert seen["min_score"] == 0.55
 
-    monkeypatch.setattr(settings, "kb_min_score", 0.2)  # явный CC_KB_MIN_SCORE
-    assert factory.search_kb("шкала депрессии") != []
+    monkeypatch.setattr(settings, "kb_min_score", 0.2)  # явный override
+    factory.search_kb("шкала депрессии")
+    assert seen["min_score"] == 0.2
+
+    # hash-профиль гейтится лексически: dense-порог не передаётся.
+    monkeypatch.setattr(settings, "embedder", "hash")
+    factory.search_kb("шкала депрессии")
+    assert seen["min_score"] is None
 
 
-# ----------------------------------------------------- candidates / rrf_k
 def test_candidates_and_rrf_k_reach_qdrant(monkeypatch):
     captured: dict = {}
 
@@ -255,15 +284,65 @@ def test_st_profile_without_extra_gives_actionable_error():
         pytest.skip("sentence-transformers установлен — тест про отсутствие extra")
 
 
-def test_gate_uses_retrieval_score_after_rerank():
-    """Порог профиля сравнивается со скором первичного поиска, не с logit-ом реранка."""
-    from app.services.agent import _dense_top_gate
+def test_gate_uses_pool_best_not_reranked_top(monkeypatch):
+    """Порог — по лучшему скору ПУЛА, а не по top-limit после реранка.
 
-    reranked = [
-        {"guideline_id": "a", "text": "x", "score": -7.5, "retrieval_score": 0.71},
-        {"guideline_id": "b", "text": "y", "score": -9.1, "retrieval_score": 0.52},
-    ]
-    assert _dense_top_gate(reranked, 0.45) == reranked
-    off_topic = [{"guideline_id": "a", "text": "x", "score": 3.2, "retrieval_score": 0.41}]
-    assert _dense_top_gate(off_topic, 0.45) == []
-    assert _dense_top_gate([], 0.45) == []
+    Сценарий P2: лучший по первичному скору чанк (0.90 >= 0.45) выброшен
+    реранком из top-5, у оставшихся retrieval_score 0.30–0.34 < порога. Гейт по
+    top-limit включил бы ложный отказ «нет данных»; ответ обязан остаться
+    обоснованным (есть цитаты).
+    """
+    from app.services import agent as agent_mod
+    from compass.agent import build_rag_answer
+
+    class DenseOnly(HashEmbedder):
+        use_sparse = False
+
+    class _Point:
+        def __init__(self, gid: str, score: float) -> None:
+            self.payload = {
+                "guideline_id": gid,
+                "source_title": f"Источник {gid}",
+                "topic": "ШКАЛЫ",
+                "text": f"Шкала PHQ-9: чанк {gid}",
+            }
+            self.score = score
+
+    class _Client:
+        def __init__(self, scores: list[float]) -> None:
+            self._scores = scores
+
+        def query_points(self, **kwargs):
+            class _Res:
+                pass
+
+            res = _Res()
+            res.points = [_Point(f"g-{i}", score) for i, score in enumerate(self._scores)]
+            return res
+
+    class _PushBestOut:
+        """CE ставит пул в обратный порядок и режет top-limit: 0.90 уходит."""
+
+        def rerank(self, query, hits, limit, *, exclude_ids=None):
+            ranked = [
+                {**h, "score": -1.0 - i, "retrieval_score": h["score"]}
+                for i, h in enumerate(hits)
+            ]
+            return list(reversed(ranked))[:limit]
+
+    monkeypatch.setattr(agent_mod, "get_embedder", lambda: DenseOnly())
+    monkeypatch.setattr(agent_mod, "get_reranker", lambda: _PushBestOut())
+    monkeypatch.setattr(settings, "embedder", "bge-m3")
+    monkeypatch.setattr(settings, "kb_min_score", None)
+
+    pool = [0.90, 0.34, 0.33, 0.32, 0.31, 0.30]
+    chunks = agent_mod.AgentFactory(client=_Client(pool)).search_kb("шкала PHQ-9 порог", limit=5)
+    assert chunks, "релевантный пул (0.90) не должен давать отказ"
+    assert all(c.guideline_id != "g-0" for c in chunks)  # реранк реально отбросил лучший
+    assert build_rag_answer("шкала PHQ-9 порог", chunks).grounded
+
+    # Контроль: пул целиком ниже порога — отказ остаётся.
+    off_topic = agent_mod.AgentFactory(
+        client=_Client([0.40, 0.39, 0.38, 0.37, 0.36, 0.35])
+    ).search_kb("шкала PHQ-9 порог", limit=5)
+    assert off_topic == []

@@ -70,7 +70,10 @@ class Settings(BaseSettings):
     # CC_RETRIEVAL_CANDIDATES: глубина пула до реранка/отсечки (0 → max(limit*3, 10)).
     retrieval_candidates: int = 0
     # CC_RRF_K: константа RRF-слияния dense+sparse (Qdrant RrfQuery, docs/08 §4).
-    rrf_k: int = 60
+    # Не задана → историческая серверная форма FusionQuery(Fusion.RRF): k берёт
+    # Qdrant (дефолт 2), выдача hash-профиля байт-в-байт как на main. k=60 —
+    # часть ЯВНОГО retrieval-профиля (CC_RRF_K=60), а не дефолт.
+    rrf_k: int | None = None
     # CC_KB_CORPUS_TTL_SECONDS: TTL кеша корпуса KB (kb_seed.build_corpus) в
     # процессе API. In-process писателей drugs нет (seed — отдельный CLI, он
     # зовёт clear_corpus_cache), поэтому TTL — единственная runtime-инвалидация.
@@ -149,6 +152,26 @@ class Settings(BaseSettings):
     emias_max_response_bytes: int = 4 * 1024 * 1024  # жёсткий кап тела ответа
     emias_snils_pepper: str = ""  # соль sha256(СНИЛС); пусто → CC_DATA_KEY
     model_config = {"env_prefix": "CC_"}
+
+    @model_validator(mode="after")
+    def _check_chunker(self) -> "Settings":
+        """Нарезка КБ: молчаливая потеря текста запрещена (docs/08 §3).
+
+        chunk_text скользит шагом max(size - overlap, 200): при size < 200 окно
+        меньше шага и куски текста теряются, а size <= 0 даёт пустой корпус без
+        ошибки. Ограничения общие для сида и enrichment (CC_KB_CHUNK_*).
+        """
+        if self.kb_chunk_chars < 200:
+            raise ValueError(
+                f"CC_KB_CHUNK_CHARS={self.kb_chunk_chars}: минимум 200 знаков — "
+                "при меньшем размере chunk_text теряет текст (шаг окна >= 200)"
+            )
+        if not (0 <= self.kb_chunk_overlap < self.kb_chunk_chars):
+            raise ValueError(
+                f"CC_KB_CHUNK_OVERLAP={self.kb_chunk_overlap} должен быть в "
+                f"[0, CC_KB_CHUNK_CHARS={self.kb_chunk_chars})"
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_secrets(self) -> "Settings":

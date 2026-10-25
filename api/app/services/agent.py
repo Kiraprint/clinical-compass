@@ -59,23 +59,6 @@ def _relevance_gate(query: str, hits: list[dict], limit: int) -> list[dict]:
     kept = [h for h in hits if _lexical_overlap(query, h.get("text", "")) >= _GATE_MIN_TOKENS]
     return kept[:limit]
 
-def _dense_top_gate(hits: list[dict], min_score: float) -> list[dict]:
-    """Отсечка «нет релевантного ответа» для нейросетевого dense-поиска.
-
-    У bge-m3 косинус калиброван: у релевантных чанков золотого набора лучший
-    score >=0.57, у офтоп-запросов <=0.43 (150 запросов, bench/REPORT-retrieval.md),
-    поэтому порог отделяет «в KB ничего нет» без лексических эвристик — они
-    отбрасывали бы кросс-языковые совпадения (RU-вопрос → EN-чанк).
-
-    После реранка score — logit кросс-энкодера, поэтому сравниваем порог с
-    retrieval_score (скор первичного поиска) лучшего кандидата пула.
-    """
-    if not hits:
-        return []
-    best = max((h.get("retrieval_score", h.get("score", 0.0)) for h in hits), default=0.0)
-    if min_score > 0 and best < min_score:
-        return []
-    return hits
 
 def _hash_rerank(
     query: str,
@@ -162,6 +145,19 @@ class AgentFactory:
         # Реранк осмыслен только для нейросетевых профилей: hash-dense шумит, и
         # его порядок уже чинится лексическим гейтом/fallback (см. _hash_rerank).
         reranker = None if use_sparse else get_reranker()
+        # Порог «нет релевантного ответа» применяет hybrid_search ко ВСЕМУ пулу
+        # ДО реранка/отсечки: max по top-limit после реранка мог выбросить
+        # лучший по первичному скору чанк и включить ложный отказ.
+        # У bge-m3 косинус калиброван (релевантные >=0.57, офтоп <=0.43,
+        # bench/REPORT-retrieval.md); шкала у профилей своя, поэтому дефолт —
+        # из профиля, CC_KB_MIN_SCORE перекрывает.
+        min_score = None
+        if not use_sparse:
+            min_score = (
+                settings.kb_min_score
+                if settings.kb_min_score is not None
+                else profile_default_min_score(settings.embedder)
+            )
         hits = kb_store.hybrid_search(
             self._client,
             embedder,
@@ -171,18 +167,12 @@ class AgentFactory:
             exclude_ids=exclude_ids,
             candidates=settings.retrieval_candidates or None,
             reranker=reranker,
+            min_score=min_score,
         )
-        if use_sparse and reranker is None:
+        if use_sparse:
             hits = _hash_rerank(
                 query, hits, limit, topic=topic, exclude_ids=exclude_ids, corpus_drugs=corpus_drugs
             )
-        else:
-            min_score = (
-                settings.kb_min_score
-                if settings.kb_min_score is not None
-                else profile_default_min_score(settings.embedder)
-            )
-            hits = _dense_top_gate(hits, min_score)
         return [
             RAGChunk(
                 text=h["text"],

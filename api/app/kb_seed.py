@@ -415,6 +415,17 @@ def main() -> None:
     # Переиндексация всегда читает БД/файлы заново: не индексируем закешированный корпус.
     clear_corpus_cache()
     docs = build_corpus(with_guidelines=args.with_guidelines)
+    # Повторный --with-guidelines не должен дублировать чанки прошлой нарезки:
+    # point id = md5(text), а границы chunk_text() зависят от CC_KB_CHUNK_*.
+    # Сносим все поколения чанков засеваемых КР (фильтр по source_title) —
+    # count после повторного сида не растёт, --reset не нужен.
+    titles = {
+        d["source_title"]
+        for d in docs
+        if str(d.get("guideline_id", "")).startswith("kr-")
+    }
+    if titles and client.collection_exists(kb.COLLECTION):
+        kb.delete_sources(client, titles)
     n = kb.upsert_documents(client, build_embedder(), docs)
     total = kb.count_points(client)
     print(f"Индексировано {n} чанков; всего в коллекции {kb.COLLECTION}: {total}")

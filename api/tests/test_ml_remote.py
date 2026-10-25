@@ -73,14 +73,16 @@ class _Response:
 class FakeQdrant:
     """Фейк QdrantClient: `query_points` возвращает заранее заданные точки."""
 
-    def __init__(self, docs: list[dict]) -> None:
+    def __init__(self, docs: list[dict], scores: list[float] | None = None) -> None:
         self._docs = docs
+        self._scores = scores
         self.last_kwargs: dict | None = None
 
     def query_points(self, **kwargs):
         self.last_kwargs = kwargs
+        scores = self._scores or [round(0.9 - 0.1 * i, 3) for i in range(len(self._docs))]
         return _Response(
-            [_Point({**d, "chunk_index": 0, "text_hash": "x"}, score=round(0.9 - 0.1 * i, 3)) for i, d in enumerate(self._docs)]
+            [_Point({**d, "chunk_index": 0, "text_hash": "x"}, score=s) for d, s in zip(self._docs, scores)]
         )
 
 
@@ -141,6 +143,39 @@ def test_sidecar_down_degrades_to_rrf_order(monkeypatch):
     ]
 
 
+def test_remote_rerank_honours_window(monkeypatch):
+    """CC_RERANK_WINDOW режет текст ДО отправки в сайдкар, как у локального CE."""
+    docs = [
+        {"guideline_id": "g-long", "source_title": "Длинный чанк", "topic": "ЛЕКАРСТВА",
+         "text": "z" * 200 + " сертралин доза" + "z" * 100},
+        {"guideline_id": "g-short", "source_title": "Короткий", "topic": "ЛЕКАРСТВА",
+         "text": "сертралин"},
+    ]
+    ml = FakeMl()
+    _patch(monkeypatch, ml)
+    monkeypatch.setattr(settings, "rerank_window", 40)
+    kb.hybrid_search(
+        FakeQdrant(docs), _Hash(), "сертралин доза", limit=2, reranker=RemoteReranker()
+    )
+    sent = [call[1]["documents"] for call in ml.calls if call[0] == "rerank"][0]
+    assert all(len(d) <= 40 for d in sent), "окно не применено к тексту для сайдкара"
+    assert any("сертр" in d for d in sent), "окно должно содержать слово запроса"
+
+
+def test_remote_embedder_batches_passages(fake_client):
+    """Индексация шлёт пачку одним POST /v1/embeddings, не по запросу на чанк."""
+    emb = RemoteEmbedder("qwen3-0.6b", expected_dense_size=1024)
+    texts = ["чанк один", "чанк два", "чанк три"]
+    vectors = emb.dense_batch(texts)
+    assert len(vectors) == 3 and all(len(v) == 1024 for v in vectors)
+    embed_calls = [c for c in fake_client.calls if c[0] == "embeddings"]
+    assert len(embed_calls) == 1
+    assert embed_calls[0][1]["texts"] == texts
+    # Повторный вызов — из кеша, без сети.
+    emb.dense_batch(texts)
+    assert len([c for c in fake_client.calls if c[0] == "embeddings"]) == 1
+
+
 def test_remote_rerank_never_resurrects_excluded(monkeypatch):
     client = FakeQdrant(DOCS)
     # сайдкар ставит исключённый документ первым — фильтр всё равно обязан его убрать
@@ -154,17 +189,26 @@ def test_remote_rerank_never_resurrects_excluded(monkeypatch):
     assert all("g-c" not in [d for d in call[1]["documents"]] for call in ml.calls if call[0] == "rerank")
 
 
-def test_remote_rerank_uses_retrieval_score_for_gate(monkeypatch):
+def test_remote_rerank_gate_uses_pool_cosine_not_sidecar_scores(monkeypatch):
+    """Порог профиля — по косинусу пула, а не по скору сайдкара (CE-логит)."""
     client = FakeQdrant(DOCS)
     ml = FakeMl(scores=[-5.0, 1.0, 2.0])
     _patch(monkeypatch, ml)
-    hits = kb.hybrid_search(client, _Hash(), "шкала PHQ-9", limit=3, reranker=RemoteReranker())
-    from app.services.agent import _dense_top_gate
-
+    hits = kb.hybrid_search(
+        client, _Hash(), "шкала PHQ-9", limit=3, reranker=RemoteReranker(), min_score=0.45
+    )
     # score — скор сайдкара, retrieval_score — косинус первичного поиска
     assert hits[0]["score"] == 2.0
     assert hits[0]["retrieval_score"] == 0.7
-    assert _dense_top_gate(hits, 0.45)  # порог смотрит на retrieval_score, а не на logit
+
+    # Пул целиком ниже порога — отказ, несмотря на положительные скоры сайдкара.
+    off_topic = FakeQdrant(DOCS, scores=[0.40, 0.30, 0.20])
+    assert (
+        kb.hybrid_search(
+            off_topic, _Hash(), "шкала PHQ-9", limit=3, reranker=RemoteReranker(), min_score=0.45
+        )
+        == []
+    )
 
 
 def test_ml_client_requires_url(monkeypatch):

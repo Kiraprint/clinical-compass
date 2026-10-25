@@ -151,11 +151,18 @@ class RemoteReranker:
 
     model_id = "remote"
 
+    # Ширина окна чанка (0 — начало чанка); __init__ берёт CC_RERANK_WINDOW.
+    _window = 0
+
     def __init__(self) -> None:
         from app.services import ml_client
 
         if not ml_client.enabled():
             raise RuntimeError("CC_RERANKER=remote требует CC_ML_URL (base-url ML-сайдкара)")
+        # CC_RERANK_WINDOW действует одинаково на обоих путях реранка: сайдкар
+        # с тем же max_length 512 теряет хвост длинного чанка, поэтому окно
+        # режется ДО отправки (docs/08 §4.8).
+        self._window = max(int(settings.rerank_window or 0), 0)
 
     def score(self, query: str, texts: list[str]) -> list[float]:
         # Повтор на сетевой сбой/5xx делает сам клиент (ml_client.rerank):
@@ -164,6 +171,8 @@ class RemoteReranker:
             return []
         from app.services import ml_client
 
+        if self._window:
+            texts = [best_window(t, query, self._window) for t in texts]
         return ml_client.rerank(query, texts)
 
     def rerank(
