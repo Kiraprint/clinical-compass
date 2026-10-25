@@ -7,7 +7,7 @@ LLM — за SPI; по умолчанию детерминированная с�
 
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import Sequence, TypedDict
 
 import re
 from langgraph.graph import END, START, StateGraph
@@ -65,7 +65,7 @@ def _hash_rerank(
     hits: list[dict],
     limit: int,
     *,
-    topic: str | None,
+    topics: Sequence[str] = (),
     exclude_ids: set[str] | None,
     allowed_work_ids: set[str] | None = None,
     corpus_drugs: list[dict] | None = None,
@@ -94,7 +94,7 @@ def _hash_rerank(
     kw = sorted(
         ((_lexical_overlap(query, d["text"]), d)
          for d in build_corpus(drug_docs=corpus_drugs or [])
-         if (topic is None or d.get("topic") == topic)
+         if (not topics or d.get("topic") in topics)
          and (not exclude_ids or d["guideline_id"] not in exclude_ids)
          and kb_store.is_visible(d, allowed_work_ids)),
         key=lambda x: x[0],
@@ -113,6 +113,7 @@ class AgentState(TypedDict, total=False):
     query: str
     retrieval_query: str | None
     topic: str | None
+    topics: tuple[str, ...]
     limit: int
     chunks: list[RAGChunk]
     exclude_ids: set[str]
@@ -132,6 +133,7 @@ class AgentFactory:
         query: str,
         *,
         topic: str | None = None,
+        topics: Sequence[str] | None = None,
         limit: int = 5,
         exclude_ids: set[str] | None = None,
         allowed_work_ids: set[str] | None = None,
@@ -171,11 +173,14 @@ class AgentFactory:
                 if settings.kb_min_score is not None
                 else profile_default_min_score(settings.embedder)
             )
+        # topic_list — одна или две темы (FR-14): вопрос бывает и про препарат,
+        # и про доказательства. Пусто — поиск по всем разделам.
+        topic_list = tuple(topics or ()) or ((topic,) if topic else ())
         hits = kb_store.hybrid_search(
             self._client,
             embedder,
             query,
-            topic=topic,
+            topics=topic_list or None,
             limit=limit,
             exclude_ids=exclude_ids,
             work_ids=allowed_work_ids,
@@ -188,7 +193,7 @@ class AgentFactory:
                 query,
                 hits,
                 limit,
-                topic=topic,
+                topics=topic_list,
                 exclude_ids=exclude_ids,
                 allowed_work_ids=allowed_work_ids,
                 corpus_drugs=corpus_drugs,
@@ -214,6 +219,7 @@ class AgentFactory:
             "chunks": self.search_kb(
                 state.get("retrieval_query") or state["query"],
                 topic=state.get("topic"),
+                topics=state.get("topics"),
                 limit=state.get("limit", 5),
                 exclude_ids=state.get("exclude_ids"),
                 allowed_work_ids=state.get("allowed_work_ids"),
@@ -264,6 +270,7 @@ class AgentFactory:
         query: str,
         *,
         topic: str | None = None,
+        topics: Sequence[str] | None = None,
         limit: int = 5,
         patient_context: dict | None = None,
         patient_contexts: list[dict] | None = None,
@@ -277,17 +284,23 @@ class AgentFactory:
         # вопроса. Без неё (одиночный вопрос/LLM выключен) — сам query.
         search_query = (retrieval_query or "").strip() or query
         # LLM-роутинг раздела (docs/04 FR-14): если клиент явно не задал topic и
-        # LLM-роутер включён — топик выбирает LLM (тулза search_<раздел>).
+        # LLM-роутер включён — темы выбирает LLM (тулзы search_<раздел>).
+        # Тем может быть две (препарат + доказательства), поэтому фильтр в
+        # Qdrant — MatchAny; это один запрос, а не два поиска.
         # Redline-запросы LLM не трогаем: отказ детерминирован и дешевле.
-        if topic is None and detect_redline(query) is None:
+        topic_list: tuple[str, ...] = tuple(topics or ())
+        if topic is not None:
+            topic_list = (topic,)
+        elif not topic_list and detect_redline(query) is None:
             from app.services import llm_router  # lazy: config-зависимый импорт
-
-            topic = llm_router.route_topic(search_query)
+            topic_list = llm_router.route_topics(search_query)
+        topic = topic_list[0] if topic_list else None
         return self.build().invoke(
             {
                 "query": query,
                 "retrieval_query": search_query,
                 "topic": topic,
+                "topics": topic_list,
                 "limit": limit,
                 "patient_context": patient_context,
                 "patient_contexts": patient_contexts,

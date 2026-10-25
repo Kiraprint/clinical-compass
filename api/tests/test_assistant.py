@@ -121,6 +121,31 @@ def test_kb_search_finds_new_drugs(client, kb_collection):
     ids2 = {h["guideline_id"] for h in hits2 if h["topic"] == "ЛЕКАРСТВА"}
     assert "drug-escitalopram-canon-safety" in ids2, ids2
 
+def test_hybrid_search_multi_topic_filter(client, kb_collection):
+    """FR-14: две темы — один запрос с MatchAny; выдача только из этих разделов.
+
+    Вопрос про препарат и его доказательства маршрутизируется в ЛЕКАРСТВА +
+    НАУЧНЫЕ-СТАТЬИ; фильтр в Qdrant — must по MatchAny, поэтому лишних поисков
+    нет, а шкалы/триаж в выдачу не попадают.
+    """
+    from qdrant_client import QdrantClient
+
+    from app.services import kb
+    from app.services.embeddings import HashEmbedder
+
+    qdrant_client = QdrantClient(url=settings.qdrant_url)
+    topics = ("ЛЕКАРСТВА", "НАУЧНЫЕ-СТАТЬИ")
+    hits = kb.hybrid_search(
+        qdrant_client, HashEmbedder(), "депрессия сертралин", limit=8, topics=topics
+    )
+    assert hits
+    assert {h["topic"] for h in hits} <= set(topics), {h["topic"] for h in hits}
+
+    single = kb.hybrid_search(
+        qdrant_client, HashEmbedder(), "депрессия сертралин", limit=8, topic="ЛЕКАРСТВА"
+    )
+    assert single and {h["topic"] for h in single} == {"ЛЕКАРСТВА"}
+
 def test_assistant_grounded_answer_with_citations(client, kb_collection):
     h, _ = clinician_ctx(client, "c-assist@test.ru")
     resp = client.post("/api/v1/assistant/ask", json={"query": "Какой порог тяжести у шкалы PHQ-9?"}, headers=h)

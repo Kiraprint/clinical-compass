@@ -237,6 +237,7 @@ def hybrid_search(
     query: str,
     *,
     topic: str | None = None,
+    topics: Sequence[str] | None = None,
     limit: int = 5,
     exclude_ids: set[str] | None = None,
     work_ids: set[str] | None = None,
@@ -268,6 +269,11 @@ def hybrid_search(
     всегда: точки без work_id (seed-корпус: шкалы, препараты, демо) и
     kind='guideline' (гайдлайны ВОЗ) — они не требуют решения врача.
 
+    topic / topics — разделы корпуса (docs/08 §3). Один раздел фильтруется
+    MatchValue, несколько — MatchAny: вопрос бывает одновременно про препарат и
+    про доказательства, и тогда LLM-роутер (FR-14) возвращает две темы. Пусто —
+    поиск по всем разделам.
+
     Возвращает [{guideline_id, source_title, topic, score, text, work_id,
     kind}]; при реранке score — скор кросс-энкодера (он же основа порога
     kb_min_score). work_id/kind — для персонального фильтра видимости в агенте.
@@ -280,8 +286,11 @@ def hybrid_search(
     must: list = []
     must_not: list = []
     should: list = []
-    if topic:
-        must.append(qm.FieldCondition(key="topic", match=qm.MatchValue(value=topic)))
+    topic_list = tuple(topics or ()) or ((topic,) if topic else ())
+    if len(topic_list) == 1:
+        must.append(qm.FieldCondition(key="topic", match=qm.MatchValue(value=topic_list[0])))
+    elif topic_list:
+        must.append(qm.FieldCondition(key="topic", match=qm.MatchAny(any=list(topic_list))))
     if exclude_ids:
         # Персональные исключения врача: источники остаются в КБ, но не в выдаче.
         must_not.append(qm.FieldCondition(key="guideline_id", match=qm.MatchAny(any=sorted(exclude_ids))))

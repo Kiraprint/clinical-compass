@@ -188,7 +188,7 @@ def test_hash_rerank_without_drugs_never_opens_sync_session(queries):
     build_corpus(drug_docs=[])  # прогрев статики без препаратов
     queries.clear()
 
-    hits = _hash_rerank("порог PHQ-9", [], 5, topic=None, exclude_ids=None, corpus_drugs=None)
+    hits = _hash_rerank("порог PHQ-9", [], 5, topics=(), exclude_ids=None, corpus_drugs=None)
 
     assert hits, "статическая часть корпуса должна находиться лексически"
     assert not any(h["guideline_id"].startswith("drug-") for h in hits)
