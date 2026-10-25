@@ -224,6 +224,19 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
+  // FR-37: анамнез пациента — вводные + подтверждённый текст.
+  clinicianAnamnesis: (patientId: string) =>
+    req<Anamnesis>(`/api/v1/clinician/patients/${patientId}/anamnesis`),
+  clinicianAnamnesisSave: (patientId: string, body: { brief: string; text?: string | null }) =>
+    req<Anamnesis>(`/api/v1/clinician/patients/${patientId}/anamnesis`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  clinicianAnamnesisDraft: (patientId: string, brief?: string) =>
+    req<AnamnesisDraft>(`/api/v1/clinician/patients/${patientId}/anamnesis/draft`, {
+      method: "POST",
+      body: JSON.stringify({ brief: brief?.trim() ? brief : null }),
+    }),
   myContacts: () => req<PatientContacts>("/api/v1/profile/contacts"),
   myContactsUpdate: (body: ContactPatch) =>
     req<PatientContacts>("/api/v1/profile/contacts", { method: "PATCH", body: JSON.stringify(body) }),
@@ -855,8 +868,22 @@ export interface Report {
   };
   // FR-31: подтверждённые врачом факты из переписки (черновики, не диагноз).
   chat_insights: AcceptedChatInsight[];
+  // FR-37: анамнез; null — нет активного согласия пациента.
+  anamnesis: Anamnesis | null;
   // FR-22: null, если у пациента нет активного согласия (152-ФЗ).
   contacts: { phone: string | null; birth_date: string | null; age: number | null; adult: boolean | null } | null;
+}
+export interface Anamnesis {
+  patient_id: string;
+  brief: string | null;
+  text: string | null;
+  updated_at: string | null;
+  updated_by: string | null;
+}
+export interface AnamnesisDraft {
+  draft: string;
+  /** Счётчики категорий, замаскированных перед отправкой в LLM (без значений). */
+  masked_report: { applied: boolean; counts: Record<string, number> };
 }
 export interface Escalation {
   id: string;

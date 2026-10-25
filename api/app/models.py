@@ -798,3 +798,30 @@ class ChatInsight(Base):
     created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
     reviewed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+class PatientAnamnesis(Base):
+    """FR-37: анамнез пациента — вводные врача и сформированный текст.
+
+    Одна строка на пациента (patient_id UNIQUE). Оба поля — спецкатегория ПДн
+    (косвенно указывают диагноз), поэтому EncryptedText (pgcrypto).
+    `brief` — краткие вводные, которые врач правит и отправляет в LLM;
+    `text` — структурированный анамнез (черновик модели после подтверждения
+    врачом). Аудит пишет только ids и категории масок, тексты — никогда.
+    """
+
+    __tablename__ = "patient_anamnesis"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), unique=True)
+    brief: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    updated_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    # Поле `text` объявлено последним: имя класса-скоупа иначе затеняет
+    # sqlalchemy.text в server_default выше.
+    text: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
