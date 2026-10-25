@@ -91,6 +91,9 @@ class FakeQdrant:
         self._scores = scores
         self.last_kwargs: dict | None = None
 
+    def collection_exists(self, name) -> bool:  # как у настоящего QdrantClient
+        return True
+
     def query_points(self, **kwargs):
         self.last_kwargs = kwargs
         scores = self._scores or [round(0.9 - 0.1 * i, 3) for i in range(len(self._docs))]

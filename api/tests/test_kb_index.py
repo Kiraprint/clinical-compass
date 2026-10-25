@@ -69,6 +69,25 @@ def test_missing_collection_is_not_a_config_error(monkeypatch):
         monkeypatch.undo()
 
 
+
+def test_search_on_absent_collection_returns_empty_not_500(monkeypatch):
+    """Коллекции нет (сброс индекса / до kb_seed) — поиск пуст, а не исключение.
+
+    Qdrant отвечает 404 `Collection ... doesn't exist`; без обработки ассистент
+    отдавал 500 вместо «в базе знаний нет данных».
+    """
+    probe = "kb_test_absent_search"
+    client = _fresh(probe)
+    monkeypatch.setattr(kb, "COLLECTION", probe)
+    try:
+        assert not client.collection_exists(probe)
+        # hash-профиль (dense+sparse prefetch) и dense-only идут одним путём
+        assert kb.hybrid_search(client, HashEmbedder(), "порог тяжести PHQ-9") == []
+        assert kb.hybrid_search(client, _DenseOnly(), "порог тяжести PHQ-9") == []
+    finally:
+        monkeypatch.undo()
+
+
 def test_startup_validation_fails_on_mismatched_index(monkeypatch):
     from qdrant_client.http import models as qm
 

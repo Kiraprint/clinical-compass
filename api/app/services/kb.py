@@ -16,6 +16,7 @@ from typing import Sequence
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 from app.config import settings
 from app.services.embeddings import Embedder
@@ -231,6 +232,26 @@ def is_visible(hit: dict, work_ids: set[str] | None) -> bool:
     return str(hit["work_id"]) in work_ids
 
 
+def _query_kb(client: QdrantClient, **kwargs):
+    """Запрос к коллекции KB; её отсутствие — пустая база, а не сбой запроса.
+
+    Сброс индекса (`kb_seed --reset`) и первый запуск до индексации оставляют
+    Qdrant без коллекции: Qdrant отвечает 404, и без этой обработки каждый
+    вопрос ассистента отдавал бы 500 вместо «в базе знаний нет данных»
+    (docs/08 §4). Возвращает None, если коллекции нет.
+    """
+    try:
+        return client.query_points(collection_name=COLLECTION, **kwargs)
+    except UnexpectedResponse as exc:
+        if getattr(exc, "status_code", None) == 404:
+            log.warning(
+                "Коллекция '%s' не найдена: KB-поиск пуст до `python -m app.kb_seed`",
+                COLLECTION,
+            )
+            return None
+        raise
+
+
 def hybrid_search(
     client: QdrantClient,
     embedder: Embedder,
@@ -328,8 +349,8 @@ def hybrid_search(
             if k and k > 0
             else qm.FusionQuery(fusion=qm.Fusion.RRF)
         )
-        res = client.query_points(
-            collection_name=COLLECTION,
+        res = _query_kb(
+            client,
             prefetch=prefetch,
             query=fusion,
             query_filter=filter_,
@@ -337,14 +358,16 @@ def hybrid_search(
             with_payload=True,
         )
     else:
-        res = client.query_points(
-            collection_name=COLLECTION,
+        res = _query_kb(
+            client,
             query=dense,
             using=DENSE_NAME,
             query_filter=filter_,
             limit=fetch,
             with_payload=True,
         )
+    if res is None:  # коллекции нет — пустая выдача (WARNING уже залогирован)
+        return []
     hits = [
         {
             "guideline_id": p.payload["guideline_id"],

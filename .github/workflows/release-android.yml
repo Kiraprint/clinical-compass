@@ -11,13 +11,17 @@ name: Android APK
 #
 # Куда попадает результат:
 #   - ветки main/master, ручной запуск → artifact `compass-apk`;
-#   - теги v* → этот workflow вызывается из release.yml (workflow_call) после
-#     публикации образов и прикрепляет APK к тому же GitHub Release.
+#   - тег v* (ручной прогон на теге) → APK прикрепляется к существующему Release.
+#
+# Основной путь релиза теперь локальный: `tools/release-local.sh X.Y.Z` гоняет
+# тесты и сборку на нашей стороне, создаёт тег и GitHub Release и заливает туда
+# готовый APK (`gh release upload`). GitHub Actions остаются резервным путём:
+# лимиты GH исчерпаны, поэтому они не запускаются автоматически на теги —
+# workflow release.yml с публикацией образов удалён, образы собираются локально.
 on:
   push:
     branches: [master, main]
   workflow_dispatch:
-  workflow_call:
 
 jobs:
   build-apk:

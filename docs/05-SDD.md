@@ -157,7 +157,7 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | FR-13 | E3 | `patient_cannot_access_clinician_routes`, `foreign_run_hidden` |
 | FR-14 | E6 | покрывается e2e-питч-сценарием (`seed` → RED-траектории), не юнит-тестом |
 | FR-15 | E5/E6 | `red_escalation_notifies_rostered_clinician`, `push_subscribe_unsubscribe` (API) + e2e «колокол уведомлений» |
-| FR-16 | E7 | `fcm_device_token_register_delete`, `fcm_upgrade_then_cooldown` (API) + CI `release-android.yml` (Capacitor-сборка APK) |
+| FR-16 | E7 | `fcm_device_token_register_delete`, `fcm_upgrade_then_cooldown` (API) + локальная Capacitor-сборка APK `tools/release-local.sh` (fallback — `release-android.yml`) |
 | FR-17 | E7 | `test_assistant.py`, `test_llm_router.py` |
 | FR-18 | E4 | `test_clinician.py` (CLINICIAN-шкалы) |
 | FR-19 | E5 | `test_patient_flows.py` (чек-ин + дневник + приём) |

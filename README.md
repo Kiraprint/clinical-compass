@@ -252,39 +252,66 @@ python -m app.enrichment serve
 
 Ревью также доступно по HTTP (`/api/v1/admin/kb/*`, роль ADMIN) — docs/04 §3.1.
 
-## CI и релизы
+## CI и релизы (локально; GitHub — только хранилище APK)
 
-Локально (тесты ядра + API против реального Postgres + сборка образов; опционально `--e2e` — полный стек + Playwright):
+Лимиты GitHub Actions исчерпаны, поэтому тесты и сборки гоняются у нас,
+а GitHub используется как место, куда кладётся готовый APK.
 
 ```bash
-./tools/ci.sh            # тесты + сборка
-./tools/ci.sh --e2e      # + подъём стека и e2e-прогон
+./tools/ci.sh            # ядро (cov ≥95%) + API (Postgres) + ml/tests + docker build
+./tools/ci.sh --e2e      # + изолированный стек и полный Playwright-прогон
+./tools/ci.sh --skip-docker
 ```
 
-GitHub Actions (`origin` — `Kiraprint/clinical-compass`):
+Изоляция прогона: гейт поднимает **свой** docker-контур — compose-проект
+`cci-infra` с Postgres на `127.0.0.1:55432` и Qdrant на `127.0.0.1:56333`, БД
+`compass_ci`, коллекция `kb_ci` (`CC_CI_PG_PORT` / `CC_CI_QDRANT_PORT` /
+`CC_CI_DB_NAME` / `CC_CI_COLLECTION`). Рабочий Postgres `:5432` (база
+`compass`) и Qdrant `:6333` (`kb`, `kb_600`) не используются никогда:
+фикстура api-тестов дропает схему целевой базы. e2e-стек — проект `cci` на
+порту `8096`, после прогона удаляется вместе с томами.
 
-- `.github/workflows/ci.yml` — на push/PR: тесты ядра и API (Postgres в service-контейнере) + сборка docker-образов; e2e-джоб на `master`/`main`.
-- `.github/workflows/release.yml` — на тег `v*`: публикация образов в GHCR (`compass-api`, `compass-ui` → GitHub Packages), создание GitHub Release (не draft), затем вызов APK-джоба.
-- `.github/workflows/release-android.yml` — Android APK (Capacitor + FCM): на push `main`/`master` и `workflow_dispatch` — artifact `compass-apk`; на теге `v*` вызывается из `release.yml` и прикрепляет APK к тому же Release.
+Релиз (тесты → образы → APK → тег → GitHub Release с APK):
 
-Выпуск версии: `git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z`.
-Из тега берутся `versionName` (`X.Y.Z`) и `versionCode` (`X*10000+Y*100+Z`); сборки из веток получают `1.0-<sha>` и `1000+run_number`.
+```bash
+./tools/release-local.sh 1.1.0                   # полный цикл
+./tools/release-local.sh 1.1.0 --skip-ci         # тесты уже гоняли
+./tools/release-local.sh 1.1.0 --no-images       # только APK + Release
+./tools/release-local.sh 1.1.0 --push-images     # + docker push в GHCR
+```
+
+`versionName` и `versionCode` считаются из `X.Y.Z` → `X*10000+Y*100+Z`
+(`1.1.0` → `10100`); тег `vX.Y.Z` создаётся только из чистого дерева.
+APK заливается `gh release upload` — для этого достаточно `gh` со scope `repo`.
+Публикация образов в GHCR — отдельный scope `write:packages`: в текущем
+`gh`-токене его нет, включить можно так: `gh auth refresh -h github.com -s write:packages`
+(или PAT с `write:packages` → `docker login ghcr.io`). Без него образы остаются
+локальными, а `tools/release-local.sh` их просто не пушит.
+
+GitHub Actions остаются резервным путём, основной релиз идёт из
+`tools/release-local.sh`:
+
+- `.github/workflows/ci.yml` — те же ворота на стороне GH (когда биллинг вернётся);
+  канонический CI — `tools/ci.sh`.
+- `.github/workflows/release-android.yml` — сборка APK на раннере
+  (`workflow_dispatch`), прикрепляет APK к существующему Release.
+- Публикация образов в GHCR на тег удалена (`release.yml`): образы собираются
+  локально, тег и Release создаёт `tools/release-local.sh`.
 
 ## Мобильное приложение (Android APK, item 4)
 
 `mobile/` — Capacitor-обёртка веб-клиента (`ui/`), universal APK `dev.compass.assistant`:
 
 ```bash
-cd ui && VITE_API_BASE=https://compass.fxtun.ru npm run build   # SPA с адресом демо
-cd ../mobile && npm ci && npx cap sync android  # скопировать в нативный проект
-cd android && ./gradlew assembleDebug           # APK: app/build/outputs/apk/debug/
+./tools/build-apk.sh 1.1.0     # SPA (VITE_API_BASE) → cap sync → gradlew assembleRelease
+./tools/build-apk.sh           # versionName из build.gradle, APK в dist/compass-release.apk
 ```
 
-- **API-хост**: сборка веб-части идёт с `VITE_API_BASE=<публичный https-URL API>` (в нативном приложении нет same-origin). Стабильный демо-адрес — `https://compass.fxtun.ru` (см. «Внешний доступ»); в CI это `vars.VITE_API_BASE`.
+- **API-хост**: сборка веб-части идёт с `VITE_API_BASE=<публичный https-URL API>` (в нативном приложении нет same-origin). Стабильный демо-адрес — `https://compass.fxtun.ru` (см. «Внешний доступ»); переопределяется `CC_API_BASE`.
 - **Пуши**: нативно приложение использует не Web Push, а FCM. Регистрация токена устройства: `POST /api/v1/push/device-token`, одноразовый апгрейд `POST /api/v1/push/fcm/upgrade` (cooldown 60 мин → `429 FCM_COOLDOWN`, статус в колоколе уведомлений).
-- **Firebase**: для реальной доставки пушей нужен Firebase-проект (`google-services.json` в `mobile/android/app/`, в CI — из `secrets.FCM_GOOGLE_SERVICES_JSON`); без файла APK собирается, но пуши не работают. Серверная отправка — FCM HTTP v1 по `CC_FCM_SERVICE_ACCOUNT_B64` (base64 service-account JSON); без неё сервер шлёт только Web Push.
-- **Подпись**: debug-APK подписывается автоматически; release — из `ANDROID_KEYSTORE_B64` + паролей (см. workflow).
-- **Локальная сборка release-APK через CLI** (без локальных Java/SDK): `tools/build-apk.sh` собирает образ `compass-android-builder` (JDK 21 + Android SDK 36), генерирует персистентный demo-keystore, запускает `gradlew assembleRelease` и кладёт подписанный APK в `dist/compass-release.apk`. Перед запуском пересобери веб-часть с `VITE_API_BASE` и `npx cap sync android` (см. блок выше).
+- **Firebase**: для реальной доставки пушей нужен Firebase-проект (`google-services.json` в `mobile/android/app/`); без файла APK собирается, но пуши не работают. Серверная отправка — FCM HTTP v1 по `CC_FCM_SERVICE_ACCOUNT_B64` (base64 service-account JSON); без неё сервер шлёт только Web Push.
+- **Подпись**: `tools/build-apk.sh` генерирует персистентный demo-keystore (`mobile/android/app/release.keystore`, `CN=Compass Demo`) и подписывает release-APK; этот же сертификат у APK из GitHub Release, поэтому обновления ставятся поверх.
+- **Локальная сборка** (без локальных Java/SDK): `tools/build-apk.sh` работает в образе `compass-android-builder` (JDK 21 + Android SDK 36), сам собирает SPA, делает `npx cap sync android`, запускает `gradlew assembleRelease` с `-PccVersionName/-PccVersionCode` и кладёт APK в `dist/compass-<версия>-release.apk`, печатая `package:` из `aapt2`.
 
 ## ИИ-ассистент врача: раздел БЗ выбирает LLM
 

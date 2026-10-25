@@ -76,6 +76,9 @@ class _SpyClient:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
+    def collection_exists(self, name) -> bool:  # как у настоящего QdrantClient
+        return True
+
     def query_points(self, **kwargs):
         self.calls.append(kwargs)
 
@@ -270,6 +273,9 @@ def test_candidates_and_rrf_k_reach_qdrant(monkeypatch):
         points = [_Point()]
 
     class _Client:
+        def collection_exists(self, name) -> bool:  # как у настоящего QdrantClient
+            return True
+
         def query_points(self, **kwargs):
             captured.update(kwargs)
             return _Res()
@@ -331,6 +337,9 @@ def test_gate_uses_pool_best_not_reranked_top(monkeypatch):
     class _Client:
         def __init__(self, scores: list[float]) -> None:
             self._scores = scores
+
+        def collection_exists(self, name) -> bool:  # как у настоящего QdrantClient
+            return True
 
         def query_points(self, **kwargs):
             class _Res:
