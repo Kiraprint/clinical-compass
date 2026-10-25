@@ -118,6 +118,14 @@ BUILTIN_PROFILES: dict[str, EmbedProfile] = {
         query_prefix="Instruct: {instruction}\nQuery: ",
         passage_prefix="",
     ),
+    # Лидер замеров поиска (docs/08 §4.7): dense-only Hit@3 0.968 на 600-символьных
+    # чанках при 29–47 мс — лучший баланс «качество/скорость» без реранка.
+    "bge-m3": EmbedProfile(
+        model_id="BAAI/bge-m3",
+        dense_size=1024,
+        query_prefix="",
+        passage_prefix="",
+    ),
 }
 
 DEFAULT_PROFILE = "qwen3-0.6b"

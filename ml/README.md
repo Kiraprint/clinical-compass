@@ -53,7 +53,7 @@ docker compose -f infra/docker-compose.yml --profile gpu exec ml python -c "impo
 | `CC_ML_DEVICE` | `auto` | `auto` \| `cuda` \| `cpu`; `auto` — CUDA при доступной карте |
 | `CC_ML_TOKEN` | — | общий секрет `X-CC-ML-Token`; **обязателен**, иначе старт падает |
 | `CC_ML_ALLOW_ANONYMOUS` | `0` | `1` — разрешить пустой токен (только локальная отладка) |
-| `CC_ML_DEFAULT_PROFILE` | `qwen3-0.6b` | профиль эмбеддингов по умолчанию |
+| `CC_ML_DEFAULT_PROFILE` | `qwen3-0.6b` | профиль эмбеддингов по умолчанию (`qwen3-0.6b`, `e5-large-instruct`, `bge-m3`) |
 | `CC_ML_PROFILES` | — | JSON `{имя: {model, dense_size, query_prefix, passage_prefix}}` |
 | `CC_ML_QUERY_INSTRUCTION` | англ. инструкция | текст `Instruct:` для instruct-эмбеддеров |
 | `CC_ML_RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | cross-encoder |
