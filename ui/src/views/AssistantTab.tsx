@@ -18,6 +18,7 @@ export default function AssistantTab() {
   const [detail, setDetail] = useState<AssistantThreadDetail | null>(null);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [switching, setSwitching] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [renaming, setRenaming] = useState("");
@@ -84,7 +85,9 @@ export default function AssistantTab() {
   async function selectThread(id: string) {
     const seq = ++selectSeq.current;
     setActiveId(id);
-    setDetail(null);
+    // detail НЕ обнуляем: иначе вместе с панелью размонтируется поле «Вопрос»
+    // и набранный в этот момент текст теряется (гонка при создании диалога).
+    setSwitching(true);
     setError("");
     setNotice("");
     try {
@@ -94,6 +97,8 @@ export default function AssistantTab() {
     } catch (e: unknown) {
       if (selectSeq.current !== seq) return;
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (selectSeq.current === seq) setSwitching(false);
     }
   }
 
@@ -172,7 +177,7 @@ export default function AssistantTab() {
   };
 
   const send = async () => {
-    if (!detail || !input.trim()) return;
+    if (!detail || !input.trim() || switching) return;
     const targetId = detail.id;
     const seq = ++selectSeq.current;
     setBusy(true);
@@ -388,12 +393,13 @@ export default function AssistantTab() {
                   maxLength={2000}
                   onChange={(e) => setInput(e.target.value)}
                   placeholder="Например: какова динамика пациента из контекста и что говорит шкала PHQ-9?"
+                  disabled={switching}
                 />
                 <button
                   className="icon-btn"
                   aria-label="Спросить"
                   title="Спросить"
-                  disabled={busy || !input.trim()}
+                  disabled={busy || switching || !input.trim()}
                   onClick={() => void send()}
                 >
                   {busy ? "…" : "→"}
