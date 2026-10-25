@@ -1,25 +1,32 @@
 """ИИ-агент врача (LangGraph). Гибридный поиск + ответ с цитатами (docs/07, docs/08).
 
-Граф: retrieve (Qdrant hybrid) → answer (чистая сборка из ядра, red line).
-LLM — за SPI; по умолчанию детерминированная сборка (docs/03 §1.3), офлайн.
-Потребляет только открытый не-ПДн корпус: связи с пациентом нет.
+Граф: retrieve (Qdrant hybrid) → answer (LLM по сниппетам либо чистая сборка
+из ядра, red line). LLM — за SPI и только по найденным фрагментам: без
+`CC_ASSISTANT_LLM_URL`, при сбое или без валидных ссылок отвечает
+детерминированный `build_rag_answer` (docs/03 §1.3), офлайн. Отказные пути
+(красная линия, нет фрагментов, только карта пациента) LLM не касаются.
+Потребляет только открытый не-ПДн корпус: карта пациента в промпт не уходит.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Sequence, TypedDict
 
 import re
 from langgraph.graph import END, START, StateGraph
 
-from compass.agent import RAGChunk, build_rag_answer, detect_redline
+from compass.agent import Citation, RAGAnswer, RAGChunk, build_rag_answer, detect_redline
 
 from app.config import settings
 from app.services.depersonalize import scrub_text
 
 from app.services import kb as kb_store
+from app.services import llm_router
 from app.services.embeddings import get_embedder, profile_default_min_score
 from app.services.reranker import get_reranker
+
+logger = logging.getLogger(__name__)
 
 # GATE: лексическое покрытие (docs/07 §5 — sparse ловит точные термины, dense —
 # смысл, но для демо-эмбеддера минимальный порог на точное совпадение терминов).
@@ -109,6 +116,71 @@ def _hash_rerank(
             break
     return hits
 
+
+# Ссылка модели на сниппет: [1], [1, 2], [1][3]. Скобки без цифр игнорируем.
+_CITATION_RE = re.compile(r"\[([^\[\]]{1,40})\]")
+MAX_ANSWER_CITATIONS = 3  # как в build_rag_answer: больше трёх источников — шум
+
+
+def _cited_indexes(text: str) -> list[int]:
+    """Номера сниппетов, на которые сослался LLM, в порядке первого упоминания."""
+    found: list[int] = []
+    for group in _CITATION_RE.findall(text):
+        for token in re.findall(r"\d{1,3}", group):
+            n = int(token)
+            if n not in found:
+                found.append(n)
+    return found
+
+
+def _compose_answer(
+    query: str, history: list[dict], chunks: list[RAGChunk]
+) -> RAGAnswer | None:
+    """LLM-ответ по сниппетам с серверной проверкой ссылок (FR-17).
+
+    None — LLM выключен/недоступен/вернул пусто ИЛИ ни одна ссылка [n] не
+    указывает на реальный фрагмент: тогда вызывающий берёт детерминированный
+    build_rag_answer. Текст ответа модели в citations не попадает — цитаты
+    собираются только из настоящих чанков (номер → chunks[n - 1]).
+    Карта пациента сюда не передаётся: модель не видит ПДн.
+    """
+    text = llm_router.compose_answer(
+        history,
+        query,
+        [{"text": c.text, "source_title": c.source_title} for c in chunks],
+    )
+    if not text:
+        return None
+    picked: list[RAGChunk] = []
+    seen: set[str] = set()
+    for n in sorted(_cited_indexes(text)):
+        if not 1 <= n <= len(chunks):
+            continue
+        chunk = chunks[n - 1]
+        if chunk.guideline_id in seen:
+            continue
+        seen.add(chunk.guideline_id)
+        picked.append(chunk)
+        if len(picked) >= MAX_ANSWER_CITATIONS:
+            break
+    if not picked:
+        logger.info("LLM-ответ без валидных ссылок на сниппеты — детерминированный ответ")
+        return None
+    return RAGAnswer(
+        answer=text,
+        citations=tuple(
+            Citation(
+                source_title=c.source_title,
+                guideline_id=c.guideline_id,
+                topic=c.topic,
+                score=round(c.score, 4),
+            )
+            for c in picked
+        ),
+        grounded=True,
+    )
+
+
 class AgentState(TypedDict, total=False):
     query: str
     retrieval_query: str | None
@@ -116,6 +188,9 @@ class AgentState(TypedDict, total=False):
     topics: tuple[str, ...]
     limit: int
     chunks: list[RAGChunk]
+    # История треда (деперсонализированные реплики, oldest → newest) — контекст
+    # для LLM-ответа; в retrieval/red line не участвует.
+    history: list[dict]
     exclude_ids: set[str]
     allowed_work_ids: set[str] | None
     patient_context: dict | None
@@ -229,12 +304,23 @@ class AgentFactory:
         }
 
     def _answer(self, state: AgentState) -> AgentState:
-        result = build_rag_answer(
-            state["query"],
-            state.get("chunks", []),
-            patient_context=state.get("patient_context"),
-            patient_contexts=state.get("patient_contexts"),
-        )
+        chunks = state.get("chunks") or []
+        # FR-17: связный ответ по сниппетам пишет LLM. Всё, что похоже на
+        # диагноз/терапию (red line), а также случаи «фрагментов нет» и «есть
+        # только карта пациента» остаются детерминированными: карта и ПДн в
+        # промпт не уходят, а отказ обязан быть воспроизводимым.
+        result = None
+        if chunks and detect_redline(state["query"]) is None:
+            result = _compose_answer(
+                state["query"], state.get("history") or [], chunks
+            )
+        if result is None:
+            result = build_rag_answer(
+                state["query"],
+                chunks,
+                patient_context=state.get("patient_context"),
+                patient_contexts=state.get("patient_contexts"),
+            )
         return {
             "answer": {
                 "answer": result.answer,
@@ -278,6 +364,7 @@ class AgentFactory:
         allowed_work_ids: set[str] | None = None,
         retrieval_query: str | None = None,
         corpus_drugs: list[dict] | None = None,
+        history: list[dict] | None = None,
     ) -> dict:
         # Retrieval и роутинг раздела идут по retrieval_query (FR-21):
         # assistant_chat подставляет сюда LLM-переформулировку уточняющего
@@ -292,7 +379,6 @@ class AgentFactory:
         if topic is not None:
             topic_list = (topic,)
         elif not topic_list and detect_redline(query) is None:
-            from app.services import llm_router  # lazy: config-зависимый импорт
             topic_list = llm_router.route_topics(search_query)
         topic = topic_list[0] if topic_list else None
         return self.build().invoke(
@@ -305,6 +391,9 @@ class AgentFactory:
                 "patient_context": patient_context,
                 "patient_contexts": patient_contexts,
                 "corpus_drugs": corpus_drugs,
+                # История треда (уже деперсонализированная) — контекст только
+                # для LLM-ответа; retrieval/red line её не видят.
+                "history": history or [],
                 "exclude_ids": exclude_ids or set(),
                 # FR-36: None — фильтр не нужен, set() (в т.ч. пустой) — статьи
                 # видны только из allow-list. Вызывающий клинический путь всегда

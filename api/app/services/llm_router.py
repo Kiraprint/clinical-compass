@@ -3,20 +3,24 @@
 Вместо ручного выбора «Раздела» в UI (удалён) топик выбирает LLM: запрос
 отправляется на OpenAI-совместимый /v1/chat/completions с набором тулз
 search_<ТОПИК>, модель обязана вернуть ровно один tool_call, из имени тулзы
-выводится topic. Ответ по-прежнему строит детерминированный build_rag_answer —
-LLM только роутит поиск, не отвечает клинически (красные линии docs/01).
+выводится topic.
 
-Два вызова LLM, оба — только маршрутизация поиска, не клинический ответ:
+Три вызова LLM, у каждого своя узкая роль:
 route_topic (FR-14) выбирает раздел БЗ, rewrite_followup (FR-21) разворачивает
-уточняющий вопрос треда («а в каких дозах?») в самодостаточный поисковый запрос.
+уточняющий вопрос треда («а в каких дозах?») в самодостаточный поисковый запрос,
+compose_answer (FR-17) пишет ответ по-русски по уже найденным сниппетам.
+Клинические границы у всех трёх общие: модель не ставит диагноз, не назначает
+терапию и не подбирает дозы (красные линии docs/01), а отказные пути всегда
+детерминированные.
 
 Границы (docs/12): на вход LLM подаётся только очищенный от ПДн текст
 (scrub_for_llm вызывается в routers/assistant.py и assistant_chat.py до вызова).
-Контекст пациента в LLM НЕ уходит.
+Контекст пациента в LLM НЕ уходит — compose_answer его просто не получает.
 
 Отказоустойчивость: URL не задан / таймаут / ошибка HTTP / пустой ответ →
 route_topic возвращает None (= поиск по всем разделам), rewrite_followup —
-None (= поиск по исходному вопросу). Ответ не ломается.
+None (= поиск по исходному вопросу), compose_answer — None (= детерминированный
+build_rag_answer). Ответ не ломается.
 """
 
 from __future__ import annotations
@@ -36,6 +40,12 @@ REWRITE_HISTORY_MESSAGES = 8      # последних сообщений тре
 REWRITE_MESSAGE_CHARS = 800       # обрезка одного сообщения
 REWRITE_HISTORY_CHARS = 3000      # обрезка всей истории (с конца, свежее важнее)
 REWRITE_QUERY_CHARS = 800         # обрезка текущего вопроса и переформулировки
+
+# Ответ по найденным фрагментам (FR-17): границы сниппетов, уходящих в LLM.
+ANSWER_SNIPPETS = 5               # не больше, чем отдаёт поиск (limit=5)
+ANSWER_SNIPPET_CHARS = 700        # обрезка одного сниппета
+ANSWER_SNIPPETS_CHARS = 3500      # обрезка всех сниппетов разом
+ANSWER_MAX_CHARS = 2000           # потолок ответа модели (защита от «простыни»)
 
 # Топики корпуса БЗ (docs/08): ключ = имя тулзы, значение = topic в Qdrant.
 # Тулза search_all специально не нужна: model может не вызывать тулзу вовсе
@@ -210,6 +220,27 @@ _ROLE_LABELS = {"CLINICIAN": "Врач", "ASSISTANT": "Ассистент"}
 # Модель иногда всё же префиксует ответ («Вопрос: …») — снимаем.
 _REWRITE_PREFIX = re.compile(r"^(?:переформулированн\w+ вопрос|вопрос|запрос|ответ)\s*:\s*", re.I)
 
+# FR-17: клинический ответ пишет модель, но только по найденным сниппетам.
+# Запреты продублированы в коде (red line считается ДО вызова LLM): промпт —
+# не единственный барьер, а модель не видит ни карты пациента, ни ПДн.
+_ANSWER_SYSTEM_PROMPT = (
+    "Ты — справочный ассистент врача. Отвечай по-русски, связно и по делу, "
+    "только на основе пронумерованных сниппетов базы знаний из сообщения "
+    "пользователя и с учётом истории диалога.\n"
+    "Правила:\n"
+    "1. Не ставь диагноз, не назначай лечение, не подбирай дозы и схемы приёма — "
+    "это функция врача.\n"
+    "2. Не добавляй факты, которых нет в сниппетах: не выдумывай числа, названия "
+    "препаратов, шкал и источников.\n"
+    "3. Каждое утверждение подкрепляй ссылкой на сниппет в виде [n], где n — "
+    "номер сниппета; допустимо несколько ссылок подряд: [1][2].\n"
+    "4. Если сниппетов не хватает для ответа, прямо скажи, что в базе знаний нет "
+    "нужных данных, и перечисли, что удалось найти.\n"
+    "5. Не упоминай персональные данные пациентов — их тебе не передают.\n"
+    "6. Верни только текст ответа: без markdown-заголовков и служебных "
+    "комментариев."
+)
+
 
 def _clip(text: str, limit: int) -> str:
     text = text.strip()
@@ -291,6 +322,89 @@ def rewrite_followup(history: list[dict], query: str) -> str | None:
     except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError, ValueError, TypeError) as exc:
         logger.warning(
             "assistant LLM-переформулировка недоступна (%s: %s) — исходный вопрос",
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
+def _format_snippets(chunks: list[dict]) -> str:
+    """Найденные фрагменты как нумерованный список для промпта.
+
+    Номера — позиции в chunks (1-based), те же, что потом проверяет сервер:
+    ссылка [n] в ответе модели означает chunks[n - 1]. Пустой текст фрагмента
+    строку не даёт, но нумерацию не сдвигает.
+    """
+    lines: list[str] = []
+    used = 0
+    for i, chunk in enumerate(chunks[:ANSWER_SNIPPETS], start=1):
+        text = _clip(" ".join(str(chunk.get("text") or "").split()), ANSWER_SNIPPET_CHARS)
+        if not text:
+            continue
+        title = _clip(str(chunk.get("source_title") or "База знаний"), 120)
+        line = f"[{i}] {title}: {text}"
+        if used + len(line) > ANSWER_SNIPPETS_CHARS:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return "\n".join(lines)
+
+
+def _clean_answer(text: str) -> str | None:
+    """Ответ модели → текст без markdown-обёртки. None = пусто/мусор."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+    return _clip(text, ANSWER_MAX_CHARS) or None
+
+
+def compose_answer(history: list[dict], query: str, chunks: list[dict]) -> str | None:
+    """Ответ ассистента по найденным фрагментам и истории диалога (FR-17).
+
+    history — предыдущие реплики треда, query — текущий вопрос (оба уже
+    деперсонализированы scrub_for_llm), chunks — найденные фрагменты КБ
+    [{"text", "source_title"}]. Карта пациента не передаётся никогда — она
+    остаётся локальной; запрос «только по карте» (без находок в КБ) до модели
+    не доходит и отвечается детерминированным build_rag_answer.
+
+    None = LLM выключен/недоступен/вернул пусто → детерминированный ответ.
+    Проверку ссылок [n] и сборку citations делает вызывающий (services.agent):
+    здесь только текст.
+    """
+    if not _enabled() or not query.strip() or not chunks:
+        return None
+    snippets = _format_snippets(chunks)
+    if not snippets:
+        return None
+    parts: list[str] = []
+    formatted = _format_history(history or [])
+    if formatted:
+        parts.append(f"История диалога:\n{formatted}")
+    parts.append(f"Вопрос врача: {_clip(query, REWRITE_QUERY_CHARS)}")
+    parts.append(f"Сниппеты базы знаний:\n{snippets}")
+    try:
+        body = _request(
+            {
+                "model": settings.assistant_llm_model,
+                "messages": [
+                    {"role": "system", "content": _ANSWER_SYSTEM_PROMPT},
+                    {"role": "user", "content": "\n\n".join(parts)},
+                ],
+                # 0.2 — связная формулировка, но без «творчества»: факты и
+                # ссылки берутся из сниппетов, повторяемость важна для тестов.
+                "temperature": 0.2,
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+            timeout=settings.assistant_llm_answer_timeout,
+        )
+        answer = _clean_answer(body["choices"][0]["message"].get("content") or "")
+        if answer is None:
+            logger.warning("assistant LLM вернул пустой ответ — детерминированный ответ")
+        return answer
+    except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError, ValueError, TypeError) as exc:
+        logger.warning(
+            "assistant LLM-ответ недоступен (%s: %s) — детерминированный ответ",
             type(exc).__name__,
             exc,
         )

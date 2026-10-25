@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     assistant_llm_url: str = ""
     assistant_llm_model: str = "local"  # CC_ASSISTANT_LLM_MODEL: имя модели на сервере
     assistant_llm_timeout: float = 10.0  # CC_ASSISTANT_LLM_TIMEOUT: сек на выбор тулзы
+    # CC_ASSISTANT_LLM_ANSWER_TIMEOUT: сек на генерацию ответа по сниппетам.
+    # Больше роутера: модель пишет связный текст, а не один tool_call. Таймаут →
+    # детерминированный build_rag_answer, не ошибка API.
+    assistant_llm_answer_timeout: float = 25.0
     # CC_ASSISTANT_LLM_API_KEY: Bearer-токен OpenAI-совместимого шлюза (omniroute).
     # Пусто → заголовок Authorization не отправляется (llama-server без ключа).
     assistant_llm_api_key: str = ""
