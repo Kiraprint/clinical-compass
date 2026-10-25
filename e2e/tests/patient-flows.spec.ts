@@ -79,7 +79,7 @@ test.describe("Пациент: первый запуск и ежедневные
     await patientSection(page, "Мой тренд");
 
     // 14 скринингов → polyline рисуется, есть текст с последним баллом и дельтой.
-    await expect(page.locator("svg polyline")).toBeVisible();
+    await expect(page.locator("svg polyline").first()).toBeVisible();
     await expect(page.getByText(/Последний балл: \d+/)).toBeVisible();
     await expect(page.getByText(/Дельта за 30 дней/)).toBeVisible();
   });

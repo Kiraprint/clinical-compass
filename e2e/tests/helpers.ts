@@ -75,6 +75,8 @@ export async function openScreening(page) {
 /** Чат — плашка в правом нижнем углу. */
 export async function openPatientChat(page) {
   await page.getByRole("button", { name: "Чат с врачом" }).click();
+}
+
 /**
  * FR-32: левое меню врача спрятано под «три полоски». Открываем (если закрыто)
  * и выбираем раздел по точному имени.
