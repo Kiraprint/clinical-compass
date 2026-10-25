@@ -101,6 +101,9 @@ services:
       CC_ML_URL: "${CC_ML_URL:-http://ml:8080}"
       CC_ML_TOKEN: "${CC_ML_TOKEN:-}"
       CC_ML_TIMEOUT: "${CC_ML_TIMEOUT:-5}"
+      # Бэкенд деперсонализации LLM-egress (docs/12): off | regex | natasha |
+      # rubert | hybrid | remote. remote требует доступного сайдкара (CC_ML_URL).
+      CC_DEPERSONALIZE_NER: "${CC_DEPERSONALIZE_NER:-off}"
       # Rate limiter логинов (docs/03 §12): общий бэкенд для всех воркеров и
       # реплик api. Пусто → memory (бюджет на процесс); auto при живом Redis.
       CC_REDIS_URL: "${CC_REDIS_URL:-redis://redis:6379/0}"

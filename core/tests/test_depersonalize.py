@@ -9,6 +9,7 @@ from compass.depersonalize import (
     EMAIL,
     FIO,
     PHONE,
+    Span,
     depersonalize,
 )
 
@@ -239,7 +240,9 @@ def test_partial_overlap_keeps_tail_masked():
     spans = [Span("FIO", 0, 11), Span("FIO", 7, 21)]
     masked = mask_spans(text, resolve_spans(spans, text)).text
     assert "Иванович" not in masked
-    assert masked.count("[ФИО]") == 2
+    # Пересекающиеся спаны одного вида склеиваются в объединение,
+    # поэтому плейсхолдер один и покрывает всё ФИО.
+    assert masked.count("[ФИО]") == 1
 
 
 def test_unknown_span_kind_gets_generic_placeholder():
@@ -334,3 +337,13 @@ def test_single_word_lowercase_is_not_person():
     assert not is_plausible_person_span(text, Span("FIO", 10, 20))
     assert is_plausible_person_span("Иванов", Span("FIO", 0, 6))
     assert is_plausible_person_span("сидорова галина", Span("FIO", 0, 15))
+
+def test_merge_adjacent_spans_is_public_and_joins_split_fio():
+    """Нейро-NER режет ФИО на два спана — публичный хелпер их склеивает."""
+    from compass.depersonalize import merge_adjacent_spans
+
+    text = "Меня зовут Иванов Пётр Сергеевич"
+    merged = merge_adjacent_spans(
+        [Span("FIO", 11, 22), Span("FIO", 22, 32)], text
+    )
+    assert merged == [Span("FIO", 11, 32)]
