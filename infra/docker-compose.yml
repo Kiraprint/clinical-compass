@@ -93,6 +93,8 @@ services:
       # FR-31: анализ переписки (факты-черновики). Требует и LLM URL выше, и флаг;
       # по умолчанию выключен — ПДн переписки в LLM не уходят (docs/10 R23, docs/17).
       CC_CHAT_INSIGHTS_ENABLED: "${CC_CHAT_INSIGHTS_ENABLED:-false}"
+      # FR-37: анамнез пациента. Выключен — 503 ANAMNESIS_DISABLED (docs/10 R27).
+      CC_ANAMNESIS_ENABLED: "${CC_ANAMNESIS_ENABLED:-false}"
       <<: *vapid
       CC_QDRANT_URL: http://qdrant:6333
       # ML-сайдкар (docs/08 §4): GPU-профиль, http://ml:8080 во внутренней
@@ -104,6 +106,14 @@ services:
       # Бэкенд деперсонализации LLM-egress (docs/12): off | regex | natasha |
       # rubert | hybrid | remote. remote требует доступного сайдкара (CC_ML_URL).
       CC_DEPERSONALIZE_NER: "${CC_DEPERSONALIZE_NER:-off}"
+      # Поиск (docs/08 §3-4): профиль эмбеддера и геометрия коллекции.
+      # Профиль и коллекцию меняют ОДНОВРЕМЕННО и только после переиндекса
+      # (kb_seed --reset + tools/rechunk_collection.py), иначе размерность
+      # dense не совпадёт и api не стартует (IndexConfigError).
+      CC_EMBEDDER: "${CC_EMBEDDER:-hash}"
+      CC_QDRANT_COLLECTION: "${CC_QDRANT_COLLECTION:-kb}"
+      CC_KB_CHUNK_CHARS: "${CC_KB_CHUNK_CHARS:-1800}"
+      CC_KB_CHUNK_OVERLAP: "${CC_KB_CHUNK_OVERLAP:-120}"
       # Rate limiter логинов (docs/03 §12): общий бэкенд для всех воркеров и
       # реплик api. Пусто → memory (бюджет на процесс); auto при живом Redis.
       CC_REDIS_URL: "${CC_REDIS_URL:-redis://redis:6379/0}"
@@ -149,6 +159,15 @@ services:
       CC_DATABASE_URL: postgresql+psycopg://compass:${POSTGRES_PASSWORD:-compass}@postgres:5432/compass
       CC_ALLOW_DEMO_SECRETS: "${CC_ALLOW_DEMO_SECRETS:-false}"  # NEW-5: по умолчанию fail-fast
       CC_DATA_KEY: ${CC_DATA_KEY:-compass-demo-data-key-do-not-use-in-prod-0123456789}
+      # Сид обязан совпадать с api по эмбеддеру, коллекции и нарезке (docs/08 §3):
+      # иначе чанки пишутся в чужую геометрию или чужой размерностью.
+      CC_EMBEDDER: "${CC_EMBEDDER:-hash}"
+      CC_QDRANT_COLLECTION: "${CC_QDRANT_COLLECTION:-kb}"
+      CC_KB_CHUNK_CHARS: "${CC_KB_CHUNK_CHARS:-1800}"
+      CC_KB_CHUNK_OVERLAP: "${CC_KB_CHUNK_OVERLAP:-120}"
+      CC_ML_URL: "${CC_ML_URL:-http://ml:8080}"
+      CC_ML_TOKEN: "${CC_ML_TOKEN:-}"
+      CC_ML_TIMEOUT: "${CC_ML_TIMEOUT:-5}"
     depends_on:
       qdrant:
         condition: service_healthy
@@ -173,6 +192,12 @@ services:
       CC_ENRICH_PUBMED_DAYS: "${CC_ENRICH_PUBMED_DAYS:-30}"
       CC_ENRICH_INTERVAL_HOURS: "${CC_ENRICH_INTERVAL_HOURS:-24}"
       CC_ENRICH_OFFLINE: "${CC_ENRICH_OFFLINE:-false}"
+      # Индексация работ идёт тем же эмбеддером/коллекцией, что у api (docs/08 §3-4).
+      CC_EMBEDDER: "${CC_EMBEDDER:-hash}"
+      CC_QDRANT_COLLECTION: "${CC_QDRANT_COLLECTION:-kb}"
+      CC_ML_URL: "${CC_ML_URL:-http://ml:8080}"
+      CC_ML_TOKEN: "${CC_ML_TOKEN:-}"
+      CC_ML_TIMEOUT: "${CC_ML_TIMEOUT:-5}"
     depends_on:
       # api прогоняет alembic upgrade head в lifespan — ждём схему, а не гоняем
       # миграции из двух процессов одновременно.

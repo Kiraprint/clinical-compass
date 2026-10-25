@@ -313,6 +313,42 @@ async def chat_insights_decide(
         db, user.id, patient_id, insight_id, body.status, ip=ip
     )
 
+class AnamnesisBody(BaseModel):
+    brief: str = Field(max_length=4000)
+    # Подтверждённый черновик. Не передан — ранее сохранённый текст не меняется.
+    text: str | None = Field(default=None, max_length=20000)
+
+class AnamnesisDraftBody(BaseModel):
+    brief: str | None = Field(default=None, max_length=4000)
+
+@router.get("/clinician/patients/{patient_id}/anamnesis")
+async def get_anamnesis(
+    patient_id: uuid.UUID,
+    user: User = Depends(require_clinician), db: AsyncSession = Depends(get_db),
+):
+    """FR-37: анамнез пациента. Roster + активное согласие + флаг."""
+    return await services.anamnesis.get(db, user.id, patient_id)
+
+@router.put("/clinician/patients/{patient_id}/anamnesis")
+async def save_anamnesis(
+    patient_id: uuid.UUID, body: AnamnesisBody, request: Request,
+    user: User = Depends(require_clinician), db: AsyncSession = Depends(get_db),
+):
+    """FR-37: сохранение вводных и подтверждённого текста. Аудит ANAMNESIS_WRITE."""
+    ip = request.client.host if request.client else None
+    return await services.anamnesis.save(
+        db, user.id, patient_id, body.brief, body.text, ip=ip
+    )
+
+@router.post("/clinician/patients/{patient_id}/anamnesis/draft")
+async def draft_anamnesis(
+    patient_id: uuid.UUID, body: AnamnesisDraftBody, request: Request,
+    user: User = Depends(require_clinician), db: AsyncSession = Depends(get_db),
+):
+    """FR-37: черновик от LLM (не сохраняется). Текст уходит только после scrub."""
+    ip = request.client.host if request.client else None
+    return await services.anamnesis.draft(db, user.id, patient_id, body.brief, ip=ip)
+
 @router.get("/clinician/chats")
 async def clinician_chats(
     user: User = Depends(require_clinician), db: AsyncSession = Depends(get_db),

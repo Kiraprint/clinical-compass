@@ -330,3 +330,89 @@
 {"id": "cc-330", "kind": "clinician_question", "text": "Виноградов Пётр Алексеевич, родился 12.03.1954. СД 2 типа впервые выявлен, стартовая схема?", "gold": [{"kind": "FIO", "start": 0, "end": 26, "value": "Виноградов Пётр Алексеевич"}, {"kind": "DOB", "start": 36, "end": 46, "value": "12.03.1954"}]}
 {"id": "cc-331", "kind": "insights_batch", "text": "Пациент: 'это Сидоров Дмитрий Иванович, 12.03.1954 г.р.'. Врач: 'да, вижу карту'. Пациент: 'полис 2942156335313002 новый'.", "gold": [{"kind": "FIO", "start": 14, "end": 38, "value": "Сидоров Дмитрий Иванович"}, {"kind": "DOB", "start": 40, "end": 50, "value": "12.03.1954"}, {"kind": "OMS", "start": 98, "end": 114, "value": "2942156335313002"}]}
 {"id": "cc-332", "kind": "insights_batch", "text": "'Здравствуйте, Козлов Николай Дмитриевич'. 'Беспокоит амлодипина' 'Какая доза?' '5 мг'. 'Оставьте пока'.", "gold": [{"kind": "FIO", "start": 15, "end": 40, "value": "Козлов Николай Дмитриевич"}]}
+{"id": "cc-333", "kind": "patient_chat", "text": "Здравствуйте, меня зовут виноградов михаил андреевич, записана на завтра.", "gold": [{"kind": "FIO", "start": 25, "end": 52, "value": "виноградов михаил андреевич"}]}
+{"id": "cc-334", "kind": "patient_chat", "text": "Добрый день, павлова ирина. Подскажите по дозировке лозартана.", "gold": [{"kind": "FIO", "start": 13, "end": 26, "value": "павлова ирина"}]}
+{"id": "cc-335", "kind": "patient_chat", "text": "Здравствуйте, это Д.Д. Кузнецов. Пришла на приём.", "gold": [{"kind": "FIO", "start": 18, "end": 31, "value": "Д.Д. Кузнецов"}]}
+{"id": "cc-336", "kind": "patient_chat", "text": "Пациентка ИВАНОВА, направлена на УЗИ.", "gold": [{"kind": "FIO", "start": 10, "end": 17, "value": "ИВАНОВА"}]}
+{"id": "cc-337", "kind": "patient_chat", "text": "Меня зовут КУЗНЕЦОВА, мне 64, беспокоит бессонница.", "gold": [{"kind": "FIO", "start": 11, "end": 20, "value": "КУЗНЕЦОВА"}, {"kind": "AGE", "start": 26, "end": 28, "value": "64"}]}
+{"id": "cc-338", "kind": "patient_chat", "text": "Это Соколов Д.А., результаты анализов во вложении.", "gold": [{"kind": "FIO", "start": 4, "end": 16, "value": "Соколов Д.А."}]}
+{"id": "cc-339", "kind": "diary", "text": "Пишу от имени петров денис петрович, доверенность у сына.", "gold": [{"kind": "FIO", "start": 14, "end": 35, "value": "петров денис петрович"}]}
+{"id": "cc-340", "kind": "diary", "text": "Обратилась КОЗЛОВА с жалобами на тревогу.", "gold": [{"kind": "FIO", "start": 11, "end": 18, "value": "КОЗЛОВА"}]}
+{"id": "cc-341", "kind": "clinician_question", "text": "Пациент петрова галина, дата рождения 12.03.1954. Нужна ли консультация?", "gold": [{"kind": "FIO", "start": 8, "end": 22, "value": "петрова галина"}, {"kind": "DOB", "start": 38, "end": 48, "value": "12.03.1954"}]}
+{"id": "cc-342", "kind": "clinician_question", "text": "А.П. Новиков, 67 года, просит справку для бассейна.", "gold": [{"kind": "FIO", "start": 0, "end": 12, "value": "А.П. Новиков"}, {"kind": "AGE", "start": 14, "end": 16, "value": "67"}]}
+{"id": "cc-343", "kind": "insights_batch", "text": "'Здравствуйте, никитин алексей дмитриевич'. 'Беспокоит омепразола' 'Какая доза?'", "gold": [{"kind": "FIO", "start": 15, "end": 41, "value": "никитин алексей дмитриевич"}]}
+{"id": "cc-344", "kind": "insights_batch", "text": "Пациент: 'это Семёнов А.И.'. Врач: 'вижу карту'.", "gold": [{"kind": "FIO", "start": 14, "end": 26, "value": "Семёнов А.И."}]}
+{"id": "cc-345", "kind": "patient_chat", "text": "Телефон для связи 7 935 470-17-63, звоните после 18.", "gold": [{"kind": "PHONE", "start": 18, "end": 33, "value": "7 935 470-17-63"}]}
+{"id": "cc-346", "kind": "patient_chat", "text": "7(961)695-00-30 — мой новый номер.", "gold": [{"kind": "PHONE", "start": 0, "end": 15, "value": "7(961)695-00-30"}]}
+{"id": "cc-347", "kind": "patient_chat", "text": "Мой номер 79555743553, если что.", "gold": [{"kind": "PHONE", "start": 10, "end": 21, "value": "79555743553"}]}
+{"id": "cc-348", "kind": "patient_chat", "text": "Перезвоните на 8 956 452 76 19, пожалуйста.", "gold": [{"kind": "PHONE", "start": 15, "end": 30, "value": "8 956 452 76 19"}]}
+{"id": "cc-349", "kind": "diary", "text": "Контакт: 8-953-524-78-61.", "gold": [{"kind": "PHONE", "start": 9, "end": 24, "value": "8-953-524-78-61"}]}
+{"id": "cc-350", "kind": "diary", "text": "Записывалась с номера 8 (975) 681-51-17.", "gold": [{"kind": "PHONE", "start": 22, "end": 39, "value": "8 (975) 681-51-17"}]}
+{"id": "cc-351", "kind": "clinician_question", "text": "Связаться с пациентом: +7 902 889 20 61.", "gold": [{"kind": "PHONE", "start": 23, "end": 39, "value": "+7 902 889 20 61"}]}
+{"id": "cc-352", "kind": "insights_batch", "text": "'Мой телефон 8 995 193 70 20' 'Записал' 'И 7(903)920-76-79 тоже'.", "gold": [{"kind": "PHONE", "start": 13, "end": 28, "value": "8 995 193 70 20"}, {"kind": "PHONE", "start": 43, "end": 58, "value": "7(903)920-76-79"}]}
+{"id": "cc-353", "kind": "patient_chat", "text": "Лучше звонить на 7 999 969-79-10, после обеда.", "gold": [{"kind": "PHONE", "start": 17, "end": 32, "value": "7 999 969-79-10"}]}
+{"id": "cc-354", "kind": "patient_chat", "text": "Дата рождения 05.11.1968, наблюдаюсь с 2010 года.", "gold": [{"kind": "DOB", "start": 14, "end": 24, "value": "05.11.1968"}]}
+{"id": "cc-355", "kind": "patient_chat", "text": "Дата рождения 9 августа 1949, давление 150/90.", "gold": [{"kind": "DOB", "start": 14, "end": 28, "value": "9 августа 1949"}]}
+{"id": "cc-356", "kind": "patient_chat", "text": "Дата рождения 1954-03-12, принимаю амлодипина.", "gold": [{"kind": "DOB", "start": 14, "end": 24, "value": "1954-03-12"}]}
+{"id": "cc-357", "kind": "diary", "text": "Родилась 9 августа 1949, сейчас беспокоит кашель.", "gold": [{"kind": "DOB", "start": 9, "end": 23, "value": "9 августа 1949"}]}
+{"id": "cc-358", "kind": "clinician_question", "text": "Пациент, дата рождения 1954-03-12, СД 2 типа. Стартовая схема?", "gold": [{"kind": "DOB", "start": 23, "end": 33, "value": "1954-03-12"}]}
+{"id": "cc-359", "kind": "insights_batch", "text": "'Дата рождения 05.11.1968' 'Принято'.", "gold": [{"kind": "DOB", "start": 15, "end": 25, "value": "05.11.1968"}]}
+{"id": "cc-360", "kind": "patient_chat", "text": "Меня зовут петрова екатерина, мне 43.", "gold": [{"kind": "FIO", "start": 11, "end": 28, "value": "петрова екатерина"}, {"kind": "AGE", "start": 34, "end": 36, "value": "43"}]}
+{"id": "cc-361", "kind": "patient_chat", "text": "Пациентка ВОЛКОВА, 58 года, беременность 12 недель.", "gold": [{"kind": "FIO", "start": 10, "end": 17, "value": "ВОЛКОВА"}, {"kind": "AGE", "start": 19, "end": 21, "value": "58"}]}
+{"id": "cc-362", "kind": "diary", "text": "зайцев николай дмитриевич, мне 67, бессонница третью неделю.", "gold": [{"kind": "FIO", "start": 0, "end": 25, "value": "зайцев николай дмитриевич"}, {"kind": "AGE", "start": 31, "end": 33, "value": "67"}]}
+{"id": "cc-363", "kind": "patient_chat", "text": "Здравствуйте, волкова мария на связи, мне 71.", "gold": [{"kind": "FIO", "start": 14, "end": 27, "value": "волкова мария"}, {"kind": "AGE", "start": 42, "end": 44, "value": "71"}]}
+{"id": "cc-364", "kind": "patient_chat", "text": "СНИЛС 407 952 974 15, прикреплена к поликлинике.", "gold": [{"kind": "SNILS", "start": 6, "end": 20, "value": "407 952 974 15"}]}
+{"id": "cc-365", "kind": "patient_chat", "text": "Мой СНИЛС 22943029766.", "gold": [{"kind": "SNILS", "start": 10, "end": 21, "value": "22943029766"}]}
+{"id": "cc-366", "kind": "patient_chat", "text": "ИНН 57 66 021 535 нужен для вычета.", "gold": [{"kind": "INN", "start": 4, "end": 17, "value": "57 66 021 535"}]}
+{"id": "cc-367", "kind": "patient_chat", "text": "Полис ОМС 9435 6587 2984 7003.", "gold": [{"kind": "OMS", "start": 10, "end": 29, "value": "9435 6587 2984 7003"}]}
+{"id": "cc-368", "kind": "patient_chat", "text": "Номер полиса 1183307887265004.", "gold": [{"kind": "OMS", "start": 13, "end": 29, "value": "1183307887265004"}]}
+{"id": "cc-369", "kind": "patient_chat", "text": "Паспорт 73 24 720134, серия и номер верные.", "gold": [{"kind": "PASSPORT", "start": 8, "end": 20, "value": "73 24 720134"}]}
+{"id": "cc-370", "kind": "patient_chat", "text": "Паспорт 4382 141731.", "gold": [{"kind": "PASSPORT", "start": 8, "end": 19, "value": "4382 141731"}]}
+{"id": "cc-371", "kind": "clinician_question", "text": "Проверьте: СНИЛС 248 814 229 93, ИНН 80 75 933 166 56.", "gold": [{"kind": "SNILS", "start": 17, "end": 31, "value": "248 814 229 93"}, {"kind": "INN", "start": 37, "end": 53, "value": "80 75 933 166 56"}]}
+{"id": "cc-372", "kind": "clinician_question", "text": "Паспорт 91 97 655106 пациента совпадает с картой?", "gold": [{"kind": "PASSPORT", "start": 8, "end": 20, "value": "91 97 655106"}]}
+{"id": "cc-373", "kind": "insights_batch", "text": "'СНИЛС 48322203965' 'ИНН 34 80 128 529 85'.", "gold": [{"kind": "SNILS", "start": 7, "end": 18, "value": "48322203965"}, {"kind": "INN", "start": 25, "end": 41, "value": "34 80 128 529 85"}]}
+{"id": "cc-374", "kind": "diary", "text": "СНИЛС 787 076 110 38, полис 4937 7448 6285 1003.", "gold": [{"kind": "SNILS", "start": 6, "end": 20, "value": "787 076 110 38"}, {"kind": "OMS", "start": 28, "end": 47, "value": "4937 7448 6285 1003"}]}
+{"id": "cc-375", "kind": "clinician_question", "text": "Полис 8164 8655 5028 2006, ИНН 48 04 143 670, всё верно?", "gold": [{"kind": "OMS", "start": 6, "end": 25, "value": "8164 8655 5028 2006"}, {"kind": "INN", "start": 31, "end": 44, "value": "48 04 143 670"}]}
+{"id": "cc-376", "kind": "patient_chat", "text": "№ 314508 — номер моей карты.", "gold": [{"kind": "MEDCARD", "start": 2, "end": 8, "value": "314508"}]}
+{"id": "cc-377", "kind": "patient_chat", "text": "Доктор, посмотрите карту 673086.", "gold": [{"kind": "MEDCARD", "start": 25, "end": 31, "value": "673086"}]}
+{"id": "cc-378", "kind": "patient_chat", "text": "ИБ 127758, выписали направление.", "gold": [{"kind": "MEDCARD", "start": 3, "end": 9, "value": "127758"}]}
+{"id": "cc-379", "kind": "clinician_question", "text": "ГБУЗ «ГКБ № 2», ИБ 204357. Нужна госпитализация?", "gold": [{"kind": "MEDCARD", "start": 19, "end": 25, "value": "204357"}]}
+{"id": "cc-380", "kind": "insights_batch", "text": "'Номер карты 724734' 'Записал'.", "gold": [{"kind": "MEDCARD", "start": 13, "end": 19, "value": "724734"}]}
+{"id": "cc-381", "kind": "diary", "text": "медкарта № 633791, приём у кардиолога.", "gold": [{"kind": "MEDCARD", "start": 11, "end": 17, "value": "633791"}]}
+{"id": "cc-382", "kind": "patient_chat", "text": "Живу в Москве на Ленина 5.", "gold": [{"kind": "ADDRESS", "start": 7, "end": 25, "value": "Москве на Ленина 5"}]}
+{"id": "cc-383", "kind": "patient_chat", "text": "Прописана: ул. Гагарина, 12, кв. 4.", "gold": [{"kind": "ADDRESS", "start": 11, "end": 34, "value": "ул. Гагарина, 12, кв. 4"}]}
+{"id": "cc-384", "kind": "patient_chat", "text": "Адрес: г. Химки, ул. Мира, 12.", "gold": [{"kind": "ADDRESS", "start": 7, "end": 29, "value": "г. Химки, ул. Мира, 12"}]}
+{"id": "cc-385", "kind": "diary", "text": "Живу в Москве на Гагарина 7, до поликлиники 10 минут.", "gold": [{"kind": "ADDRESS", "start": 7, "end": 27, "value": "Москве на Гагарина 7"}]}
+{"id": "cc-386", "kind": "clinician_question", "text": "Пациент прикреплён по адресу Санкт-Петербург, Лиговский пр-т, д. 55, кв. 17.", "gold": [{"kind": "ADDRESS", "start": 29, "end": 75, "value": "Санкт-Петербург, Лиговский пр-т, д. 55, кв. 17"}]}
+{"id": "cc-387", "kind": "insights_batch", "text": "'Живу в Казани на Баумана 9' 'Адрес записан'.", "gold": [{"kind": "ADDRESS", "start": 8, "end": 27, "value": "Казани на Баумана 9"}]}
+{"id": "cc-388", "kind": "patient_chat", "text": "Почта petrova.a@yandex.ru, отвечайте туда.", "gold": [{"kind": "EMAIL", "start": 6, "end": 25, "value": "petrova.a@yandex.ru"}]}
+{"id": "cc-389", "kind": "patient_chat", "text": "Пишите на иванов@демо.рф.", "gold": [{"kind": "EMAIL", "start": 10, "end": 24, "value": "иванов@демо.рф"}]}
+{"id": "cc-390", "kind": "diary", "text": "Мой e-mail sidorov1980@gmail.com.", "gold": [{"kind": "EMAIL", "start": 11, "end": 32, "value": "sidorov1980@gmail.com"}]}
+{"id": "cc-391", "kind": "insights_batch", "text": "'Почта novikova.e@inbox.ru' 'Принято'.", "gold": [{"kind": "EMAIL", "start": 7, "end": 26, "value": "novikova.e@inbox.ru"}]}
+{"id": "cc-392", "kind": "patient_chat", "text": "Телефон +7 954 630 07 23, звоните вечером.", "gold": [{"kind": "PHONE", "start": 8, "end": 24, "value": "+7 954 630 07 23"}]}
+{"id": "cc-393", "kind": "patient_chat", "text": "Дата рождения 1985-04-17, беременность 8 недель.", "gold": [{"kind": "DOB", "start": 14, "end": 24, "value": "1985-04-17"}]}
+{"id": "cc-394", "kind": "diary", "text": "Меня зовут М.Н. Семёнов, телефон 8 (993) 270-12-97.", "gold": [{"kind": "FIO", "start": 11, "end": 23, "value": "М.Н. Семёнов"}, {"kind": "PHONE", "start": 33, "end": 50, "value": "8 (993) 270-12-97"}]}
+{"id": "cc-395", "kind": "clinician_question", "text": "Пациент МОРОЗОВА, 76 лет, паспорт 66 96 485689.", "gold": [{"kind": "FIO", "start": 8, "end": 16, "value": "МОРОЗОВА"}, {"kind": "AGE", "start": 18, "end": 20, "value": "76"}, {"kind": "PASSPORT", "start": 34, "end": 46, "value": "66 96 485689"}]}
+{"id": "cc-396", "kind": "insights_batch", "text": "'Дата рождения 9 августа 1949' 'СНИЛС 154 026 315 26'.", "gold": [{"kind": "DOB", "start": 15, "end": 29, "value": "9 августа 1949"}, {"kind": "SNILS", "start": 38, "end": 52, "value": "154 026 315 26"}]}
+{"id": "cc-397", "kind": "patient_chat", "text": "Живу в Москве на Гагарина 7, почта morozov.s@mail.ru.", "gold": [{"kind": "ADDRESS", "start": 7, "end": 27, "value": "Москве на Гагарина 7"}, {"kind": "EMAIL", "start": 35, "end": 52, "value": "morozov.s@mail.ru"}]}
+{"id": "cc-398", "kind": "diary", "text": "Карта 776831, ИБ 454912, выписан лозартана.", "gold": [{"kind": "MEDCARD", "start": 6, "end": 12, "value": "776831"}, {"kind": "MEDCARD", "start": 17, "end": 23, "value": "454912"}]}
+{"id": "cc-399", "kind": "diary", "text": "Тревога усилилась за последние 5 дней, бессонница.", "gold": []}
+{"id": "cc-400", "kind": "diary", "text": "Принимаю 2 раза в день по 5 мг, стало легче.", "gold": []}
+{"id": "cc-401", "kind": "patient_chat", "text": "Температура 38,5 держится 5 дней, кашель.", "gold": []}
+{"id": "cc-402", "kind": "patient_chat", "text": "Головная боль и тошнота, слабость.", "gold": []}
+{"id": "cc-403", "kind": "patient_chat", "text": "Давление 160/95, пульс 95, одышка.", "gold": []}
+{"id": "cc-404", "kind": "patient_chat", "text": "Пришла на приём 12.03.2024 в 14:30.", "gold": []}
+{"id": "cc-405", "kind": "patient_chat", "text": "Записана на 12 марта 2026, кабинет 5.", "gold": []}
+{"id": "cc-406", "kind": "clinician_question", "text": "Шкала HDRS-17: 18 баллов, PHQ-8: 12.", "gold": []}
+{"id": "cc-407", "kind": "clinician_question", "text": "Анализ от 14.05, гемоглобин 120, лейкоциты 6,2.", "gold": []}
+{"id": "cc-408", "kind": "patient_chat", "text": "Мне 34, беспокоит бессонница.", "gold": []}
+{"id": "cc-409", "kind": "diary", "text": "Таблетку выпила 7 дней назад.", "gold": []}
+{"id": "cc-410", "kind": "diary", "text": "Принимаю 7 таблеток в день.", "gold": []}
+{"id": "cc-411", "kind": "patient_chat", "text": "Живу одна, уход не нужен.", "gold": []}
+{"id": "cc-412", "kind": "patient_chat", "text": "Работаю в больнице на 0,5 ставки.", "gold": []}
+{"id": "cc-413", "kind": "clinician_question", "text": "Госпитализация в городскую больницу № 2.", "gold": []}
+{"id": "cc-414", "kind": "clinician_question", "text": "Результаты КТ от 08.04.2025: без динамики.", "gold": []}
+{"id": "cc-415", "kind": "diary", "text": "Сон 5 часов, аппетит снижен 2 недели.", "gold": []}
+{"id": "cc-416", "kind": "diary", "text": "Пью воду 2 литра в день, соль ограничиваю.", "gold": []}
+{"id": "cc-417", "kind": "patient_chat", "text": "Бессонница и тревога, пульс 92, температура 36,8.", "gold": []}
+{"id": "cc-418", "kind": "clinician_question", "text": "Принимаю метформина 1000 мг два раза в день.", "gold": []}

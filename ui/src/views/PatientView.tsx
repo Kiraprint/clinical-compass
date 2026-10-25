@@ -126,9 +126,6 @@ export default function PatientView({ onLogout }: { onLogout?: () => void }) {
         <>
           <div className="alert-info row">
             <span style={{ fontSize: 13 }}>Согласие активно (v{consent.version}, от {consent.signed_at.slice(0, 10)})</span>
-            <button className="ghost" onClick={revokeConsent}>
-              Отозвать
-            </button>
           </div>
           <TodayTab onOpen={go} />
         </>
@@ -434,16 +431,18 @@ const SAFETY_BLOCKS: Record<
     },
   },
   unassessed: {
-    title: "Риск не оценён",
+    // v2.0.0: гейт не сработал, HR4 сознательно не задавался — нейтрально, без тревоги.
+    title: "Риск сегодня не оценивался",
     paragraphs: [
-      "Вы не ответили на вопрос о мыслях о самоубийстве, поэтому риск сегодня не оценён. Пропуск не означает «нет».",
-      "Если есть мысли о том, чтобы причинить себе вред, обратитесь за экстренной помощью по местному номеру — 112.",
+      "Сегодня вопросов о мыслях о самоповреждении не было: по вашим ответам не нашлось оснований задавать их.",
+      "Это не значит, что риска нет. Это значит, что сегодня он не оценивался. Если такие мысли появятся, скажите об этом врачу или обратитесь за помощью.",
+      "Если помощь нужна сейчас — 112 (единый номер экстренных служб) или ближайшее отделение скорой помощи.",
     ],
     last: {
       notified:
-        "Ответ видит ваш врач в карте — обсудите с ним состояние. Просмотр может быть не мгновенным: это не линия экстренной помощи.",
+        "Ответы сохранены. Ваш врач видит их в карте и может обсудить с вами состояние на приёме.",
       notNotified:
-        "Ответ сохранён. Закреплённого врача у вас нет — пожалуйста, обсудите состояние с близкими или обратитесь к специалисту.",
+        "Ответы сохранены. Если появятся мысли о самоповреждении, обратитесь к специалисту или по номеру 112.",
     },
   },
 };
@@ -499,7 +498,10 @@ function CheckinCard() {
 
   if (!state) return <p style={{ color: "#5a6478" }}>{err || "Загрузка чек-ина…"}</p>;
 
-  const items = state.step.items;
+  // HR4 — только на шаге безопасности (docs/16 §2); в ядре его больше нет.
+  const items = state.step.items.filter(
+    (i) => i.id !== "HR4" || state.phase === "safety",
+  );
   const answeredInStep = items.filter((i) => stepAnswers[i.id] !== undefined).length;
   const allAnswered = items.length > 0 && answeredInStep === items.length;
   // «Отправить» — на последнем шаге: безопасность или модули закрывают сеанс.
@@ -521,9 +523,11 @@ function CheckinCard() {
           <p style={{ color: "#5a6478", fontSize: 13 }}>
             {state.safety === "none"
               ? "Ответы сохранены. Если за вами закреплён врач, он увидит их в карте. Это наблюдения и их динамика, а не диагноз."
-              : state.clinician_notified
-                ? "Ваши ответы за сегодня видит врач в карте. Это отдельные наблюдения и их динамика, а не диагноз."
-                : "Ответ сохранён. Закреплённого врача у вас нет — при необходимости обратитесь к специалисту или по номеру 112."}
+              : state.safety === "unassessed"
+                ? "Ответы сохранены. Вопросы о риске сегодня не задавались — риск сегодня не оценивался."
+                : state.clinician_notified
+                  ? "Ваши ответы за сегодня видит врач в карте. Это отдельные наблюдения и их динамика, а не диагноз."
+                  : "Ответ сохранён. Закреплённого врача у вас нет — при необходимости обратитесь к специалисту или по номеру 112."}
           </p>
         </>
       ) : state.status !== "in_progress" ? (
@@ -572,7 +576,13 @@ function CheckinCard() {
         </>
       )}
       {err && <p className="error">{err}</p>}
-      <SafetyBlock safety={state.safety} notified={state.clinician_notified} />
+      {/* Плашку показываем только после завершения или при сигнале/разборе:
+          незавершённый чек-ин не должен объявлять риск «неоценённым» раньше времени. */}
+      {(state.status === "completed" ||
+        state.safety === "signal" ||
+        state.safety === "review") && (
+        <SafetyBlock safety={state.safety} notified={state.clinician_notified} />
+      )}
     </>
   );
 }
@@ -1382,7 +1392,12 @@ function AdverseTab() {
             <tbody>
               {items.map((e) => (
                 <tr key={e.id}>
-                  <td>{e.onset_date}</td>
+                  <td>
+                    <div className="ae-meta">
+                      <span className="ae-date">{e.onset_date}</span>
+                      {e.medication_title && <span className="ae-drug">{e.medication_title}</span>}
+                    </div>
+                  </td>
                   <td>{e.event_text}</td>
                   <td>
                     {e.severity ? (
@@ -1588,6 +1603,9 @@ function AccountScreen({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState("");
+  const [confirmRevoke, setConfirmRevoke] = useState(false);
+  const [revoking, setRevoking] = useState(false);
+  const [revokeError, setRevokeError] = useState("");
 
   const apply = (next: PatientContacts) => {
     setContacts(next);
@@ -1613,6 +1631,32 @@ function AccountScreen({
       setError(e instanceof ApiError ? e.detail : String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  // Отзыв согласия необратим: без подтверждения в диалоге запрос не уходит.
+  useEffect(() => {
+    if (!confirmRevoke) return;
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape" && !revoking) setConfirmRevoke(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [confirmRevoke, revoking]);
+
+  const openRevoke = () => {
+    setRevokeError("");
+    setConfirmRevoke(true);
+  };
+
+  const doRevoke = async () => {
+    setRevokeError("");
+    setRevoking(true);
+    try {
+      await onRevoke();
+    } catch (e: unknown) {
+      setRevokeError(e instanceof ApiError ? e.detail : String(e));
+      setRevoking(false);
     }
   };
 
@@ -1680,15 +1724,59 @@ function AccountScreen({
         Активно с {consent.signed_at.slice(0, 10)} (версия {consent.version}).
       </p>
       <div className="row">
-        <button className="ghost" onClick={onRevoke}>
-          Отозвать согласие
-        </button>
         {onLogout && (
           <button className="ghost" onClick={onLogout}>
             Выйти
           </button>
         )}
       </div>
+      <details className="danger-zone">
+        <summary>Опасная зона</summary>
+        <p className="danger-zone-note">
+          Отзыв согласия необратим: аккаунт останется, но клинические данные и связь с врачом будут
+          удалены.
+        </p>
+        <button type="button" className="link-danger" onClick={openRevoke}>
+          Отозвать согласие
+        </button>
+      </details>
+      {confirmRevoke && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onClick={() => { if (!revoking) setConfirmRevoke(false); }}
+        >
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="revoke-consent-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="revoke-consent-title">Отозвать согласие?</h3>
+            <p>
+              Все данные будут безвозвратно удалены: дневник, чек-ины, результаты скринингов,
+              переписка, назначения и отметки о приёме лекарств, приёмы с заметками врача,
+              сообщения о побочных эффектах, напоминания, телефон и дата рождения.
+              Врач больше не сможет вести вас в системе. Продолжить?
+            </p>
+            {revokeError && <p className="error">{revokeError}</p>}
+            <div className="row" style={{ justifyContent: "flex-end" }}>
+              <button
+                className="ghost"
+                autoFocus
+                onClick={() => setConfirmRevoke(false)}
+                disabled={revoking}
+              >
+                Отмена
+              </button>
+              <button className="danger" onClick={doRevoke} disabled={revoking}>
+                {revoking ? "Удаляем…" : "Отозвать и удалить"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

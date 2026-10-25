@@ -328,6 +328,7 @@ class RemoteEmbedder:
     use_sparse = False
 
     def __init__(self, profile_id: str, *, expected_dense_size: int = 0) -> None:
+        from app.config import settings
         from app.services import ml_client
         from app.services.ml_client import MlUnavailable
 

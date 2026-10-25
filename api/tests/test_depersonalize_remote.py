@@ -173,13 +173,17 @@ def test_remote_masks_structural_formats(fake_ml):
     ):
         assert leaked not in out
 
-def test_remote_matches_lowercase_fio_residual(fake_ml):
-    """Остаточный риск docs/10 R25: ФИО целиком строчными не видит и sidecar."""
+def test_remote_masks_lowercase_fio_by_core_heuristic(fake_ml):
+    """Строчное ФИО закрывает правило ядра, даже если sidecar его не видит.
+
+    Бывший остаточный риск docs/10 R25: NER не размечает «сидорова галина».
+    Теперь морфология фамилии + имя из списка частых срабатывают до NER.
+    """
     _use(fake_ml)
     text = "Меня зовут сидорова галина, беспокоит тревога"
     result = scrub_text(text)
-    assert result.text == text  # как у локального hybrid: промах, не утечка логики
-    assert not result.findings
+    assert result.text == "Меня зовут [ФИО], беспокоит тревога"
+    assert [f.kind for f in result.findings] == [FIO]
 
 def test_remote_passes_names_and_token(fake_ml):
     _use(fake_ml, token="secret-ml-token")
@@ -278,11 +282,11 @@ def test_remote_matches_gold_on_clinical_corpus(fake_ml):
             assert leaked not in out, (row["id"], gold, out)
 
 
-def test_remote_lowercase_fio_misses_match_hybrid(fake_ml):
-    """Все 8 остаточных промахов hybrid (docs/10 R25) воспроизводятся remote.
+def test_remote_lowercase_fio_masked_without_ner(fake_ml):
+    """Бывшие 8 промахов hybrid/remote (docs/10 R25) закрыты правилом ядра.
 
-    Строчные ФИО не размечает rubert внутри sidecar'а; прочие ПДн в тех же
-    строках (ИНН) обязаны маскироваться.
+    rubert внутри sidecar'а строчные ФИО не размечает; морфология фамилии +
+    имя из списка частых маскирует их структурно, в том числе в remote-пути.
     """
     _use(fake_ml)
     low = [
@@ -292,14 +296,11 @@ def test_remote_lowercase_fio_misses_match_hybrid(fake_ml):
             for g in row["gold"]
         )
     ]
-    assert len(low) == 8, [row["id"] for row in low]
+    assert len(low) >= 8, [row["id"] for row in low]
     for row in low:
         out = scrub_text(row["text"]).text
         for gold in row["gold"]:
-            if gold["kind"] == "FIO":
-                assert gold["value"] in out  # известный промах, не регресс
-            elif gold["kind"] != "AGE":
-                assert gold["value"] not in out, (row["id"], gold, out)
+            assert gold["value"] not in out, (row["id"], gold, out)
 
 @pytest.mark.parametrize(
     "spans",

@@ -26,11 +26,12 @@ CORE = {
     "IN1": 0,
     "EN1": 0,
     "FU1": 0,
-    "HR4": 0,
 }
 
-# МО1 ≥ 3 → HR(3 пункта); SL1 ≤ 2 → SL(2); остальное не помещается в лимит.
-RISKY_CORE = {**CORE, "MO1": 4, "SL1": 0}
+# v2.0.0: гейт безопасности — MO1 >= 3 или FU1 >= 3 или EN1 >= 2.
+GATE_CORE = {**CORE, "MO1": 3}
+# Без гейта: SL(2) + FU(2) + MO(2) заполняют бюджет 6 модульных пунктов, AP — нет.
+RISKY_CORE = {**CORE, "MO1": 2, "SL1": 0, "FU1": 2}
 
 
 def _start(client, h) -> dict:
@@ -45,6 +46,13 @@ def _answer(client, h, session_id: str, answers: dict, expected: int = 200) -> d
     )
     assert resp.status_code == expected, resp.text
     return resp.json()
+
+def _gate_yes(client, h, session_id: str) -> dict:
+    """Ядро с MO1=3 включает гейт: шаг safety из одного HR4, ответ «Да» → RS1–RS3."""
+    body = _answer(client, h, session_id, GATE_CORE)
+    assert body["phase"] == "safety", body
+    assert [i["id"] for i in body["step"]["items"]] == ["HR4"]
+    return _answer(client, h, session_id, {"HR4": 1})
 
 
 def _add_roster(patient_id: str, clinician_id: str) -> None:
@@ -92,14 +100,17 @@ def test_today_not_started(client):
     assert body["session_id"] is None and body["phase"] is None
     assert body["step"] == {"kind": None, "items": []}
     assert body["answers"] == {}
-    assert body["progress"] == {"answered": 0, "planned": 7}
-    assert body["modules"] == [] and body["safety"] == "none"
+    progress = body["progress"]
+    assert progress["answered"] == 0 and progress["planned"] == 6
+    assert progress["safety_gate"] is False and progress["safety_gate_reason"]
+    assert body["modules"] == [] and body["safety"] == "unassessed"
+    assert body["safety_gate"] is False
     assert body["clinician_notified"] is False
-    assert body["rules_version"] == "1.0.0"
+    assert body["rules_version"] == "2.0.0"
     assert body["date"] == datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat()
 
 
-def test_start_returns_core_step_of_seven_items(client):
+def test_start_returns_core_step_of_six_items(client):
     h, _ = patient_ctx(client, "chk_start@test.ru")
     resp = client.post("/api/v1/checkins", headers=h)
     assert resp.status_code == 201
@@ -107,15 +118,16 @@ def test_start_returns_core_step_of_seven_items(client):
     assert body["status"] == "in_progress"
     assert body["phase"] == "core"
     assert body["session_id"]
-    assert body["safety"] == "none"
+    # Риск не оценён: HR4 в ядро не входит, гейт решается после ядра.
+    assert body["safety"] == "unassessed" and body["safety_gate"] is False
     items = body["step"]["items"]
-    assert [i["id"] for i in items] == ["MO1", "TR1", "SL1", "IN1", "EN1", "FU1", "HR4"]
+    assert [i["id"] for i in items] == ["MO1", "TR1", "SL1", "IN1", "EN1", "FU1"]
     assert body["step"]["kind"] == "core"
     for item in items:
         assert set(item) == {"id", "domain", "text", "kind", "anchors", "emoji", "max_value"}
-    assert items[6]["kind"] == "gate"
+        assert item["kind"] == "scale" and item["max_value"] == 4
     assert items[0]["anchors"] and items[0]["emoji"]
-    assert items[0]["max_value"] == 4 and items[6]["max_value"] == 1
+    assert body["progress"]["planned"] == 6
 
 
 def test_start_is_idempotent(client):
@@ -136,7 +148,9 @@ def test_today_reflects_open_session(client):
     assert body["status"] == "in_progress"
     assert body["session_id"] == started["session_id"]
     assert body["phase"] == "core"
-    assert body["progress"] == {"answered": 0, "planned": 7}
+    progress = body["progress"]
+    assert progress["answered"] == 0 and progress["planned"] == 6
+    assert progress["safety_gate"] is False
 
 
 # --- Валидация шага ----------------------------------------------------------
@@ -190,9 +204,14 @@ def test_out_of_range_and_bool_rejected(client):
         )
         assert resp.status_code == 422, bad
         assert resp.json()["code"] == "CHECKIN_OUT_OF_RANGE", bad
-    # HR4 — бинарный: 2 вне диапазона
+
+
+def test_gate_item_out_of_range_rejected(client):
+    h, _ = patient_ctx(client, "chk_gate_range@test.ru")
+    sid = _start(client, h)["session_id"]
+    _answer(client, h, sid, GATE_CORE)
     resp = client.post(
-        f"/api/v1/checkins/{sid}/answers", json={"answers": {**CORE, "HR4": 2}}, headers=h
+        f"/api/v1/checkins/{sid}/answers", json={"answers": {"HR4": 2}}, headers=h
     )
     assert resp.status_code == 422
     assert resp.json()["code"] == "CHECKIN_OUT_OF_RANGE"
@@ -208,9 +227,14 @@ def test_core_without_symptoms_completes_without_modules(client):
     assert body["status"] == "completed"
     assert body["phase"] == "done"
     assert body["step"] == {"kind": "done", "items": []}
-    assert body["safety"] == "none"
+    # Гейт не сработал: HR4 не задавался, риск остаётся неоценённым — это норма.
+    assert body["safety"] == "unassessed"
+    assert body["safety_gate"] is False
+    assert "HR4" not in body["answers"]
     assert body["completed_at"]
-    assert body["progress"] == {"answered": 7, "planned": 7}
+    progress = body["progress"]
+    assert progress["answered"] == 6 and progress["planned"] == 6
+    assert progress["safety_gate"] is False and progress["safety_gate_reason"]
     assert _escalations(pid) == []
     assert "CHECKIN_COMPLETE" in _audit_actions(pid)
     # после завершения второй сеанс в тот же день невозможен
@@ -222,28 +246,33 @@ def test_core_without_symptoms_completes_without_modules(client):
 def test_core_with_symptoms_leads_to_module_step(client):
     h, _ = patient_ctx(client, "chk_modules@test.ru")
     sid = _start(client, h)["session_id"]
-    answers = {**CORE, "MO1": 3}
+    answers = {**CORE, "MO1": 2}
     body = _answer(client, h, sid, answers)
     assert body["status"] == "in_progress"
     assert body["phase"] == "modules"
-    assert set(i["id"] for i in body["step"]["items"]) == {"HR1", "HR2", "HR3", "MO2", "MO3"}
-    assert body["progress"] == {"answered": 7, "planned": 12}
+    assert body["safety_gate"] is False
+    ids = set(i["id"] for i in body["step"]["items"])
+    assert ids == {"MO2", "MO3", "AP1", "AP2", "AP3"}
+    progress = body["progress"]
+    assert progress["answered"] == 6 and progress["planned"] == 11
+    assert progress["safety_gate"] is False
     codes = {m["code"]: m for m in body["modules"]}
-    assert codes["HR"]["included"] is True and codes["HR"]["reason"]
-    assert codes["MO"]["included"] is True
-    # AP не помещается в остаток лимита: модуль пропускается целиком, но причина видна
-    assert codes["AP"]["included"] is False and "лимит 12" in codes["AP"]["reason"]
+    assert codes["MO"]["included"] is True and codes["MO"]["reason"]
+    # HR включается только при MO1 ≥ 3 или FU1 ≥ 3 — сегодня модуль не выбран
+    assert "HR" not in codes
     # Повторная отправка ядра на модульном шаге — уже не текущий шаг
     resp = client.post(
         f"/api/v1/checkins/{sid}/answers", json={"answers": CORE}, headers=h
     )
     assert resp.status_code == 422
     assert resp.json()["code"] == "CHECKIN_UNKNOWN_ITEM"
-    modules = _answer(client, h, sid, {"HR1": 0, "HR2": 0, "HR3": 0, "MO2": 0, "MO3": 0})
+    modules = _answer(
+        client, h, sid, {"MO2": 0, "MO3": 0, "AP1": 0, "AP2": 0, "AP3": 0}
+    )
     assert modules["status"] == "completed"
     assert modules["phase"] == "done"
-    assert modules["answers"]["MO1"] == 3
-    assert modules["progress"]["answered"] == 12
+    assert modules["answers"]["MO1"] == 2
+    assert modules["progress"]["answered"] == 11
 
 
 def test_limit_12_items_and_module_reasons(client):
@@ -251,29 +280,59 @@ def test_limit_12_items_and_module_reasons(client):
     sid = _start(client, h)["session_id"]
     body = _answer(client, h, sid, RISKY_CORE)
     ids = [i["id"] for i in body["step"]["items"]]
-    assert body["progress"]["planned"] <= 12
-    # HR (приоритет 1) и SL (приоритет 2) заполнили бюджет целиком
-    assert set(ids) == {"HR1", "HR2", "HR3", "SL2", "SL3"}
+    assert body["progress"]["planned"] == 12
+    assert body["safety_gate"] is False
+    # Бюджет без гейта — 6 модульных пунктов: SL(2) + FU(2) + MO(2).
+    assert set(ids) == {"SL2", "SL3", "FU2", "FU3", "MO2", "MO3"}
     codes = {m["code"]: m for m in body["modules"]}
-    assert codes["HR"]["included"] is True
     assert codes["SL"]["included"] is True
-    skipped = [m for m in body["modules"] if not m["included"]]
-    assert skipped and all("лимит 12" in m["reason"] for m in skipped)
+    assert codes["FU"]["included"] is True
+    assert codes["MO"]["included"] is True
+    # AP подходит по правилу (MO1 ≥ 2), но не помещается в лимит — пропуск с причиной
+    assert codes["AP"]["included"] is False and "лимит 12" in codes["AP"]["reason"]
 
 
 # --- Протокол риска ----------------------------------------------------------
 
 
-def test_gate_yes_routes_to_safety_module_only(client):
+def test_gate_fires_after_core_and_asks_only_hr4(client):
     h, _ = patient_ctx(client, "chk_gate@test.ru")
     sid = _start(client, h)["session_id"]
-    body = _answer(client, h, sid, {**CORE, "HR4": 1})
+    body = _answer(client, h, sid, GATE_CORE)
     assert body["status"] == "in_progress"
     assert body["phase"] == "safety"
     assert body["step"]["kind"] == "safety"
+    assert [i["id"] for i in body["step"]["items"]] == ["HR4"]
+    assert body["step"]["items"][0]["text"] == "Были ли у вас мысли о самоповреждении?"
+    assert body["safety"] == "unassessed"
+    assert body["safety_gate"] is True
+    assert "MO1 ≥ 3" in body["progress"]["safety_gate_reason"]
+    # Модули решаются после ответа на HR4; при гейте предъявлено 6 ядра + 1 HR4.
+    assert body["progress"]["answered"] == 6 and body["progress"]["planned"] == 7
+
+    body = _answer(client, h, sid, {"HR4": 1})
+    assert body["phase"] == "safety"
     assert [i["id"] for i in body["step"]["items"]] == ["RS1", "RS2", "RS3"]
-    assert body["progress"] == {"answered": 7, "planned": 10}
-    assert body["modules"] == []  # симптоматические модули в этот день не предъявляются
+    assert body["progress"]["answered"] == 7 and body["progress"]["planned"] == 10
+    assert body["safety"] == "unassessed"  # RS ещё не пройден
+    assert body["modules"] == []
+
+
+def test_gate_yes_no_skips_safety_and_goes_to_modules(client):
+    h, pid = patient_ctx(client, "chk_gate_no@test.ru")
+    _, cid = clinician_ctx(client, "chk_gate_no_doc@test.ru")
+    _add_roster(pid, cid)
+    sid = _start(client, h)["session_id"]
+    _answer(client, h, sid, GATE_CORE)
+    body = _answer(client, h, sid, {"HR4": 0})
+    assert body["phase"] == "modules"
+    assert body["safety"] == "none"
+    assert _escalations(pid) == []
+    assert _notifications(cid) == []
+    codes = {m["code"]: m for m in body["modules"]}
+    assert codes["HR"]["included"] is True
+    assert codes["MO"]["included"] is True
+    assert body["progress"]["safety_gate"] is True
 
 
 def test_gate_yes_signal_escalates_to_roster_clinician(client):
@@ -281,7 +340,7 @@ def test_gate_yes_signal_escalates_to_roster_clinician(client):
     _, cid = clinician_ctx(client, "chk_doc@test.ru")
     _add_roster(pid, cid)
     sid = _start(client, h)["session_id"]
-    _answer(client, h, sid, {**CORE, "HR4": 1})
+    _gate_yes(client, h, sid)
     body = _answer(client, h, sid, {"RS1": 1, "RS2": 0, "RS3": 0})
     assert body["status"] == "completed"
     assert body["safety"] == "signal"
@@ -303,7 +362,7 @@ def test_gate_yes_signal_escalates_to_roster_clinician(client):
 def test_gate_yes_signal_without_roster_escalates_silently(client):
     h, pid = patient_ctx(client, "chk_noroster@test.ru")
     sid = _start(client, h)["session_id"]
-    body = _answer(client, h, sid, {**CORE, "HR4": 1})
+    body = _gate_yes(client, h, sid)
     assert body["clinician_notified"] is False
     body = _answer(client, h, sid, {"RS1": 0, "RS2": 1, "RS3": 0})
     assert body["safety"] == "signal"
@@ -321,7 +380,10 @@ def test_gate_yes_without_rs_keeps_escalation_open(client):
     _, cid = clinician_ctx(client, "chk_open_doc@test.ru")
     _add_roster(pid, cid)
     sid = _start(client, h)["session_id"]
-    body = _answer(client, h, sid, {**CORE, "HR4": 1})
+    # Гейт сработал, но HR4 ещё не отвечен — эскалации нет.
+    _answer(client, h, sid, GATE_CORE)
+    assert _escalations(pid) == []
+    body = _answer(client, h, sid, {"HR4": 1})
     assert body["status"] == "in_progress"
     assert body["phase"] == "safety"
     assert body["clinician_notified"] is True
@@ -336,7 +398,7 @@ def test_gate_yes_review_state_keeps_primary_escalation(client):
     _, cid = clinician_ctx(client, "chk_review_doc@test.ru")
     _add_roster(pid, cid)
     sid = _start(client, h)["session_id"]
-    _answer(client, h, sid, {**CORE, "HR4": 1})
+    _gate_yes(client, h, sid)
     body = _answer(client, h, sid, {"RS1": 0, "RS2": 0, "RS3": 1})
     assert body["safety"] == "review"
     (escalation,) = _escalations(pid)
@@ -394,14 +456,14 @@ def test_answers_encrypted_at_rest(client, db_session):
 def test_presented_keeps_steps_and_module_reasons(client, db_session):
     h, _ = patient_ctx(client, "chk_presented@test.ru")
     sid = _start(client, h)["session_id"]
-    _answer(client, h, sid, {**CORE, "MO1": 3})
+    _answer(client, h, sid, {**CORE, "MO1": 2})
     session = db_session.get(CheckinSession, uuid.UUID(sid))
     steps = session.presented["steps"]
     assert len(steps) == 1
     assert steps[0]["phase"] == "core"
-    assert len(steps[0]["items"]) == 7
+    assert len(steps[0]["items"]) == 6
     reasons = {m["code"]: m["reason"] for m in session.presented["modules"]}
-    assert reasons["HR"].startswith("MO1 ≥ 3")
+    assert reasons["MO"].startswith("MO1 ≥ 2")
     assert session.phase == "modules" and session.status == "in_progress"
 
 
@@ -411,7 +473,7 @@ def test_report_shows_checkin_answers_and_risk(client):
     ch, cid = clinician_ctx(client, "chk_report_doc@test.ru")
     _add_roster(pid, cid)
     sid = _start(client, h)["session_id"]
-    _answer(client, h, sid, {**RISKY_CORE, "HR4": 1})
+    _gate_yes(client, h, sid)
     _answer(client, h, sid, {"RS1": 1, "RS2": 0, "RS3": 0})
 
     report = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=ch)
@@ -434,7 +496,7 @@ def test_repeat_submit_does_not_duplicate_escalation(client):
     _, cid = clinician_ctx(client, "chk_dup_doc@test.ru")
     _add_roster(pid, cid)
     sid = _start(client, h)["session_id"]
-    _answer(client, h, sid, {**CORE, "HR4": 1})
+    _gate_yes(client, h, sid)
     _answer(client, h, sid, {"RS1": 1, "RS2": 0, "RS3": 0})
     assert len(_escalations(pid)) == 1
 
@@ -451,7 +513,7 @@ def test_repeat_submit_does_not_duplicate_escalation(client):
 def test_escalation_queue_visible_to_staff_only(client):
     h, pid = patient_ctx(client, "chk_queue@test.ru")
     sid = _start(client, h)["session_id"]
-    _answer(client, h, sid, {**CORE, "HR4": 1})
+    _gate_yes(client, h, sid)
     _answer(client, h, sid, {"RS1": 0, "RS2": 1, "RS3": 0})  # signal без roster
 
     ch, _ = clinician_ctx(client, "chk_queue_doc@test.ru")
@@ -479,7 +541,7 @@ def test_escalation_queue_visible_to_staff_only(client):
 def test_consent_revoke_removes_checkin_and_escalations(client, db_session):
     h, pid = patient_ctx(client, "chk_revoke@test.ru")
     sid = _start(client, h)["session_id"]
-    _answer(client, h, sid, {**CORE, "HR4": 1})
+    _gate_yes(client, h, sid)
     _answer(client, h, sid, {"RS1": 1, "RS2": 0, "RS3": 0})
     assert _escalations(pid)
 
@@ -500,11 +562,11 @@ def test_resubmit_of_core_step_does_not_duplicate_escalation(client):
     _, cid = clinician_ctx(client, "chk_dup_step_doc@test.ru")
     _add_roster(pid, cid)
     sid = _start(client, h)["session_id"]
-    _answer(client, h, sid, {**CORE, "HR4": 1})
+    _gate_yes(client, h, sid)
     assert len(_escalations(pid)) == 1
     assert len(_notifications(cid)) == 1
 
-    body = _answer(client, h, sid, {**CORE, "HR4": 1}, expected=422)
+    body = _answer(client, h, sid, CORE, expected=422)
     assert body["code"] == "CHECKIN_UNKNOWN_ITEM"
     assert len(_escalations(pid)) == 1
     assert len(_notifications(cid)) == 1
@@ -551,7 +613,7 @@ def test_escalation_queue_marks_roster_and_hides_admin(client):
     oh, _ = clinician_ctx(client, "chk_queue_other_doc@test.ru")
     _add_roster(pid, cid)
     sid = _start(client, h)["session_id"]
-    _answer(client, h, sid, {**CORE, "HR4": 1})
+    _gate_yes(client, h, sid)
     _answer(client, h, sid, {"RS1": 1, "RS2": 0, "RS3": 0})
 
     mine = client.get("/api/v1/escalations", headers=ch).json()["items"]
@@ -570,7 +632,7 @@ def test_escalation_queue_window_and_limit(client):
     h2, pid2 = patient_ctx(client, "chk_win2@test.ru")
     for h in (h1, h2):
         sid = _start(client, h)["session_id"]
-        _answer(client, h, sid, {**CORE, "HR4": 1})
+        _gate_yes(client, h, sid)
         _answer(client, h, sid, {"RS1": 1, "RS2": 0, "RS3": 0})
 
     with db.SyncSessionLocal() as s:
@@ -590,7 +652,7 @@ def test_escalation_queue_window_and_limit(client):
 def test_escalation_resolve_closes_signal(client):
     h, pid = patient_ctx(client, "chk_resolve@test.ru")
     sid = _start(client, h)["session_id"]
-    _answer(client, h, sid, {**CORE, "HR4": 1})
+    _gate_yes(client, h, sid)
     _answer(client, h, sid, {"RS1": 1, "RS2": 0, "RS3": 0})
     (escalation,) = _escalations(pid)
 
@@ -620,7 +682,7 @@ def test_escalation_resolve_closes_signal(client):
 def test_escalation_resolution_is_encrypted(client):
     h, pid = patient_ctx(client, "chk_res_secret@test.ru")
     sid = _start(client, h)["session_id"]
-    _answer(client, h, sid, {**CORE, "HR4": 1})
+    _gate_yes(client, h, sid)
     _answer(client, h, sid, {"RS1": 1, "RS2": 0, "RS3": 0})
     (escalation,) = _escalations(pid)
     ch, _ = clinician_ctx(client, "chk_res_secret_doc@test.ru")

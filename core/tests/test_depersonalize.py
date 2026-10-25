@@ -224,8 +224,13 @@ def test_age_combo_requires_fio():
     start = text.index("Петрова")
     masked = depersonalize(text, extra_spans=[Span("FIO", start, start + len("Петрова Анна"))])
     assert "[ВОЗРАСТ]" in masked.text
+    # С 25.10 ФИО ловит и структурная эвристика (docs/12), поэтому возраст
+    # в связке маскируется и без внешнего спана.
     plain = depersonalize(text)
-    assert plain.text == text
+    assert "[ФИО]" in plain.text and "[ВОЗРАСТ]" in plain.text
+    # Одиночный возраст без ФИО — клинический показатель, не ПДн.
+    assert depersonalize("Пациентке 64 года").text == "Пациентке 64 года"
+    assert depersonalize("Мне 34, беспокоит бессонница").text == "Мне 34, беспокоит бессонница"
 
 
 def test_partial_overlap_keeps_tail_masked():
@@ -347,3 +352,86 @@ def test_merge_adjacent_spans_is_public_and_joins_split_fio():
         [Span("FIO", 11, 22), Span("FIO", 22, 32)], text
     )
     assert merged == [Span("FIO", 11, 32)]
+
+
+def test_fio_lowercase_and_initials_forms():
+    """ФИО без deny-list/NER: строчные, инициалы в обе стороны, капс-фамилия."""
+    cases = {
+        "сидорова галина": "[ФИО]",
+        "иванов пётр сергеевич": "[ФИО]",
+        "меня зовут иванов пётр, беспокоит кашель": "меня зовут [ФИО], беспокоит кашель",
+        "Иванов Пётр Сергеевич": "[ФИО]",
+        "Иванов П.С.": "[ФИО]",
+        "П.С. Иванов": "[ФИО]",
+        "ПЕТРОВА": "[ФИО]",
+    }
+    for text, expected in cases.items():
+        assert depersonalize(text).text == expected, text
+
+
+def test_clinical_words_are_not_fio():
+    """Морфология фамилии без якоря-имени не маскирует клинический текст."""
+    for text in (
+        "больница городская, температура 38,5",
+        "голова болит третий день",
+        "бессонница и тревога усилились",
+        "принимаю аспирин 5 дней",
+        "принимаю 2 раза в день по 5 мг",
+        "таблетку выпила 7 дней назад",
+        "давление 160/95, пульс 95",
+        "мне 34, беспокоит бессонница",
+        "записана на 12 марта 2026",
+        "приём 12.03.2024 в 14:30",
+        "ГБУЗ ГКБ № 2, кабинет 5",
+    ):
+        assert depersonalize(text).text == text, text
+
+
+def test_phone_seven_prefix_forms():
+    for text in ("7 926 123-45-67", "7(916)555-77-33", "79261234567"):
+        r = depersonalize(f"телефон {text}")
+        assert r.text == "телефон [ТЕЛЕФОН]", text
+
+
+def test_grouped_document_forms():
+    cases = (
+        ("СНИЛС 123 456 789 01", "[ДОКУМЕНТ]"),
+        ("ИНН 77 07 083 229", "[ДОКУМЕНТ]"),
+        ("полис 1234 5678 9012 3456", "[ДОКУМЕНТ]"),
+        ("паспорт 45 09 123456", "[ДОКУМЕНТ]"),
+    )
+    for text, expected in cases:
+        r = depersonalize(text)
+        assert r.text.endswith(expected), text
+        assert r.findings[-1].kind == DOC
+
+
+def test_medcard_without_marker():
+    for text in ("№ 123456", "карта 123456", "ИБ 456789", "медкарта № 0034512"):
+        r = depersonalize(text)
+        assert r.findings and r.findings[0].category == "MEDCARD", text
+        assert "[ДОКУМЕНТ]" in r.text, text
+
+
+def test_address_prepositional_street():
+    r = depersonalize("Живу в Москве на Ленина 5.")
+    assert r.text == "Живу [АДРЕС].", r.text
+    assert r.findings[0].kind == ADDRESS
+
+
+def test_age_me_masked_only_in_combo():
+    r = depersonalize("Меня зовут иванов пётр, мне 34")
+    assert r.text == "Меня зовут [ФИО], мне [ВОЗРАСТ]", r.text
+
+
+def test_address_plausibility_filter():
+    """NER-адрес без опоры и числа — мусор; структурные формы проходят."""
+    from compass.depersonalize import Span, is_plausible_address_span
+
+    city = "живу в Москве"
+    assert is_plausible_address_span(city, Span("ADDRESS", 7, 13))
+    street = "ул. Ленина, 5"
+    assert is_plausible_address_span(street, Span("ADDRESS", 0, 13))
+    assert not is_plausible_address_span("кабинет 5", Span("ADDRESS", 0, 9))
+    number = "больницу № 2"
+    assert not is_plausible_address_span(number, Span("ADDRESS", 11, 12))
