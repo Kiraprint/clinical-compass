@@ -17,12 +17,19 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-PY="$ROOT/.venv/bin/python"
+PY="${CC_PY:-$ROOT/.venv/bin/python}"
+# В worktree своего .venv нет — берём venv основного чекаута, но код под тестом
+# обязан быть из этого дерева: PYTHONPATH перекрывает editable-установку app/compass.
+if [ ! -x "$PY" ]; then
+  MAIN_WT="$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
+  [ -n "$MAIN_WT" ] && [ -x "$MAIN_WT/.venv/bin/python" ] && PY="$MAIN_WT/.venv/bin/python"
+fi
+export PYTHONPATH="$ROOT/api:$ROOT/core${PYTHONPATH:+:$PYTHONPATH}"
 COMPOSE="docker compose -f infra/docker-compose.yml"
 DEV_COMPOSE="docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml"
 TEST_DB_NAME="${CC_CI_DB_NAME:-compass_ci}"
 TEST_DB="${CC_TEST_DATABASE_URL:-postgresql+psycopg://compass:compass@127.0.0.1:5432/${TEST_DB_NAME}}"
-CI_COLLECTION="${CC_QDRANT_COLLECTION:-kb_ci}"
+CI_COLLECTION="${CC_CI_COLLECTION:-kb_ci}"
 E2E_PROJECT="cci"
 E2E_PORT="${CC_CI_E2E_PORT:-8096}"
 E2E_OVERRIDE=""
@@ -50,30 +57,42 @@ case "$TEST_DB" in
     fail "тестовая БД '$TEST_DB' похожа на рабочую — задайте CC_CI_DB_NAME" ;;
 esac
 
+# Унаследованные CC_* меняют поведение тестов (cookie-secure ломает ожидания
+# 401, эмбеддер/коллекция подменяют индекс) — чистим и задаём свои.
+unset CC_COOKIE_SECURE CC_EMBEDDER CC_RERANKER CC_ML_URL CC_ML_TOKEN \
+      CC_DEPERSONALIZE_NER CC_ASSISTANT_LLM_URL CC_CHAT_INSIGHTS_ENABLED \
+      CC_ALLOW_DEMO_SECRETS CC_QDRANT_COLLECTION
 export CC_ALLOW_DEMO_SECRETS=true
-export CC_COOKIE_SECURE=false
-export CC_ML_TOKEN=            # ml/tests сами выставляют токен; унаследованный ломает их
 export CC_QDRANT_COLLECTION="$CI_COLLECTION"
 
 # --- 1. Postgres + Qdrant ----------------------------------------------------
-log "Postgres + Qdrant (compose services)…"
-$DEV_COMPOSE up -d postgres qdrant >/dev/null
-for _ in $(seq 1 40); do
-  $COMPOSE exec -T postgres pg_isready -U compass -d compass >/dev/null 2>&1 && break
-  sleep 1
-done
-for _ in $(seq 1 40); do
-  curl -sf http://127.0.0.1:6333/healthz >/dev/null 2>&1 && break
-  sleep 1
-done
-$COMPOSE exec -T postgres pg_isready -U compass -d compass >/dev/null \
-  || fail "Postgres не поднялся (порты публикует только docker-compose.dev.yml)"
+# Если dev-порты уже опубликованы (обычно infra с docker-compose.dev.yml), берём
+# их: второй проект в этой же рабочей папке конфликтовал бы на 5432/6333.
+port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+if port_open 5432 && port_open 6333; then
+  log "использую уже опубликованные Postgres :5432 и Qdrant :6333"
+else
+  log "поднимаю Postgres + Qdrant (compose services)…"
+  $DEV_COMPOSE up -d postgres qdrant >/dev/null
+  for _ in $(seq 1 40); do port_open 5432 && port_open 6333 && break; sleep 1; done
+  port_open 5432 || fail "Postgres не поднялся на 127.0.0.1:5432"
+  port_open 6333 || fail "Qdrant не поднялся на 127.0.0.1:6333"
+fi
 curl -sf http://127.0.0.1:6333/healthz >/dev/null || fail "Qdrant не отвечает на 127.0.0.1:6333"
 
 log "БД для тестов: $TEST_DB_NAME"
-$COMPOSE exec -T postgres psql -U compass -d compass -tc \
-  "SELECT 1 FROM pg_database WHERE datname='${TEST_DB_NAME}'" | grep -q 1 \
-  || $COMPOSE exec -T postgres psql -U compass -d compass -c "CREATE DATABASE ${TEST_DB_NAME}" >/dev/null
+$PY - "$TEST_DB_NAME" <<'PY'
+import sys, psycopg
+name = sys.argv[1]
+admin = "postgresql://compass:compass@127.0.0.1:5432/compass"
+with psycopg.connect(admin, autocommit=True) as conn:
+    exists = conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,)).fetchone()
+    if not exists:
+        conn.execute(f'CREATE DATABASE "{name}"')
+        print(f"  создана БД {name}")
+    else:
+        print(f"  БД {name} уже есть")
+PY
 
 # --- 2. Ядро -----------------------------------------------------------------
 log "[1/5] Ядро (core/tests, coverage ≥ 95%)…"

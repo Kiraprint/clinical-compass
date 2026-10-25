@@ -264,7 +264,7 @@ python -m app.enrichment serve
 ```
 
 Изоляция прогона: БД `compass_ci` и коллекция `kb_ci` (переопределяются
-`CC_CI_DB_NAME` / `CC_TEST_DATABASE_URL` / `CC_QDRANT_COLLECTION`), e2e-стек —
+`CC_CI_DB_NAME` / `CC_TEST_DATABASE_URL` / `CC_CI_COLLECTION`), e2e-стек —
 проект `cci` на порту `8096`, после прогона удаляется вместе с томами.
 
 Релиз (тесты → образы → APK → тег → GitHub Release с APK):
