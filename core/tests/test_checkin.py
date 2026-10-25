@@ -15,6 +15,8 @@ from compass.checkin import (
     planned_items,
     safety_gate,
     safety_gate_reason,
+    risk_assessed,
+    risk_pattern,
     safety_level,
     select_modules,
     validate_answers,
@@ -153,6 +155,29 @@ def test_urgent_signal(answer):
     assert safety_level(answers) == "signal"
 
 
+@pytest.mark.parametrize(
+    "answers,expected",
+    [
+        (CORE_CLEAN, "unknown"),                                   # HR4 не задавался
+        ({**CORE_CLEAN, GATE_ITEM: 0}, "negative"),                # «Нет»
+        ({**CORE_CLEAN, GATE_ITEM: 1, "RS1": 0, "RS2": 0, "RS3": 1}, "self_harm"),
+        ({**CORE_CLEAN, GATE_ITEM: 1, "RS1": 1, "RS2": 0, "RS3": 1}, "suicidal"),
+        ({**CORE_CLEAN, GATE_ITEM: 1, "RS1": 0, "RS2": 0, "RS3": 0}, "suicidal"),
+        ({**CORE_CLEAN, GATE_ITEM: 1}, "self_harm"),               # RS ещё не собраны
+    ],
+)
+def test_risk_pattern_distinguishes_self_harm_from_suicidal(answers, expected):
+    """HR4=«Да» при отрицательных RS — самоповреждение, а не отрицание риска."""
+    assert risk_pattern(answers) == expected
+
+
+def test_risk_assessed_follows_hr4_being_asked():
+    # False только тогда, когда вопроса о риске сегодня не было.
+    assert risk_assessed(CORE_CLEAN) is False
+    assert risk_assessed({**CORE_CLEAN, GATE_ITEM: 0}) is True
+    assert risk_assessed({**CORE_CLEAN, GATE_ITEM: 1}) is True
+
+
 def test_gate_unanswered_is_unassessed_not_negative():
     # Новое правило: ядро без HR4 завершается, но риск остаётся неоценённым.
     assert safety_level(CORE_CLEAN) == "unassessed"
@@ -221,7 +246,7 @@ def test_anchors_match_scale_width():
 
 def test_risk_item_wording_is_person_safe():
     gate = next(i for i in ITEMS if i.id == GATE_ITEM)
-    assert gate.text == "Были ли у вас мысли о самоповреждении?"
+    assert gate.text == "Были ли у вас сегодня мысли о самоповреждении или о том, чтобы причинить себе вред?"
     assert gate.anchors == ("Нет", "Да")
 
 
