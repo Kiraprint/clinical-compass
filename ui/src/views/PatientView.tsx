@@ -126,9 +126,6 @@ export default function PatientView({ onLogout }: { onLogout?: () => void }) {
         <>
           <div className="alert-info row">
             <span style={{ fontSize: 13 }}>Согласие активно (v{consent.version}, от {consent.signed_at.slice(0, 10)})</span>
-            <button className="ghost" onClick={revokeConsent}>
-              Отозвать
-            </button>
           </div>
           <TodayTab onOpen={go} />
         </>
@@ -1382,7 +1379,12 @@ function AdverseTab() {
             <tbody>
               {items.map((e) => (
                 <tr key={e.id}>
-                  <td>{e.onset_date}</td>
+                  <td>
+                    <div className="ae-meta">
+                      <span className="ae-date">{e.onset_date}</span>
+                      {e.medication_title && <span className="ae-drug">{e.medication_title}</span>}
+                    </div>
+                  </td>
                   <td>{e.event_text}</td>
                   <td>
                     {e.severity ? (
@@ -1588,6 +1590,9 @@ function AccountScreen({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState("");
+  const [confirmRevoke, setConfirmRevoke] = useState(false);
+  const [revoking, setRevoking] = useState(false);
+  const [revokeError, setRevokeError] = useState("");
 
   const apply = (next: PatientContacts) => {
     setContacts(next);
@@ -1613,6 +1618,32 @@ function AccountScreen({
       setError(e instanceof ApiError ? e.detail : String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  // Отзыв согласия необратим: без подтверждения в диалоге запрос не уходит.
+  useEffect(() => {
+    if (!confirmRevoke) return;
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape" && !revoking) setConfirmRevoke(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [confirmRevoke, revoking]);
+
+  const openRevoke = () => {
+    setRevokeError("");
+    setConfirmRevoke(true);
+  };
+
+  const doRevoke = async () => {
+    setRevokeError("");
+    setRevoking(true);
+    try {
+      await onRevoke();
+    } catch (e: unknown) {
+      setRevokeError(e instanceof ApiError ? e.detail : String(e));
+      setRevoking(false);
     }
   };
 
@@ -1680,15 +1711,59 @@ function AccountScreen({
         Активно с {consent.signed_at.slice(0, 10)} (версия {consent.version}).
       </p>
       <div className="row">
-        <button className="ghost" onClick={onRevoke}>
-          Отозвать согласие
-        </button>
         {onLogout && (
           <button className="ghost" onClick={onLogout}>
             Выйти
           </button>
         )}
       </div>
+      <details className="danger-zone">
+        <summary>Опасная зона</summary>
+        <p className="danger-zone-note">
+          Отзыв согласия необратим: аккаунт останется, но клинические данные и связь с врачом будут
+          удалены.
+        </p>
+        <button type="button" className="link-danger" onClick={openRevoke}>
+          Отозвать согласие
+        </button>
+      </details>
+      {confirmRevoke && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onClick={() => { if (!revoking) setConfirmRevoke(false); }}
+        >
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="revoke-consent-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="revoke-consent-title">Отозвать согласие?</h3>
+            <p>
+              Все данные будут безвозвратно удалены: дневник, чек-ины, результаты скринингов,
+              переписка, назначения и отметки о приёме лекарств, приёмы с заметками врача,
+              сообщения о побочных эффектах, напоминания, телефон и дата рождения.
+              Врач больше не сможет вести вас в системе. Продолжить?
+            </p>
+            {revokeError && <p className="error">{revokeError}</p>}
+            <div className="row" style={{ justifyContent: "flex-end" }}>
+              <button
+                className="ghost"
+                autoFocus
+                onClick={() => setConfirmRevoke(false)}
+                disabled={revoking}
+              >
+                Отмена
+              </button>
+              <button className="danger" onClick={doRevoke} disabled={revoking}>
+                {revoking ? "Удаляем…" : "Отозвать и удалить"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
