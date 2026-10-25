@@ -8,13 +8,14 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import get_db, require_consent, require_roles
 from app.errors import Problem
 from app.models import Drug, PatientMedication, User
+from app.services.audit import record as audit_record
 
 router = APIRouter(tags=["drugs"])
 
@@ -68,26 +69,29 @@ def _as_key(value: str | None) -> str:
 def _match_drug(title: str, index: dict[str, Drug]) -> Drug | None:
     """Связь назначения с ГРЛС по названию/МНН (FK в patient_medications нет).
 
-    Title — свободный текст врача («Авиандр 150 мг»), поэтому сначала точное
-    совпадение по нормализованной строке, затем вхождение в любую сторону.
+    Только точное совпадение нормализованной строки: подстрочный матч цеплял
+    чужую карточку («Авиандр» в «Авиандр 150 мг» — угадывание), а порядок
+    справочника делал результат недетерминированным. Нет совпадения — нет
+    карточки: препарат не показываем, а не показываем похожий.
     """
     normalized = _as_key(title)
     if not normalized:
         return None
-    exact = index.get(normalized)
-    if exact is not None:
-        return exact
-    for key, drug in index.items():
-        if key and (key in normalized or normalized in key):
-            return drug
-    return None
+    return index.get(normalized)
 
 
 @router.get("/me/drugs")
 async def my_drug_reference(
+    request: Request,
     user: User = Depends(require_consent), db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Справочник по препаратам, назначенным пациенту (свои назначения + ГРЛС)."""
+    """Справочник по препаратам, назначенным пациенту (свои назначения + ГРЛС).
+
+    F6: назначения и названия препаратов — контекст лечения, чтение аудируется.
+    """
+    ip = request.client.host if request.client else None
+    await audit_record(db, user.id, "READ_MY_DRUGS", "patient", str(user.id), ip=ip)
+    await db.commit()  # аудит чтения своего PHI сохраняется, даже если items пуст
     meds = (await db.scalars(
         select(PatientMedication)
         .where(PatientMedication.patient_id == user.id)
@@ -99,7 +103,7 @@ async def my_drug_reference(
     )).all()
     if not meds:
         return {"items": []}
-    drugs = (await db.scalars(select(Drug))).all()
+    drugs = (await db.scalars(select(Drug).order_by(Drug.drug_id))).all()
     index: dict[str, Drug] = {}
     for drug in drugs:
         for value in (drug.trade_name, drug.inn):

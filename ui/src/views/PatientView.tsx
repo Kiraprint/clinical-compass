@@ -19,7 +19,6 @@ import {
   Questionnaire,
   Timeline,
 } from "../api";
-import TrendChart from "../TrendChart";
 
 type Tab =
   | "today"
@@ -105,7 +104,7 @@ export default function PatientView({ onLogout }: { onLogout?: () => void }) {
           <span aria-hidden="true">☰</span> Меню
         </button>
         <span className="patient-bar-spacer" />
-        <button className="ghost" aria-pressed={tab === "account"} onClick={() => go("account")}>
+        <button className="ghost" aria-current={tab === "account" ? "page" : undefined} onClick={() => go("account")}>
           Личный кабинет
         </button>
       </div>
@@ -989,6 +988,7 @@ function ChatTab() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [alert, setAlert] = useState(false);
+  const [crisis, setCrisis] = useState(false);
   const [quiet, setQuiet] = useState(false);
   const [error, setError] = useState("");
 
@@ -997,6 +997,12 @@ function ChatTab() {
   };
   useEffect(() => {
     load().catch((e: unknown) => setError(e instanceof ApiError ? e.detail : String(e)));
+    // Номера помощи не зависят от лимита автоответа: при последней RED-оценке
+    // блок показывается и тогда, когда сервер вернул reply: null.
+    api
+      .getTimeline(90)
+      .then((t) => setCrisis(t.runs.length > 0 && t.runs[t.runs.length - 1].triage === "RED"))
+      .catch(() => undefined);
   }, []);
 
   const send = async () => {
@@ -1031,7 +1037,7 @@ function ChatTab() {
           </div>
         ))}
       </div>
-      {alert && (
+      {(alert || crisis) && (
         <div className="alert-danger">
           Если сейчас тяжело — позвоните: 8-800-2000-122 (телефон доверия), 112 (экстренная помощь).
         </div>
@@ -1078,18 +1084,21 @@ function TrendTab() {
   if (error) return <div className="card"><p className="error">{error}</p></div>;
   if (!timeline || !adherence) return <div className="card">Загрузка…</div>;
 
-  // Одна линия на шкалу: у PHQ-8 и GAD-7 разные максимумы.
-  const byScale = new Map<string, { label: string; value: number }[]>();
+  // Одна линия на шкалу: верх графика приходит с сервера (`max_total`), потому
+  // что у PHQ-8 24, у GAD-7 21, у HCL-32 32, у PSS-10 40, у HDRS-17 52.
+  const byScale = new Map<string, { points: { label: string; value: number }[]; max: number }>();
   timeline.runs.forEach((run) => {
     const code = run.questionnaire_code ?? "шкала";
-    const list = byScale.get(code) ?? [];
-    list.push({ label: run.computed_at.slice(0, 10), value: run.total_score });
-    byScale.set(code, list);
+    const entry = byScale.get(code) ?? { points: [], max: run.max_total ?? 0 };
+    entry.points.push({ label: run.computed_at.slice(0, 10), value: run.total_score });
+    byScale.set(code, entry);
   });
-  const scaleCharts = [...byScale.entries()].map(([code, points]) => {
-    const max = code === "PHQ-9" ? 24 : 21;
-    return { code, points, max };
-  });
+  const scaleCharts = [...byScale.entries()].map(([code, { points, max }]) => ({
+    code,
+    points,
+    // Неизвестная шкала (нет в core/compass/scales.py) — верх по наблюдениям.
+    max: max > 0 ? max : Math.max(1, ...points.map((p) => p.value)),
+  }));
 
   const adherenceByDay = new Map<string, { score: number; total: number }>();
   adherence.items.forEach((record) => {
@@ -1109,7 +1118,6 @@ function TrendTab() {
     <>
       <div className="card">
         <h2>Динамика за 90 дней</h2>
-        <TrendChart timeline={timeline} />
         {timeline.runs.length === 0 && <p style={{ color: "#5a6478" }}>Пройдите первый скрининг, чтобы увидеть тренд.</p>}
         {scaleCharts.map((chart) => (
           <LineChart
@@ -1168,7 +1176,7 @@ function LineChart({
   const h = 150;
   const pad = 30;
   const px = (i: number) => pad + (i * (w - pad * 2)) / (points.length - 1);
-  const py = (v: number) => h - pad - (Math.max(0, Math.min(max, v)) * (h - pad * 2)) / max;
+  const py = (v: number) => h - pad - (v * (h - pad * 2)) / max;
   const line = points.map((p, i) => `${px(i).toFixed(1)},${py(p.value).toFixed(1)}`).join(" ");
   const last = points[points.length - 1];
   return (
@@ -1419,9 +1427,17 @@ function maskPhone(phone: string | null): string {
 
 // Главный экран (FR-33 A): приветствие, дата и время, напоминания и баннер
 // назначенного врачом скрининга. Ниже — чек-ин, дневник и приём лекарств.
+type PrescribedScale = {
+  code: string;
+  title: string;
+  prescribed_at: string | null;
+  // Не null — по этому назначению уже есть завершённая оценка: баннер гаснет.
+  completed_at: string | null;
+};
+
 function HomeHead({ onOpen }: { onOpen: (tab: Tab) => void }) {
   const [contacts, setContacts] = useState<PatientContacts | null>(null);
-  const [scales, setScales] = useState<{ code: string; title: string }[]>([]);
+  const [scales, setScales] = useState<PrescribedScale[]>([]);
   const [checkinDone, setCheckinDone] = useState<boolean | null>(null);
   const [medsMarked, setMedsMarked] = useState<boolean | null>(null);
   const [unread, setUnread] = useState<NotificationItem[]>([]);
@@ -1452,9 +1468,11 @@ function HomeHead({ onOpen }: { onOpen: (tab: Tab) => void }) {
 
   const now = new Date();
   const reminders: string[] = [];
+  // Только непройденные назначения: completed_at заполнен → скрининг уже пройден.
+  const pendingScales = scales.filter((s) => !s.completed_at);
   if (checkinDone === false) reminders.push("Чек-ин на сегодня ещё не выполнен.");
   if (medsMarked === false) reminders.push("Приём лекарств на сегодня не отмечен.");
-  if (scales.length > 0) reminders.push(`Назначен скрининг: ${scales.map((s) => s.title).join(", ")}.`);
+  if (pendingScales.length > 0) reminders.push(`Назначен скрининг: ${pendingScales.map((s) => s.title).join(", ")}.`);
   unread.forEach((n) => reminders.push(n.title));
 
   return (
@@ -1464,10 +1482,10 @@ function HomeHead({ onOpen }: { onOpen: (tab: Tab) => void }) {
         {now.toLocaleDateString("ru-RU", { weekday: "long", day: "numeric", month: "long" })} ·{" "}
         {now.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}
       </p>
-      {scales.length > 0 && (
+      {pendingScales.length > 0 && (
         <div className="patient-banner">
           <b>Скрининг, назначенный врачом</b>
-          <p>{scales.map((s) => s.title).join(", ")}</p>
+          <p>{pendingScales.map((s) => s.title).join(", ")}</p>
           <button onClick={() => onOpen("screening")}>Перейти к скринингу</button>
         </div>
       )}
@@ -1645,7 +1663,8 @@ function AccountScreen({
       {saved && <p style={{ color: "#2e7d32", fontSize: 13 }}>{saved}</p>}
       {error && <p className="error">{error}</p>}
       <p style={{ color: "#5a6478", fontSize: 13 }}>
-        Телефон хранится в зашифрованном виде и показывается врачу только маской.
+        Телефон хранится в зашифрованном виде; в списке пациентов он показан маской, лечащему
+        врачу — полностью.
       </p>
       <h3>Документы</h3>
       <ul>

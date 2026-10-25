@@ -209,8 +209,10 @@ async def notify_escalation_clinicians(
 
 
 async def notify_adverse_event_clinicians(db: AsyncSession, patient_id: uuid.UUID) -> list[uuid.UUID]:
-    """FR-28: серьёзное НЯ, о котором сообщил пациент. Один Notification на врача ростера.
+    """FR-28: НЯ, о котором сообщил пациент. Один Notification на врача ростера.
 
+    Отправляется на любое сообщение пациента: тяжесть он не оценивает, а врач
+    должен узнать о событии из пуша, а не из открытой очереди.
     Текст без ПДн: ни имени пациента, ни описания события (152-ФЗ, спецкатегория).
     Коммитит внешний код.
     """
@@ -222,8 +224,8 @@ async def notify_adverse_event_clinicians(db: AsyncSession, patient_id: uuid.UUI
             Notification(
                 user_id=clinician_id,
                 kind="ADVERSE_EVENT",
-                title="Серьёзное нежелательное явление",
-                body="Пациент сообщил о серьёзном нежелательном явлении",
+                title="Нежелательное явление",
+                body="Пациент сообщил о нежелательном явлении",
                 patient_id=patient_id,
             )
         )

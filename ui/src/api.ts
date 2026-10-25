@@ -184,8 +184,9 @@ export const api = {
   getMyDrugs: () => req<{ items: MyDrugReference[] }>("/api/v1/me/drugs"),
   // FR-28: нежелательные явления. Пациент сообщает, врач проверяет.
   myAdverseEvents: () => req<{ items: MyAdverseEvent[] }>("/api/v1/me/adverse-events"),
+  // Тяжесть пациент не передаёт: её выставляет врач при проверке (severity — колонка врача).
   reportAdverseEvent: (body: {
-    event_text: string; onset_date: string; severity?: AdverseSeverity; medication_id?: string;
+    event_text: string; onset_date: string; medication_id?: string;
   }) =>
     req<MyAdverseEvent>("/api/v1/me/adverse-events", {
       method: "POST",
@@ -292,7 +293,16 @@ export const api = {
   drugs: (q?: string) =>
     req<{ items: Drug[] }>(`/api/v1/drugs${q ? `?q=${encodeURIComponent(q)}` : ""}`),
   drug: (drugId: string) => req<Drug>(`/api/v1/drugs/${encodeURIComponent(drugId)}`),
-  prescribedScales: () => req<{ scales: { code: string; title: string }[] }>("/api/v1/me/prescribed-scales"),
+  prescribedScales: () =>
+    req<{
+      scales: {
+        code: string;
+        title: string;
+        prescribed_at: string | null;
+        // Не null — по этому назначению уже есть завершённая оценка.
+        completed_at: string | null;
+      }[];
+    }>("/api/v1/me/prescribed-scales"),
   setPrescribedScales: (patientId: string, scales: string[]) =>
     req<{ patient_id: string; scales: string[] }>(`/api/v1/clinician/patients/${patientId}/prescribed-scales`, {
       method: "PUT",
@@ -474,6 +484,9 @@ export interface Consent {
 export interface Questionnaire {
   code: string;
   title: string;
+  // Сумма максимумов предъявленных пациенту пунктов (PHQ-9 → 24, GAD-7 → 21,
+  // HCL-32 → 32, PSS-10 → 40): верхняя граница графика тренда по этой шкале.
+  max_total: number;
   items: { key: string; text: string; max_value: number; anchors: string[] }[];
 }
 export interface Assessment {
@@ -529,6 +542,9 @@ export interface Timeline {
     total_score: number; severity: string; triage: string; computed_at: string;
     // FR-33: код шкалы — у пациента несколько назначенных, тренд строится по каждой.
     questionnaire_code?: string;
+    // Верх шкалы (сумма максимумов пунктов): 24/21/32/40/52 — граница графика.
+    // Нет у клиницистского отчёта (Report.history) — график берёт верх по наблюдениям.
+    max_total?: number;
   }[];
   trend: { moving_avg: number[]; delta_7: number | null; delta_30: number | null; slope: number | null };
 }
@@ -787,6 +803,9 @@ export interface Report {
     // FR-34: kind="NOT_ASSESSED" — пункт 9 не задавался, риск не оценён.
     risk_flags?: { kind: string; item_key: string | null }[];
     omitted_items?: string[];
+    // Шкала, из которой взят omitted_items (последняя с suicidal_item): после
+    // заполненного GAD-7 пропуск q9 всё ещё относится к PHQ-9.
+    omitted_scale?: string | null;
     computed_at: string;
   } | null;
   history: { total_score: number; severity: string; triage: string; computed_at: string }[];

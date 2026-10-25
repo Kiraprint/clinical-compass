@@ -85,23 +85,23 @@ def risk_flags(
     - SUICIDAL_IDEATION: scale.suicidal_item (пункт о суициде) >= 1
     - SEVERE_SYMPTOMS: сумма баллов достигла собственного порога SEVERE шкалы
     - NOT_ASSESSED: пункт о суициде не задавался → риск НЕ оценён (не «нет»)
+
+    Пропуски проходят тот же guard, что и в score(): спрятать видимый пункт
+    нельзя, иначе риск молча уходил бы в NOT_ASSESSED. Сумма берётся из
+    score(...), поэтому неотвеченный обратный пункт не добавляет max_value
+    и не раздувает SEVERE.
     """
-    skipped = frozenset(omitted)
+    try:
+        skipped = _check_omitted(scale, omitted)
+    except KeyError as exc:
+        raise UnknownItemError(f"unknown omitted item {exc.args[0]!r} for scale {scale.code}") from None
+    total = score(scale, answers, omitted=skipped).total_score
     flags: list[RiskFlag] = []
     if scale.suicidal_item:
         if scale.suicidal_item in skipped:
             flags.append(RiskFlag(kind=FlagKind.NOT_ASSESSED, item_key=scale.suicidal_item))
         elif answers.get(scale.suicidal_item, 0) >= 1:
             flags.append(RiskFlag(kind=FlagKind.SUICIDAL_IDEATION, item_key=scale.suicidal_item))
-    if scale.severity_for(total_for(scale, answers)) == Severity.SEVERE:
+    if scale.severity_for(total) == Severity.SEVERE:
         flags.append(RiskFlag(kind=FlagKind.SEVERE_SYMPTOMS, item_key=None))
     return flags
-
-
-def total_for(scale: Scale, answers: Mapping[str, int]) -> int:
-    """Балл по ответам (для risk_flags — вне скоринга, без повторной валидации)."""
-    total = 0
-    for item in scale.items:
-        raw = answers.get(item.key, 0)
-        total += item.max_value - raw if item.reverse else raw
-    return total

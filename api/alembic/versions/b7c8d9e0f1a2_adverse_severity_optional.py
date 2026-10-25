@@ -9,8 +9,9 @@ Create Date: 2026-10-25
 Исторические строки (в т.ч. все врачебные НЯ) сохраняют прежнее значение —
 колонка просто перестаёт быть NOT NULL.
 
-Downgrade: NULL-значения заполняются 'mild' (иначе NOT NULL не восстановить);
-это единственная потеря информации на откате, upgrade данные не меняет.
+Downgrade: если есть строки с severity IS NULL, откат падает с ошибкой — это
+НЯ, которые пациент сообщил, а врач ещё не оценил. Подставить им 'mild' значило
+бы выдумать клиническую оценку; такие строки нужно разобрать вручную.
 """
 
 from alembic import op
@@ -32,7 +33,17 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("UPDATE adverse_events SET severity = 'mild' WHERE severity IS NULL")
+    """Возвращает NOT NULL только если ни одно НЯ не осталось без оценки врача."""
+    conn = op.get_bind()
+    unassessed = conn.execute(
+        sa.text("select count(*) from adverse_events where severity is null")
+    ).scalar_one()
+    if unassessed:
+        raise RuntimeError(
+            f"нельзя вернуть adverse_events.severity NOT NULL: {unassessed} строк без оценки "
+            "(severity IS NULL). Подстановка 'mild' выдумала бы клиническую оценку — "
+            "оцените эти НЯ врачом и повторите downgrade."
+        )
     op.alter_column(
         "adverse_events",
         "severity",
