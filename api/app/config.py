@@ -111,6 +111,12 @@ class Settings(BaseSettings):
     # Живой шлюз отвечает 12–13 с, прежний общий 30-секундный лимит давал
     # ложные 503; в chat_insights один ретрай на таймаут (docs/04 FR-31).
     chat_insights_timeout: float = Field(default=60.0, gt=0)
+    # FR-37: анамнез пациента (черновик LLM + сохранение врачом). Выключен по
+    # умолчанию: и хранение, и формирование черновика недоступны, пока явно не
+    # включено. Для POST …/anamnesis/draft дополнительно нужен CC_ASSISTANT_LLM_URL.
+    anamnesis_enabled: bool = False  # CC_ANAMNESIS_ENABLED
+    # CC_ANAMNESIS_TIMEOUT: таймаут одного вызова LLM при формировании черновика.
+    anamnesis_timeout: float = Field(default=60.0, gt=0)
     # CC_DEPERSONALIZE_NER: off | natasha | rubert | hybrid | remote (docs/12).
     # true/1 = natasha (обратная совместимость). rubert — redmadrobot-rnd/
     # rubert-base-pii-ner: Apache-2.0, FIO F1 0.933 (bench/ner); hybrid — rubert

@@ -4,22 +4,29 @@
 контракту ядра (docs/03 §1.3): офлайн, детерминированно, тестируемо.
 
 Что маскируется:
-- ФИО — deny-list известных имён (ростер врача) + спаны нейро-NER, переданные
-  снаружи через ``extra_spans`` (api/app/services/depersonalize.py);
+- ФИО — структурная эвристика (морфология фамилии + имя из списка частых,
+  инициалы, капс-фамилия из списка), deny-list известных имён (ростер врача)
+  и спаны нейро-NER, переданные снаружи через ``extra_spans``
+  (api/app/services/depersonalize.py);
 - адреса — улица/город/область/дом/квартира по опорным словам
-  (ул./просп./пр-т/пер./наб./г./обл. и т.п.), с расширением влево на город;
-- номера документов — СНИЛС (3-3-3 2 и слитно), ИНН (10/12, контрольное
-  число), ОМС (16 цифр, контрольная сумма или маркер «полис/ОМС»), паспорт
-  (серия 4 + номер 6), медкарта/ИБ (маркер «медкарта/ИБ/история болезни»);
-- телефон РФ — +7/8 с любыми разделителями и без, а также 10-значный
-  мобильный (9…): ``+79261234567``, ``8 926 123-45-67``, ``9261234567``;
+  (ул./просп./пр-т/пер./наб./г./обл. и т.п.), с расширением влево на город,
+  и оборот «живу в Москве на Ленина 5»;
+- номера документов — СНИЛС (3-3-3 2, группы через пробелы, слитно), ИНН
+  (10/12, контрольное число, группы через пробелы), ОМС (16 цифр,
+  контрольная сумма или маркер «полис/ОМС»), паспорт (серия 4 + номер 6,
+  в т.ч. серия по 2 цифры), медкарта/ИБ (маркер
+  «медкарта/ИБ/история болезни» либо голый «№ 123456» — 5–8 цифр);
+- телефон РФ — +7/7/8 с любыми разделителями и без, а также 10-значный
+  мобильный (9…): ``+79261234567``, ``7(926)123-45-67``, ``8 926 123-45-67``,
+  ``9261234567``;
 - email (в т.ч. кириллический local-part);
 - дата рождения — с явным маркером: «дата рождения», «д.р.», «род.»
   «родился/родилась», суффикс «г.р.»; форматы дд.мм.гггг, дд-мм-гггг,
   гггг-мм-дд, «12 марта 1954». Дата без маркера (приём, начало симптомов)
   не маскируется — это клинические данные, а не ПДн;
-- возраст — только в связке с ФИО в том же предложении (комбо-идентификатор);
-  отдельно взятый «64 года» уходит в LLM как клинический показатель.
+- возраст — только в связке с ФИО в том же предложении (комбо-идентификатор):
+  «64 года» и «мне 34»; отдельно взятый возраст уходит в LLM как
+  клинический показатель.
 
 Метод обезличивания — замена (приказ Роскомнадзора №996, метод «замена»),
 режим redact — сокращение. На выходе placeholders вида [ФИО]/[АДРЕС]/
@@ -201,21 +208,28 @@ def normalize_phone(value: str) -> str | None:
 # без хвостовой пунктуации на конце предложения.
 _EMAIL = re.compile(r"[^\s@]+@[^\s@]+\.[A-Za-zА-Яа-яЁё0-9-]{2,}")
 
-# Телефон: +7/8 с разделителями или 10-значный мобильный 9XXXXXXXXX.
+# Телефон: +7/7/8 с разделителями или 10-значный мобильный 9XXXXXXXXX.
+# «7 926 …» без плюса — частая форма из карточки пациента.
 _PHONE = re.compile(
     r"(?<![\d+])(?:"
-    r"(?:\+7|8)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}"
+    r"(?:\+7|7|8)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}"
     r"|9\d{2}[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}"
     r")(?!\d)"
 )
 
 _SNILS_HYPHEN = re.compile(r"(?<!\d)\d{3}-\d{3}-\d{3}\s\d{2}(?!\d)")
 _DIGITS_RUN = re.compile(r"(?<![\d+])\d{10,16}(?!\d)")
+# Числа с разделителями: СНИЛС «123 456 789 01», ИНН «77 07 083 229»,
+# ОМС «1234 5678 9012 3456». Вид определяется длиной и контрольным числом
+# (или маркером) в _doc_spans.
+_DIGITS_GROUPED = re.compile(r"(?<![\d+])\d{2,4}(?:[\s\-]\d{2,4}){2,5}(?!\d)")
 # Паспорт: серия 4 + номер 6 — только с пробелом/№ или явным маркером,
 # иначе слитные 10 цифр (телефон/ИНН) ложно считались бы паспортом.
 _PASSPORT = re.compile(r"(?<!\d)\d{4}\s(?:№\s?)?\d{6}(?!\d)")
 _PASSPORT_MARKED = re.compile(
-    r"паспорт\w*\s*(?:серия\s*)?№?\s*(\d{4}\s?№?\s?\d{6})(?!\d)", re.IGNORECASE
+    r"паспорт\w*\s*(?:серия\s*)?№?\s*"
+    r"(\d{2}\s?\d{2}\s?№?\s?\d{6}|\d{4}\s?№?\s?\d{6})(?!\d)",
+    re.IGNORECASE,
 )
 _OMS_SPACED = re.compile(r"(?<!\d)\d{4}\s\d{4}\s\d{4}\s\d{4}(?!\d)")
 
@@ -224,6 +238,10 @@ _MEDCARD = re.compile(
     r"№?\s*(\d{2,7}(?:[-/]\d{2,7}){0,2})",
     re.IGNORECASE,
 )
+# Медкарта без слова-маркера: «№ 123456». 5–8 цифр: короче — нумерация
+# кабинетов/талонов, длиннее — телефон/ИНН/СНИЛС.
+_MEDCARD_BARE = re.compile(r"(?<![\w№/])(?:№|N|No\.?)\s*(\d{5,8})(?!\d)",
+                           re.IGNORECASE)
 
 # Дата рождения — только с явным маркером (см. docstring модуля).
 _DOB_PREFIX = re.compile(
@@ -237,6 +255,9 @@ _DOB_SUFFIX = re.compile(
 )
 
 _AGE = re.compile(r"(?<![\d])\d{1,3}\s*(?:лет|года|г\.)(?![\w])")
+# «мне 34» — возраст без единицы; маскируется только в связке с ФИО
+# (resolve_spans), одиночный остаётся клиническим показателем.
+_AGE_ME = re.compile(r"\bмне\s+(\d{1,3})(?![\d\w])", re.IGNORECASE)
 
 # Адрес. Опорное слово + название (одно/два слова с заглавной) + хвост
 # «, д. 5, кв. 10» / « 5» / «д. 5 кв. 10».
@@ -255,6 +276,13 @@ _ADDRESS = re.compile(rf"{_STREET}\s+{_NAME}{_TAIL}")
 # номер дома: без него «Добрый день, пер.» давало бы ложные адреса.
 _ADDRESS_NAME_FIRST = re.compile(
     rf"{_NAME}\s+{_STREET}(?:{_TAIL_ONE}){{1,3}}"
+)
+# «живу в Москве на Ленина 5» — улица в обороте «на + улица + дом».
+# Без номера дома и заглавной улицы не срабатывает: «на приём», «на 5 дней».
+_ADDRESS_STREET_ON = re.compile(
+    r"(?:(?:в|во)\s+(?P<city>[А-ЯЁ][а-яё\-]+)\s+)?"
+    r"на\s+(?P<street>[А-ЯЁ][а-яё\-]+(?:\s+[А-ЯЁ][а-яё\-]+)?)\s+"
+    r"(?:д\.?\s*)?(?P<house>\d+[а-яёА-Я]?)(?![\d])"
 )
 
 # Сегмент слева от улицы, который тоже относится к адресу: «г. Москва,»,
@@ -278,6 +306,116 @@ def _add(spans: list[Span], kind: str, start: int, end: int,
 def _marker_before(text: str, start: int, words: str, window: int = 18) -> bool:
     return re.search(rf"(?:{words})", text[max(0, start - window):start],
                      re.IGNORECASE) is not None
+
+
+# --------------------------------------------------- ФИО без deny-list/NER
+# Словарно-агностичная эвристика: русская фамилия опознаётся по морфологии
+# окончания, имя — по списку частых имён (не привязан к ростеру пациентов).
+# Закрывает ФИО целиком строчными («сидорова галина»), которые NER и
+# deny-list пропускают, не начиная маскировать клинические слова: «больница»,
+# «температура», «голова» не проходят якорь «имя из списка».
+
+_FIRST_NAMES = frozenset("""
+иван пётр сергей алексей дмитрий андрей михаил николай владимир олег роман
+кирилл артём максим евгений александр виктор юрий игорь вячеслав василий
+анатолий валерий павел денис антон тимофей георгий борис константин григорий
+степан семён вадим эдуард аркадий леонид матвей
+анна мария ольга елена татьяна наталья ирина светлана юлия екатерина галина
+любовь валентина надежда вера тамара лариса нина ксения дарья алина софья
+полина валерия людмила евгения зоя инна раиса римма эльвира
+""".split())
+
+_SURNAME_RX = re.compile(
+    r"^[а-яё]{2,}(?:ов|ев|ёв|ин|ын|ский|цкий|ская|цкая|ских|ых|их|ко|енко|"
+    r"ук|юк|ян|дзе|швили|ич|ова|ева|ёва|ина|ына|ого|ому|ым|ой|ая|ую)$"
+)
+_PATRONYMIC_RX = re.compile(r"^[а-яё]{3,}(?:ович|евич|ич|овна|евна|ична|инична)$")
+
+# Частые фамилии: нужны только для одиночной формы («ПЕТРОВА»), где нет
+# второго слова-якоря. Список не связан с пациентами/ростером.
+_COMMON_SURNAMES = frozenset("""
+иванов петров сидоров кузнецов смирнов волков морозов новиков фёдоров федоров
+соколов никитин орлов зайцев павлов семёнов семенов голубев виноградов козлов
+михайлов попов васильев алексеев лебедев егоров степанов николаев андреев
+макаров захаров соловьёв соловьев борисов яковлев григорьев романов воробьёв
+воробьев сергеев кузьмин фролов александров дмитриев королёв королев гусев
+киселёв киселев ильин максимов поляков сорокин ковалёв ковалев белов медведев
+антонов тарасов жуков баранов филиппов комаров давыдов беляев герасимов
+богданов осипов матвеев титов марков миронов крылов куликов карпов власов
+мельников денисов гаврилов тихонов казаков афанасьев данилов савельев
+тимофеев фомин чернов абрамов мартынов ефимов федотов щербаков назаров
+калинин исаев чернышёв быков маслов родионов коновалов лазарев воронин климов
+филатов пономарёв пономарев кудрявцев прохоров наумов потапов журавлёв
+овчинников трофимов леонов соболев ермаков колесников гончаров емельянов
+никифоров грачёв грачев котов гришин ефремов архипов громов кириллов малышев
+панов моисеев румянцев акимов кондратьев бирюков горбунов анохин
+""".split())
+
+_INITIALS = r"[А-ЯЁ]\.\s?[А-ЯЁ]\."
+_FIO_INITIALS_AFTER = re.compile(
+    rf"(?<![А-Яа-яЁё])([а-яёА-ЯЁ][а-яё\-]+)\s+{_INITIALS}(?![А-ЯЁа-яё])"
+)
+_FIO_INITIALS_BEFORE = re.compile(
+    rf"(?<![А-ЯЁ])({_INITIALS})\s+([А-ЯЁ][а-яё\-]+)(?![А-ЯЁа-яё])"
+)
+_WORD = re.compile(r"[А-Яа-яЁё][А-Яа-яЁё\-]*")
+
+
+def _surname_like(word: str) -> bool:
+    return bool(_SURNAME_RX.match(word.lower()))
+
+
+def _common_surname(word: str) -> bool:
+    w = word.lower()
+    return w in _COMMON_SURNAMES or (
+        w.endswith(("а", "я")) and w[:-1] in _COMMON_SURNAMES
+    )
+
+
+def _fio_heuristic_spans(text: str) -> list[Span]:
+    """ФИО по морфологии фамилии + имени/инициалам/списку частых фамилий.
+
+    Формы:
+    * «иванов пётр [сергеевич]» — фамилия по окончанию + имя из списка;
+    * «Иванов П.С.» / «П.С. Иванов» — фамилия по окончанию + инициалы;
+    * «ПЕТРОВА» / «Петрова» — одиночная фамилия из списка частых (строчную
+      без второго слова не берём: слишком неоднозначно).
+    """
+    out: list[Span] = []
+    for m in _FIO_INITIALS_AFTER.finditer(text):
+        if _surname_like(m.group(1)):
+            _add(out, FIO, m.start(1), m.end())
+    for m in _FIO_INITIALS_BEFORE.finditer(text):
+        if _surname_like(m.group(2)):
+            _add(out, FIO, m.start(1), m.end(2))
+
+    words = list(_WORD.finditer(text))
+    for i in range(len(words)):
+        for take in (3, 2):
+            seq = words[i:i + take]
+            if len(seq) < take:
+                continue
+            gaps = [text[seq[k].end():seq[k + 1].start()] for k in range(take - 1)]
+            if any(not gap.isspace() for gap in gaps):
+                continue
+            tokens = [s.group(0) for s in seq]
+            if take == 3:
+                good = (_surname_like(tokens[0])
+                        and tokens[1].lower() in _FIRST_NAMES
+                        and _PATRONYMIC_RX.match(tokens[2].lower()))
+            else:
+                good = (_surname_like(tokens[0])
+                        and tokens[1].lower() in _FIRST_NAMES)
+            if good:
+                _add(out, FIO, seq[0].start(), seq[-1].end())
+                break
+
+    for m in words:
+        w = m.group(0)
+        if (len(w) >= 4 and (w.isupper() or w.istitle())
+                and _surname_like(w) and _common_surname(w)):
+            _add(out, FIO, m.start(), m.end())
+    return out
 
 
 def _phone_spans(text: str) -> list[Span]:
@@ -310,6 +448,35 @@ def _doc_spans(text: str) -> list[Span]:
         if free(m.start(), m.end()):
             _add(out, DOC, m.start(), m.end(), OMS)
             claimed.append((m.start(), m.end()))
+    for m in _DIGITS_GROUPED.finditer(text):
+        a, b = m.start(), m.end()
+        if not free(a, b):
+            continue
+        digits = re.sub(r"\D", "", m.group(0))
+        # Маркер сильнее формы: «СНИЛС 787 076 110 38» начинается с 7 и по
+        # виду похож на телефон, но это документ.
+        if (len(digits) == 11 and _marker_before(text, a, r"СНИЛС")
+                or len(digits) in (10, 12) and _marker_before(text, a, r"ИНН")
+                or len(digits) == 16 and _marker_before(text, a, r"полис|ОМС")):
+            cat = (SNILS if len(digits) == 11
+                   else INN if len(digits) in (10, 12) else OMS)
+            _add(out, DOC, a, b, cat)
+            claimed.append((a, b))
+        elif normalize_phone(digits) and digits[0] in "789":
+            # «8 926 123 45 67» — телефон, а не документ.
+            _add(out, PHONE, a, b)
+            claimed.append((a, b))
+        elif len(digits) == 11 and snils_valid(digits):
+            _add(out, DOC, a, b, SNILS)
+            claimed.append((a, b))
+        elif len(digits) in (10, 12) and (
+                inn_valid(digits) or _marker_before(text, a, r"ИНН")):
+            _add(out, DOC, a, b, INN)
+            claimed.append((a, b))
+        elif len(digits) == 16 and (
+                oms_valid(digits) or _marker_before(text, a, r"полис|ОМС")):
+            _add(out, DOC, a, b, OMS)
+            claimed.append((a, b))
 
     for m in _DIGITS_RUN.finditer(text):
         val = m.group(0)
@@ -368,6 +535,12 @@ def _doc_spans(text: str) -> list[Span]:
         if free(a, b):
             _add(out, DOC, a, b, MEDCARD)
             claimed.append((a, b))
+
+    for m in _MEDCARD_BARE.finditer(text):
+        a, b = m.span(1)
+        if free(a, b):
+            _add(out, DOC, a, b, MEDCARD)
+            claimed.append((a, b))
     return out
 
 
@@ -388,7 +561,7 @@ def _dob_spans(text: str) -> list[Span]:
 
 def _address_spans(text: str) -> list[Span]:
     out: list[Span] = []
-    for rx in (_ADDRESS, _ADDRESS_NAME_FIRST):
+    for rx in (_ADDRESS, _ADDRESS_NAME_FIRST, _ADDRESS_STREET_ON):
         for m in rx.finditer(text):
             start, end = m.start(), m.end()
             # расширяем влево на город/область: «г. Москва, ул. Ленина…»
@@ -410,6 +583,8 @@ def structural_spans(text: str) -> list[Span]:
     spans += _dob_spans(text)
     spans += _address_spans(text)
     spans += [Span(AGE, m.start(), m.end()) for m in _AGE.finditer(text)]
+    spans += [Span(AGE, m.start(1), m.end(1)) for m in _AGE_ME.finditer(text)]
+    spans += _fio_heuristic_spans(text)
     return spans
 
 
@@ -477,6 +652,34 @@ def is_plausible_person_span(text: str, span: Span) -> bool:
     return value[:1].isupper()
 
 
+_ADDRESS_ANCHOR = re.compile(
+    r"(?:ул\.|улица|просп|пр-т|пр-кт|пер\.|переулок|бульв|наб\.|набереж|"
+    r"шоссе|аллея|площадь|пл\.|мкр|микрорайон|г\.|город|обл\.|область|"
+    r"край|район|р-н|респ\.|пос\.|посёлок|село|дер\.|деревня|пгт|"
+    r"д\.|дом|кв\.|квартира|корп|стр\.|строение|литер)",
+    re.IGNORECASE,
+)
+
+
+def is_plausible_address_span(text: str, span: Span) -> bool:
+    """Отсев мусорных NER-адресов: «кабинет 5», «2», «на приём».
+
+    Адрес — либо фрагмент с опорным словом (ул./д./г./кв. …), либо 1–2 слова
+    с заглавной (город/улица). Числа и строчные фразы без опоры — не адрес.
+    """
+    if span.kind != ADDRESS:
+        return True
+    value = text[span.start:span.end].strip()
+    if not value or not value[:1].isalpha():
+        return False
+    if _ADDRESS_ANCHOR.search(value):
+        return True
+    words = value.split()
+    return len(words) <= 2 and all(
+        w[:1].isupper() or w[:1].isdigit() for w in words
+    )
+
+
 # ------------------------------------------------------------------ разрешение
 
 def merge_adjacent_spans(spans: list[Span], text: str) -> list[Span]:
@@ -490,10 +693,13 @@ def merge_adjacent_spans(spans: list[Span], text: str) -> list[Span]:
         if merged:
             prev = merged[-1]
             gap = text[prev.end:s.start]
+            adjacent = s.start >= prev.end and gap in ("", " ", ", ", ",")
             if (prev.kind == s.kind and prev.category == s.category
-                    and gap in ("", " ", ", ", ",") and
-                    len(gap) <= 2):
-                merged[-1] = Span(prev.kind, prev.start, s.end, prev.category)
+                    and (s.start < prev.end or adjacent)):
+                # Перекрытие — объединение (не терять хвост длинного спана);
+                # соседство — только если между ними пробел/запятая.
+                merged[-1] = Span(prev.kind, prev.start,
+                                  max(prev.end, s.end), prev.category)
                 continue
         merged.append(s)
     return merged
@@ -510,6 +716,8 @@ def _fio_near(text: str, age_start: int, fio_spans: list[Span],
         if abs(x.start - age_start) > window:
             continue
         between = text[min(x.start, age_start):max(x.start, age_start)]
+        # «П.Д.» — инициалы, а не конец фразы; убираем их до проверки.
+        between = re.sub(r"[А-ЯЁ]\.", "", between)
         if re.search(r"[.!?]\s", between) or "\n" in between:
             continue
         return True

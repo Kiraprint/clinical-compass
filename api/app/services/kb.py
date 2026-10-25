@@ -217,6 +217,20 @@ def delete_sources(
         )
     return len(ids)
 
+
+def is_visible(hit: dict, work_ids: set[str] | None) -> bool:
+    """FR-36: статья видна, только если врач одобрил её сам.
+
+    `work_ids is None` — фильтр не применяется (служебные пути). Гайдлайны ВОЗ
+    и seed-корпус (нет work_id) видны всем без решения врача.
+    """
+    if work_ids is None:
+        return True
+    if hit.get("kind") == "guideline" or not hit.get("work_id"):
+        return True
+    return str(hit["work_id"]) in work_ids
+
+
 def hybrid_search(
     client: QdrantClient,
     embedder: Embedder,
@@ -225,6 +239,7 @@ def hybrid_search(
     topic: str | None = None,
     limit: int = 5,
     exclude_ids: set[str] | None = None,
+    work_ids: set[str] | None = None,
     candidates: int | None = None,
     reranker=None,
     rrf_k: int | None = None,
@@ -248,8 +263,14 @@ def hybrid_search(
     top-limit и включить отказ на релевантном запросе). Hash-профиль гейтится
     лексически в агенте — RRF-скоры с косинусом несравнимы.
 
-    Возвращает [{guideline_id, source_title, topic, score, text}]; при реранке
-    score — скор кросс-энкодера (он же основа порога kb_min_score).
+    work_ids (FR-36) — allow-list статей, которые врач одобрил лично. None —
+    фильтра нет (служебные пути), пустое множество — ни одной статьи. Видны
+    всегда: точки без work_id (seed-корпус: шкалы, препараты, демо) и
+    kind='guideline' (гайдлайны ВОЗ) — они не требуют решения врача.
+
+    Возвращает [{guideline_id, source_title, topic, score, text, work_id,
+    kind}]; при реранке score — скор кросс-энкодера (он же основа порога
+    kb_min_score). work_id/kind — для персонального фильтра видимости в агенте.
     """
     if not query.strip():
         return []
@@ -258,12 +279,27 @@ def hybrid_search(
     dense = getattr(embedder, "query_dense", embedder.dense)(query)
     must: list = []
     must_not: list = []
+    should: list = []
     if topic:
         must.append(qm.FieldCondition(key="topic", match=qm.MatchValue(value=topic)))
     if exclude_ids:
         # Персональные исключения врача: источники остаются в КБ, но не в выдаче.
         must_not.append(qm.FieldCondition(key="guideline_id", match=qm.MatchAny(any=sorted(exclude_ids))))
-    filter_ = qm.Filter(must=must, must_not=must_not) if (must or must_not) else None
+    if work_ids is not None:
+        # FR-36: статья видна врачу, только если он одобрил её сам. should —
+        # OR-группа поверх must: seed-точки без work_id (шкалы/препараты/демо) и
+        # гайдлайны ВОЗ (kind='guideline') видны всем без решения врача.
+        if work_ids:
+            should.append(qm.FieldCondition(key="work_id", match=qm.MatchAny(any=sorted(work_ids))))
+        should.append(
+            qm.IsEmptyCondition(is_empty=qm.PayloadField(key="work_id"))
+        )
+        should.append(qm.FieldCondition(key="kind", match=qm.MatchValue(value="guideline")))
+    filter_ = (
+        qm.Filter(must=must, should=should, must_not=must_not)
+        if (must or should or must_not)
+        else None
+    )
     if getattr(embedder, "use_sparse", True):
         indices, values = embedder.sparse(query)
         prefetch = [
@@ -307,6 +343,9 @@ def hybrid_search(
             "topic": p.payload.get("topic", ""),
             "text": p.payload.get("text", ""),
             "score": p.score,
+            # FR-36: work_id/kind — для персонального фильтра видимости в агенте.
+            "work_id": p.payload.get("work_id"),
+            "kind": p.payload.get("kind"),
         }
         for p in (res.points or [])
     ]
@@ -322,12 +361,19 @@ def hybrid_search(
         except Exception as exc:  # noqa: BLE001 — реранк не должен ронять запрос
             # Сайдкар/модель/сеть упали: прод обязан отвечать, порядок остаётся RRF.
             log.warning("реранк недоступен (%s) — выдача остаётся в порядке RRF", exc)
+            if work_ids is not None:
+                hits = [h for h in hits if is_visible(h, work_ids)]
             return hits[:limit]
         if exclude_ids:
             # Реранк не имеет права воскресить исключённый врачом источник,
             # даже если его реализация забыла про фильтр (defense in depth).
             ranked = [h for h in ranked if h.get("guideline_id") not in exclude_ids]
+        if work_ids is not None:
+            # То же для персональной видимости статей (FR-36).
+            ranked = [h for h in ranked if is_visible(h, work_ids)]
         return ranked[:limit]
+    if work_ids is not None:
+        hits = [h for h in hits if is_visible(h, work_ids)]
     return hits[:limit]
 
 
@@ -346,5 +392,6 @@ __all__ = [
     "upsert_documents",
     "delete_sources",
     "hybrid_search",
+    "is_visible",
     "count_points",
 ]

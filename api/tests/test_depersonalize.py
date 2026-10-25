@@ -145,7 +145,12 @@ def test_age_masked_only_with_fio_span(fake_extractor):
     r = scrub_text(text)
     assert FIO in r.text and "[ВОЗРАСТ]" in r.text
     fake_extractor.spans = []
-    assert scrub_text(text).text == text
+    # ФИО ловит структурная эвристика (docs/12), поэтому возраст в связке
+    # маскируется и без спана модели.
+    plain = scrub_text(text)
+    assert FIO in plain.text and "[ВОЗРАСТ]" in plain.text
+    # Одиночный возраст без ФИО — клинический показатель, не ПДн.
+    assert scrub_text("Пациентке 64 года").text == "Пациентке 64 года"
 
 
 # --------------------------------------------------------- спаны и перекрытия
@@ -227,7 +232,10 @@ def test_non_prod_degrades_to_regex(monkeypatch):
                         lambda self: (_ for _ in ()).throw(ImportError("no torch")))
     r = scrub_text("Иванов Иван, +79261234567")
     assert r.text.endswith(PHONE)
-    assert "Иванов" in r.text  # без ML-модели ФИО не маскируется — так и документируем
+    # Без ML-модели ФИО всё равно маскируется структурной эвристикой ядра
+    # (docs/12, правило фамилия+имя), а не уходит открытым текстом.
+    assert "Иванов" not in r.text
+    assert FIO in r.text
 
 
 def test_unknown_fio_masked_with_prod_backend(fake_extractor):
@@ -260,7 +268,8 @@ def test_dialogue_only_patient_messages_chronological():
     # names=[] — deny-list пуст; маскирование структурных ПДн идёт внутри.
     dialogue = chat_insights._dialogue_text(msgs, [])
     assert "Помощник" not in dialogue and "диктовка" not in dialogue
-    assert dialogue.index("Иванов") < dialogue.index("Температура")
+    assert "Иванов" not in dialogue
+    assert dialogue.index(FIO) < dialogue.index("Температура")
 
 
 def test_insights_prompt_has_no_phi_and_no_noise(monkeypatch, fake_extractor):

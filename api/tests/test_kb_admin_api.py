@@ -171,6 +171,15 @@ def test_assistant_retrieval_respects_personal_exclusion(client, db_session, see
     db_session.expire_all()
     db_session.commit()
 
+    # FR-36: публикации админом мало — статья видна врачу только после его
+    # собственного одобрения (персональная видимость, не публикация).
+    approved = client.post(
+        f"/api/v1/clinician/kb/works/{work.id}/decision",
+        json={"decision": "approved"},
+        headers=clinician,
+    )
+    assert approved.status_code == 200, approved.text
+
     body = {"query": "cognitive behavioural therapy generalised anxiety", "limit": 5}
     before = client.post("/api/v1/assistant/ask", json=body, headers=clinician)
     assert before.status_code == 200, before.text

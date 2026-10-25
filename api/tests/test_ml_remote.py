@@ -261,3 +261,20 @@ class _Hash:
 
     def sparse(self, text: str):
         return [], []
+
+
+def test_remote_embedder_unreachable_sidecar_names_url(monkeypatch):
+    """Сайдкар не отвечает: ошибка обязана назвать CC_ML_URL (раньше падала NameError)."""
+    from app.services import ml_client as client
+    from app.services.embeddings import EmbedderConfigError, RemoteEmbedder
+
+    monkeypatch.setattr(settings, "ml_url", "http://ml:8080")
+    monkeypatch.setattr(client, "enabled", lambda: True)
+
+    def boom():
+        raise client.MlUnavailable("connection refused")
+
+    monkeypatch.setattr(client, "ping", boom)
+    with pytest.raises(EmbedderConfigError) as exc:
+        RemoteEmbedder("bge-m3")
+    assert "http://ml:8080" in str(exc.value)

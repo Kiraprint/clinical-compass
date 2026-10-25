@@ -36,6 +36,7 @@ from compass.depersonalize import (
     depersonalize as core_depersonalize,
     merge_adjacent_spans,
     is_plausible_person_span,
+    is_plausible_address_span,
 )
 
 from app.config import settings
@@ -255,7 +256,8 @@ class HybridNameExtractor(RubertPiiNameExtractor):
         ]
         out: list[tuple[str, int, int]] = []
         for span in merge_adjacent_spans(candidates, text):
-            if not is_plausible_person_span(text, span):
+            if not is_plausible_person_span(text, span) \
+                    or not is_plausible_address_span(text, span):
                 continue
             out.append((span.kind, span.start, span.end))
         return out
@@ -337,6 +339,7 @@ def _spans_from_remote(text: str, payload: object) -> list[Span]:
     return [
         span for span in merge_adjacent_spans(out, text)
         if is_plausible_person_span(text, span)
+        and is_plausible_address_span(text, span)
     ]
 
 
@@ -441,7 +444,8 @@ def extract_pii_spans(
     for kind, start, end in build_name_extractor().extract_spans(text):
         if 0 <= start < end <= len(text):
             span = Span(kind, start, end)
-            if is_plausible_person_span(text, span):
+            if is_plausible_person_span(text, span) \
+                    and is_plausible_address_span(text, span):
                 spans.append(span)
     return spans
 

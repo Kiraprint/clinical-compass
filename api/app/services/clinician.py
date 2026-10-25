@@ -408,6 +408,9 @@ async def _patient_card(db: AsyncSession, patient_id) -> dict:
         # FR-31: только принятые врачом факты; отзыв согласия удаляет строки.
         "chat_insights": await _accepted_chat_insights(db, patient_id) if has_consent else [],
         "contacts": contacts_payload(patient, masked=True) if has_consent else None,
+        # FR-37: анамнез. Подтверждённый текст и вводные — спецкатегория ПДн,
+        # отдаются в карточке только при активном согласии (roster — у report()).
+        "anamnesis": await _anamnesis_payload(db, patient_id) if has_consent else None,
     }
 
 
@@ -416,6 +419,12 @@ async def _accepted_chat_insights(db: AsyncSession, patient_id) -> list[dict]:
     from . import chat_insights as chat_insights_service
 
     return await chat_insights_service.accepted_for_report(db, patient_id)
+
+async def _anamnesis_payload(db: AsyncSession, patient_id) -> dict:
+    """Ленивый импорт: anamnesis зависит от roster/consent-гейтов этого модуля."""
+    from . import anamnesis as anamnesis_service
+
+    return await anamnesis_service.card_payload(db, patient_id)
 
 
 async def report(db: AsyncSession, clinician_id, patient_id, ip: str | None = None) -> dict:

@@ -118,14 +118,17 @@ def cand_rubert(text: str) -> list[dict]:
 
 
 def cand_hybrid(text: str) -> list[dict]:
-    from compass.depersonalize import Span, extract_spans, is_plausible_person_span
+    from compass.depersonalize import (
+        Span, extract_spans, is_plausible_address_span, is_plausible_person_span,
+    )
 
     extra = []
     for s in cand_rubert(text):
         if s["kind"] not in ("FIO", "ADDRESS"):
             continue
         span = Span(s["kind"], s["start"], s["end"])
-        if is_plausible_person_span(text, span):
+        if is_plausible_person_span(text, span) and is_plausible_address_span(
+                text, span):
             extra.append((s["kind"], s["start"], s["end"]))
     return _span_dicts(extract_spans(text, extra_spans=extra))
 

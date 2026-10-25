@@ -8,7 +8,8 @@
 Источник формулировок, якорей и правил: docs/16-ежедневный-чек-ин.md.
 Это черновик для клинического пилота: пункты не откалиброваны по IRT/Rasch и не
 являются диагностическим инструментом. Риск (HR4/RS1–RS3) — отдельный маршрут
-безопасности, он не суммируется с симптомами.
+безопасности, он не суммируется с симптомами; HR4 задаётся только после ядра и
+только при срабатывании safety_gate (docs/16 §2).
 """
 
 from __future__ import annotations
@@ -16,16 +17,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-RULES_VERSION = "1.0.0"
+RULES_VERSION = "2.0.0"
 
-#: Лимит пунктов за день: 7 ядра + не более 5 пунктов симптоматических модулей.
+#: Лимит пунктов за день: 6 пунктов ядра + gate HR4 (если задаётся) + модули.
 MAX_ITEMS = 12
 
-#: Gate-вопрос о суицидальных мыслях. Бинарный (0 = нет, 1 = да), не входит в сумму.
+#: Gate-вопрос о мыслях о самоповреждении. Бинарный (0 = нет, 1 = да), не входит в сумму.
+#: Задаётся не в ядре, а отдельной фазой safety и только при срабатывании safety_gate (docs/16 §2).
 GATE_ITEM = "HR4"
 
 #: Фиксированное ядро: предъявляется каждый день независимо от вчерашних модулей.
-CORE_ITEMS = ("MO1", "TR1", "SL1", "IN1", "EN1", "FU1", GATE_ITEM)
+CORE_ITEMS = ("MO1", "TR1", "SL1", "IN1", "EN1", "FU1")
 
 #: Короткий модуль безопасности после положительного gate.
 SAFETY_MODULE = "RS"
@@ -149,7 +151,7 @@ ITEMS: tuple[CheckinItem, ...] = (
     CheckinItem(
         GATE_ITEM,
         "risk",
-        "Сегодня у вас возникали мысли о самоубийстве?",
+        "Были ли у вас мысли о самоповреждении?",
         "gate",
         YES_NO_LABELS,
         YES_NO_EMOJI,
@@ -214,7 +216,10 @@ class CheckinPlan:
     phase: str  # core | safety | modules | done
     items: tuple[str, ...]
     modules: tuple[ModuleDecision, ...] = ()
-    safety: str = "none"  # none | signal | review | unassessed
+    safety: str = "unassessed"  # none | signal | review | unassessed
+    #: Задан ли сегодня вопрос HR4; reason — основание включения или пропуска.
+    safety_gate: bool = False
+    safety_gate_reason: str = ""
 
 
 def item(item_id: str) -> CheckinItem:
@@ -311,7 +316,11 @@ MODULE_TITLES = {module.code: module.title for module, _ in MODULES}
 
 
 def safety_level(answers: Mapping[str, int]) -> str:
-    """Классификация риск-маршрута (не диагноз, не итоговая категория риска)."""
+    """Классификация риск-маршрута (не диагноз, не итоговая категория риска).
+
+    `unassessed` — не «риска нет», а «риск не оценивался»: gate не задавался,
+    ещё не отвечен или модуль RS не пройден до конца (docs/16 §3).
+    """
     gate = answers.get(GATE_ITEM)
     if gate is None:
         return "unassessed"
@@ -319,7 +328,49 @@ def safety_level(answers: Mapping[str, int]) -> str:
         return "none"
     if answers.get("RS1") == 1 or answers.get("RS2") == 1 or answers.get("RS3") == 0:
         return "signal"
+    if _missing(SAFETY_ITEMS, answers):
+        return "unassessed"
     return "review"
+
+
+def _gate_trigger(answers: Mapping[str, int]) -> str:
+    """Основание задать HR4; пустая строка — оснований нет."""
+    if _has(answers, "MO1", 3, at_least=True):
+        return "MO1 ≥ 3 (выраженное снижение настроения)"
+    if _has(answers, "FU1", 3, at_least=True):
+        return "FU1 ≥ 3 (выраженные трудности функционирования)"
+    if _has(answers, "EN1", 2, at_least=True):
+        return "EN1 ≥ 2 (заметный дефицит энергии)"
+    if _module_selected(answers, "HR"):
+        return "включён модуль HR (безнадёжность)"
+    return ""
+
+
+def _module_selected(answers: Mapping[str, int], code: str) -> bool:
+    for module, condition in MODULES:
+        if module.code == code:
+            return bool(condition(answers))  # type: ignore[operator]
+    return False
+
+
+def safety_gate(answers: Mapping[str, int]) -> bool:
+    """Задаётся ли сегодня HR4. После ядра решается один раз и не меняется."""
+    if answers.get(GATE_ITEM) == 1:
+        # Положительный ответ прошлых версий правил: сигнал нельзя потерять.
+        return True
+    return not _missing(CORE_ITEMS, answers) and bool(_gate_trigger(answers))
+
+
+def safety_gate_reason(answers: Mapping[str, int]) -> str:
+    """Причина включения или пропуска HR4 — для API, UI и аудита."""
+    if answers.get(GATE_ITEM) == 1:
+        return "HR4 задан: положительный ответ зафиксирован"
+    if _missing(CORE_ITEMS, answers):
+        return "ядро не заполнено: вопрос о риске решается после ядра"
+    trigger = _gate_trigger(answers)
+    if trigger:
+        return f"HR4 задаётся: {trigger}"
+    return "HR4 не задаётся: MO1 < 3, FU1 < 3, EN1 < 2, модуль HR не включён"
 
 
 def _missing(ids: tuple[str, ...], answers: Mapping[str, int]) -> tuple[str, ...]:
@@ -329,7 +380,7 @@ def _missing(ids: tuple[str, ...], answers: Mapping[str, int]) -> tuple[str, ...
 def select_modules(answers: Mapping[str, int]) -> tuple[ModuleDecision, ...]:
     """Выбирает симптоматические модули: целиком, по приоритету, в пределах лимита."""
     decisions: list[ModuleDecision] = []
-    budget = MAX_ITEMS - len(CORE_ITEMS)
+    budget = MAX_ITEMS - len(CORE_ITEMS) - (1 if safety_gate(answers) else 0)
     for module, condition in MODULES:
         if not condition(answers):  # type: ignore[operator]
             continue
@@ -347,30 +398,41 @@ def plan(answers: Mapping[str, int]) -> CheckinPlan:
     Ответы на модули, которые не выбраны или не предъявлены, игнорируются — но
     API обязано отклонять их до вызова plan().
     """
-    safety = safety_level(answers)
     core_missing = _missing(CORE_ITEMS, answers)
+    gate_on = safety_gate(answers)
+    gate_reason = safety_gate_reason(answers)
     if core_missing:
-        return CheckinPlan("core", core_missing, (), safety)
-    if safety == "unassessed":  # gate не может отсутствовать после ядра; страховка
-        return CheckinPlan("done", (), (), safety)
-    if answers[GATE_ITEM] == 1:
-        rs_missing = _missing(SAFETY_ITEMS, answers)
-        if rs_missing:
-            return CheckinPlan("safety", rs_missing, (), safety)
-        return CheckinPlan("done", (), (), safety)
+        return CheckinPlan("core", core_missing, (), "unassessed", gate_on, gate_reason)
+    if gate_on:
+        if not _answered(answers, GATE_ITEM):
+            return CheckinPlan("safety", (GATE_ITEM,), (), "unassessed", True, gate_reason)
+        if answers[GATE_ITEM] == 1:
+            safety = safety_level(answers)
+            rs_missing = _missing(SAFETY_ITEMS, answers)
+            if rs_missing:
+                return CheckinPlan("safety", rs_missing, (), safety, True, gate_reason)
+            return CheckinPlan("done", (), (), safety, True, gate_reason)
+        safety = "none"  # HR4 = «Нет»: риск явно отрицается
+    else:
+        # Gate не сработал: HR4 не задаётся, `unassessed` — нормальный итог дня.
+        safety = "unassessed"
     modules = select_modules(answers)
     pending = tuple(i for d in modules if d.included for i in _missing(d.items, answers))
     if pending:
-        return CheckinPlan("modules", pending, modules, safety)
-    return CheckinPlan("done", (), modules, safety)
+        return CheckinPlan("modules", pending, modules, safety, gate_on, gate_reason)
+    return CheckinPlan("done", (), modules, safety, gate_on, gate_reason)
 
 
 def planned_items(answers: Mapping[str, int]) -> tuple[str, ...]:
     """Полный список пунктов дня (для аудита и прогресса) — без учёта пропусков."""
     if answers.get(GATE_ITEM) == 1:
-        return CORE_ITEMS + SAFETY_ITEMS
+        return CORE_ITEMS + (GATE_ITEM,) + SAFETY_ITEMS
+    gate_on = safety_gate(answers)
+    if gate_on and not _answered(answers, GATE_ITEM):
+        return CORE_ITEMS + (GATE_ITEM,)
     modules = select_modules(answers)
-    return CORE_ITEMS + tuple(i for d in modules if d.included for i in d.items)
+    head = CORE_ITEMS + ((GATE_ITEM,) if gate_on else ())
+    return head + tuple(i for d in modules if d.included for i in d.items)
 
 
 def validate_answers(answers: Mapping[str, int]) -> None:
@@ -398,6 +460,8 @@ __all__ = [
     "plan",
     "planned_items",
     "safety_level",
+    "safety_gate",
+    "safety_gate_reason",
     "select_modules",
     "validate_answers",
 ]

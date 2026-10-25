@@ -224,6 +224,19 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
+  // FR-37: анамнез пациента — вводные + подтверждённый текст.
+  clinicianAnamnesis: (patientId: string) =>
+    req<Anamnesis>(`/api/v1/clinician/patients/${patientId}/anamnesis`),
+  clinicianAnamnesisSave: (patientId: string, body: { brief: string; text?: string | null }) =>
+    req<Anamnesis>(`/api/v1/clinician/patients/${patientId}/anamnesis`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  clinicianAnamnesisDraft: (patientId: string, brief?: string) =>
+    req<AnamnesisDraft>(`/api/v1/clinician/patients/${patientId}/anamnesis/draft`, {
+      method: "POST",
+      body: JSON.stringify({ brief: brief?.trim() ? brief : null }),
+    }),
   myContacts: () => req<PatientContacts>("/api/v1/profile/contacts"),
   myContactsUpdate: (body: ContactPatch) =>
     req<PatientContacts>("/api/v1/profile/contacts", { method: "PATCH", body: JSON.stringify(body) }),
@@ -289,6 +302,33 @@ export const api = {
     req<{ excluded_guideline_ids: string[] }>(
       `/api/v1/assistant/sources/${encodeURIComponent(guidelineId)}/exclude`,
       { method: "POST", body: JSON.stringify({ excluded }) },
+    ),
+  // FR-36: персональное ревью статей — видимость в МОИХ ответах ассистента.
+  // Публикация (админский approve) глобальна; решение врача — личное.
+  clinicianKbWorks: (
+    params: {
+      status?: "new" | "approved" | "rejected" | "all";
+      kind?: "article" | "guideline";
+      limit?: number;
+    } = {},
+  ) => {
+    const q = new URLSearchParams();
+    if (params.status) q.set("status", params.status);
+    if (params.kind) q.set("kind", params.kind);
+    if (params.limit !== undefined) q.set("limit", String(params.limit));
+    const query = q.toString();
+    return req<{ works: ClinicianKbWork[] }>(
+      `/api/v1/clinician/kb/works${query ? `?${query}` : ""}`,
+    );
+  },
+  clinicianKbDecision: (
+    workId: string,
+    decision: "approved" | "rejected",
+    note?: string,
+  ) =>
+    req<ClinicianKbWork>(
+      `/api/v1/clinician/kb/works/${encodeURIComponent(workId)}/decision`,
+      { method: "POST", body: JSON.stringify({ decision, ...(note ? { note } : {}) }) },
     ),
   drugs: (q?: string) =>
     req<{ items: Drug[] }>(`/api/v1/drugs${q ? `?q=${encodeURIComponent(q)}` : ""}`),
@@ -532,7 +572,15 @@ export interface CheckinState {
   phase: string | null;
   step: { kind: string | null; items: CheckinStepItem[] };
   answers: Record<string, number>;
-  progress: { answered: number; planned: number };
+  progress: {
+    answered: number;
+    planned: number;
+    // v2.0.0: задавался ли HR4 и на каком основании (docs/16 §2).
+    safety_gate: boolean;
+    safety_gate_reason: string;
+  };
+  // true — сегодня задавался вопрос о риске после ядра.
+  safety_gate: boolean;
   safety: string; // none | review | signal | unassessed
   modules: CheckinModule[];
   completed_at: string | null;
@@ -855,8 +903,22 @@ export interface Report {
   };
   // FR-31: подтверждённые врачом факты из переписки (черновики, не диагноз).
   chat_insights: AcceptedChatInsight[];
+  // FR-37: анамнез; null — нет активного согласия пациента.
+  anamnesis: Anamnesis | null;
   // FR-22: null, если у пациента нет активного согласия (152-ФЗ).
   contacts: { phone: string | null; birth_date: string | null; age: number | null; adult: boolean | null } | null;
+}
+export interface Anamnesis {
+  patient_id: string;
+  brief: string | null;
+  text: string | null;
+  updated_at: string | null;
+  updated_by: string | null;
+}
+export interface AnamnesisDraft {
+  draft: string;
+  /** Счётчики категорий, замаскированных перед отправкой в LLM (без значений). */
+  masked_report: { applied: boolean; counts: Record<string, number> };
 }
 export interface Escalation {
   id: string;
@@ -1142,6 +1204,24 @@ export interface KbWorksResp {
 export interface KbSourcesResp {
   sources: KbWork[];
   excluded_guideline_ids: string[];
+}
+
+/** FR-36: карточка статьи для врача — сжатые критерии без админских обоснований. */
+export interface ClinicianKbCriteria {
+  decision: "include" | "exclude" | null;
+  relevance_score: number | null;
+  verdicts: { key: string; label: string; status: KbVerdictStatus }[];
+}
+export interface ClinicianKbWork {
+  work_id: string;
+  title: string;
+  source: "pubmed" | "who";
+  year: number | null;
+  source_url: string;
+  design: KbDesign;
+  criteria: ClinicianKbCriteria;
+  decision: "approved" | "rejected" | null;
+  reviewed_at: string | null;
 }
 
 /** Человекочитаемые названия дизайнов (зеркало api/app/enrichment/design.py). */

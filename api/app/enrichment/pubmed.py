@@ -20,6 +20,11 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
+try:  # defusedxml отклоняет сущности на уровне парсера, если он установлен
+    from defusedxml.ElementTree import fromstring as _fromstring  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - в образе defusedxml не обязателен
+    _fromstring = ET.fromstring
+
 from app.enrichment.types import SourceDocument
 
 MAX_BATCH = 100
@@ -27,9 +32,11 @@ MAX_BATCH = 100
 # дальше источник считается неисправным, а не «медленным».
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
-# DOCTYPE/ENTITY в ответе NCBI не встречаются, но дают XML-бомбы и внешние
-# сущности: такой ответ отклоняется до разбора.
-_DTD_MARKER = re.compile(r"<!\s*(?:DOCTYPE|ENTITY)\b", re.I)
+# efetch штатно отдаёт DOCTYPE со ссылкой на DTD NLM (внешний subset), поэтому
+# DOCTYPE разрешён: ElementTree не тянет внешний DTD. Опасны объявления сущностей
+# (XML-бомбы «billion laughs» и внешние сущности), поэтому любой `<!ENTITY …>`
+# отклоняется до разбора.
+_ENTITY_MARKER = re.compile(r"<!\s*ENTITY\b", re.I)
 
 
 class SourceError(RuntimeError):
@@ -134,10 +141,10 @@ def retraction_status(
 
 def parse_pubmed_xml(xml_text: str) -> list[SourceDocument]:
     """XML от efetch → SourceDocument. Чистая функция (тесты на фикстурах)."""
-    if _DTD_MARKER.search(xml_text):
-        raise SourceError("PubMed XML содержит DOCTYPE/ENTITY — разбор отклонён")
+    if _ENTITY_MARKER.search(xml_text):
+        raise SourceError("PubMed XML объявляет ENTITY — разбор отклонён")
     try:
-        root = ET.fromstring(xml_text)
+        root = _fromstring(xml_text)
     except ET.ParseError as exc:
         raise SourceError(f"PubMed XML не разобран: {exc}") from exc
 
