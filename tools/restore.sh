@@ -21,5 +21,6 @@ openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 \
   | gunzip -c \
   | docker compose -f "${COMPOSE}" exec -T postgres psql -U compass -d compass
 
-echo "[restore] done — проверьте целостность:"
-echo "  docker compose -f ${COMPOSE} run --rm seed --reset --days 14"
+echo "[restore] done — проверьте целостность (без --reset: восстановленную БД не затираем):"
+echo "  docker compose -f ${COMPOSE} exec -T postgres psql -U compass -d compass \\"
+echo "    -c 'select (select count(*) from users) as users, (select count(*) from assessments) as assessments'"

@@ -69,6 +69,12 @@ case "$CI_COLLECTION" in
   kb_ci*) ;;
   *) fail "коллекция '$CI_COLLECTION' не из контура гейта (ожидается kb_ci*)" ;;
 esac
+# Порты/имена выше «самоссылочные» при переопределении CC_CI_*: рабочие
+# Postgres/Qdrant запрещены буквально.
+[ "$CI_PG_PORT" != 5432 ] || fail "порт 5432 — рабочий Postgres, гейту нужен свой (CC_CI_PG_PORT)"
+[ "$CI_QDRANT_PORT" != 6333 ] || fail "порт 6333 — рабочий Qdrant, гейту нужен свой (CC_CI_QDRANT_PORT)"
+[ "$TEST_DB_NAME" != compass ] || fail "база compass — рабочая (CC_CI_DB_NAME)"
+[ "$CI_COLLECTION" != kb ] || fail "коллекция kb — рабочая (CC_CI_COLLECTION)"
 
 # Унаследованные CC_* меняют поведение тестов (cookie-secure ломает ожидания
 # 401, эмбеддер/коллекция подменяют индекс) — чистим и задаём свои.
@@ -181,6 +187,8 @@ YAML
     rm -rf "$(dirname "$E2E_OVERRIDE")"
   }
   trap cleanup EXIT
+  # Пока блок e2e не дошёл до успеха — любой выход по ошибке льёт логи api.
+  CI_E2E_FAILED=1
   # Стек e2e не должен тянуть прод-настройки из infra/.env: свой эмбеддер,
   # своя коллекция, без ML-сайдкара (иначе api ждёт http://ml:8080 по 30 с)
   # и без внешней LLM (ответы ассистента — retrieval-only, как в GH CI).
@@ -211,7 +219,8 @@ YAML
     ( cd e2e && npm ci )
   fi
   ( cd e2e && CC_E2E_URL="http://127.0.0.1:${E2E_PORT}" npx playwright test ) \
-    || { CI_E2E_FAILED=1; fail "e2e упали"; }
+    || fail "e2e упали"
+  CI_E2E_FAILED=0
 else
   log "[5/5] e2e: пропущено (добавьте --e2e)"
 fi

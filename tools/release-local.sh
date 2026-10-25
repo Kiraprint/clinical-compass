@@ -48,6 +48,8 @@ log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31mОТКАЗ:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # --- 0. Дерево ---------------------------------------------------------------
+gh auth status >/dev/null 2>&1 || fail "gh не авторизован — залить ассет релиза некуда"
+git fetch --quiet origin main || fail "не удалось обновить origin/main"
 [ -z "$(git status --porcelain)" ] || fail "рабочее дерево грязное — релиз собирается только из коммита"
 log "релиз $TAG (versionCode $VERSION_CODE) из $(git rev-parse --short HEAD)"
 
@@ -84,9 +86,19 @@ CC_API_BASE="${CC_API_BASE:-https://compass.fxtun.ru}" tools/build-apk.sh "$VERS
 
 # --- 4. Тег ------------------------------------------------------------------
 if [ "$DO_TAG" = 1 ]; then
+  HEAD_SHA="$(git rev-parse HEAD)"
   if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-    log "тег $TAG уже существует — не двигаю"
+    # Повторный прогон после сбоя на шаге Release: тег обязан указывать на HEAD,
+    # иначе артефакт и тег разъедутся молча.
+    [ "$(git rev-parse "$TAG^{commit}")" = "$HEAD_SHA" ] \
+      || fail "тег $TAG указывает на другой коммит — возьмите следующую версию"
+    log "тег $TAG уже есть и указывает на HEAD — продолжаю"
   else
+    if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+      fail "тег $TAG уже есть на origin — возьмите следующую версию"
+    fi
+    [ "$HEAD_SHA" = "$(git rev-parse origin/main)" ] \
+      || fail "HEAD не совпадает с origin/main — тег ставится только на main после мержа"
     git tag -a "$TAG" -m "Компас $VERSION"
     git push origin "$TAG"
     log "тег $TAG запушен"

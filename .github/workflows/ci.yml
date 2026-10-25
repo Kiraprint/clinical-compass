@@ -102,6 +102,20 @@ jobs:
             sleep 2
           done
           curl -sf http://127.0.0.1:8090/ >/dev/null
+      # UI-health наступает раньше, чем one-shot kb-seed создаст коллекцию:
+      # вопрос ассистента в первые секунды получил бы пустую базу.
+      - name: Wait for KB indexer
+        run: |
+          state=""
+          for i in $(seq 1 120); do
+            id="$(docker compose -f infra/docker-compose.yml --profile seed ps -aq kb-seed)"
+            if [ -n "$id" ]; then
+              state="$(docker inspect -f '{{.State.Status}}/{{.State.ExitCode}}' "$id")"
+              [ "$state" = "exited/0" ] && break
+            fi
+            sleep 1
+          done
+          test "$state" = "exited/0"
 
       - name: Setup Node + Playwright
         uses: actions/setup-node@v4
