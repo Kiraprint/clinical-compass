@@ -155,6 +155,10 @@ services:
     build:
       context: ..
       dockerfile: api/Dockerfile
+    # Профиль seed: обычный `up` не трогает one-shot сервисы (иначе каждый
+    # деплой перезапускал сид/индексатор). Запуск — вручную:
+    #   docker compose --profile seed up -d kb-seed
+    profiles: ["seed"]
     # Без --reset: upsert идемпотентен по text_hash (docs/15 §11), а --reset
     # каждый рестарт стирал бы коллекцию вместе с чанками обогащения.
     command: ["/app/.venv/bin/python", "-m", "app.kb_seed"]
@@ -215,11 +219,10 @@ services:
       - mlnet
     depends_on:
       # api прогоняет alembic upgrade head в lifespan — ждём схему, а не гоняем
-      # миграции из двух процессов одновременно.
+      # миграции из двух процессов одновременно. От kb-seed обогащение не
+      # зависит: индексатор живёт в профиле seed и может быть не запущен.
       api:
         condition: service_healthy
-      kb-seed:
-        condition: service_completed_successfully
     restart: unless-stopped
 
   # FR-24: доставка напоминаний врача. Отдельный процесс (как kb-enrichment):
@@ -248,13 +251,11 @@ services:
     build:
       context: ..
       dockerfile: ui/Dockerfile
+    # One-shot сид/индексатор в профиле seed и в depend_on ui не входят:
+    # иначе профильный сервис нельзя было бы выключить обычным `up`.
     depends_on:
       api:
         condition: service_healthy
-      seed:
-        condition: service_completed_successfully
-      kb-seed:
-        condition: service_completed_successfully
     restart: unless-stopped
     ports:
       - "8090:80"
@@ -263,6 +264,10 @@ services:
     build:
       context: ..
       dockerfile: api/Dockerfile
+    # Профиль seed: обычный деплой (`up -d api ui ...`) этот one-shot не
+    # пересоздаёт и не перезапускает. Первый запуск/обновление сида —
+    #   docker compose --profile seed up -d seed kb-seed
+    profiles: ["seed"]
     # Без --reset: сид идемпотентен (get-or-create) и НЕ стирает данные.
     # Разрушающий сброс — ручная команда `python -m app.seed --reset ...`
     # (docs/03 §13), иначе каждый deploy, пересоздавший этот one-shot сервис,

@@ -87,13 +87,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Start full stack
-        run: docker compose -f infra/docker-compose.yml up -d --build
+        # --profile seed: сид и индексатор КБ — one-shot сервисы в отдельном
+        # профиле, обычный `up` их больше не перезапускает (docs/03 §13).
+        run: docker compose -f infra/docker-compose.yml --profile seed up -d --build
         env:
           # CI крутит только demo-данные и не имеет infra/.env — разрешаем
           # демо-секреты явно, иначе api падает на fail-fast (NEW-5/F3).
           CC_ALLOW_DEMO_SECRETS: "true"
           CC_COOKIE_SECURE: "false"
-
       - name: Wait for UI
         run: |
           for i in $(seq 1 60); do
