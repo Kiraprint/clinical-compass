@@ -263,7 +263,11 @@ services:
     build:
       context: ..
       dockerfile: api/Dockerfile
-    command: ["/app/.venv/bin/python", "-m", "app.seed", "--reset", "--patients", "12", "--days", "14"]
+    # Без --reset: сид идемпотентен (get-or-create) и НЕ стирает данные.
+    # Разрушающий сброс — ручная команда `python -m app.seed --reset ...`
+    # (docs/03 §13), иначе каждый deploy, пересоздавший этот one-shot сервис,
+    # обнулял бы демо-данные и реестр КБ.
+    command: ["/app/.venv/bin/python", "-m", "app.seed", "--patients", "12", "--days", "14"]
     environment:
       CC_DATABASE_URL: postgresql+psycopg://compass:${POSTGRES_PASSWORD:-compass}@postgres:5432/compass
       CC_DEMO_TOTP: JBSWY3DPEHPK3PXP

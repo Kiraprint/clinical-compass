@@ -149,6 +149,28 @@ async def _seed_drugs_async(s) -> None:
     print(f"[seed] drugs: {len(payload)} в таблице (источник для KB-чанков и /drugs)")
 
 
+async def _ensure_user(s, email: str, *, fio: str, role: str, totp_secret: str):
+    """Get-or-create демо-учётки: повторный сид не ломает вход и не крутит TOTP.
+
+    Пароль/TOTP существующей учётки не перезаписываются: иначе деплой,
+    пересоздавший one-shot сервис `seed`, менял бы демо-2FA и все проверки
+    (и e2e) начинали падать с 401.
+    """
+    user = await s.scalar(select(User).where(User.email == email))
+    if user is not None:
+        return user
+    user = User(
+        email=email,
+        fio=fio,
+        password_hash=security.hash_password("Demo-Pass-1"),
+        role=role,
+        totp_secret=totp_secret,
+    )
+    s.add(user)
+    await s.flush()
+    return user
+
+
 async def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: bool = False, seed_value: int = 42) -> None:
     db.setup(database_url)
     db.init_db()
@@ -159,29 +181,26 @@ async def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: b
     rng = random.Random(seed_value)
     s = db.AsyncSessionLocal()
     try:
-        admin = User(
-            email="admin@compass.demo", fio="Администратор системы",
-            password_hash=security.hash_password("Demo-Pass-1"), role="ADMIN",
+        # Идемпотентность: существующие учётки не пересоздаются и не теряют
+        # TOTP/пароль. `--reset` (ручной, разрушающий) идёт другим путём.
+        admin = await _ensure_user(
+            s, "admin@compass.demo", fio="Администратор системы", role="ADMIN",
             totp_secret=DEMO_TOTP or security.generate_totp_secret(),
         )
-        doc = User(
-            email="doc@compass.demo", fio="Врач психиатр (демо)",
-            password_hash=security.hash_password("Demo-Pass-1"), role="CLINICIAN",
+        doc = await _ensure_user(
+            s, "doc@compass.demo", fio="Врач психиатр (демо)", role="CLINICIAN",
             totp_secret=DEMO_TOTP or security.generate_totp_secret(),
         )
         # FR-37: третий врач для демонстрации изоляции roster. Свои пациенты
         # (p1–p2) не видны первому врачу, а пациенты первого — не видны ему.
-        doc2 = User(
-            email="doc2@compass.demo", fio="Второй врач (демо)",
-            password_hash=security.hash_password("Demo-Pass-1"), role="CLINICIAN",
+        doc2 = await _ensure_user(
+            s, "doc2@compass.demo", fio="Второй врач (демо)", role="CLINICIAN",
             # Фиксированный TOTP (base32) — воспроизводимый вход на демо/тестах.
             totp_secret="JBSWY3DPEHPK3PXP",
         )
-        s.add_all([admin, doc, doc2])
-        await s.flush()
+        await s.commit()
         doc_id = doc.id
         doc2_id = doc2.id
-        await s.commit()
         print(f"[seed] admin={admin.email} clinician={doc.email} (TOTP: {doc.totp_secret})")
 
         await _seed_drugs_async(s)
@@ -191,6 +210,19 @@ async def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: b
         for idx, profile in enumerate(profiles, start=1):
             fio, code, base, slope, noise, _ = profile
             email = f"p{idx}@compass.demo"
+            existing = await s.scalar(select(User).where(User.email == email))
+            if existing is not None:
+                # Уже засеян: историю скринингов/дневник не дублируем и ничего
+                # не перезаписываем — сид переиспользуется, а не пересоздаёт.
+                if fio == "Елена В.":
+                    elena_pid = existing.id
+                owner_id = doc2_id if idx <= 2 else doc_id
+                await s.execute(
+                    text("INSERT INTO clinician_roster(clinician_id, patient_id) VALUES (:cid, :pid) ON CONFLICT DO NOTHING"),
+                    {"cid": owner_id, "pid": existing.id},
+                )
+                print(f"[seed] patient {email} уже есть — пропуск (история сохранена)")
+                continue
             patient = User(
                 email=email, fio=fio, password_hash=security.hash_password("Demo-Pass-1"),
                 role="PATIENT",
@@ -249,7 +281,11 @@ async def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: b
         # FR-37: демо-анамнез «Елены В.» по карточке — 34 года, после COVID
         # тревожность/утомляемость/нарушение сна/внутреннее напряжение/страх
         # ухудшения здоровья; лёгкая/средняя выраженность, без тяжёлой депрессии.
-        if elena_pid is not None:
+        elena_anamnesis = (
+            await s.scalar(select(PatientAnamnesis).where(PatientAnamnesis.patient_id == elena_pid))
+            if elena_pid is not None else None
+        )
+        if elena_pid is not None and elena_anamnesis is None:
             s.add(PatientAnamnesis(
                 patient_id=elena_pid,
                 brief=(
