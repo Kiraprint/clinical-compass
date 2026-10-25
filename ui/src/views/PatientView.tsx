@@ -616,6 +616,21 @@ function TodayTab({ onOpen }: { onOpen: (tab: Tab) => void }) {
     load().catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)));
   }, []);
 
+  // Приёмов в день может быть несколько (FR-27): каждый отмечается отдельной
+  // записью прямо здесь, без перехода в историю. Считаем только отметки
+  // выбранного назначения; «не назначено сегодня» закрывает день целиком и
+  // приёмом не считается. Режим не задан (или отметка без назначения) —
+  // допускаем одну отметку в день, как было до появления режимов.
+  const todayRef = new Date();
+  const todayForSelected = adhItems.filter((r) =>
+    sameDay(r.created_at, todayRef) && (adhMedId ? r.medication_id === adhMedId : !r.medication_id),
+  );
+  const intakesExpected = adhMeds.find((m) => m.id === adhMedId)?.times_per_day ?? 1;
+  const dayNotScheduled = todayForSelected.some((r) => r.status === "not_scheduled");
+  const intakesMarked = todayForSelected.filter((r) => r.status !== "not_scheduled").length;
+  const intakesLeft = Math.max(0, intakesExpected - intakesMarked);
+  const intakesComplete = dayNotScheduled || intakesLeft === 0;
+
   const save = async () => {
     if (status === "partial" && !partialKind) {
       setErr("Укажите, сколько принято: часть таблетки, часть доз или другое.");
@@ -632,11 +647,9 @@ function TodayTab({ onOpen }: { onOpen: (tab: Tab) => void }) {
         // Выбор настроения оставляем: пользователь видит, что именно сохранилось.
         parts.push("дневник");
       }
-      const ref = new Date();
-      const markedToday = adhItems.some(
-        (r) => sameDay(r.created_at, ref) && (adhMedId ? r.medication_id === adhMedId : !r.medication_id),
-      );
-      if (!markedToday && status) {
+      // Каждый клик — новая запись приёма, пока не набрался режим: прежнюю
+      // отметку не перезаписываем, иначе второй приём за день терялся бы.
+      if (status && !intakesComplete) {
         await api.recordAdherence({
           medication_id: adhMedId || undefined,
           medication: adhMedId ? undefined : medication.trim() || undefined,
@@ -651,7 +664,14 @@ function TodayTab({ onOpen }: { onOpen: (tab: Tab) => void }) {
         parts.push("приём лекарств");
       }
       await load();
-      setSaved(parts.length > 0 ? `Сохранено: ${parts.join(" · ")}` : "Всё уже отмечено за сегодня");
+      const savedLabel =
+        parts.length > 0
+          ? `Сохранено: ${parts.join(" · ")}`
+          : status
+            ? `За сегодня отмечено ${intakesMarked} из ${intakesExpected} ` +
+              `${intakePlural(intakesExpected, true)} — больше отметок не нужно`
+            : "Нечего сохранять: отметьте приём или заполните дневник";
+      setSaved(savedLabel);
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -659,10 +679,6 @@ function TodayTab({ onOpen }: { onOpen: (tab: Tab) => void }) {
     }
   };
 
-  const markedTodayForSelected = adhItems.find((r) => {
-    const ref = new Date();
-    return sameDay(r.created_at, ref) && (adhMedId ? r.medication_id === adhMedId : !r.medication_id);
-  });
   return (
     <>
       <HomeHead onOpen={onOpen} />
@@ -727,16 +743,35 @@ function TodayTab({ onOpen }: { onOpen: (tab: Tab) => void }) {
           ))}
         </select>
       )}
-      {markedTodayForSelected ? (
-        <p style={{ color: "#2e7d32", fontWeight: 600 }}>
-          За сегодня отмечено: {ADH_LABELS[markedTodayForSelected.status] ?? markedTodayForSelected.status}
-          {markedTodayForSelected.status === "partial" && markedTodayForSelected.partial_kind
-            ? ` — ${partialKindLabel(markedTodayForSelected.partial_kind)}`
-            : ""}
-          {markedTodayForSelected.medication ? ` (${markedTodayForSelected.medication})` : ""}
-        </p>
+      {intakesComplete ? (
+        <>
+          <p style={{ color: "#2e7d32", fontWeight: 600 }}>
+            {dayNotScheduled
+              ? "Сегодня не назначено — приёмы отмечать не нужно"
+              : `За сегодня отмечено ${intakesMarked} из ${intakesExpected} ` +
+                intakePlural(intakesExpected, true)}
+          </p>
+          {todayForSelected.map((r) => (
+            <p key={r.id} style={{ color: "#5a6478", fontSize: 13 }}>
+              {new Date(r.created_at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })} ·{" "}
+              <b>{ADH_LABELS[r.status] ?? r.status}</b>
+              {r.status === "partial" && r.partial_kind ? ` — ${partialKindLabel(r.partial_kind)}` : ""}
+              {r.medication ? ` (${r.medication})` : ""}
+              {r.note ? ` · ${r.note}` : ""}
+            </p>
+          ))}
+          <p style={{ color: "#5a6478", fontSize: 13 }}>
+            Ошиблись с отметкой? Исправить можно в истории приёма.
+          </p>
+        </>
       ) : (
         <>
+          {intakesMarked > 0 && (
+            <p style={{ color: "#2e7d32", fontWeight: 600 }}>
+              Отмечено {intakesMarked} из {intakesExpected} {intakePlural(intakesExpected, true)} за сегодня ·
+              осталось отметить ещё {intakesLeft} {intakePlural(intakesLeft)}
+            </p>
+          )}
           <div
             role="group"
             aria-label="Отметка приёма"
@@ -812,6 +847,16 @@ function DiaryTab() {
 
 // FR-27: процент — от ожидаемых приёмов по назначенному режиму, а не от числа отметок.
 const doseWord = (n: number) => `${n} ${n === 1 ? "раз" : "раза"} в день`;
+// Числительные для копий о приёмах: «1 приём», «2 приёма», «5 приёмов».
+// После «из» нужен родительный падеж: «из 1 приёма», «из 2 приёмов».
+const intakePlural = (n: number, genitive = false) => {
+  const tail = n % 100;
+  if (tail >= 11 && tail <= 14) return "приёмов";
+  const last = n % 10;
+  if (last === 1) return genitive ? "приёма" : "приём";
+  if (last >= 2 && last <= 4) return genitive ? "приёмов" : "приёма";
+  return "приёмов";
+};
 const fmtScore = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
 
 function AdherenceTab() {
