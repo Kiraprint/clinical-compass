@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CheckinSession, ClinicianRoster, Escalation, User
 from app.errors import Problem
+from compass import checkin as engine
 
 from .audit import record as audit_record
 
@@ -38,6 +39,22 @@ def _risk_answers(raw: str | None) -> dict:
         return {}
     answers = json.loads(raw)
     return {item: answers[item] for item in RISK_ITEMS if item in answers}
+
+
+def _risk_pattern(raw: str | None) -> str:
+    """Паттерн риска для очереди: suicidal | self_harm | negative | unknown.
+
+    Ответы расшифровываются здесь же (EncryptedText), чтобы UI не выводил
+    клинический вывод сам: «HR4 = Да при отрицательных RS» — это
+    несуицидальное самоповреждение, и его нельзя читать как «всё хорошо».
+    """
+    if not raw:
+        return "unknown"
+    try:
+        answers = json.loads(raw)
+    except (TypeError, ValueError):
+        return "unknown"
+    return engine.risk_pattern(answers)
 
 
 def _parse_id(raw: str | uuid.UUID) -> uuid.UUID:
@@ -121,6 +138,7 @@ async def list_queue(
             "resolution": e.resolution,
             "in_roster": (not is_admin) and e.patient_id in roster,
             "risk_answers": _risk_answers(answers),
+            "risk_pattern": _risk_pattern(answers),
         }
         for e, fio, safety, answers in rows
     ]

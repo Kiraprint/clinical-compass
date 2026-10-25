@@ -151,7 +151,10 @@ ITEMS: tuple[CheckinItem, ...] = (
     CheckinItem(
         GATE_ITEM,
         "risk",
-        "Были ли у вас мысли о самоповреждении?",
+        # Формулировка покрывает и суицидальные мысли, и несуицидальное
+        # самоповреждение: маршрут RS1–RS3 уточняет, есть ли суицидальный риск
+        # (docs/16 §2). Итоговая клиническая формулировка — на ревью врача.
+        "Были ли у вас сегодня мысли о самоповреждении или о том, чтобы причинить себе вред?",
         "gate",
         YES_NO_LABELS,
         YES_NO_EMOJI,
@@ -333,6 +336,39 @@ def safety_level(answers: Mapping[str, int]) -> str:
     return "review"
 
 
+def risk_assessed(answers: Mapping[str, int]) -> bool:
+    """Задавался ли сегодня риск-гейт (HR4) и был ли на него ответ.
+
+    False — это «риск не оценивался», а не «риска нет»: терминальное состояние
+    safety='unassessed' (gate не сработал) нельзя читать как отрицание риска.
+    """
+    return GATE_ITEM in answers
+
+
+#: Паттерн риск-маршрута: что именно зафиксировано ответами (не диагноз).
+RISK_PATTERNS = ("unknown", "negative", "self_harm", "suicidal")
+
+
+def risk_pattern(answers: Mapping[str, int]) -> str:
+    """Клинический паттерн для врача: suicidal | self_harm | negative | unknown.
+
+    - unknown — HR4 не задавался (риск не оценивался);
+    - negative — HR4 = «Нет»;
+    - suicidal — HR4 = «Да» и хотя бы один ответ RS указывает на суицидальный
+      риск (RS1/RS2 = «Да» или RS3 = «Нет»);
+    - self_harm — HR4 = «Да», но суицидальных ответов нет: несуицидальное
+      самоповреждение, нужна клиническая оценка (docs/16 §2).
+    """
+    gate = answers.get(GATE_ITEM)
+    if gate is None:
+        return "unknown"
+    if gate != 1:
+        return "negative"
+    if answers.get("RS1") == 1 or answers.get("RS2") == 1 or answers.get("RS3") == 0:
+        return "suicidal"
+    return "self_harm"
+
+
 def _gate_trigger(answers: Mapping[str, int]) -> str:
     """Основание задать HR4; пустая строка — оснований нет."""
     if _has(answers, "MO1", 3, at_least=True):
@@ -460,6 +496,9 @@ __all__ = [
     "plan",
     "planned_items",
     "safety_level",
+    "risk_assessed",
+    "risk_pattern",
+    "RISK_PATTERNS",
     "safety_gate",
     "safety_gate_reason",
     "select_modules",

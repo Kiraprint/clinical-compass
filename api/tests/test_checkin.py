@@ -303,7 +303,7 @@ def test_gate_fires_after_core_and_asks_only_hr4(client):
     assert body["phase"] == "safety"
     assert body["step"]["kind"] == "safety"
     assert [i["id"] for i in body["step"]["items"]] == ["HR4"]
-    assert body["step"]["items"][0]["text"] == "Были ли у вас мысли о самоповреждении?"
+    assert body["step"]["items"][0]["text"] == "Были ли у вас сегодня мысли о самоповреждении или о том, чтобы причинить себе вред?"
     assert body["safety"] == "unassessed"
     assert body["safety_gate"] is True
     assert "MO1 ≥ 3" in body["progress"]["safety_gate_reason"]
@@ -405,6 +405,47 @@ def test_gate_yes_review_state_keeps_primary_escalation(client):
     assert escalation.kind == "CHECKIN_RISK"
     assert escalation.checkin_session_id is not None
     assert len(_notifications(cid)) == 1  # повторное уведомление только для signal
+
+
+def test_hr4_yes_with_negative_rs_is_self_harm_not_suicidal(client):
+    """HR4=«Да» при всех отрицательных RS — самоповреждение, а не «всё хорошо».
+
+    Такое состояние остаётся review (не urgent), но паттерн обязан отличаться от
+    «суицидальный риск»: врач не должен читать это как отрицание риска.
+    """
+    h, pid = patient_ctx(client, "chk_selfharm@test.ru")
+    sid = _start(client, h)["session_id"]
+    _gate_yes(client, h, sid)
+    body = _answer(client, h, sid, {"RS1": 0, "RS2": 0, "RS3": 1})
+    assert body["safety"] == "review"
+    assert body["risk_assessed"] is True
+    assert body["risk_pattern"] == "self_harm"
+
+    ch, _ = clinician_ctx(client, "chk_selfharm_doc@test.ru")
+    item = client.get("/api/v1/escalations", headers=ch).json()["items"][0]
+    assert item["patient_id"] == pid
+    assert item["risk_pattern"] == "self_harm"
+
+
+def test_unassessed_day_reports_risk_not_assessed(client):
+    """Гейт не сработал — риск не оценивался; risk_assessed=False и в API, и в карте."""
+    h, pid = patient_ctx(client, "chk_noassess@test.ru")
+    state = _start(client, h)
+    sid = state["session_id"]
+    today = client.get("/api/v1/checkins/today", headers=h).json()
+    core = {item["id"]: 0 for item in today["step"]["items"]}
+    body = _answer(client, h, sid, core)
+    assert body["safety"] == "unassessed"
+    assert body["risk_assessed"] is False
+    assert body["risk_pattern"] == "unknown"
+
+    ch, cid = clinician_ctx(client, "chk_noassess_doc@test.ru")
+    _add_roster(pid, cid)
+    report = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=ch)
+    assert report.status_code == 200, report.text
+    session = report.json()["checkin"]["recent"][0]
+    assert session["risk_assessed"] is False
+    assert session["risk_pattern"] == "unknown"
 
 
 def test_completed_session_rejects_answers(client):
@@ -529,6 +570,7 @@ def test_escalation_queue_visible_to_staff_only(client):
         assert item["created_at"] is not None
         assert item["in_roster"] is False  # ростера нет; админу флаг всегда false
         assert item["risk_answers"] == {"HR4": 1, "RS1": 0, "RS2": 1, "RS3": 0}
+        assert item["risk_pattern"] == "suicidal"
     assert client.get("/api/v1/escalations", headers=h).status_code == 403
 
     with db.SyncSessionLocal() as s:

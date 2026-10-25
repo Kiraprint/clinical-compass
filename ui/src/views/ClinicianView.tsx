@@ -157,6 +157,16 @@ const ESCALATION_KINDS: Record<string, string> = {
 // Пункты риска, которые сервер кладёт в risk_answers (только отвеченные, 0/1).
 const RISK_ITEM_IDS = ["HR4", "RS1", "RS2", "RS3"] as const;
 
+// Клиническая подсказка по паттерну (docs/16 §2): не диагноз, а «что именно
+// зафиксировано». HR4=Да при отрицательных RS — несуицидальное самоповреждение,
+// и читать его как «всё хорошо» нельзя.
+const RISK_PATTERN_LABELS: Record<string, string> = {
+  suicidal: "ответы указывают на суицидальный риск — разобрать в первую очередь",
+  self_harm: "самоповреждение без суицидальных ответов — нужна клиническая оценка",
+  negative: "отрицает мысли о самоповреждении",
+  unknown: "риск не оценивался",
+};
+
 // Общая очередь открытых эскалаций (docs/16 §3): сигнал виден даже без roster-врача.
 // Карточку открываем только для своего пациента (in_roster): иначе сервер отдаст 403.
 function EscalationsQueue({
@@ -336,6 +346,11 @@ function EscalationsQueue({
                       {RISK_ITEM_IDS.filter((id) => e.risk_answers?.[id] != null)
                         .map((id) => `${id} ${e.risk_answers?.[id] ? "Да" : "Нет"}`)
                         .join(" · ") || "—"}
+                      {e.risk_pattern && e.risk_pattern !== "unknown" && (
+                        <div style={{ color: e.risk_pattern === "negative" ? "#5a6478" : "#a3282d", fontSize: 12 }}>
+                          {RISK_PATTERN_LABELS[e.risk_pattern]}
+                        </div>
+                      )}
                     </td>
                     <td>
                       <button
@@ -1626,8 +1641,12 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
                   : c.safety === "review"
                     ? "требует рассмотрения"
                     : c.safety === "unassessed"
-                      ? "риск не оценён"
+                      ? "сегодня не оценивался"
                       : "нет";
+              const pattern =
+                c.risk_pattern && c.risk_pattern !== "unknown"
+                  ? RISK_PATTERN_LABELS[c.risk_pattern]
+                  : "";
               const answers = Object.entries(c.answers)
                 .map(([k, v]) => `${k} ${v}`)
                 .join(" · ");
@@ -1641,6 +1660,11 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
                     </span>
                   </div>
                   {answers && <div style={{ color: "#3d4657" }}>{answers}</div>}
+                  {pattern && (
+                    <div style={{ color: c.risk_pattern === "negative" ? "#5a6478" : "#a3282d" }}>
+                      {pattern}
+                    </div>
+                  )}
                   {included.length > 0 && (
                     <div style={{ color: "#5a6478" }}>
                       Модули: {included.map((m) => m.code).join(", ")} —{" "}

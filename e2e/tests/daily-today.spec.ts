@@ -140,7 +140,7 @@ test("gate-пункт HR4 «Да» ведёт на шаг безопасност
   await answerStep(page, { mo1: GATE_SEVERITY });
   await nextStep(page);
 
-  // Шаг безопасности: единственный пункт HR4 «Были ли у вас мысли о самоповреждении?».
+  // Шаг безопасности: единственный пункт HR4 (мысли о самоповреждении / причинении себе вреда).
   await expect(page.locator(".qa")).toHaveCount(1);
   await page.locator('[data-item="HR4"]').getByRole("button").nth(1).click();
   await nextStep(page);
