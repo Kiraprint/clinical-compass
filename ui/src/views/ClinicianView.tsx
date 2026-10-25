@@ -20,7 +20,7 @@ import {
   Report,
   Visit,
 } from "../api";
-import { stripIntakeFrequency } from "../dosage";
+import { resolveTimesPerDay, stripIntakeFrequency } from "../dosage";
 import TrendChart from "../TrendChart";
 import ChatsView from "./ChatsView";
 import LibraryView from "./LibraryView";
@@ -2517,8 +2517,10 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
     setSuggestOpen(false);
     setSuggestIdx(-1);
     // Частота приёма из инструкции сразу заполняет «сколько раз в день»
-    // (FR-27: знаменатель приверженности). Дальше врач правит её как обычно.
-    if (d.times_per_day != null) setTimesPerDay(d.times_per_day);
+    // (FR-27: знаменатель приверженности). null из справочника (частоты нет,
+    // она неоднозначна или вне 1..6) → 1, а не значение прошлого препарата:
+    // его частота из подставленного текста уже вырезана. Дальше врач правит сам.
+    setTimesPerDay(resolveTimesPerDay(d));
   };
 
   // Источник канонической дозировки: dosage, при его отсутствии — special_notes
