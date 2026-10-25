@@ -255,7 +255,7 @@ python -m loadtest.run_all --embedder hash
 
 ## 6. Ограничения
 
-- Один процесс API, без nginx/TLS и без внешнего LLM; `WEB_CONCURRENCY` поддержан, но в этом прогоне не измерялся.
+- Один процесс API, без nginx/TLS и без внешнего LLM. `WEB_CONCURRENCY` поддержан (`--workers N` в `loadtest/server_app.py`, бюджет соединений проверяется до спавна) и измерен отдельным прогоном `python -m loadtest.run_workers`: `diary_read` ×1.95 на 2 воркерах и ×3.19 на 4 (282.6 RPS против 88.6), `health` упирается в однопроцессный генератор (клиент 105 % ядра против 48 % у сервера), `pg_stat_activity` без idle-in-transaction. Раздел «Многопроцессный режим» появится в этом отчёте при наличии `loadtest/results/workers.json`.
 - Postgres и Qdrant — локально в Docker; межсерверная сеть не моделируется.
 - Эмбеддер `hash` — демо-база; bge-m3 включается `CC_EMBEDDER=bge-m3` с extra `embeddings` и переиндексацией KB.
 - Замкнутый контур: p95 на высоких C включает очередь к async-пулу БД (SQLAlchemy: 20 + 20 overflow на процесс).

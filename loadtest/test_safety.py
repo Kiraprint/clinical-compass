@@ -96,3 +96,20 @@ def test_pool_budget_matches_app_formula(workers, pool, overflow, demand):
     assert budget["fits"] is True
     tight = common.pool_budget(workers, pool, overflow, max_connections=demand - 1)
     assert tight["fits"] is False
+
+def test_api_server_resolves_db_name(monkeypatch):
+    """Снимки pg_stat_activity фильтруют по ApiServer.db — он обязан быть именем.
+
+    Регрессия «self.db = db» давала None и молча нулевые счётчики соединений
+    стенда в отчёте.
+    """
+    monkeypatch.setenv("CC_LOADTEST_DB", "compass_load_mw")
+    from loadtest import serve
+
+    server = serve.ApiServer(workers=4, pool_size=8, max_overflow=8)
+    assert server.db == "compass_load_mw"
+    assert server.budget["demand"] == 72
+    assert server.budget["fits"] is True
+    explicit = serve.ApiServer(workers=1, pool_size=20, max_overflow=20,
+                              db="compass_load_other")
+    assert explicit.db == "compass_load_other"

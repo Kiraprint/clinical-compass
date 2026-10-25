@@ -320,10 +320,16 @@ def main(argv: list[str] | None = None) -> int:
             block["peak_pg"] = peak_pg
             block["log_tail"] = server.log_tail(15)
             if workers == 1 and drift_first is None:
+                # Якорь дрейфа — health при C=DRIFT_CONCURRENCY. Если такого
+                # уровня/сценария в прогоне нет (--concurrency), контроля дрейфа
+                # просто не будет: падать из-за этого нельзя.
                 drift_first = next(
-                    p for p in points
-                    if p["key"] == "health"
-                    and p["concurrency"] == DRIFT_CONCURRENCY
+                    (
+                        p for p in points
+                        if p["key"] == "health"
+                        and p["concurrency"] == DRIFT_CONCURRENCY
+                    ),
+                    None,
                 )
             # Снимок с ещё открытыми соединениями пула: idle-in-transaction тут
             # означал бы застрявшую транзакцию, а не штатный idle между запросами.

@@ -31,13 +31,14 @@ class ApiServer:
         log_name: str | None = None,
     ):
         self.embedder = embedder
-        self.collection = collection
-        self.db = db
+        self.collection = common.resolve_collection(collection)
+        # Имя БД резолвится здесь же: снимки pg_stat_activity в run_workers
+        # фильтруют по self.db, и «сырое» None молча давало нули в отчёте.
+        self.db = common.resolve_db(db)
         self.port = port
         self.base_url = f"http://127.0.0.1:{port}"
         self.proc: subprocess.Popen | None = None
         self.log_path = common.RESULTS_DIR / (log_name or "api.log")
-        self.collection = common.resolve_collection(collection)
         self.pool_size = pool_size
         # Явный overflow важнее производной pool//4 (так же считает server_app):
         # pool-профиль run_cliff полагается на исторические 60+15.
