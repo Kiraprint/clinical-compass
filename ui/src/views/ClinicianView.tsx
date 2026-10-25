@@ -2311,6 +2311,8 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
   const [drugs, setDrugs] = useState<Drug[]>([]);
   const [suggestOpen, setSuggestOpen] = useState(false);
   const [suggestIdx, setSuggestIdx] = useState(-1);
+  // Подсказка дозировки: препарат, выбранный из справочника (dosage → special_notes → form).
+  const [pickedDrug, setPickedDrug] = useState<Drug | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -2331,9 +2333,16 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
 
   const pickDrug = (d: Drug) => {
     setTitle(d.trade_name);
+    setPickedDrug(d);
     setSuggestOpen(false);
     setSuggestIdx(-1);
   };
+
+  // Источник канонической дозировки: dosage, при его отсутствии — special_notes или форма.
+  const dosageHint = pickedDrug
+    ? pickedDrug.dosage.trim() || pickedDrug.special_notes.trim() || pickedDrug.form.trim()
+    : "";
+  const dosageApplied = dosageHint !== "" && dosage.trim() === dosageHint;
 
   const onDrugKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Escape") {
@@ -2384,6 +2393,7 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
       });
       setTitle("");
       setDosage("");
+      setPickedDrug(null);
       setNotes("");
       setTimesPerDay(1);
       load();
@@ -2520,6 +2530,7 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
             value={title}
             onChange={(e) => {
               setTitle(e.target.value);
+              setPickedDrug(null);
               setSuggestOpen(true);
               setSuggestIdx(-1);
             }}
@@ -2557,7 +2568,19 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
             </ul>
           )}
         </div>
-        <input placeholder="Дозировка" value={dosage} onChange={(e) => setDosage(e.target.value)} style={{ maxWidth: 150 }} />
+        <div className="dosage-field">
+          <input placeholder="Дозировка" value={dosage} onChange={(e) => setDosage(e.target.value)} style={{ maxWidth: 150 }} />
+          {dosageHint && (
+            <div className="dosage-hint" title={dosageHint}>
+              <span className="dosage-hint-text">Справочник: {dosageHint}</span>
+              {!dosageApplied && (
+                <button type="button" className="ghost" onClick={() => setDosage(dosageHint)}>
+                  Подставить
+                </button>
+              )}
+            </div>
+          )}
+        </div>
         <input type="date" aria-label="Дата начала" value={startedOn} onChange={(e) => setStartedOn(e.target.value)} />
         <label style={{ fontSize: 13, color: "#3d4657" }}>
           Раз в день:{" "}

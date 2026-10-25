@@ -579,3 +579,81 @@ small { color: #8a94a8; }
   .patient-chat { right: 8px; bottom: 8px; left: 8px; align-items: stretch; }
   .patient-chat-toggle { align-self: flex-end; }
 }
+
+/* НЯ: дата и препарат не слипаются */
+.ae-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  white-space: nowrap;
+}
+.ae-meta .ae-date { font-variant-numeric: tabular-nums; }
+.ae-meta .ae-drug { color: #3d4657; font-size: 13px; }
+
+/* FR-1a: подсказка канонической дозировки из справочника */
+.dosage-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dosage-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 320px;
+  font-size: 12px;
+  color: #3d4657;
+}
+.dosage-hint-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dosage-hint button { padding: 2px 8px; font-size: 12px; }
+
+/* Отзыв согласия: спрятан в «опасной зоне», подтверждение — модальным диалогом */
+.danger-zone {
+  margin-top: 24px;
+  border-top: 1px solid #e2e6ee;
+  padding-top: 12px;
+}
+.danger-zone > summary {
+  cursor: pointer;
+  color: #5a6478;
+  font-size: 13px;
+}
+.danger-zone-note {
+  margin: 8px 0;
+  font-size: 13px;
+  color: #5a6478;
+  max-width: 520px;
+}
+.link-danger {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #b42318;
+  font-size: 13px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 50;
+}
+.modal {
+  background: #fff;
+  border-radius: 12px;
+  padding: 20px;
+  max-width: 520px;
+  width: 100%;
+  box-shadow: 0 16px 48px rgba(15, 23, 42, 0.25);
+}
+.modal h3 { margin: 0 0 8px; }
+.modal p { font-size: 14px; color: #2b3242; }
