@@ -3,15 +3,19 @@
 
 Отличие от bench/eval_retrieval.py: там матрица считается in-memory (быстро,
 но своя реализация RRF/реранка). Здесь — ровно тот код, что обслуживает
-/assistant/ask: Qdrant NamedVector dense+sparse → RrfQuery(k) → реранк
-(app.services.reranker) → порог профиля. Метрики должны совпасть с матрицей
-(допуск на округления/переранжирование одинаковых скоров).
+/assistant/ask: Qdrant NamedVector (dense+sparse → FusionQuery/RrfQuery по
+CC_RRF_K) → реранк (app.services.reranker) → порог профиля, применённый в
+hybrid_search ко всему пулу. Метрики должны совпасть с матрицей (допуск на
+округления/переранжирование одинаковых скоров).
 
-Запуск:
-  CC_EMBEDDER=bge-m3 CC_QDRANT_COLLECTION=kb_eval_prod \
-  CC_RERANKER=BAAI/bge-reranker-v2-m3 CC_RETRIEVAL_CANDIDATES=50 CC_RRF_K=60 \
-  CC_EMBEDDER_DEVICE=cuda /bench/.venv/bin/python bench/eval_prod_path.py \
-      --profile bge-m3 --json-out bench/data/eval_prod_bge.json
+Запуск (600-набор: тот же корпус/qrels, что в отчёте §6.2):
+  CC_EMBEDDER=bge-m3 CC_QDRANT_COLLECTION=kb_eval_600 \
+  CC_RERANKER=BAAI/bge-reranker-v2-m3 CC_RETRIEVAL_CANDIDATES=20 \
+  CC_RERANK_WINDOW=700 CC_EMBEDDER_DEVICE=cuda \
+  .venv/bin/python bench/eval_prod_path.py --profile bge-m3 \
+      --corpus bench/data/kb_corpus_600.jsonl \
+      --qrels bench/data/qrels_600_full.jsonl \
+      --json-out bench/data/eval_prod_bge.json
 """
 
 from __future__ import annotations
@@ -68,6 +72,15 @@ def main() -> None:
     client = QdrantClient(url=settings.qdrant_url, timeout=60)
     embedder = embeddings.build_embedder(kind=args.profile)
     rr = reranker_mod.build_reranker(settings.reranker)
+    # Тот же гейт «нет релевантного ответа», что в prod (agent.search_kb):
+    # CC_KB_MIN_SCORE, иначе дефолт профиля. Применяется внутри hybrid_search
+    # ко ВСЕМУ пулу ДО реранка — сравнивать hits[0]["score"] нельзя, после
+    # реранка это logit кросс-энкодера, а не косинус профиля.
+    min_score = (
+        settings.kb_min_score
+        if settings.kb_min_score is not None
+        else embeddings.profile_default_min_score(args.profile)
+    )
 
     if client.collection_exists(kb.COLLECTION):
         n = kb.count_points(client)
@@ -92,7 +105,7 @@ def main() -> None:
     import torch
 
     _ = kb.hybrid_search(client, embedder, "warmup", limit=5, candidates=settings.retrieval_candidates or None,
-                         reranker=rr)
+                         reranker=rr, min_score=min_score)
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
     for q in queries:
@@ -100,12 +113,9 @@ def main() -> None:
         hits = kb.hybrid_search(
             client, embedder, q["q"], limit=10,
             candidates=settings.retrieval_candidates or None, reranker=rr,
+            min_score=min_score,
         )
         lat.append(time.perf_counter() - t0)
-        grade = qrels.get(q["id"])
-        min_score = settings.kb_min_score
-        if grade is not None and min_score is not None and hits and hits[0]["score"] < min_score:
-            hits = []  # тот же гейт, что в agent.search_kb
         rankings[q["id"]] = [by_text.get(h["text"], h["guideline_id"]) for h in hits]
 
     stats = {
@@ -114,6 +124,8 @@ def main() -> None:
         "reranker": settings.reranker,
         "candidates": settings.retrieval_candidates,
         "rrf_k": settings.rrf_k,
+        "min_score": min_score,
+        "refused": sum(1 for r in rankings.values() if not r),
         "p50_ms": kbb.percentile(lat, 0.5) * 1000,
         "p95_ms": kbb.percentile(lat, 0.95) * 1000,
         "vram_mb": torch.cuda.max_memory_allocated() / 2**20 if torch.cuda.is_available() else 0.0,
@@ -121,8 +133,9 @@ def main() -> None:
     if qrels:
         stats["metrics"] = kbb.evaluate(rankings, qrels)
         m = stats["metrics"]
-        print(f"{args.profile}+{settings.reranker}: nDCG@3={m['nDCG@3']:.3f} "
-              f"Recall@3={m['Recall@3']:.3f} p50={stats['p50_ms']:.0f}ms p95={stats['p95_ms']:.0f}ms")
+        print(f"{args.profile}+{settings.reranker} (gate {min_score}): nDCG@3={m['nDCG@3']:.3f} "
+              f"Recall@3={m['Recall@3']:.3f} p50={stats['p50_ms']:.0f}ms p95={stats['p95_ms']:.0f}ms "
+              f"refused={stats['refused']}")
     stats["rankings"] = rankings
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(stats, ensure_ascii=False, indent=1))
