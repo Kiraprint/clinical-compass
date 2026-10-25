@@ -32,7 +32,7 @@ def test_patient_reports_pending_event(client):
     h, pid = patient_ctx(client, "ae-p1@test.ru")
     resp = client.post(
         "/api/v1/me/adverse-events",
-        json={"event_text": "Тошнота после приёма", "severity": "mild", "onset_date": "2026-10-20"},
+        json={"event_text": "Тошнота после приёма", "onset_date": "2026-10-20"},
         headers=h,
     )
     assert resp.status_code == 201, resp.text
@@ -57,7 +57,7 @@ def test_patient_report_requires_consent(client):
     h = auth_header(login(client, "ae-nocons@test.ru")["access_token"])
     resp = client.post(
         "/api/v1/me/adverse-events",
-        json={"event_text": "x", "severity": "mild", "onset_date": "2026-10-20"},
+        json={"event_text": "x", "onset_date": "2026-10-20"},
         headers=h,
     )
     assert resp.status_code == 403
@@ -70,7 +70,7 @@ def test_patient_foreign_medication_rejected(client):
     resp = client.post(
         "/api/v1/me/adverse-events",
         json={
-            "event_text": "Сыпь", "severity": "moderate", "onset_date": "2026-10-20",
+            "event_text": "Сыпь", "onset_date": "2026-10-20",
             "medication_id": foreign,
         },
         headers=h,
@@ -82,7 +82,7 @@ def test_patient_foreign_medication_rejected(client):
     ok = client.post(
         "/api/v1/me/adverse-events",
         json={
-            "event_text": "Сыпь", "severity": "moderate", "onset_date": "2026-10-20",
+            "event_text": "Сыпь", "onset_date": "2026-10-20",
             "medication_id": own,
         },
         headers=h,
@@ -91,7 +91,8 @@ def test_patient_foreign_medication_rejected(client):
     assert ok.json()["medication_id"] == own
     assert ok.json()["medication_title"] == "Маритупир"
 
-def test_severe_report_notifies_roster_without_pdn(client):
+def test_patient_report_notifies_roster_without_pdn(client):
+    """Пациент не оценивает тяжесть, поэтому пуш уходит на любое сообщение."""
     h, pid = patient_ctx(client, "ae-severe-p@test.ru")
     ch, cid = clinician_ctx(client, "ae-severe-doc@test.ru")
     _roster(pid, cid)
@@ -100,12 +101,12 @@ def test_severe_report_notifies_roster_without_pdn(client):
         "/api/v1/me/adverse-events",
         json={
             "event_text": "Обморок и судороги, вызвал скорую",
-            "severity": "severe",
             "onset_date": "2026-10-20",
         },
         headers=h,
     )
     assert resp.status_code == 201, resp.text
+    assert resp.json()["severity"] is None
 
     with db.SyncSessionLocal() as s:
         notes = s.scalars(
@@ -116,19 +117,25 @@ def test_severe_report_notifies_roster_without_pdn(client):
     assert n.kind == "ADVERSE_EVENT"
     # Текст без ПДн: ни имени, ни описания события.
     assert "Обморок" not in n.body and "судорог" not in n.body
-    assert n.body == "Пациент сообщил о серьёзном нежелательном явлении"
+    assert n.body == "Пациент сообщил о нежелательном явлении"
 
-def test_mild_report_does_not_notify(client):
+def test_patient_cannot_set_severity(client):
+    """Тяжесть — колонка врачебной проверки: присланное пациентом значение игнорируется."""
     h, pid = patient_ctx(client, "ae-mild-p@test.ru")
     ch, cid = clinician_ctx(client, "ae-mild-doc@test.ru")
     _roster(pid, cid)
-    assert client.post(
+    resp = client.post(
         "/api/v1/me/adverse-events",
-        json={"event_text": "Лёгкая тошнота", "severity": "mild", "onset_date": "2026-10-20"},
+        json={"event_text": "Лёгкая тошнота", "severity": "severe", "onset_date": "2026-10-20"},
         headers=h,
-    ).status_code == 201
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["severity"] is None
     with db.SyncSessionLocal() as s:
-        assert s.scalars(select(Notification).where(Notification.user_id == uuid.UUID(cid))).all() == []
+        ev = s.get(AdverseEvent, uuid.UUID(resp.json()["id"]))
+        assert ev.severity is None
+        # Пуш не зависит от присланной пациентом «тяжести»: он уходит всегда.
+        assert len(s.scalars(select(Notification).where(Notification.user_id == uuid.UUID(cid))).all()) == 1
 
 def test_clinician_queue_contains_pending(client):
     h, pid = patient_ctx(client, "ae-q-p@test.ru")
@@ -136,7 +143,7 @@ def test_clinician_queue_contains_pending(client):
     _roster(pid, cid)
     ev = client.post(
         "/api/v1/me/adverse-events",
-        json={"event_text": "Тремор рук", "severity": "moderate", "onset_date": "2026-10-21"},
+        json={"event_text": "Тремор рук", "onset_date": "2026-10-21"},
         headers=h,
     ).json()
 
@@ -159,7 +166,7 @@ def test_verify_confirm_sets_verifier_and_drug_reference(client):
     ev = client.post(
         "/api/v1/me/adverse-events",
         json={
-            "event_text": "Тошнота", "severity": "mild", "onset_date": "2026-10-20",
+            "event_text": "Тошнота", "onset_date": "2026-10-20",
             "medication_id": med_id,
         },
         headers=h,
@@ -215,13 +222,35 @@ def test_verify_confirm_sets_verifier_and_drug_reference(client):
     assert conflict.status_code == 409
     assert conflict.json()["code"] == "ADVERSE_ALREADY_VERIFIED"
 
+def test_verify_confirm_requires_severity(client):
+    """Подтверждение без оценки тяжести — 422: severity пациента всегда NULL."""
+    h, pid = patient_ctx(client, "ae-nosev-p@test.ru")
+    ch, cid = clinician_ctx(client, "ae-nosev-doc@test.ru")
+    _roster(pid, cid)
+    ev = client.post(
+        "/api/v1/me/adverse-events",
+        json={"event_text": "Тошнота", "onset_date": "2026-10-20"},
+        headers=h,
+    ).json()
+    resp = client.patch(
+        f"/api/v1/clinician/patients/{pid}/adverse-events/{ev['id']}",
+        json={"status": "confirmed"},
+        headers=ch,
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["code"] == "SEVERITY_REQUIRED"
+    # Событие осталось в очереди непринятым.
+    with db.SyncSessionLocal() as s:
+        assert s.get(AdverseEvent, uuid.UUID(ev["id"])).status == "pending"
+
+
 def test_verify_reject(client):
     h, pid = patient_ctx(client, "ae-r-p@test.ru")
     ch, cid = clinician_ctx(client, "ae-r-doc@test.ru")
     _roster(pid, cid)
     ev = client.post(
         "/api/v1/me/adverse-events",
-        json={"event_text": "Головная боль", "severity": "mild", "onset_date": "2026-10-20"},
+        json={"event_text": "Головная боль", "onset_date": "2026-10-20"},
         headers=h,
     ).json()
     resp = client.patch(
@@ -240,7 +269,7 @@ def test_verify_foreign_patient_and_event_404(client):
     # Врач не закреплён за пациентом.
     ev = client.post(
         "/api/v1/me/adverse-events",
-        json={"event_text": "x", "severity": "mild", "onset_date": "2026-10-20"},
+        json={"event_text": "x", "onset_date": "2026-10-20"},
         headers=h,
     ).json()
     resp = client.patch(
@@ -268,7 +297,7 @@ def test_verify_unknown_drug_404(client):
     _roster(pid, cid)
     ev = client.post(
         "/api/v1/me/adverse-events",
-        json={"event_text": "x", "severity": "mild", "onset_date": "2026-10-20"},
+        json={"event_text": "x", "onset_date": "2026-10-20"},
         headers=h,
     ).json()
     resp = client.patch(
@@ -302,7 +331,7 @@ def test_patient_report_audit_has_no_content(client, db_session):
     h, pid = patient_ctx(client, "ae-audit-p@test.ru")
     client.post(
         "/api/v1/me/adverse-events",
-        json={"event_text": "Секретный симптом", "severity": "mild", "onset_date": "2026-10-20"},
+        json={"event_text": "Секретный симптом", "onset_date": "2026-10-20"},
         headers=h,
     )
     from app.models import AuditLog
@@ -321,7 +350,7 @@ def test_consent_revoke_deletes_patient_events(client):
     h, pid = patient_ctx(client, "ae-rev-p@test.ru")
     client.post(
         "/api/v1/me/adverse-events",
-        json={"event_text": "x", "severity": "mild", "onset_date": "2026-10-20"},
+        json={"event_text": "x", "onset_date": "2026-10-20"},
         headers=h,
     )
     assert client.post("/api/v1/consent/revoke", headers=h).status_code == 204
@@ -336,12 +365,12 @@ def test_adverse_text_encrypted_at_rest(client, db_session):
     _roster(pid, cid)
     ev = client.post(
         "/api/v1/me/adverse-events",
-        json={"event_text": "Секретное описание явления", "severity": "mild", "onset_date": "2026-10-20"},
+        json={"event_text": "Секретное описание явления", "onset_date": "2026-10-20"},
         headers=h,
     ).json()
     client.patch(
         f"/api/v1/clinician/patients/{pid}/adverse-events/{ev['id']}",
-        json={"status": "confirmed", "verification_note": "Секретная заметка врача"},
+        json={"status": "confirmed", "severity": "moderate", "verification_note": "Секретная заметка врача"},
         headers=ch,
     )
     types = db_session.execute(
@@ -380,13 +409,13 @@ def test_onset_date_is_validated_by_moscow_calendar(client, monkeypatch):
     h, _pid = patient_ctx(client, "ae-msk@test.ru")
     ok = client.post(
         "/api/v1/me/adverse-events",
-        json={"event_text": "Тошнота", "severity": "mild", "onset_date": "2026-10-24"},
+        json={"event_text": "Тошнота", "onset_date": "2026-10-24"},
         headers=h,
     )
     assert ok.status_code == 201, ok.text
     future = client.post(
         "/api/v1/me/adverse-events",
-        json={"event_text": "Тошнота", "severity": "mild", "onset_date": "2026-10-25"},
+        json={"event_text": "Тошнота", "onset_date": "2026-10-25"},
         headers=h,
     )
     assert future.status_code == 422, future.text

@@ -38,6 +38,9 @@
 | phq9_severe_symptoms_with_nonzero_q9 | total 15 + item 9 = 1 | risk_flags() | оба флага |
 | gad7_no_suicidal_flag_but_severe_symptoms | GAD-7 total 15 | risk_flags() | SUICIDAL_IDEATION нет, SEVERE_SYMPTOMS есть |
 | hads_has_no_severe_bound_no_severe_flag | HADS-A/HADS-D максимум баллов | risk_flags() | SEVERE_SYMPTOMS нет (потолок MODERATE) |
+| `test_risk_flags_rejects_visible_omitted_item` | HADS-D, `omitted={d1}` (видимый обратный пункт) | risk_flags() | ValueError «cannot be omitted» — тот же guard, что у `score()`, а не молчаливый NOT_ASSESSED |
+| `test_risk_flags_requires_complete_answers` | PHQ-9 q1..q8 без q9 и без `omitted` | risk_flags() | `IncompleteAnswersError` — неполный набор не считается по `.get(..., 0)` |
+| `test_risk_flags_uses_scored_total_with_hidden_item` | PHQ-8 15 / 14, q9 скрыт | risk_flags() | сумма из `score()`: 15 → SEVERE_SYMPTOMS + NOT_ASSESSED, 14 → только NOT_ASSESSED |
 | gad7_severity_boundaries | GAD-7 total 0/5/10/15 | score() | NONE/MILD/MODERATE/SEVERE |
 | triage_red_suicidal | flag SUICIDAL, severity MILD | triage() | RED (флаг важнее severity) |
 | triage_red_severe | severity SEVERE, флагов нет | triage() | RED |
@@ -271,8 +274,9 @@
 | `test_patient_reports_pending_event` | пациент отправляет НЯ с назначением | `201`, `status=pending`, `status_label=на проверке`, `reported_by=patient`, `clinician_id`/`verified_by` пусты; событие видно в `GET /me/adverse-events` |
 | `test_patient_report_requires_consent` | без активного согласия | 403 `CONSENT_REQUIRED` |
 | `test_patient_foreign_medication_rejected` | `medication_id` чужого пациента, затем своё | 422 `MEDICATION_NOT_FOUND`; своё — 201 с `medication_title` |
-| `test_severe_report_notifies_roster_without_pdn` | `severity=severe` при roster-враче | один `Notification` с `kind=ADVERSE_EVENT`, текст «Пациент сообщил о серьёзном нежелательном явлении», без имени и описания |
-| `test_mild_report_does_not_notify` | `severity=mild` | уведомлений нет |
+| `test_patient_report_notifies_roster_without_pdn` | любое сообщение пациента при roster-враче | один `Notification` с `kind=ADVERSE_EVENT`, текст «Пациент сообщил о нежелательном явлении», без имени и описания; `severity: null` |
+| `test_patient_cannot_set_severity` | пациент присылает `severity: severe` | поле не принимается: в ответе и в БД `null`, пуш уходит всё равно (тяжесть — колонка врача) |
+| `test_verify_confirm_requires_severity` | PATCH confirm без `severity` | 422 `SEVERITY_REQUIRED`, событие остаётся `pending` |
 | `test_clinician_queue_contains_pending` | `GET /clinician/adverse-events?status=pending` | событие с полями пациента/статусом, `reference=null` без препарата |
 | `test_verify_confirm_sets_verifier_and_drug_reference` | PATCH confirm с `drug_id` и заметкой | `verified_by/at`, `reference.trade_name`, пациент видит «проверено врачом» без заметки; очередь pending пустеет; повтор того же статуса — 200 без изменения `verified_at`; смена на rejected — 409 `ADVERSE_ALREADY_VERIFIED` |
 | `test_verify_reject` | PATCH rejected | статус `rejected`, пациент видит «отклонено» |
@@ -299,11 +303,17 @@
 | `test_legacy_client_item9_answer_still_scored` | старый клиент присылает `q9=2` | `finish` | балл учитывается, `SUICIDAL_IDEATION` → RED (явно сообщённый риск не теряем) |
 | `test_chat_auto_reply_once_per_moscow_day` | два сообщения подряд | `POST /chat/thread` ×2 | первый ответ `FAQ`, второй `reply=null`; в треде 3 сообщения и 1 `SYSTEM`; перенос SYSTEM-строки на вчера снова разрешает ответ |
 | `test_chat_hotline_copy_is_supportive` | RED-скрининг | `POST /chat/thread` | ответ `HOTLINE` без «специалисты уведомлены» / «требуется внимание» / обещания мгновенного контакта |
-| `test_me_drugs_returns_only_own_prescriptions` | препарат пациента + карточка ГРЛС | `GET /me/drugs` | только своё назначение с совпавшей карточкой, чужого препарата нет |
+| `test_my_drug_reference_contains_only_own_medications` | два своих назначения: точное название ГРЛС и «название + дозировка» | `GET /me/drugs` | карточка только у точного совпадения (подстрочный матч не подставляет похожий препарат); аудит `READ_MY_DRUGS` без названий |
 | `test_checkin_history_aggregates_without_raw_answers` | завершённый сеанс с ответами ядра | `GET /checkins/history?days=7` | `{date, wellbeing, safety}`, `wellbeing` — среднее 0..4, сырых ответов в payload нет |
+| `test_checkin_history_returns_aggregate_without_raw_answers` (`test_patient_ux.py`) | пустая история | `GET /checkins/history` | `{items: []}` + аудит `READ_CHECKIN_HISTORY` (значений нет) |
+| `test_questionnaire_catalog_exposes_scale_maxima` | пациентский каталог | `GET /questionnaires` | `max_total` = сумма `max_value` пунктов: PHQ-9 24, GAD-7 21, HADS 21, HCL-32 32, PSS-10 40 |
+| `test_timeline_exposes_scale_max_total` | завершённый PHQ-9 | `GET /me/timeline` | у run `max_total=24` — график берёт верх шкалы с сервера, а не по коду шкалы |
+| `test_prescribed_scale_completion_hides_banner` | назначена PHQ-9 | `GET /me/prescribed-scales` до и после finish | `completed_at: null` → ISO-время: баннер «Назначен скрининг» гаснет после прохождения |
+| `test_crisis_reply_ignores_daily_quota` | утром израсходован FAQ, затем RED-оценка | второй POST в чат | `reply.kind=HOTLINE` с `help_resources` (112, 8-800-2000-122); лимит режет только не-кризисный FAQ |
+| `test_concurrent_chat_posts_yield_one_auto_reply` | два параллельных POST в двух async-сессиях | `chat.post_message` | ровно один автоответ: `pg_advisory_xact_lock` на (пациент, сутки МСК) |
 | `test_contacts_include_fio_and_email` | пациент с ФИО | `GET /profile/contacts` | в ответе `fio` и `email` (только self-service) |
 
-`test_adverse_events.py::test_patient_report_has_no_severity_until_clinician_verifies`: пациент шлёт НЯ без `severity` → 201 и `severity: null` в БД, врач `PATCH` ставит `moderate` (FR-34). `test_screening.py::test_finish_incomplete_422`: неполный набор (7 из 8 пунктов) → 422 `VALIDATION`.
+`test_adverse_events.py::test_patient_report_has_no_severity_until_clinician_verifies`: пациент шлёт НЯ без `severity` → 201 и `severity: null` в БД, врач `PATCH` с обязательной `severity=moderate` подтверждает (без неё — 422 `SEVERITY_REQUIRED`, FR-34). `test_screening.py::test_finish_incomplete_422`: неполный набор (7 из 8 пунктов) → 422 `VALIDATION`.
 
 ### 3.2 Async-рантайм, пулы и кеш корпуса
 

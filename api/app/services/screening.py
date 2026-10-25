@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Mapping
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from compass.models import AUDIENCE_PATIENT
@@ -61,6 +61,45 @@ async def prescribed_scales(db: AsyncSession, patient_id) -> list[str]:
 async def prescribed_scale(db: AsyncSession, patient_id) -> str:
     """Первичная (первая назначенная) шкала — для чек-инов и дефолта старта. Без назначения — PHQ-9."""
     return (await prescribed_scales(db, patient_id))[0]
+
+
+async def _completed_since(db: AsyncSession, patient_id, scale_code: str, since) -> datetime | None:
+    """Последняя завершённая оценка по шкале не раньше `since` (None — любая)."""
+    stmt = (
+        select(func.max(Assessment.computed_at))
+        .join(Run, Run.id == Assessment.run_id)
+        .where(Assessment.patient_id == patient_id, Run.questionnaire_code == scale_code)
+    )
+    if since is not None:
+        stmt = stmt.where(Assessment.computed_at >= since)
+    return await db.scalar(stmt)
+
+
+async def prescription_status(db: AsyncSession, patient_id) -> list[dict]:
+    """Назначенные шкалы + признак выполнения по каждому назначению (FR-33).
+
+    `completed_at` — завершённая оценка по шкале не раньше даты назначения:
+    баннер «Назначен скрининг» гаснет, когда скрининг пройден, и снова
+    появляется, если врач назначил шкалу повторно. Без назначений — дефолт
+    первой линии PHQ-9 (как prescribed_scales), выполнение — любая PHQ-9.
+    """
+    rows = (await db.scalars(
+        select(Prescription).where(Prescription.patient_id == patient_id).order_by(Prescription.created_at)
+    )).all()
+    if not rows:
+        return [{
+            "code": DEFAULT_SCALE,
+            "prescribed_at": None,
+            "completed_at": await _completed_since(db, patient_id, DEFAULT_SCALE, None),
+        }]
+    return [
+        {
+            "code": r.scale_code,
+            "prescribed_at": r.created_at,
+            "completed_at": await _completed_since(db, patient_id, r.scale_code, r.created_at),
+        }
+        for r in rows
+    ]
 
 async def start_screening(db: AsyncSession, patient_id, questionnaire_code: str | None = None) -> Run:
     """Старт скрининга. Шкала: явно указанная пациентом (если она в назначенном множестве),

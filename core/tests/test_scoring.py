@@ -1,9 +1,9 @@
 # Контракт: docs/05-SDD.md §3 (scoring, risk_flags); пороги — docs/06-TDD.md §2.1-2.2
 import pytest
 
-from compass.models import Severity
+from compass.models import FlagKind, Severity
 from compass.scales import PHQ9, HADS_D
-from compass.scoring import score, UnknownItemError, IncompleteAnswersError
+from compass.scoring import score, risk_flags, UnknownItemError, IncompleteAnswersError
 
 
 def phq_all() -> dict[str, int]:
@@ -73,3 +73,28 @@ def test_hads_d_reverse_scoring():
     res2 = score(HADS_D, {f"d{i}": 3 for i in range(1, 8)})
     assert res2.total_score == 3
     assert res2.per_item["d4"] == 3
+
+def test_risk_flags_rejects_visible_omitted_item():
+    """Спрятать видимый пункт нельзя: риск не должен молча уходить в NOT_ASSESSED."""
+    answers = {f"d{i}": 0 for i in range(1, 8)}
+    with pytest.raises(ValueError, match="cannot be omitted"):
+        risk_flags(HADS_D, answers, omitted={"d1"})  # d1 — обратный видимый пункт
+
+
+def test_risk_flags_requires_complete_answers():
+    answers = {f"q{i}": 0 for i in range(1, 9)}  # q9 не задан и не объявлен omitted
+    with pytest.raises(IncompleteAnswersError):
+        risk_flags(PHQ9, answers)
+
+
+def test_risk_flags_uses_scored_total_with_hidden_item():
+    """Сумма — из score(): скрытый q9 не добавляет баллов и не раздувает SEVERE."""
+    answers = fill(15)
+    answers.pop("q9")
+    kinds = {f.kind for f in risk_flags(PHQ9, answers, omitted={"q9"})}
+    assert kinds == {FlagKind.NOT_ASSESSED, FlagKind.SEVERE_SYMPTOMS}
+
+    answers = fill(14)
+    answers.pop("q9")
+    kinds = {f.kind for f in risk_flags(PHQ9, answers, omitted={"q9"})}
+    assert kinds == {FlagKind.NOT_ASSESSED}  # 14 < 15: порога SEVERE ещё нет

@@ -216,10 +216,17 @@ async def patient_timeline(db: AsyncSession, patient_id, days: int) -> dict:
         .where(Assessment.patient_id == patient_id, Assessment.computed_at >= since)
         .order_by(Assessment.computed_at.asc())
     )).all()
+    def _max_total(code: str) -> int:
+        # Верх шкалы для графика пациента: сумма максимумов пунктов. Считается на
+        # сервере, чтобы UI не угадывал порог по коду шкалы (HDRS-17 → 52).
+        scale = ALL_SCALES.get(code)
+        return sum(i.max_value for i in scale.patient_items()) if scale else 0
+
     runs = [
         {
             "assessment_id": str(a.id),
             "questionnaire_code": code,
+            "max_total": _max_total(code),
             "total_score": a.total_score,
             "severity": a.severity,
             "triage": a.triage,
