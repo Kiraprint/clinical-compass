@@ -208,6 +208,10 @@ def _points_for(documents: Sequence[dict], embedder) -> list[qm.PointStruct]:
     # на чанк); локальные эмбеддеры идут прежним путём.
     batch = getattr(embedder, "dense_batch", None)
     dense_vectors = batch(texts) if batch is not None else [embedder.dense(t) for t in texts]
+    if len(dense_vectors) != len(texts):
+        raise RuntimeError(
+            f"эмбеддер вернул {len(dense_vectors)} dense-векторов на {len(texts)} чанков"
+        )
     points: list[qm.PointStruct] = []
     for doc, text, dense in zip(documents, texts, dense_vectors):
         indices, values = embedder.sparse(text)

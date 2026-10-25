@@ -95,26 +95,25 @@ def _point_id(text: str) -> str:
     return str(uuid.UUID(hashlib.md5(text.encode("utf-8")).hexdigest()))
 
 
-def upsert_documents(
-    client: QdrantClient,
-    embedder: Embedder,
-    documents: Sequence[dict],
-) -> int:
-    """Загружает чанки. Каждый doc: {guideline_id, source_title, topic, text}.
+def build_points(embedder: Embedder, documents: Sequence[dict]) -> list[qm.PointStruct]:
+    """Точки для upsert: эмбеддинги + payload, без записи в Qdrant.
 
-    Дедупликация по text_hash; повторный заход не плодит дубли (docs/08 §5).
-    Sparse-вектор пишется всегда: профиль эмбеддера может смениться, а коллекция
-    под него всё равно пересобирается.
+    Отделено от записи, чтобы вызывающий мог СНАЧАЛА посчитать эмбеддинги и
+    только потом сносить старые точки: сбой эмбеддера не должен оставить
+    коллекцию без гайдлайнов (так же устроен enrichment/index.py).
+    Каждый doc: {guideline_id, source_title, topic, text}.
     """
-    ensure_collection(client, embedder.dense_size)
     texts = [doc["text"].strip() for doc in documents]
-    # Пачкой, если эмбеддер умеет (RemoteEmbedder: один HTTP на пачку вместо
-    # одного на чанк — ре-сид не делает ~3362 POST).
+    # Пачкой, если эмбеддер умеет (RemoteEmbedder: пачка HTTP вместо POST на
+    # чанк — ре-сид не делает ~3362 запроса).
     batch = getattr(embedder, "dense_batch", None)
     dense_vectors = batch(texts) if batch is not None else [embedder.dense(t) for t in texts]
+    if len(dense_vectors) != len(texts):
+        raise RuntimeError(
+            f"эмбеддер вернул {len(dense_vectors)} dense-векторов на {len(texts)} чанков"
+        )
     points: list[qm.PointStruct] = []
     for i, (doc, text, dense) in enumerate(zip(documents, texts, dense_vectors)):
-        text_hash = _hash(text)
         indices, values = embedder.sparse(text)
         points.append(
             qm.PointStruct(
@@ -129,45 +128,94 @@ def upsert_documents(
                     "topic": doc.get("topic", ""),
                     "chunk_index": i,
                     "text": text,
-                    "text_hash": text_hash,
+                    "text_hash": _hash(text),
                 },
             )
         )
-    client.upsert(collection_name=COLLECTION, points=points, wait=True)
+    return points
+
+def upsert_points(
+    client: QdrantClient,
+    points: Sequence[qm.PointStruct],
+    *,
+    dense_size: int,
+) -> int:
+    """Записать готовые точки (см. build_points). Возвращает их число."""
+    ensure_collection(client, dense_size)
+    if not points:
+        return 0
+    client.upsert(collection_name=COLLECTION, points=list(points), wait=True)
     return len(points)
 
+def upsert_documents(
+    client: QdrantClient,
+    embedder: Embedder,
+    documents: Sequence[dict],
+) -> int:
+    """Загружает чанки. Каждый doc: {guideline_id, source_title, topic, text}.
+
+    Дедупликация по text_hash; повторный заход не плодит дубли (docs/08 §5).
+    Sparse-вектор пишется всегда: профиль эмбеддера может смениться, а коллекция
+    под него всё равно пересобирается.
+    """
+    return upsert_points(
+        client, build_points(embedder, documents), dense_size=embedder.dense_size
+    )
+
+_SCROLL_PAGE = 256
+_DELETE_BATCH = 512
 
 def delete_sources(
     client: QdrantClient,
     source_titles: Sequence[str],
     *,
+    id_prefix: str | None = None,
     wait: bool = True,
-) -> None:
-    """Удалить все точки указанных источников перед повторным засевом.
+) -> int:
+    """Удалить точки указанных источников перед повторным засевом.
 
     Point id производен от текста чанка (`_point_id`), а границы нарезки зависят
     от CC_KB_CHUNK_*: повторный `kb_seed --with-guidelines` с другой нарезкой
     оставил бы чанки прошлой генерации рядом с новыми (id другие). Фильтр по
     source_title — стабильному имени источника — сносит все поколения сразу,
     поэтому count после повторного сида не растёт (docs/08 §5).
+
+    `id_prefix` дополнительно сужает удаление до точек, у которых guideline_id
+    начинается с префикса (`kr-` у КР): Qdrant не умеет prefix-фильтр по payload,
+    поэтому точки читаются scroll'ом и фильтруются на клиенте. Возвращает число
+    удалённых точек.
     """
     titles = sorted({t for t in source_titles if t})
     if not titles:
-        return
-    client.delete(
-        collection_name=COLLECTION,
-        points_selector=qm.FilterSelector(
-            filter=qm.Filter(
-                must=[
-                    qm.FieldCondition(
-                        key="source_title", match=qm.MatchAny(any=titles)
-                    )
-                ]
-            )
-        ),
-        wait=wait,
+        return 0
+    source_filter = qm.Filter(
+        must=[qm.FieldCondition(key="source_title", match=qm.MatchAny(any=titles))]
     )
-
+    ids: list[str] = []
+    offset = None
+    while True:
+        points, offset = client.scroll(
+            collection_name=COLLECTION,
+            scroll_filter=source_filter,
+            limit=_SCROLL_PAGE,
+            offset=offset,
+            with_payload=["guideline_id"],
+            with_vectors=False,
+        )
+        for point in points:
+            payload = point.payload or {}
+            if id_prefix is not None and not str(payload.get("guideline_id", "")).startswith(id_prefix):
+                continue
+            ids.append(str(point.id))
+        if offset is None:
+            break
+    for start in range(0, len(ids), _DELETE_BATCH):
+        client.delete(
+            collection_name=COLLECTION,
+            points_selector=qm.PointIdsList(points=ids[start : start + _DELETE_BATCH]),
+            wait=wait,
+        )
+    return len(ids)
 
 def hybrid_search(
     client: QdrantClient,
@@ -293,6 +341,8 @@ __all__ = [
     "IndexConfigError",
     "check_embedder_compatibility",
     "ensure_collection",
+    "build_points",
+    "upsert_points",
     "upsert_documents",
     "delete_sources",
     "hybrid_search",
