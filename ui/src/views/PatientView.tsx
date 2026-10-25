@@ -92,7 +92,7 @@ export default function PatientView({ onLogout }: { onLogout?: () => void }) {
   };
 
   return (
-    <>
+    <div className="patient-view">
       <div className="patient-bar">
         <button
           className="ghost patient-burger"
@@ -140,7 +140,7 @@ export default function PatientView({ onLogout }: { onLogout?: () => void }) {
         <AccountScreen consent={consent} onRevoke={revokeConsent} onLogout={onLogout} />
       )}
       <ChatPanel />
-    </>
+    </div>
   );
 }
 
@@ -1385,21 +1385,21 @@ function AdverseTab() {
         <p style={{ color: "#5a6478", fontSize: 13 }}>Сообщений пока нет.</p>
       ) : (
         <div className="table-wrap">
-          <table>
+          <table className="data-cards">
             <thead>
               <tr><th>Дата</th><th>Событие</th><th>Тяжесть</th><th>Статус проверки</th></tr>
             </thead>
             <tbody>
               {items.map((e) => (
                 <tr key={e.id}>
-                  <td>
+                  <td data-label="Дата">
                     <div className="ae-meta">
                       <span className="ae-date">{e.onset_date}</span>
                       {e.medication_title && <span className="ae-drug">{e.medication_title}</span>}
                     </div>
                   </td>
-                  <td>{e.event_text}</td>
-                  <td>
+                  <td data-label="Событие">{e.event_text}</td>
+                  <td data-label="Тяжесть">
                     {e.severity ? (
                       <>
                         <span className={`badge ${e.severity === "severe" ? "RED" : e.severity === "moderate" ? "YELLOW" : "GREEN"}`}>
@@ -1415,7 +1415,7 @@ function AdverseTab() {
                       <span style={{ color: "#5a6478", fontSize: 13 }}>не оценена</span>
                     )}
                   </td>
-                  <td>
+                  <td data-label="Статус проверки">
                     <span className={`badge ${e.status === "confirmed" ? "GREEN" : e.status === "pending" ? "YELLOW" : ""}`}>
                       {e.status_label}
                     </span>

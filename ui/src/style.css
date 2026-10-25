@@ -178,7 +178,10 @@ small { color: #8a94a8; }
   align-items: start;
 }
 .dash-main { min-width: 0; }
+/* Правая колонка содержит nowrap-превью чатов: без min-width:0 её min-content
+   растягивает грид шире экрана и на мобиле появляется горизонтальный скролл. */
 .dash-side {
+  min-width: 0;
   position: sticky;
   top: 12px;
   align-self: start;
@@ -284,7 +287,7 @@ small { color: #8a94a8; }
 .chip:disabled { color: #5a6478; }
 
 @media (max-width: 900px) {
-  .dash { grid-template-columns: 1fr; }
+  .dash { grid-template-columns: minmax(0, 1fr); }
   .dash-side { position: static; max-height: none; overflow: visible; }
 }
 @media (max-width: 700px) {
@@ -449,6 +452,9 @@ small { color: #8a94a8; }
 .reminder-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .reminder-actions button { padding: 4px 10px; font-size: 12px; }
 
+/* FR-23: чипы-фильтры истории — компактные на десктопе, крупнее на тач-экране. */
+.history-chip { padding: 2px 10px; }
+
 @media (max-width: 700px) {
   .tabs { flex-wrap: wrap; gap: 6px; }
   .tabs button { flex: 0 1 auto; white-space: nowrap; }
@@ -461,8 +467,49 @@ small { color: #8a94a8; }
   .bubble { max-width: 86%; }
   .chat-messages { max-height: 46vh; }
   .reminder-form { grid-template-columns: 1fr; }
-  .reminder-actions button { padding: 6px 10px; font-size: 12px; }
+  .reminder-actions button { padding: 8px 12px; font-size: 13px; }
   .chat-view { overflow-x: hidden; }
+  /* Панель уведомлений: absolute 320px у левого края шапки уезжала за экран. */
+  .bell-panel {
+    position: fixed;
+    top: 70px;
+    left: 8px;
+    right: 8px;
+    width: auto;
+    max-height: calc(100vh - 78px);
+    z-index: 60;
+  }
+  .bell-head button { padding: 8px 10px; }
+  /* Мелкие тапы: чипы и компактные кнопки в карточках. */
+  .chip { padding: 8px 12px; }
+  .history-chip { padding: 8px 12px; }
+  .insight-actions button { padding: 8px 12px; font-size: 13px; }
+  summary { padding: 6px 0; }
+  .table-wrap td a { display: inline-block; padding: 8px 0; margin: -8px 0; }
+  /* Таблицы с data-cards: на телефоне строки становятся карточками с подписями. */
+  table.data-cards thead { display: none; }
+  table.data-cards,
+  table.data-cards tbody,
+  table.data-cards tr,
+  table.data-cards td { display: block; width: 100%; }
+  table.data-cards tr {
+    box-sizing: border-box;
+    border: 1px solid #e2e6ee;
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+  }
+  table.data-cards tr:last-child { margin-bottom: 0; }
+  table.data-cards td { border: 0; padding: 3px 0; white-space: normal; }
+  table.data-cards td[data-label]::before {
+    content: attr(data-label) ": ";
+    color: #5a6478;
+    font-weight: 600;
+  }
+  table.data-cards td:last-child { padding-top: 8px; }
+  table.data-cards td:last-child button { width: 100%; }
+  /* Фиксированная плашка чата перекрывала нижние кнопки (в ЛК — «Выйти»). */
+  .patient-view { padding-bottom: 64px; }
 }
 
 /* FR-35: правовые страницы (/legal/terms, /legal/consent) — статические, без входа. */

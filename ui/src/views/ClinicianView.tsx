@@ -1191,7 +1191,7 @@ export default function ClinicianView() {
           )}
           {!cardsError && (
             <div className="table-wrap">
-              <table className="patients">
+              <table className="patients data-cards">
                 <thead>
                   <tr>
                     <th>Пациент</th>
@@ -1220,15 +1220,15 @@ export default function ClinicianView() {
                           </>
                         )}
                       </td>
-                      <td>
+                      <td data-label="Риск">
                         {c.last_triage ? (
                           <span className={`badge ${c.last_triage}`}>{c.last_triage}</span>
                         ) : (
                           <span className="badge GREEN">без наблюдений</span>
                         )}
                       </td>
-                      <td>{c.last_score ?? "—"}</td>
-                      <td>{c.open_escalations}</td>
+                      <td data-label="Балл">{c.last_score ?? "—"}</td>
+                      <td data-label="Эскалации">{c.open_escalations}</td>
                       <td>
                         <button className="ghost" onClick={() => openPatient(c.patient_id)}>
                           Открыть
@@ -2821,12 +2821,13 @@ function HistoryBlock({ patientId }: { patientId: string }) {
           return (
             <button
               key={chip.value}
+              className="history-chip"
               onClick={() => setTypes((prev) => (
                 prev.includes(chip.value) ? prev.filter((x) => x !== chip.value) : [...prev, chip.value]
               ))}
               aria-pressed={on}
               style={{
-                fontSize: 13, padding: "2px 10px", borderRadius: 12,
+                fontSize: 13, borderRadius: 12,
                 border: "1px solid #cfd6e4", cursor: "pointer",
                 background: on ? "#e8eefc" : "transparent",
                 color: on ? "#1b3a8a" : "#5a6478",
