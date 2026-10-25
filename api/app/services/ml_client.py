@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -34,6 +36,49 @@ log = logging.getLogger(__name__)
 _RETRY_DELAY = 0.2
 _MAX_BODY = 8 * 1024 * 1024  # потолок ответа: эмбеддинги пачки чанков
 _MAX_NAMES = 128  # потолок deny-list в /v1/mask
+
+# Предохранитель: если сайдкар лежит, каждый вызов иначе стоит два ml_timeout
+# (по 30 с на маскирование), и любой ответ ассистента упирается в дедлайн.
+# После _FAILURE_LIMIT сетевых сбоев подряд вызовы _COOLDOWN_S секунд падают
+# сразу, без обращения к сети; первый успешный вызов сбрасывает счётчик.
+_FAILURE_LIMIT = 3
+_COOLDOWN_S = 30.0
+_breaker_lock = threading.Lock()
+_breaker_failures = 0
+_breaker_open_until = 0.0
+
+
+def _breaker_guard(path: str) -> None:
+    """Полуоткрытое состояние: по истечении паузы пропускаем одну пробу."""
+    global _breaker_open_until
+    with _breaker_lock:
+        if not _breaker_open_until:
+            return
+        now = time.monotonic()
+        if now < _breaker_open_until:
+            left = round(_breaker_open_until - now, 1)
+            raise MlUnavailable(f"сайдкар {path}: недоступен, пауза ещё {left} с")
+        _breaker_open_until = 0.0
+
+
+def _breaker_ok() -> None:
+    global _breaker_failures, _breaker_open_until
+    with _breaker_lock:
+        _breaker_failures = 0
+        _breaker_open_until = 0.0
+
+
+def _breaker_fail(path: str) -> None:
+    global _breaker_failures, _breaker_open_until
+    with _breaker_lock:
+        _breaker_failures += 1
+        if _breaker_failures >= _FAILURE_LIMIT:
+            _breaker_open_until = time.monotonic() + _COOLDOWN_S
+            log.warning(
+                "ML-сайдкар: %d сбоев подряд (%s) — пауза %.0f с, вызовы отвечают MlUnavailable",
+                _breaker_failures, path, _COOLDOWN_S,
+            )
+
 
 class MlUnavailable(RuntimeError):
     """Сайдкар не сконфигурирован, недоступен или ответил ошибкой."""
@@ -50,6 +95,7 @@ def _endpoint(path: str) -> str:
 
 def _post(path: str, payload: dict) -> dict:
     """POST JSON с одним повтором на сетевой сбой/5xx."""
+    _breaker_guard(path)
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if settings.ml_token:
@@ -64,6 +110,7 @@ def _post(path: str, payload: dict) -> dict:
             data = json.loads(raw or b"{}")
             if not isinstance(data, dict):
                 raise MlUnavailable(f"сайдкар {path}: ожидался JSON-объект")
+            _breaker_ok()
             return data
         except urllib.error.HTTPError as exc:
             # Тело ошибки не логируем и не тащим в текст исключения: сайдкар
@@ -75,10 +122,9 @@ def _post(path: str, payload: dict) -> dict:
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
             last = MlUnavailable(f"сайдкар {path}: {type(exc).__name__}")
         if attempt == 0:
-            import time
-
             time.sleep(_RETRY_DELAY)
     assert last is not None
+    _breaker_fail(path)
     raise last
 
 def ping() -> dict:
@@ -96,6 +142,7 @@ def ping() -> dict:
         raise MlUnavailable(f"сайдкар /health: {exc}") from exc
     if not isinstance(data, dict):
         raise MlUnavailable("сайдкар /health: ожидался JSON-объект")
+    _breaker_ok()  # живой ping — доказательство восстановления, цепь снова замкнута
     return data
 
 def embed(texts: list[str], *, kind: str = "query", profile: str = "") -> list[list[float]]:
