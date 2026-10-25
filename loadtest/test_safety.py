@@ -61,3 +61,38 @@ def test_seed_qdrant_validates_its_argument_as_a_collection(monkeypatch):
     with pytest.raises(common.SafetyRefusal) as exc:
         provision.seed_qdrant("compass_loadtest")
     assert "Коллекц" in str(exc.value)
+
+
+def test_database_url_override_is_allowlisted(monkeypatch):
+    """Полный URL не обходит allowlist: имя БД из URL проверяется."""
+    monkeypatch.setenv("CC_LOADTEST_ALLOW", "1")
+    monkeypatch.delenv("CC_LOADTEST_DB", raising=False)
+    monkeypatch.delenv("CC_LOADTEST_COLLECTION", raising=False)
+    monkeypatch.setenv(
+        "CC_LOADTEST_DATABASE_URL", "postgresql+psycopg://u:p@127.0.0.1:5432/compass"
+    )
+    with pytest.raises(common.SafetyRefusal):
+        common.assert_destructive()
+
+    monkeypatch.setenv(
+        "CC_LOADTEST_DATABASE_URL",
+        "postgresql+psycopg://u:p@127.0.0.1:5432/compass_load_mw",
+    )
+    assert common.assert_destructive() == ("compass_load_mw", "kb_loadtest")
+    assert common.db_url().endswith("/compass_load_mw")
+    assert ":p@" not in common.redacted_db_url()
+    assert "dbname=postgres" in common.pg_dsn()
+    assert "dbname=compass_load_mw" in common.pg_dsn("compass_load_mw")
+
+
+@pytest.mark.parametrize(
+    "workers,pool,overflow,demand",
+    [(1, 20, 20, 42), (2, 20, 20, 84), (4, 8, 8, 72)],
+)
+def test_pool_budget_matches_app_formula(workers, pool, overflow, demand):
+    """Бюджет стенда = N × (pool + overflow + 2), как в db.validate_pool_budget."""
+    budget = common.pool_budget(workers, pool, overflow, max_connections=100)
+    assert budget["demand"] == demand
+    assert budget["fits"] is True
+    tight = common.pool_budget(workers, pool, overflow, max_connections=demand - 1)
+    assert tight["fits"] is False

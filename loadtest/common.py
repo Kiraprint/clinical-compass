@@ -28,6 +28,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+from urllib.parse import unquote, urlsplit
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -60,10 +61,14 @@ DEFAULT_DB = "compass_loadtest"
 DEFAULT_COLLECTION = "kb_loadtest"
 ALLOW_ENV = "CC_LOADTEST_ALLOW"
 
-PG_HOST = "127.0.0.1"
-PG_PORT = 5432
-PG_USER = "compass"
-PG_PASSWORD = "compass"
+# Postgres стенда. Переопределяется env, чтобы параллельные прогоны (другие
+# worktree/агенты) не делили один сервер по умолчанию: имя БД — CC_LOADTEST_DB,
+# полный URL — CC_LOADTEST_DATABASE_URL (приоритет выше сборки из частей).
+PG_HOST = os.environ.get("CC_LOADTEST_PG_HOST", "127.0.0.1")
+PG_PORT = int(os.environ.get("CC_LOADTEST_PG_PORT", "5432"))
+PG_USER = os.environ.get("CC_LOADTEST_PG_USER", "compass")
+PG_PASSWORD = os.environ.get("CC_LOADTEST_PG_PASSWORD", "compass")
+DATABASE_URL_ENV = "CC_LOADTEST_DATABASE_URL"
 
 QDRANT_URL = os.environ.get("CC_QDRANT_URL", "http://127.0.0.1:6333")
 
@@ -74,9 +79,41 @@ class SafetyRefusal(RuntimeError):
     exit_code = 2
 
 
+def _override_url() -> str | None:
+    """CC_LOADTEST_DATABASE_URL: полный URL стенда вместо сборки из PG_*."""
+    return os.environ.get(DATABASE_URL_ENV) or None
+
+
+def _url_parts() -> dict[str, str | int]:
+    """Хост/порт/логин/пароль: из URL-override, иначе из PG_*."""
+    url = _override_url()
+    if not url:
+        return {
+            "host": PG_HOST,
+            "port": PG_PORT,
+            "user": PG_USER,
+            "password": PG_PASSWORD,
+        }
+    parts = urlsplit(url)
+    return {
+        "host": parts.hostname or PG_HOST,
+        "port": parts.port or PG_PORT,
+        "user": unquote(parts.username or PG_USER),
+        "password": unquote(parts.password or PG_PASSWORD),
+    }
+
+
 def resolve_db(name: str | None = None) -> str:
-    """Явный аргумент → CC_LOADTEST_DB → compass_loadtest (резолв в момент вызова)."""
-    return name or os.environ.get("CC_LOADTEST_DB") or DEFAULT_DB
+    """Явный аргумент → CC_LOADTEST_DB → имя из URL → compass_loadtest."""
+    if name:
+        return name
+    env_name = os.environ.get("CC_LOADTEST_DB")
+    if env_name:
+        return env_name
+    url = _override_url()
+    if url:
+        return urlsplit(url).path.lstrip("/") or DEFAULT_DB
+    return DEFAULT_DB
 
 
 def resolve_collection(name: str | None = None) -> str:
@@ -85,12 +122,71 @@ def resolve_collection(name: str | None = None) -> str:
 
 
 def db_url(name: str | None = None) -> str:
-    return f"postgresql+psycopg://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{resolve_db(name)}"
+    """async-URL для приложения: URL-override (если имя не задано) или сборка."""
+    url = _override_url()
+    if url and name is None:
+        return url
+    parts = _url_parts()
+    return (
+        f"postgresql+psycopg://{parts['user']}:{parts['password']}"
+        f"@{parts['host']}:{parts['port']}/{resolve_db(name)}"
+    )
+
+
+def pg_dsn(dbname: str = "postgres") -> str:
+    """libpq-DSN для psycopg (provision и снимки pg_stat_activity)."""
+    parts = _url_parts()
+    return (
+        f"host={parts['host']} port={parts['port']} user={parts['user']} "
+        f"password={parts['password']} dbname={dbname}"
+    )
 
 
 def redacted_db_url(name: str | None = None) -> str:
-    return f"postgresql+psycopg://{PG_USER}:***@{PG_HOST}:{PG_PORT}/{resolve_db(name)}"
+    return re.sub(r"://([^:/@]+):[^@]*@", r"://\1:***@", db_url(name))
 
+
+# Бюджет соединений Postgres. app/db.validate_pool_budget() считает то же
+# выражение из env и падает на старте воркера; harness считает его заранее,
+# чтобы отчёт называл конфигурацию, а не «API не поднялся».
+POOL_SYNC_ALLOWANCE = 2
+DEFAULT_POOL_SIZE = 20
+DEFAULT_MAX_OVERFLOW = 20
+DEFAULT_MAX_CONNECTIONS = 100
+
+
+def pool_budget(
+    workers: int,
+    pool_size: int = DEFAULT_POOL_SIZE,
+    max_overflow: int = DEFAULT_MAX_OVERFLOW,
+    *,
+    max_connections: int | None = None,
+) -> dict:
+    """N × (pool + overflow + 2 служебных) ≤ CC_DB_MAX_CONNECTIONS.
+
+    Фоновые процессы в стенде не запущены (CC_DB_BACKGROUND_PROCESSES=0),
+    поэтому их пулы в бюджет не входят.
+    """
+    limit = max_connections or int(
+        os.environ.get("CC_DB_MAX_CONNECTIONS", str(DEFAULT_MAX_CONNECTIONS))
+    )
+    demand = workers * (pool_size + max_overflow + POOL_SYNC_ALLOWANCE)
+    return {
+        "workers": workers,
+        "pool_size": pool_size,
+        "max_overflow": max_overflow,
+        "sync_allowance": POOL_SYNC_ALLOWANCE,
+        "background_processes": 0,
+        "per_worker": pool_size + max_overflow,
+        "demand": demand,
+        "max_connections": limit,
+        "fits": demand <= limit,
+        "formula": (
+            f"{workers} × (CC_DB_POOL_SIZE={pool_size} + "
+            f"CC_DB_MAX_OVERFLOW={max_overflow} + {POOL_SYNC_ALLOWANCE}) = {demand}"
+            f" ≤ CC_DB_MAX_CONNECTIONS={limit}"
+        ),
+    }
 
 def _check_name(kind: str, value: str, prefix: str, env_var: str, flag: str) -> str:
     # Только [a-z0-9_] и длина ≤ 48: имя подставляется в DDL (DROP DATABASE),
@@ -201,6 +297,14 @@ class ResourceSample:
     cpu_seconds: float = 0.0
     threads: int = 0
 
+def self_cpu_seconds() -> float:
+    """CPU текущего процесса (генератора) в секундах — для оценки его насыщения."""
+    try:
+        fields = Path("/proc/self/stat").read_text().rsplit(")", 1)[-1].split()
+        return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+    except (OSError, IndexError, ValueError):
+        return 0.0
+
 
 def _read_status(pid: int) -> ResourceSample:
     sample = ResourceSample()
@@ -221,31 +325,129 @@ def _read_status(pid: int) -> ResourceSample:
     return sample
 
 
-class ResourceSampler:
-    """Пиковый RSS/CPU процесса API за время замера."""
+def _children(pid: int) -> list[int]:
+    """Прямые потомки PID через /proc/<pid>/task/*/children (CONFIG_PROC_CHILDREN)."""
+    kids: list[int] = []
+    try:
+        tasks = list(Path(f"/proc/{pid}/task").iterdir())
+    except OSError:
+        return kids
+    for task in tasks:
+        try:
+            kids += [int(value) for value in (task / "children").read_text().split()]
+        except (OSError, ValueError):
+            continue
+    return kids
 
-    def __init__(self, pid: int):
+
+def _proc_tree(root: int) -> list[int]:
+    """PID root и все его потомки.
+
+    Основной путь — `children` (несколько чтений); если ядро не отдало файл —
+    полный обход /proc по ppid. Опрос идёт каждые 0.25 с от процесса-генератора,
+    поэтому полный обход на нагруженной машине был бы заметной помехой замеру.
+    """
+    tree = [root]
+    frontier = [root]
+    while frontier:
+        nxt: list[int] = []
+        for pid in frontier:
+            for kid in _children(pid):
+                if kid not in tree:
+                    tree.append(kid)
+                    nxt.append(kid)
+        frontier = nxt
+    if len(tree) > 1:
+        return tree
+
+    parents: dict[int, int] = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text()
+        except OSError:
+            continue
+        # comm может содержать пробелы и скобки: режем по последней ')'.
+        fields = stat.rsplit(")", 1)[-1].split()
+        try:
+            parents[int(entry.name)] = int(fields[1])
+        except (IndexError, ValueError):
+            continue
+    tree = [root]
+    changed = True
+    while changed:  # потомки добавляются слоями: дерево маленькое
+        changed = False
+        for pid, ppid in parents.items():
+            if ppid in tree and pid not in tree:
+                tree.append(pid)
+                changed = True
+    return tree
+
+
+def _read_tree(root: int) -> ResourceSample:
+    """Суммарные CPU/RSS всех процессов дерева (supervisor uvicorn + воркеры)."""
+    total = ResourceSample()
+    for pid in _proc_tree(root):
+        sample = _read_status(pid)
+        total.rss_kb += sample.rss_kb
+        total.cpu_seconds += sample.cpu_seconds
+        total.threads += sample.threads
+    return total
+
+
+def uvicorn_pids(root: int) -> list[int]:
+    """Процессы дерева без служебных: supervisor uvicorn и его воркеры.
+
+    `multiprocessing` добавляет в дерево `resource_tracker` (в его cmdline есть
+    `resource_tracker`) — он не обслуживает запросы, и в счётчике процессов ему
+    места нет.
+    """
+    pids: list[int] = []
+    for pid in _proc_tree(root):
+        try:
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            continue
+        if b"resource_tracker" not in cmdline:
+            pids.append(pid)
+    return pids
+
+
+class ResourceSampler:
+    """Пиковый RSS/CPU процесса API за время замера.
+
+    `tree=True` суммирует дерево процессов: при `WEB_CONCURRENCY>1` uvicorn
+    держит supervisor и N дочерних воркеров, и CPU одного PID занизил бы нагрузку
+    в N раз.
+    """
+
+    def __init__(self, pid: int, *, tree: bool = False):
         self.pid = pid
+        self.tree = tree
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self.peak = ResourceSample()
         self.start_sample = ResourceSample()
         self.end_sample = ResourceSample()
 
+    def _sample(self) -> ResourceSample:
+        return _read_tree(self.pid) if self.tree else _read_status(self.pid)
+
     def _loop(self) -> None:
         while not self._stop.wait(0.25):
-            s = _read_status(self.pid)
+            s = self._sample()
             if s.rss_kb > self.peak.rss_kb:
                 self.peak.rss_kb = s.rss_kb
             self.peak.threads = max(self.peak.threads, s.threads)
 
     def __enter__(self) -> "ResourceSampler":
-        self.start_sample = _read_status(self.pid)
+        self.start_sample = self._sample()
         self._thread.start()
         return self
 
     def __exit__(self, *exc: object) -> None:
-        self.end_sample = _read_status(self.pid)
+        self.end_sample = self._sample()
         self._stop.set()
         self._thread.join(timeout=2)
 
@@ -256,7 +458,9 @@ class ResourceSampler:
             "cpu_seconds": round(cpu, 2),
             "cpu_percent_one_core": round(100 * cpu / wall_s, 1) if wall_s else 0.0,
             "threads": self.peak.threads,
+            "processes": len(uvicorn_pids(self.pid)) if self.tree else 1,
         }
+
 
 
 def percentile(values: list[float], p: float) -> float:
@@ -397,8 +601,6 @@ async def _worker(
                 status_counts[status] = status_counts.get(status, 0) + 1
         finally:
             latencies.append((time.perf_counter() - t0) * 1000)
-
-
 async def run_closed_loop(
     scenario: Scenario,
     *,
@@ -406,7 +608,10 @@ async def run_closed_loop(
     duration_s: float,
     warmup_s: float = 1.0,
     pid: int | None = None,
+    base_url: str | None = None,
+    tree: bool = False,
 ) -> LoadResult:
+    """Замкнутый контур. base_url/pid — конкретного экземпляра API, не модульные."""
     import httpx
 
     limits = httpx.Limits(
@@ -415,7 +620,7 @@ async def run_closed_loop(
     )
     timeout = httpx.Timeout(30.0)
     async with httpx.AsyncClient(
-        base_url=BASE_URL, limits=limits, timeout=timeout
+        base_url=base_url or BASE_URL, limits=limits, timeout=timeout
     ) as client:
         # Прогрев соединений и пула БД, в статистику не входит.
         warm_deadline = time.perf_counter() + warmup_s
@@ -431,9 +636,13 @@ async def run_closed_loop(
         counters: dict[str, int] = {"requests": 0, "flows": 0, "errors": 0}
         status_counts: dict[int, int] = {}
         error_types: dict[str, int] = {}
-        sampler = ResourceSampler(pid) if pid else None
+        sampler = ResourceSampler(pid, tree=tree) if pid else None
         if sampler is not None:
             sampler.__enter__()
+        # CPU самого генератора: однопроцессный asyncio-клиент упирается в своё
+        # ядро раньше сервера, и без этой цифры легко приписать клиенту заслуги
+        # сервера (или наоборот).
+        client_cpu_0 = self_cpu_seconds()
         start = time.perf_counter()
         deadline = start + duration_s
         try:
@@ -448,11 +657,15 @@ async def run_closed_loop(
             ]
             await asyncio.gather(*workers)
             wall = time.perf_counter() - start
+            client_cpu = self_cpu_seconds() - client_cpu_0
         finally:
             if sampler is not None:
                 sampler.__exit__(None, None, None)
 
     resources = sampler.report(wall) if sampler else {}
+    resources["client_cpu_percent_one_core"] = (
+        round(100 * client_cpu / wall, 1) if wall else 0.0
+    )
     return LoadResult(
         name=scenario.name,
         concurrency=concurrency,
@@ -471,8 +684,8 @@ async def run_closed_loop(
 __all__ = [
     "ALLOW_ENV", "COLLECTION_PREFIX", "DB_PREFIX", "DEFAULT_COLLECTION", "DEFAULT_DB",
     "BASE_URL", "QDRANT_URL", "SafetyRefusal", "assert_destructive", "assert_safe",
-    "apply_env", "describe_target", "db_url", "git_provenance", "redacted_db_url",
-    "resolve_collection", "resolve_db", "setup_env",
+    "apply_env", "describe_target", "db_url", "pg_dsn", "git_provenance",
+    "redacted_db_url", "resolve_collection", "resolve_db", "setup_env",
     "API_DIR", "CORE_DIR", "ROOT", "RESULTS_DIR", "PYTHON", "JWT_SECRET", "PASSWORD",
     "PATIENTS", "CLINICIANS", "ResourceSampler", "Scenario", "run_closed_loop",
     "latency_summary", "percentile", "write_json", "read_json",

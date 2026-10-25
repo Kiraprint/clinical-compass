@@ -132,7 +132,10 @@ def _remeasure_block(meta: dict, prov: dict) -> list[str]:
         "python -m loadtest.provision --dry-run",
         "# 3) пересоздать БД/коллекцию: схема, users, drugs, корпус + bench",
         f"python -m loadtest.provision --embedder {embedder}",
-        "# 4) полный прогон (provision → API → ML → HTTP → ядро → REPORT.md)",
+        "# 4) многопроцессный режим (WEB_CONCURRENCY 1/2/4) и пересборка отчёта",
+        "python -m loadtest.run_workers --workers 1,2,4",
+        "python -m loadtest.report",
+        "# 5) полный прогон (provision → API → ML → HTTP → ядро → REPORT.md)",
         f"python -m loadtest.run_all --embedder {embedder}",
         "# быстрый смоук: python -m loadtest.run_all --quick --embedder " + embedder,
         "```",
@@ -149,12 +152,146 @@ def _remeasure_block(meta: dict, prov: dict) -> list[str]:
     ]
 
 
+def _workers_block(workers: dict) -> list[str]:
+    """Раздел «Многопроцессный режим» из results/workers.json (run_workers.py)."""
+    lines: list[str] = []
+    add = lines.append
+    summary = workers.get("summary", {})
+    levels = workers.get("levels") or []
+
+    add("## 5. Многопроцессный режим (WEB_CONCURRENCY)")
+    add("")
+    add("Свежий сервер на каждое число воркеров (`--workers N` и `WEB_CONCURRENCY=N`, "
+        "приложение строкой импорта `app.main:app`), C∈{"
+        + ", ".join(str(c) for c in levels) + "}, "
+        f"{_num(workers.get('duration_s'), 0)} с на точку, прогрев "
+        f"{_num(workers.get('warmup_s'), 2)} с. Сценарии без эмбеддера: `health` "
+        "(предел HTTP-слоя) и `diary_read` (JWT + PostgreSQL + аудит).")
+    add("")
+    add("| Воркеров | Пул на процесс | Бюджет соединений | Сценарий | Лучший RPS | C | "
+        "p95, мс | Ошибки | Масштаб vs 1 | CPU сервера | CPU клиента | Процессов* |")
+    add("|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+    for key in sorted(summary, key=int):
+        block = summary[key]
+        budget = block.get("budget") or {}
+        pool = f"{budget.get('pool_size')}+{budget.get('max_overflow')}"
+        for scenario, row in block.get("points", {}).items():
+            lat = row.get("latency_at_best") or {}
+            add(f"| {block.get('workers')} | {pool} | {budget.get('demand', '—')} | "
+                f"{scenario} | {_num(row.get('best_rps'))} | "
+                f"{row.get('best_concurrency') or '—'} | {_ms(lat.get('p95'))} | "
+                f"{_num(row.get('error_total'), 0)} | "
+                f"{_num(row.get('scaling_vs_1'), 2)} | "
+                f"{_num(row.get('cpu_at_best', row.get('peak_cpu_percent_one_core')), 0)} | "
+                f"{_num(row.get('client_cpu_at_best'), 0) if row.get('client_cpu_at_best') is not None else '—'} | "
+                f"{_num(row.get('processes'), 0)} |")
+    add("")
+    add("\\* «Процессов» — supervisor uvicorn и его воркеры; CPU сервера — сумма по "
+        "всему дереву (иначе N воркеров выглядели бы как один), CPU клиента — процесс "
+        "генератора (один asyncio-клиент на все соединения), 100 % = одно ядро.")
+    add("")
+
+    # Кривые по конкуренции: точка важнее «лучшего» RPS, который ловит шум.
+    by_point = {}
+    worker_list = sorted(
+        {b.get("workers") for b in workers.get("worker_configs", []) if b.get("points")}
+    )
+    for block in workers.get("worker_configs", []):
+        for point in block.get("points") or []:
+            by_point[(point.get("key"), point.get("workers"), point.get("concurrency"))] = point
+    for scenario in (workers.get("scenarios") or []):
+        add(f"| `{scenario}`: RPS по конкуренции | "
+            + " | ".join(f"{w} ворк." for w in worker_list) + " |")
+        add("|---:|" + "---:|" * len(worker_list))
+        for c in workers.get("levels") or []:
+            cells = []
+            for w in worker_list:
+                point = by_point.get((scenario, w, c)) or {}
+                cells.append(_num(point.get("rps")))
+            add(f"| C={c} | " + " | ".join(cells) + " |")
+        add("")
+    for key in sorted(summary, key=int):
+        block = summary[key]
+        for scenario, row in block.get("points", {}).items():
+            sat = row.get("saturation") or {}
+            parts = [
+                f"{block.get('workers')} ворк.: `{scenario}` — пик "
+                f"{_num(sat.get('peak_rps'))} RPS при C={sat.get('peak_concurrency')}"
+            ]
+            tail = sat.get("rps_after_peak") or []
+            if tail:
+                parts.append(
+                    "после пика "
+                    + ", ".join(f"C={p['concurrency']}→{_num(p['rps'])}" for p in tail)
+                )
+            if sat.get("first_error_concurrency"):
+                types = sat.get("first_error_types") or {}
+                parts.append(
+                    f"первые ошибки при C={sat['first_error_concurrency']} "
+                    f"({sat.get('first_error_rate', 0):.0%}: "
+                    + ", ".join(f"{k}×{v}" for k, v in types.items()) + ")"
+                )
+            add("- " + "; ".join(parts) + ".")
+    add("")
+
+    for block in workers.get("worker_configs", []):
+        if block.get("error"):
+            add(f"> Набор воркеров {block.get('workers')} не стартовал: "
+                f"`{str(block['error']).splitlines()[0]}`")
+            add("")
+
+    budget = next(iter(summary.values()), {}).get("budget") or {}
+    if budget:
+        add(f"Бюджет соединений: {budget.get('formula', '—')}. Каждый воркер "
+            "проверяет его сам в `app.db.validate_pool_budget()` и падает на старте "
+            "с точной конфигурацией, поэтому «воркеров больше — пул на процесс "
+            "меньше» здесь не оптимизация, а условие старта.")
+        add("")
+
+    drift = workers.get("drift") or {}
+    if drift.get("ratio") is not None:
+        add(f"Контроль дрейфа машины: те же 1 воркер и `health` C="
+            f"{drift.get('concurrency')} в начале и в конце прогона дали "
+            f"{_num(drift.get('first_rps'))} и {_num(drift.get('last_rps'))} RPS "
+            f"(×{drift['ratio']:.2f}) — настолько числа зависят от чужой нагрузки "
+            "на машине, а не от воркеров.")
+        add("")
+
+    peak_conn, peak_where, idle_max = 0, "", 0
+    for block in workers.get("worker_configs", []):
+        for point in block.get("points") or []:
+            snapshot = point.get("pg") or {}
+            conns = snapshot.get("loadtest_connections", 0) or 0
+            if conns > peak_conn:
+                peak_conn, peak_where = conns, (
+                    f"{point.get('workers')} ворк./C={point.get('concurrency')}"
+                )
+            idle_max = max(idle_max, snapshot.get("idle_in_transaction", 0) or 0)
+    final = workers.get("pg_final") or {}
+    if final:
+        add(f"`pg_stat_activity`: пик соединений стенда за точки — {peak_conn} "
+            f"({peak_where or '—'}), idle-in-transaction максимум за точки — "
+            f"**{idle_max}**; после остановки сервера idle-in-transaction = "
+            f"**{final.get('idle_in_transaction', '—')}**, соединений стенда = "
+            f"{final.get('loadtest_connections', '—')}, всего в кластере = "
+            f"{final.get('total', '—')} из {final.get('max_connections', '—')}.")
+        add("")
+
+    add("Ограничение режима: лимитер запросов (`app.ratelimit`), лимитер агента и "
+        "кеш корпуса (`build_corpus`) живут в памяти процесса. Без `CC_REDIS_URL` "
+        "каждый воркер считает свой счётчик, поэтому фактический лимит инсталляции "
+        "становится N × `CC_RATE_MAX`, а корпус прогревается N раз. Это свойство "
+        "конфигурации, а не стенда: с общим Redis счётчик один на инсталляцию.")
+    add("")
+    return lines
+
 def build() -> Path:
     meta = _load("meta.json")
     core = _load("core.json")
     http = _load("http.json")
     ml = _load("ml.json")
     cliff = _load("cliff.json")
+    workers = _load("workers.json")
 
     lines: list[str] = []
     add = lines.append
@@ -398,7 +535,15 @@ def build() -> Path:
         for point in flow.get("points", []):
             if point["concurrency"] == flow.get("max_rps_concurrency"):
                 flow_rate = point["flows_per_s"]
-        add("## 5. Выводы")
+
+    # Номер следующего раздела зависит от того, есть ли замер WEB_CONCURRENCY:
+    # без него отчёт остаётся таким же, каким был до появления run_workers.
+    tail = 5
+    if workers:
+        lines.extend(_workers_block(workers))
+        tail = 6
+    if http:
+        add(f"## {tail}. Выводы")
         add("")
         if health_rps:
             add(f"- Предел одного процесса uvicorn без БД: **{_num(health_rps)} RPS**.")
@@ -479,7 +624,7 @@ def build() -> Path:
                 f"один раз на сборку. Реальный путь агента (поиск + ответ) — строка "
                 f"`agent.AgentFactory.invoke` в разделе 2.")
         add("")
-        add("### 5.1 Сравнение с прошлыми прогонами")
+        add(f"### {tail}.1 Сравнение с прошлыми прогонами")
         add("")
         add("Исторические числа этого отчёта (базовый прогон 2026-10-23, отдельный "
             "замер bge-m3 на RTX 5090) удалены: у них не был зафиксирован git-коммит, "
@@ -488,10 +633,17 @@ def build() -> Path:
             "(провенанс — раздел 0): выполните «Как перемерить» на двух коммитах и "
             "сопоставьте таблицы.")
         add("")
-        add("## 6. Ограничения")
+        add(f"## {tail + 1}. Ограничения")
         add("")
-        add("- Один процесс API, без nginx/TLS и без внешнего LLM; `WEB_CONCURRENCY` "
-            "поддержан, но в этом прогоне не измерялся.")
+        if workers:
+            add("- Многопроцессный режим измерен отдельным прогоном "
+                "`python -m loadtest.run_workers` (раздел 5) на той же машине, но не "
+                "одновременно с остальными замерами: абсолютные RPS двух разделов "
+                "сравнимы только с поправкой на чужую нагрузку (см. контроль дрейфа).")
+        else:
+            add("- Один процесс API, без nginx/TLS и без внешнего LLM; "
+                "`WEB_CONCURRENCY` поддержан, но в этом прогоне не измерялся "
+                "(замер: `python -m loadtest.run_workers`).")
         add("- Postgres и Qdrant — локально в Docker; межсерверная сеть не моделируется.")
         add("- Эмбеддер `hash` — демо-база; bge-m3 включается `CC_EMBEDDER=bge-m3` "
             "с extra `embeddings` и переиндексацией KB.")
