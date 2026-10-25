@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import threading
+import time
+import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -68,6 +70,67 @@ def stub(monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
+
+@pytest.fixture(autouse=True)
+def _reset_breaker(monkeypatch):
+    """Предохранитель — состояние модуля: сбрасываем между тестами."""
+    monkeypatch.setattr(ml_client, "_breaker_failures", 0)
+    monkeypatch.setattr(ml_client, "_breaker_open_until", 0.0)
+    monkeypatch.setattr(ml_client, "_RETRY_DELAY", 0.0)
+    yield
+
+
+def _dead_transport(monkeypatch):
+    """urlopen, который всегда падает по сети, со счётчиком обращений."""
+    calls = {"n": 0}
+
+    def boom(*args, **kwargs):
+        calls["n"] += 1
+        raise urllib.error.URLError("down")
+
+    monkeypatch.setattr(ml_client.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(settings, "ml_url", "http://127.0.0.1:1")
+    return calls
+
+
+def test_breaker_opens_after_three_network_failures(monkeypatch):
+    calls = _dead_transport(monkeypatch)
+    for _ in range(3):
+        with pytest.raises(ml_client.MlUnavailable):
+            ml_client.mask("Иванов Пётр")
+    assert calls["n"] == 6  # по два захода на вызов (один повтор)
+    with pytest.raises(ml_client.MlUnavailable) as err:
+        ml_client.mask("Иванов Пётр")
+    assert calls["n"] == 6, "разомкнутая цепь не должна ходить в сеть"
+    assert "пауза" in str(err.value)
+
+
+def test_breaker_half_open_after_cooldown(monkeypatch):
+    calls = _dead_transport(monkeypatch)
+    monkeypatch.setattr(ml_client, "_breaker_failures", ml_client._FAILURE_LIMIT)
+    monkeypatch.setattr(ml_client, "_breaker_open_until", time.monotonic() - 1)
+    with pytest.raises(ml_client.MlUnavailable):
+        ml_client.mask("x")
+    assert calls["n"] == 2, "после паузы вызов снова идёт в сеть (полуоткрытое состояние)"
+
+
+def test_success_resets_failure_counter(monkeypatch, stub):
+    monkeypatch.setattr(ml_client, "_breaker_failures", ml_client._FAILURE_LIMIT - 1)
+    stub.responses = [(200, {"text": "ok", "spans": [], "model": "hybrid"})]
+    ml_client.mask("x")
+    assert ml_client._breaker_failures == 0
+    assert ml_client._breaker_open_until == 0.0
+
+
+def test_client_4xx_does_not_open_breaker(stub):
+    for _ in range(5):
+        stub.responses = [(422, {"detail": "bad"})]
+        with pytest.raises(ml_client.MlUnavailable):
+            ml_client.mask("x")
+    assert ml_client._breaker_failures == 0, "4xx — ошибка запроса, а не отказ сервиса"
+    stub.responses = [(200, {"text": "ok", "spans": [], "model": "hybrid"})]
+    assert ml_client.mask("x")["text"] == "ok"
+
 
 def test_disabled_without_url(monkeypatch):
     monkeypatch.setattr(settings, "ml_url", "")

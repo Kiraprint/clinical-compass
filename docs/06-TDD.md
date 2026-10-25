@@ -404,6 +404,8 @@ e2e-хелперы вынесены в `e2e/tests/helpers.ts` (TOTP RFC 4648 bas
 - Подготовка (единый venv): `pip install -e "core[dev]" -e "api[dev]"`; тестовый Postgres — `docker compose -f infra/docker-compose.yml up -d postgres` (тестовая БД `compass_test` создаётся фикстурой, URL в `CC_TEST_DATABASE_URL`).
 - Команда прогона: `pytest core api -q` (интеграция — против реального Postgres, не моков).
 - Покрытие ядра (DoD E1, ≥95%): `pytest core --cov=compass --cov-fail-under=95 --cov-report=term-missing` (нужен `pytest-cov` в dev-extra).
+Предохранитель ML-клиента (docs/12): | ML-клиент | `test_breaker_opens_after_three_network_failures`, `test_breaker_half_open_after_cooldown`, `test_success_resets_failure_counter`, `test_client_4xx_does_not_open_breaker` — предохранитель не ходит в сеть при разомкнутой цепи, пропускает пробу после паузы, не размыкается на 4xx | 4 |
+
 - e2e (UI-флоу): `cd e2e && npx playwright test` — запускать при изменении `ui/` или контрактов API; против поднятого `docker compose up -d postgres api ui`.
 - Перед каждым коммитом — полный прогон `pytest core api -q` + (при изменении UI) e2e.
 
