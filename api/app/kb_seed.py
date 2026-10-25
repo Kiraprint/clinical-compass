@@ -134,17 +134,21 @@ def _guideline_docs(with_full_text: bool = False) -> list[dict]:
             cache = _GUIDELINES_CACHE / f"{g['id']}.txt"
             if cache.exists():
                 full = cache.read_text(encoding="utf-8")
-                for i in range(0, len(full), 1800):
-                    chunk = full[i : i + 1800].strip()
-                    if chunk:
-                        docs.append(
-                            {
-                                "guideline_id": f"kr-{g['id']}-t{i // 1800}",
-                                "source_title": g["title"],
-                                "topic": "РЕКОМЕНДАЦИИ",
-                                "text": chunk,
-                            }
-                        )
+                # Нарезка та же, что у enrichment/index.py: параметры CC_KB_CHUNK_*
+                # (docs/08 §3), чтобы сид и гайдлайны ВОЗ индексировались одинаково.
+                from app.enrichment.index import chunk_text
+
+                for idx, chunk in enumerate(
+                    chunk_text(full, settings.kb_chunk_chars, settings.kb_chunk_overlap)
+                ):
+                    docs.append(
+                        {
+                            "guideline_id": f"kr-{g['id']}-t{idx}",
+                            "source_title": g["title"],
+                            "topic": "РЕКОМЕНДАЦИИ",
+                            "text": chunk,
+                        }
+                    )
     return docs
 
 
@@ -411,9 +415,29 @@ def main() -> None:
     # Переиндексация всегда читает БД/файлы заново: не индексируем закешированный корпус.
     clear_corpus_cache()
     docs = build_corpus(with_guidelines=args.with_guidelines)
-    n = kb.upsert_documents(client, build_embedder(), docs)
+    n = upsert_corpus(client, build_embedder(), docs)
     total = kb.count_points(client)
     print(f"Индексировано {n} чанков; всего в коллекции {kb.COLLECTION}: {total}")
+
+def upsert_corpus(client, embedder, docs: tuple[dict, ...]) -> int:
+    """Эмбеддинги → снос чанков прошлой нарезки → запись.
+
+    Порядок обязателен: эмбеддинги считаются ДО удаления, иначе сбой сайдкара
+    между `delete_sources` и upsert оставил бы прод без гайдлайнов. Повторный
+    `--with-guidelines` не дублирует чанки прошлой генерации: point id —
+    md5(text), а границы chunk_text() зависят от CC_KB_CHUNK_*; сносим точки
+    засеваемых КР по source_title + префиксу guideline_id `kr-` (статьи с тем же
+    заголовком не трогаем). --reset не нужен.
+    """
+    points = kb.build_points(embedder, docs)
+    titles = {
+        d["source_title"]
+        for d in docs
+        if str(d.get("guideline_id", "")).startswith("kr-")
+    }
+    if titles and client.collection_exists(kb.COLLECTION):
+        kb.delete_sources(client, titles, id_prefix="kr-")
+    return kb.upsert_points(client, points, dense_size=embedder.dense_size)
 
 
 if __name__ == "__main__":

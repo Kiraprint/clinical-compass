@@ -38,10 +38,13 @@ class IndexConfigError(RuntimeError):
 def _dense_mismatch(actual: int, expected: int) -> IndexConfigError:
     return IndexConfigError(
         f"Коллекция '{COLLECTION}' построена с dense={actual}, а эмбеддер даёт "
-        f"{expected}. Dense-вектора разных моделей несравнимы: пересоздайте индекс "
-        f"`python -m app.kb_seed --reset` с текущим CC_EMBEDDER (это переиндексация "
-        f"всего корпуса; после неё верните опубликованные гайдлайны и статьи "
-        f"`python -m app.enrichment reindex`) или верните прежний CC_EMBEDDER."
+        f"{expected}. Dense-вектора разных моделей несравнимы. Сначала задайте "
+        f"ОТДЕЛЬНУЮ коллекцию под новый профиль (CC_QDRANT_COLLECTION=kb_<profile>"
+        f" и `python -m app.kb_seed`) — рабочая `kb` и документированный откат "
+        f"(docs/08 §4.7) остаются целы. `python -m app.kb_seed --reset` — только "
+        f"как последнее средство: он сносит коллекцию '{COLLECTION}' целиком "
+        f"(после него верните гайдлайны и статьи `python -m app.enrichment "
+        f"reindex`). Либо верните прежний CC_EMBEDDER."
     )
 
 
@@ -92,23 +95,25 @@ def _point_id(text: str) -> str:
     return str(uuid.UUID(hashlib.md5(text.encode("utf-8")).hexdigest()))
 
 
-def upsert_documents(
-    client: QdrantClient,
-    embedder: Embedder,
-    documents: Sequence[dict],
-) -> int:
-    """Загружает чанки. Каждый doc: {guideline_id, source_title, topic, text}.
+def build_points(embedder: Embedder, documents: Sequence[dict]) -> list[qm.PointStruct]:
+    """Точки для upsert: эмбеддинги + payload, без записи в Qdrant.
 
-    Дедупликация по text_hash; повторный заход не плодит дубли (docs/08 §5).
-    Sparse-вектор пишется всегда: профиль эмбеддера может смениться, а коллекция
-    под него всё равно пересобирается.
+    Отделено от записи, чтобы вызывающий мог СНАЧАЛА посчитать эмбеддинги и
+    только потом сносить старые точки: сбой эмбеддера не должен оставить
+    коллекцию без гайдлайнов (так же устроен enrichment/index.py).
+    Каждый doc: {guideline_id, source_title, topic, text}.
     """
-    ensure_collection(client, embedder.dense_size)
+    texts = [doc["text"].strip() for doc in documents]
+    # Пачкой, если эмбеддер умеет (RemoteEmbedder: пачка HTTP вместо POST на
+    # чанк — ре-сид не делает ~3362 запроса).
+    batch = getattr(embedder, "dense_batch", None)
+    dense_vectors = batch(texts) if batch is not None else [embedder.dense(t) for t in texts]
+    if len(dense_vectors) != len(texts):
+        raise RuntimeError(
+            f"эмбеддер вернул {len(dense_vectors)} dense-векторов на {len(texts)} чанков"
+        )
     points: list[qm.PointStruct] = []
-    for i, doc in enumerate(documents):
-        text = doc["text"].strip()
-        text_hash = _hash(text)
-        dense = embedder.dense(text)
+    for i, (doc, text, dense) in enumerate(zip(documents, texts, dense_vectors)):
         indices, values = embedder.sparse(text)
         points.append(
             qm.PointStruct(
@@ -123,13 +128,94 @@ def upsert_documents(
                     "topic": doc.get("topic", ""),
                     "chunk_index": i,
                     "text": text,
-                    "text_hash": text_hash,
+                    "text_hash": _hash(text),
                 },
             )
         )
-    client.upsert(collection_name=COLLECTION, points=points, wait=True)
+    return points
+
+def upsert_points(
+    client: QdrantClient,
+    points: Sequence[qm.PointStruct],
+    *,
+    dense_size: int,
+) -> int:
+    """Записать готовые точки (см. build_points). Возвращает их число."""
+    ensure_collection(client, dense_size)
+    if not points:
+        return 0
+    client.upsert(collection_name=COLLECTION, points=list(points), wait=True)
     return len(points)
 
+def upsert_documents(
+    client: QdrantClient,
+    embedder: Embedder,
+    documents: Sequence[dict],
+) -> int:
+    """Загружает чанки. Каждый doc: {guideline_id, source_title, topic, text}.
+
+    Дедупликация по text_hash; повторный заход не плодит дубли (docs/08 §5).
+    Sparse-вектор пишется всегда: профиль эмбеддера может смениться, а коллекция
+    под него всё равно пересобирается.
+    """
+    return upsert_points(
+        client, build_points(embedder, documents), dense_size=embedder.dense_size
+    )
+
+_SCROLL_PAGE = 256
+_DELETE_BATCH = 512
+
+def delete_sources(
+    client: QdrantClient,
+    source_titles: Sequence[str],
+    *,
+    id_prefix: str | None = None,
+    wait: bool = True,
+) -> int:
+    """Удалить точки указанных источников перед повторным засевом.
+
+    Point id производен от текста чанка (`_point_id`), а границы нарезки зависят
+    от CC_KB_CHUNK_*: повторный `kb_seed --with-guidelines` с другой нарезкой
+    оставил бы чанки прошлой генерации рядом с новыми (id другие). Фильтр по
+    source_title — стабильному имени источника — сносит все поколения сразу,
+    поэтому count после повторного сида не растёт (docs/08 §5).
+
+    `id_prefix` дополнительно сужает удаление до точек, у которых guideline_id
+    начинается с префикса (`kr-` у КР): Qdrant не умеет prefix-фильтр по payload,
+    поэтому точки читаются scroll'ом и фильтруются на клиенте. Возвращает число
+    удалённых точек.
+    """
+    titles = sorted({t for t in source_titles if t})
+    if not titles:
+        return 0
+    source_filter = qm.Filter(
+        must=[qm.FieldCondition(key="source_title", match=qm.MatchAny(any=titles))]
+    )
+    ids: list[str] = []
+    offset = None
+    while True:
+        points, offset = client.scroll(
+            collection_name=COLLECTION,
+            scroll_filter=source_filter,
+            limit=_SCROLL_PAGE,
+            offset=offset,
+            with_payload=["guideline_id"],
+            with_vectors=False,
+        )
+        for point in points:
+            payload = point.payload or {}
+            if id_prefix is not None and not str(payload.get("guideline_id", "")).startswith(id_prefix):
+                continue
+            ids.append(str(point.id))
+        if offset is None:
+            break
+    for start in range(0, len(ids), _DELETE_BATCH):
+        client.delete(
+            collection_name=COLLECTION,
+            points_selector=qm.PointIdsList(points=ids[start : start + _DELETE_BATCH]),
+            wait=wait,
+        )
+    return len(ids)
 
 def hybrid_search(
     client: QdrantClient,
@@ -139,20 +225,37 @@ def hybrid_search(
     topic: str | None = None,
     limit: int = 5,
     exclude_ids: set[str] | None = None,
+    candidates: int | None = None,
+    reranker=None,
+    rrf_k: int | None = None,
+    min_score: float | None = None,
 ) -> list[dict]:
     """Поиск по базе знаний: стратегия зависит от эмбеддера (Embedder.use_sparse).
 
     - hash (демо/тесты): dense + лексический sparse prefetch → RRF fusion.
       Hash-dense шумит, точный лексический канал вытаскивает термины;
-    - bge-m3 (прод): dense-only. RRF уравнивает сильный мультиязычный dense и
-      слабый лексический канал и на золотом наборе роняет RU nDCG@3 с 0.78 до
-      0.49 (55 запросов; bench/eval_app_path.py) — семантически релевантные
-      чанки уступают лексическим совпадениям.
+    - dense-профили (bge-m3, qwen3-0.6b, e5-large-instruct, user-bge-m3):
+      dense-only — RRF с лексическим каналом на RU→EN перефразах только мешает
+      (bench/REPORT-retrieval.md).
 
-    Возвращает [{guideline_id, source_title, topic, score, text}] — текст берём
-    из базового фрагмента (полный корпус хранится отдельно; здесь метаданные).
+    candidates — глубина пула ДО реранка/отсечки (CC_RETRIEVAL_CANDIDATES;
+    None/0 → историческое max(limit*3, 10)). reranker — объект с методом
+    rerank(query, hits, limit, exclude_ids=...) (app.services.reranker);
+    без него — порядок каналов как есть. rrf_k — константа RRF (CC_RRF_K,
+    не задана → серверный дефолт Qdrant). min_score — порог «нет релевантного
+    ответа» по dense-косинусу профиля: применяется ко ВСЕМУ пулу до реранка и
+    отсечки (иначе реранк мог выбросить лучший по первичному скору чанк из
+    top-limit и включить отказ на релевантном запросе). Hash-профиль гейтится
+    лексически в агенте — RRF-скоры с косинусом несравнимы.
+
+    Возвращает [{guideline_id, source_title, topic, score, text}]; при реранке
+    score — скор кросс-энкодера (он же основа порога kb_min_score).
     """
-    dense = embedder.dense(query)
+    if not query.strip():
+        return []
+    fetch = candidates if candidates and candidates > 0 else max(limit * 3, 10)
+    fetch = max(fetch, limit)
+    dense = getattr(embedder, "query_dense", embedder.dense)(query)
     must: list = []
     must_not: list = []
     if topic:
@@ -164,15 +267,28 @@ def hybrid_search(
     if getattr(embedder, "use_sparse", True):
         indices, values = embedder.sparse(query)
         prefetch = [
-            qm.Prefetch(query=dense, using=DENSE_NAME, limit=max(limit * 3, 10)),
-            qm.Prefetch(query=qm.SparseVector(indices=indices, values=values), using=SPARSE_NAME, limit=max(limit * 3, 10)),
+            qm.Prefetch(query=dense, using=DENSE_NAME, limit=fetch),
+            qm.Prefetch(
+                query=qm.SparseVector(indices=indices, values=values),
+                using=SPARSE_NAME,
+                limit=fetch,
+            ),
         ]
+        # CC_RRF_K не задан → историческая серверная форма FusionQuery(RRF):
+        # k выбирает Qdrant, выдача hash-профиля не меняется молча. Явный
+        # retrieval-профиль (CC_RRF_K=60) → RrfQuery(Rrf(k=60)).
+        k = rrf_k if rrf_k is not None else settings.rrf_k
+        fusion = (
+            qm.RrfQuery(rrf=qm.Rrf(k=k))
+            if k and k > 0
+            else qm.FusionQuery(fusion=qm.Fusion.RRF)
+        )
         res = client.query_points(
             collection_name=COLLECTION,
             prefetch=prefetch,
-            query=qm.FusionQuery(fusion=qm.Fusion.RRF),
+            query=fusion,
             query_filter=filter_,
-            limit=limit,
+            limit=fetch,
             with_payload=True,
         )
     else:
@@ -181,10 +297,10 @@ def hybrid_search(
             query=dense,
             using=DENSE_NAME,
             query_filter=filter_,
-            limit=limit,
+            limit=fetch,
             with_payload=True,
         )
-    return [
+    hits = [
         {
             "guideline_id": p.payload["guideline_id"],
             "source_title": p.payload["source_title"],
@@ -194,6 +310,25 @@ def hybrid_search(
         }
         for p in (res.points or [])
     ]
+    # Порог — про лучший скор ПУЛА (до реранка/отсечки), а не про top-limit:
+    # см. docstring min_score.
+    if min_score and min_score > 0 and not getattr(embedder, "use_sparse", True):
+        pool_best = max((h["score"] for h in hits), default=0.0)
+        if pool_best < min_score:
+            return []
+    if reranker is not None:
+        try:
+            ranked = reranker.rerank(query, hits, limit, exclude_ids=exclude_ids)
+        except Exception as exc:  # noqa: BLE001 — реранк не должен ронять запрос
+            # Сайдкар/модель/сеть упали: прод обязан отвечать, порядок остаётся RRF.
+            log.warning("реранк недоступен (%s) — выдача остаётся в порядке RRF", exc)
+            return hits[:limit]
+        if exclude_ids:
+            # Реранк не имеет права воскресить исключённый врачом источник,
+            # даже если его реализация забыла про фильтр (defense in depth).
+            ranked = [h for h in ranked if h.get("guideline_id") not in exclude_ids]
+        return ranked[:limit]
+    return hits[:limit]
 
 
 def count_points(client: QdrantClient) -> int:
@@ -206,7 +341,10 @@ __all__ = [
     "IndexConfigError",
     "check_embedder_compatibility",
     "ensure_collection",
+    "build_points",
+    "upsert_points",
     "upsert_documents",
+    "delete_sources",
     "hybrid_search",
     "count_points",
 ]

@@ -1,6 +1,6 @@
 """Конфигурация API (pydantic-settings). Префикс env: CC_"""
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 # Демо-секреты, запрещённые по умолчанию (F3). Чтобы стартовать с ними,
@@ -57,12 +57,35 @@ class Settings(BaseSettings):
     embedder_device: str = "auto"  # CC_EMBEDDER_DEVICE: auto | cpu | cuda[:N]
     embedder_batch_size: int = 8  # CC_EMBEDDER_BATCH_SIZE: батч энкодера
     embedder_max_length: int = 2048  # CC_EMBEDDER_MAX_LENGTH: токенов на текст
-    kb_min_score: float = 0.45  # CC_KB_MIN_SCORE: порог score лучшего чанка (dense-only профиль)
+    # CC_KB_MIN_SCORE: порог «релевантного ответа нет» для score лучшего чанка.
+    # Пусто → дефолт профиля (PROFILES[...].default_min_score, docs/08 §4):
+    # шкала косинуса у моделей разная, единый порог ненадёжен.
+    kb_min_score: float | None = None
+    # CC_RERANKER: off | id кросс-энкодера (BAAI/bge-reranker-v2-m3 и др.).
+    # Требует extra `rerank`; без него — предупреждение и порядок RRF (docs/08 §4).
+    reranker: str = "off"
+    # CC_RERANK_WINDOW: ширина окна чанка, которое видит кросс-энкодер
+    # (0 — начало чанка; 700 — лучшее по словам запроса окно, docs/08 §4.8).
+    rerank_window: int = 0
+    # CC_RETRIEVAL_CANDIDATES: глубина пула до реранка/отсечки (0 → max(limit*3, 10)).
+    retrieval_candidates: int = 0
+    # CC_RRF_K: константа RRF-слияния dense+sparse (Qdrant RrfQuery, docs/08 §4).
+    # Не задана (или <=0) → историческая серверная форма FusionQuery(Fusion.RRF):
+    # k берёт Qdrant (дефолт 2), выдача hash-профиля байт-в-байт как на main.
+    # k=60 — часть ЯВНОГО retrieval-профиля (CC_RRF_K=60), а не дефолт.
+    # `CC_RRF_K=` (пусто) = «не задана» (см. _rrf_k_unset).
+    rrf_k: int | None = None
     # CC_KB_CORPUS_TTL_SECONDS: TTL кеша корпуса KB (kb_seed.build_corpus) в
     # процессе API. In-process писателей drugs нет (seed — отдельный CLI, он
     # зовёт clear_corpus_cache), поэтому TTL — единственная runtime-инвалидация.
     # 0 → кеш выключен.
     kb_corpus_ttl_seconds: float = 60.0
+    # CC_KB_CHUNK_CHARS / CC_KB_CHUNK_OVERLAP: нарезка чанков КБ — общий
+    # контракт kb_seed (сид) и enrichment/index.py (гайдлайны ВОЗ, статьи).
+    # 1800/120 — исторический дефолт; 600/120 измеренно поднимает Hit@3
+    # поиска (bench/REPORT-retrieval.md §6), но требует переиндексации.
+    kb_chunk_chars: int = 1800
+    kb_chunk_overlap: int = 120
     # CC_ASSISTANT_LLM_URL: OpenAI-совместимый /v1 (llama-server, vLLM, Ollama).
     # Пусто → LLM-роутинг топиков выключен (поиск по всем разделам). LLM получает
     # только очищенный от ПДн запрос и выбирает тулзу search_<раздел> (docs/12).
@@ -130,6 +153,44 @@ class Settings(BaseSettings):
     emias_max_response_bytes: int = 4 * 1024 * 1024  # жёсткий кап тела ответа
     emias_snils_pepper: str = ""  # соль sha256(СНИЛС); пусто → CC_DATA_KEY
     model_config = {"env_prefix": "CC_"}
+
+    @field_validator("rrf_k", mode="before")
+    @classmethod
+    def _rrf_k_unset(cls, value: object) -> object:
+        """Пустое/неположительное CC_RRF_K = не задан → серверный FusionQuery(RRF).
+
+        Пустую строку (CC_RRF_K=) pydantic сам в int не разберёт, а 0/минус по
+        смыслу эквивалентны дефолту сервера — нормализуем в None, чтобы «пусто»
+        в docs/08 не роняло старт.
+        """
+        raw = value.strip() if isinstance(value, str) else value
+        if raw is None or raw == "":
+            return None
+        try:
+            number = int(raw)  # type: ignore[arg-type] — env приходит строкой
+        except (TypeError, ValueError):
+            return value  # не число — пусть pydantic ругается сам
+        return number if number > 0 else None
+
+    @model_validator(mode="after")
+    def _check_chunker(self) -> "Settings":
+        """Нарезка КБ: молчаливая потеря текста запрещена (docs/08 §3).
+
+        chunk_text скользит шагом max(size - overlap, 200): при size < 200 окно
+        меньше шага и куски текста теряются, а size <= 0 даёт пустой корпус без
+        ошибки. Ограничения общие для сида и enrichment (CC_KB_CHUNK_*).
+        """
+        if self.kb_chunk_chars < 200:
+            raise ValueError(
+                f"CC_KB_CHUNK_CHARS={self.kb_chunk_chars}: минимум 200 знаков — "
+                "при меньшем размере chunk_text теряет текст (шаг окна >= 200)"
+            )
+        if not (0 <= self.kb_chunk_overlap < self.kb_chunk_chars):
+            raise ValueError(
+                f"CC_KB_CHUNK_OVERLAP={self.kb_chunk_overlap} должен быть в "
+                f"[0, CC_KB_CHUNK_CHARS={self.kb_chunk_chars})"
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_secrets(self) -> "Settings":

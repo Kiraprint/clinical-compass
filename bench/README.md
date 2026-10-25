@@ -151,3 +151,53 @@ PMC (open access): 10277900, 9790363, 13571187, 13641322, 13653422, 13655782,
 13660419, 13264932. ВОЗ: news-room/fact-sheets «Depression» и «Anxiety disorders»
 (EN + RU). Повторный сбор — `fetch_sources.py` (ID/URL детерминированы, сырьё
 не коммитится: сторонний контент, docs/08 §2).
+
+## Бенчмарк БЗ целиком (`kb_bench.py`, `eval_retrieval.py`)
+
+Предыдущие разделы меряют корпус научных статей (108 чанков). Отчёт
+`bench/REPORT-retrieval.md` и скрипты ниже меряют **реальную БЗ** — снимок
+прод-коллекции Qdrant (998 чанков: КР ВОЗ, шкалы, препараты, триаж, статьи) и
+158 клинических запросов (92 RU + 66 EN) с **градуированной** разметкой 0/1/2 от
+LLM-асессора по пулу из восьми стеков.
+
+```bash
+# 1) снимок корпуса из Qdrant + набор запросов (LLM-генерация + 38 ручных)
+.venv/bin/python bench/build_kb_bench.py --export
+
+# 1b) альтернативный снимок с другим размером чанка — тем же кодом, что прод
+#     (CC_KB_CHUNK_CHARS/CC_KB_CHUNK_OVERLAP; чанки сида переносятся как есть)
+CC_ALLOW_DEMO_SECRETS=true .venv/bin/python bench/rechunk_corpus.py --chars 600     --overlap 120 --out bench/data/kb_corpus_600.jsonl
+
+# 2) разметка пула локальной instruct-моделью на GPU (батчи, идемпотентно,
+#    докачивается построчно; ~17 с/запрос на RTX 5090)
+.venv/bin/python bench/eval_retrieval.py --stacks bge-m3-dense,qwen3-0.6b-dense \
+    user-bge-m3-dense,bge-m3-dense+sparse --candidates 30 \
+    --dump-pools bench/data/pool_bge.jsonl            # по файлу на стек
+.venv/bin/python bench/merge_pools.py bench/data/pool_*.jsonl --cap 30 \
+    --out bench/data/kb_pool_merged30.jsonl
+# судья видит тело чанка без метаданного заголовка источника (--keep-header
+# отключает срезание); --corpus — снапшот, под который размечен пул
+.venv/bin/python bench/grade_local.py --pool bench/data/kb_pool_merged30.jsonl \
+    --corpus bench/data/kb_corpus.jsonl --out bench/data/qrels.jsonl \
+    --chunk-chars 700
+# альтернатива — шлюзовой асессор (медленнее: 60–120 с на вызов):
+# .venv/bin/python bench/grade_kb_qrels.py --pool bench/data/kb_pool.jsonl --workers 4
+
+# 3) проверки набора (анти-предвзятость, детерминированные)
+.venv/bin/python bench/qa_qrels.py --qrels bench/data/qrels.jsonl \
+    --corpus bench/data/kb_corpus.jsonl
+
+# 4) матрица стеков: эмбеддеры, RRF-k, реранк; метрики/латентность/VRAM
+.venv/bin/python bench/eval_retrieval.py --stacks all --qrels bench/data/qrels.jsonl \
+  --json-out bench/data/eval_all.json
+.venv/bin/python bench/report_table.py bench/data/eval_all.json --qrels bench/data/qrels.jsonl
+
+# 5) валидация победной конфигурации на продовом пути (kb.hybrid_search)
+CC_EMBEDDER=bge-m3 CC_QDRANT_COLLECTION=kb_eval_prod \
+CC_RERANKER=BAAI/bge-reranker-v2-m3 CC_RETRIEVAL_CANDIDATES=50 \
+  .venv/bin/python bench/eval_prod_path.py --profile bge-m3 --reindex
+```
+
+Данные (`bench/data/`) в git не коммитятся: корпус КР ВОЗ — сторонний контент,
+qrels/пулы воспроизводятся скриптами. Профили эмбеддеров, реранк и миграция
+коллекции — docs/08 §4.

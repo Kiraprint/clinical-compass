@@ -1,0 +1,152 @@
+"""Чанкер КБ: размер/перекрытие и общий контракт сида и обогащения (docs/08 §3).
+
+Тесты без БД и Qdrant: chunk_text — чистая функция, сид проверяется на
+временном файле вместо data/guidelines_cache.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from app.config import settings
+from app.enrichment.config import EnrichmentConfig
+from app.enrichment.index import chunk_text
+from app.services.reranker import best_window
+
+
+def _settings(**kwargs):
+    from app.config import Settings
+
+    return Settings(_env_file=None, allow_demo_secrets=True, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "chars,overlap",
+    [
+        (150, 0),     # size < 200: шаг = max(size-overlap, 200) > окна, текст теряется
+        (0, 0),       # пустой корпус без ошибки
+        (-600, 0),
+        (600, 600),   # overlap == size: шаг упирается в 200, нарезка бессмысленна
+        (600, -1),
+    ],
+)
+def test_settings_reject_lossy_chunker_bounds(chars: int, overlap: int) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        _settings(kb_chunk_chars=chars, kb_chunk_overlap=overlap)
+
+
+def test_settings_accept_historical_chunking() -> None:
+    cfg = _settings(kb_chunk_chars=600, kb_chunk_overlap=120)
+    assert (cfg.kb_chunk_chars, cfg.kb_chunk_overlap) == (600, 120)
+
+@pytest.mark.parametrize("chars,overlap", [(150, 0), (0, 0), (600, 600), (600, -1)])
+def test_enrichment_config_rejects_same_lossy_bounds(chars: int, overlap: int) -> None:
+    """CC_ENRICH_CHUNK_* — свой dataclass, но контракт чанкера тот же (P3 ревью)."""
+    with pytest.raises(ValueError):
+        EnrichmentConfig(chunk_chars=chars, chunk_overlap=overlap)
+
+def test_enrichment_config_accepts_historical_chunking() -> None:
+    cfg = EnrichmentConfig(chunk_chars=600, chunk_overlap=120)
+    assert (cfg.chunk_chars, cfg.chunk_overlap) == (600, 120)
+
+def test_enrichment_config_env_bounds_are_enforced(monkeypatch) -> None:
+    monkeypatch.setenv("CC_ENRICH_CHUNK_CHARS", "100")
+    with pytest.raises(ValueError, match="CC_ENRICH_CHUNK_CHARS"):
+        EnrichmentConfig.from_env()
+
+@pytest.mark.parametrize("raw,expected", [("", None), ("0", None), ("-3", None), ("60", 60)])
+def test_rrf_k_empty_or_nonpositive_means_server_default(monkeypatch, raw: str, expected) -> None:
+    """CC_RRF_K= (пусто) и <=0 — «не задан»: серверный FusionQuery(RRF)."""
+    monkeypatch.setenv("CC_RRF_K", raw)
+    assert _settings().rrf_k == expected
+
+
+def test_chunk_text_short_text_single_chunk() -> None:
+    assert chunk_text("короткий текст", 600, 120) == ["короткий текст"]
+    assert chunk_text("", 600, 120) == []
+
+
+def test_chunk_text_respects_size_and_keeps_paragraphs() -> None:
+    text = "\n\n".join(f"Абзац {i}. " + "слово " * 40 for i in range(6))
+    chunks = chunk_text(text, 600, 120)
+    assert len(chunks) > 1
+    assert all(len(c) <= 600 for c in chunks)
+    # абзацы не разорваны: каждый кусок начинается с «Абзац N»
+    assert all(c.lstrip().startswith("Абзац") for c in chunks)
+
+
+def test_chunk_text_long_paragraph_overlaps() -> None:
+    paragraph = "".join(f"{i:05d} " for i in range(400))  # один абзац, ~2400 знаков
+    chunks = chunk_text(paragraph, 600, 120)
+    assert len(chunks) >= 4
+    assert all(len(c) <= 600 for c in chunks)
+    # перекрытие: хвост куска (120 знаков) присутствует в следующем (шаг 480)
+    for prev, nxt in zip(chunks, chunks[1:]):
+        assert prev[-120:].strip() in nxt
+
+
+def test_chunk_text_no_duplicates_and_terminates() -> None:
+    text = ("абзац " * 50 + "\n\n") * 20
+    chunks = chunk_text(text, 300, 100)
+    assert chunks == list(dict.fromkeys(chunks))
+    assert all(len(c) <= 300 for c in chunks)
+
+
+def test_enrichment_defaults_follow_kb_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CC_ENRICH_CHUNK_CHARS", raising=False)
+    monkeypatch.delenv("CC_ENRICH_CHUNK_OVERLAP", raising=False)
+    cfg = EnrichmentConfig.from_env()
+    assert cfg.chunk_chars == settings.kb_chunk_chars
+    assert cfg.chunk_overlap == settings.kb_chunk_overlap
+
+
+def test_seed_guidelines_use_configured_chunk_size(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import kb_seed
+
+    data = {
+        "guidelines": [
+            {
+                "id": "t1",
+                "code": "КР1",
+                "title": "Тест",
+                "revision": "2024",
+                "developer": "МЗ",
+                "summary": "кратко",
+                "rubricator_url": "https://example.org",
+            }
+        ]
+    }
+    gfile = tmp_path / "guidelines.json"
+    gfile.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "t1.txt").write_text("\n\n".join(f"Абзац {i}. " + "слово " * 60 for i in range(8)), encoding="utf-8")
+
+    monkeypatch.setattr(kb_seed, "_GUIDELINES_FILE", gfile)
+    monkeypatch.setattr(kb_seed, "_GUIDELINES_CACHE", cache)
+    monkeypatch.setattr(settings, "kb_chunk_chars", 600)
+    monkeypatch.setattr(settings, "kb_chunk_overlap", 120)
+
+    docs = kb_seed._guideline_docs(with_full_text=True)
+    body = [d for d in docs if d["guideline_id"].startswith("kr-t1-t")]
+    assert len(body) > 1
+    assert all(len(d["text"]) <= 600 for d in body)
+    assert [d["guideline_id"] for d in body] == [f"kr-t1-t{i}" for i in range(len(body))]
+    # метаданный чанк самой КР остаётся отдельным и первым
+    assert docs[0]["guideline_id"] == "kr-t1"
+
+
+def test_best_window_finds_answer_beyond_head() -> None:
+    text = "шапка " * 120 + " Ответ: сертралин 50 мг при депрессии. " + "хвост " * 120
+    window = best_window(text, "какая доза сертралина при депрессии", 600)
+    assert len(window) <= 600
+    assert "сертралин" in window
+    # короткий чанк возвращается целиком, без изменений
+    assert best_window("коротко", "запрос", 600) == "коротко"
+    assert best_window(text, "запрос", 0) == text

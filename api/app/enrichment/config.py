@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from app.config import settings
 from app.enrichment.who import WHO_HANDLES, WHOHandle
 
 # Продуктовый скоуп (docs/13 §2): тревога/депрессия + коморбидность, ТРД,
@@ -79,6 +80,24 @@ class EnrichmentConfig:
     chunk_overlap: int = 120
     user_agent: str = "clinical-compass-kb-enrichment/1.0 (evidence ingest; contact: team)"
 
+    def __post_init__(self) -> None:
+        """Те же границы, что у CC_KB_CHUNK_* в app.config.Settings.
+
+        chunk_text() скользит шагом max(size - overlap, 200): при size < 200
+        окно меньше шага и куски текста молча теряются, а size <= 0 даёт пустой
+        корпус. Невалидный env должен падать на старте, а не портить индекс.
+        """
+        if self.chunk_chars < 200:
+            raise ValueError(
+                f"CC_ENRICH_CHUNK_CHARS={self.chunk_chars}: минимум 200 знаков — "
+                "иначе chunk_text теряет текст (шаг не меньше 200)"
+            )
+        if not (0 <= self.chunk_overlap < self.chunk_chars):
+            raise ValueError(
+                f"CC_ENRICH_CHUNK_OVERLAP={self.chunk_overlap} должен быть в "
+                f"[0, CC_ENRICH_CHUNK_CHARS={self.chunk_chars})"
+            )
+
     @classmethod
     def from_env(cls) -> "EnrichmentConfig":
         email = _env_str("CC_ENRICH_PUBMED_EMAIL", "")
@@ -113,7 +132,10 @@ class EnrichmentConfig:
             timeout=timeout,
             interval_hours=float(_env_int("CC_ENRICH_INTERVAL_HOURS", 24)),
             run_on_start=_env_bool("CC_ENRICH_RUN_ON_START", True),
-            chunk_chars=_env_int("CC_ENRICH_CHUNK_CHARS", 1800),
-            chunk_overlap=_env_int("CC_ENRICH_CHUNK_OVERLAP", 120),
+            # Дефолты — общие с сидом (CC_KB_CHUNK_*, docs/08 §3), чтобы
+            # гайдлайны ВОЗ и остальная КБ резались одинаково; CC_ENRICH_CHUNK_*
+            # остаётся точечным переопределением для обогащения.
+            chunk_chars=_env_int("CC_ENRICH_CHUNK_CHARS", settings.kb_chunk_chars),
+            chunk_overlap=_env_int("CC_ENRICH_CHUNK_OVERLAP", settings.kb_chunk_overlap),
             user_agent=agent,
         )

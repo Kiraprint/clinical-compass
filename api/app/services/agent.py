@@ -18,7 +18,8 @@ from app.config import settings
 from app.services.depersonalize import scrub_text
 
 from app.services import kb as kb_store
-from app.services.embeddings import get_embedder
+from app.services.embeddings import get_embedder, profile_default_min_score
+from app.services.reranker import get_reranker
 
 # GATE: лексическое покрытие (docs/07 §5 — sparse ловит точные термины, dense —
 # смысл, но для демо-эмбеддера минимальный порог на точное совпадение терминов).
@@ -58,17 +59,6 @@ def _relevance_gate(query: str, hits: list[dict], limit: int) -> list[dict]:
     kept = [h for h in hits if _lexical_overlap(query, h.get("text", "")) >= _GATE_MIN_TOKENS]
     return kept[:limit]
 
-def _dense_top_gate(hits: list[dict], min_score: float) -> list[dict]:
-    """Отсечка «нет релевантного ответа» для нейросетевого dense-поиска.
-
-    У bge-m3 косинус калиброван: у релевантных чанков золотого набора лучший
-    score >=0.57, у офтоп-запросов <=0.43 (55 запросов, bench/eval_app_path.py),
-    поэтому порог 0.45 отделяет «в KB ничего нет» без лексических эвристик —
-    они отбрасывали бы кросс-языковые совпадения (RU-вопрос → EN-чанк).
-    """
-    if not hits or (min_score > 0 and hits[0]["score"] < min_score):
-        return []
-    return hits
 
 def _hash_rerank(
     query: str,
@@ -151,6 +141,23 @@ class AgentFactory:
         if detect_redline(redline_query if redline_query is not None else query) is not None:
             return []
         embedder = get_embedder()
+        use_sparse = getattr(embedder, "use_sparse", True)
+        # Реранк осмыслен только для нейросетевых профилей: hash-dense шумит, и
+        # его порядок уже чинится лексическим гейтом/fallback (см. _hash_rerank).
+        reranker = None if use_sparse else get_reranker()
+        # Порог «нет релевантного ответа» применяет hybrid_search ко ВСЕМУ пулу
+        # ДО реранка/отсечки: max по top-limit после реранка мог выбросить
+        # лучший по первичному скору чанк и включить ложный отказ.
+        # У bge-m3 косинус калиброван (релевантные >=0.57, офтоп <=0.43,
+        # bench/REPORT-retrieval.md); шкала у профилей своя, поэтому дефолт —
+        # из профиля, CC_KB_MIN_SCORE перекрывает.
+        min_score = None
+        if not use_sparse:
+            min_score = (
+                settings.kb_min_score
+                if settings.kb_min_score is not None
+                else profile_default_min_score(settings.embedder)
+            )
         hits = kb_store.hybrid_search(
             self._client,
             embedder,
@@ -158,13 +165,14 @@ class AgentFactory:
             topic=topic,
             limit=limit,
             exclude_ids=exclude_ids,
+            candidates=settings.retrieval_candidates or None,
+            reranker=reranker,
+            min_score=min_score,
         )
-        if getattr(embedder, "use_sparse", True):
+        if use_sparse:
             hits = _hash_rerank(
                 query, hits, limit, topic=topic, exclude_ids=exclude_ids, corpus_drugs=corpus_drugs
             )
-        else:
-            hits = _dense_top_gate(hits, settings.kb_min_score)
         return [
             RAGChunk(
                 text=h["text"],

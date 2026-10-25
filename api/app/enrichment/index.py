@@ -203,15 +203,23 @@ def remote_count(client: QdrantClient, work: KBWork) -> int:
 
 
 def _points_for(documents: Sequence[dict], embedder) -> list[qm.PointStruct]:
+    texts = [doc["text"] for doc in documents]
+    # Пачкой, если эмбеддер умеет (remote: один POST на работу вместо одного
+    # на чанк); локальные эмбеддеры идут прежним путём.
+    batch = getattr(embedder, "dense_batch", None)
+    dense_vectors = batch(texts) if batch is not None else [embedder.dense(t) for t in texts]
+    if len(dense_vectors) != len(texts):
+        raise RuntimeError(
+            f"эмбеддер вернул {len(dense_vectors)} dense-векторов на {len(texts)} чанков"
+        )
     points: list[qm.PointStruct] = []
-    for doc in documents:
-        text = doc["text"]
+    for doc, text, dense in zip(documents, texts, dense_vectors):
         indices, values = embedder.sparse(text)
         points.append(
             qm.PointStruct(
                 id=_point_id(text),
                 vector={
-                    kb_store.DENSE_NAME: embedder.dense(text),
+                    kb_store.DENSE_NAME: dense,
                     kb_store.SPARSE_NAME: qm.SparseVector(indices=indices, values=values),
                 },
                 payload={**doc, "text_hash": _hash(text)},

@@ -26,6 +26,9 @@ SPARSE_BUCKETS = 65536    # пространство хеш-индексов spa
 # Сколько текстов держать в кэше энкодера (upsert считает dense и sparse одного
 # и того же текста по отдельности; кэш убирает второй прогон модели).
 _CACHE_SIZE = 256
+# Потолок сайдкара на /v1/embeddings (ml/models.py MAX_TEXTS): больше — 4xx,
+# а 4xx ml_client не ретраит. Пачки режет клиент.
+_MAX_EMBED_BATCH = 64
 
 
 class EmbedderConfigError(RuntimeError):
@@ -38,18 +41,48 @@ class EmbedderConfigError(RuntimeError):
 
 @dataclass(frozen=True)
 class EmbedderProfile:
-    """Поддерживаемый профиль CC_EMBEDDER."""
+    """Поддерживаемый профиль CC_EMBEDDER.
+
+    default_min_score — порог «лучший чанк нерелевантен» под калибровку ИМЕННО
+    этой модели (docs/08 §4): шкала косинуса у профилей разная, поэтому
+    CC_KB_MIN_SCORE по умолчанию берётся отсюда, а не единым числом.
+    query_prefix/passage_prefix — инструкции моделей, требующих их (e5, Qwen3).
+    """
 
     kind: str
     model_id: str
     dense_size: int
+    use_sparse: bool = False
+    default_min_score: float = 0.45
+    query_prefix: str = ""
+    passage_prefix: str = ""
 
 
 # Профили — единственный источник истины для размерности dense: коллекция
 # Qdrant создаётся под неё (docs/08 §3), при смене нужна переиндексация.
+# default_min_score перемерян на bench/data/kb_queries.jsonl (bench/REPORT-retrieval.md).
+_INSTRUCT_QWEN = (
+    "Instruct: Given a clinical question, retrieve passages that answer the question\nQuery: "
+)
 PROFILES: dict[str, EmbedderProfile] = {
-    "hash": EmbedderProfile("hash", "offline/hash", DENSE_SIZE),
-    "bge-m3": EmbedderProfile("bge-m3", "BAAI/bge-m3", 1024),
+    "hash": EmbedderProfile("hash", "offline/hash", DENSE_SIZE, use_sparse=True, default_min_score=0.45),
+    "bge-m3": EmbedderProfile("bge-m3", "BAAI/bge-m3", 1024, default_min_score=0.45),
+    "qwen3-0.6b": EmbedderProfile(
+        "st", "Qwen/Qwen3-Embedding-0.6B", 1024,
+        default_min_score=0.40, query_prefix=_INSTRUCT_QWEN,
+    ),
+    "e5-large-instruct": EmbedderProfile(
+        "st", "intfloat/multilingual-e5-large-instruct", 1024,
+        default_min_score=0.80,
+        query_prefix="Instruct: Given a clinical question, retrieve passages that answer the question\nQuery: ",
+    ),
+    "user-bge-m3": EmbedderProfile("st", "deepvk/USER-bge-m3", 1024, default_min_score=0.55),
+    # Профили ML-сайдкара (GPU): model_id — id профиля в сайдкаре, dense_size —
+    # ожидаемая размерность (проверяется при старте, docs/08 §4.7).
+    "remote-bge-m3": EmbedderProfile("remote", "bge-m3", 1024, default_min_score=0.45),
+    "remote-qwen3-0.6b": EmbedderProfile("remote", "qwen3-0.6b", 1024, default_min_score=0.40),
+    "remote-user-bge-m3": EmbedderProfile("remote", "user-bge-m3", 1024, default_min_score=0.55),
+    "remote-e5-large-instruct": EmbedderProfile("remote", "e5-large-instruct", 1024, default_min_score=0.80),
 }
 
 
@@ -196,6 +229,210 @@ class BgeM3Embedder:
         return indices, values
 
 
+
+class SentenceTransformerEmbedder:
+    """Dense-эмбеддер через sentence-transformers под общим SPI (docs/08 §4).
+
+    Профили qwen3-0.6b / e5-large-instruct / user-bge-m3. Префиксы запроса и
+    пассажа — из EmbedderProfile (инструкции моделей). Sparse-канал лексический
+    (hash): коллекция всегда содержит sparse-вектор, но профиль по умолчанию
+    ищет dense-only (use_sparse=False).
+    """
+
+    use_sparse = False  # стратегия поиска профиля; sparse пишется для схемы коллекции
+
+    def __init__(
+        self,
+        model_id: str,
+        *,
+        dense_size: int,
+        query_prefix: str = "",
+        passage_prefix: str = "",
+        device: str = "auto",
+        batch_size: int = 8,
+        max_length: int = 512,
+    ) -> None:
+        resolved_device = _resolve_device(device)
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            raise EmbedderConfigError(
+                "Dense-профиль требует опциональных зависимостей sentence-transformers+torch. "
+                "Установите extra `embeddings` (uv: `uv sync --extra embeddings`), "
+                "либо верните CC_EMBEDDER=hash. Базовый образ API намеренно без torch "
+                "(docs/08 §4)."
+            ) from exc
+        self.model_id = model_id
+        self.dense_size = dense_size
+        self.device = resolved_device
+        self.query_prefix = query_prefix
+        self.passage_prefix = passage_prefix
+        self._batch_size = batch_size
+        self._max_length = max_length
+        try:
+            self._m = SentenceTransformer(model_id, device=resolved_device)
+        except Exception as exc:  # сеть/кэш HF/несовместимые веса
+            raise EmbedderConfigError(
+                f"Не удалось загрузить эмбеддер '{model_id}' на устройстве "
+                f"'{resolved_device}': {exc}. Проверьте кэш HF и сеть (модель качается "
+                f"при первом запуске) или укажите CC_EMBEDDER_DEVICE=cpu."
+            ) from exc
+        self._m.max_seq_length = max_length
+        self._lexical = HashEmbedder()  # sparse-канал схемы коллекции
+        self._cache: dict[str, tuple[list[float], list[int], list[float]]] = {}
+
+    def _encode(self, text: str, prefix: str) -> tuple[list[float], list[int], list[float]]:
+        key = prefix + text
+        hit = self._cache.get(key)
+        if hit is not None:
+            return hit
+        vec = self._m.encode(
+            [prefix + text],
+            batch_size=self._batch_size,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )[0]
+        indices, values = self._lexical.sparse(text)
+        encoded = (vec.tolist(), indices, values)
+        if len(self._cache) >= _CACHE_SIZE:  # FIFO: держим память ограниченной
+            self._cache.pop(next(iter(self._cache)))
+        self._cache[key] = encoded
+        return encoded
+
+    def dense(self, text: str) -> list[float]:
+        """Вектор ПАССАЖА (индексация) — с passage_prefix профиля."""
+        return self._encode(text, self.passage_prefix)[0]
+
+    def query_dense(self, text: str) -> list[float]:
+        """Вектор ЗАПРОСА — с query_prefix профиля (инструкции e5/Qwen3)."""
+        return self._encode(text, self.query_prefix)[0]
+
+    def sparse(self, text: str) -> tuple[list[int], list[float]]:
+        return self._encode(text, self.passage_prefix)[1:]
+
+
+class RemoteEmbedder:
+    """Эмбеддер ML-сайдкара на GPU через HTTP (docs/08 §4.7).
+
+    Прод-образ API без torch: модель живёт в отдельном сервисе (`ml`), профиль
+    эмбеддера передаётся как есть (`profile`). Размерность dense берётся из
+    `/health` (или из первого ответа), несовпадение с ожидаемой профилем —
+    громкая ошибка: молча обрезать вектор нельзя, коллекция Qdrant создаётся
+    под конкретную размерность (docs/08 §3).
+
+    Sparse-вектор лексический (hash) — нужен только для схемы коллекции;
+    стратегия поиска профиля — dense-only (`use_sparse=False`).
+    """
+
+    use_sparse = False
+
+    def __init__(self, profile_id: str, *, expected_dense_size: int = 0) -> None:
+        from app.services import ml_client
+        from app.services.ml_client import MlUnavailable
+
+        if not ml_client.enabled():
+            raise EmbedderConfigError(
+                f"CC_EMBEDDER={profile_id} — профиль ML-сайдкара, но CC_ML_URL не задан. "
+                "Укажите base-url сайдкара (compose: CC_ML_URL=http://ml:8080) "
+                "или верните локальный профиль (hash/bge-m3/...)."
+            )
+        self.model_id = profile_id
+        self.profile_id = profile_id
+        self._lexical = HashEmbedder()
+        self._cache: dict[tuple[str, str], list[float]] = {}
+        try:
+            health = ml_client.ping()
+        except MlUnavailable as exc:
+            raise EmbedderConfigError(
+                f"ML-сайдкар недоступен по CC_ML_URL={settings.ml_url}: {exc}. "
+                "Поиск без эмбеддера невозможен — проверьте сервис `ml` (GET /health)."
+            ) from exc
+        models = health.get("models") or {}
+        entry = models.get(profile_id) if isinstance(models, dict) else None
+        size = 0
+        if isinstance(entry, dict):
+            size = int(entry.get("dense_size") or entry.get("dense") or 0)
+        elif isinstance(entry, int):
+            size = int(entry)
+        if not size:
+            # /health без размерности — узнаём из первого же ответа
+            try:
+                vec = ml_client.embed(["warmup"], kind="passage", profile=profile_id)[0]
+                size = len(vec)
+            except MlUnavailable as exc:
+                raise EmbedderConfigError(f"ML-сайдкар не вернул размерность для '{profile_id}': {exc}") from exc
+        if not size:
+            raise EmbedderConfigError(f"ML-сайдкар не сообщил dense_size для профиля '{profile_id}'")
+        if expected_dense_size and size != expected_dense_size:
+            raise EmbedderConfigError(
+                f"Размерность эмбеддера '{profile_id}' в сайдкаре — {size}, а профиль ожидает "
+                f"{expected_dense_size}. Коллекция Qdrant создаётся под одну размерность (docs/08 §3): "
+                f"поправьте CC_ML_URL/профиль либо переиндексируйте KB под нужную модель."
+            )
+        self.dense_size = size
+
+    def _vectors(self, texts: list[str], kind: str) -> list[list[float]]:
+        """Векторы пачкой: недостающие считаются пачками по `_MAX_EMBED_BATCH`.
+
+        Сайдкар отвечает 4xx на /v1/embeddings с >MAX_TEXTS текстами (ml/models.py),
+        поэтому пачки режем сами: ре-сид на 3362 чанках — 53 запроса по 64.
+        Ответ собирается из локальной карты, а не перечитывается из FIFO-кеша:
+        кеш на `_CACHE_SIZE` записей не обязан вместить всю пачку (300 текстов
+        вытеснили бы первые).
+        """
+        from app.services import ml_client
+        from app.services.ml_client import MlUnavailable
+
+        vectors: dict[str, list[float]] = {}
+        missing: list[str] = []
+        for text in dict.fromkeys(texts):
+            hit = self._cache.get((kind, text))
+            if hit is None:
+                missing.append(text)
+            else:
+                vectors[text] = hit
+        for start in range(0, len(missing), _MAX_EMBED_BATCH):
+            part = missing[start : start + _MAX_EMBED_BATCH]
+            raw_vectors = ml_client.embed(part, kind=kind, profile=self.profile_id)
+            if not raw_vectors or len(raw_vectors) != len(part):
+                raise MlUnavailable(
+                    f"/v1/embeddings: {len(raw_vectors or [])} векторов на {len(part)} текстов"
+                )
+            for text, raw in zip(part, raw_vectors):
+                if not isinstance(raw, list):
+                    raise MlUnavailable("/v1/embeddings: пустой ответ")
+                vec = [float(v) for v in raw]
+                if len(vec) != self.dense_size:
+                    raise MlUnavailable(
+                        f"/v1/embeddings: размерность {len(vec)} != {self.dense_size} "
+                        f"(профиль '{self.profile_id}')"
+                    )
+                if len(self._cache) >= _CACHE_SIZE:
+                    self._cache.pop(next(iter(self._cache)))
+                self._cache[(kind, text)] = vec
+                vectors[text] = vec
+        return [vectors[text] for text in texts]
+
+    def _vector(self, text: str, kind: str) -> list[float]:
+        return self._vectors([text], kind)[0]
+
+    def dense(self, text: str) -> list[float]:
+        """Вектор ПАССАЖА (индексация)."""
+        return self._vector(text, "passage")
+
+    def dense_batch(self, texts: list[str]) -> list[list[float]]:
+        """Векторы ПАССАЖЕЙ пачкой — путь индексации (kb.upsert_documents)."""
+        return self._vectors(texts, "passage")
+
+    def query_dense(self, text: str) -> list[float]:
+        """Вектор ЗАПРОСА (асимметричные модели на сайдкаре применяют префиксы сами)."""
+        return self._vector(text, "query")
+
+    def sparse(self, text: str) -> tuple[list[int], list[float]]:
+        return self._lexical.sparse(text)
+
+
 def _resolve_device(device: str) -> str:
     """auto|cpu|cuda[:N] → конкретное устройство; понятная ошибка при промахе."""
     dev = (device or "auto").strip().lower()
@@ -268,7 +505,32 @@ def build_embedder(
             batch_size=batch_size or settings.embedder_batch_size,
             max_length=max_length or settings.embedder_max_length,
         )
+    if profile.kind == "st":
+        return SentenceTransformerEmbedder(
+            model_id or settings.embedder_model or profile.model_id,
+            dense_size=profile.dense_size,
+            query_prefix=profile.query_prefix,
+            passage_prefix=profile.passage_prefix,
+            device=device or settings.embedder_device,
+            batch_size=batch_size or settings.embedder_batch_size,
+            max_length=max_length or settings.embedder_max_length,
+        )
+    if profile.kind == "remote":
+        # Модель живёт в ML-сайдкаре на GPU; локально torch не нужен.
+        return RemoteEmbedder(profile.model_id, expected_dense_size=profile.dense_size)
     return HashEmbedder()
+
+
+def profile_default_min_score(kind: str | None = None) -> float:
+    """Порог «нет релевантного ответа» по умолчанию для выбранного профиля.
+
+    CC_KB_MIN_SCORE (settings.kb_min_score) перекрывает его, если задан явно.
+    """
+    from app.config import settings
+
+    chosen = (kind if kind is not None else settings.embedder) or "hash"
+    profile = PROFILES.get(chosen.strip().lower())
+    return profile.default_min_score if profile else 0.45
 
 
 _embedder: Embedder | None = None

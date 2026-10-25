@@ -128,13 +128,117 @@ def test_dense_only_embedder_never_calls_sparse(monkeypatch):
         client.delete_collection(probe)
 
 
-def test_dense_top_gate_keeps_crosslingual_and_rejects_offtopic():
-    from app.services.agent import _dense_top_gate
+def _fake_dense_client(scores: list[float]):
+    """Фейк Qdrant: пул из n точек с заданными косинусами (dense-профиль)."""
 
-    relevant = [{"score": 0.71}, {"score": 0.55}]
-    assert _dense_top_gate(relevant, 0.45) == relevant
-    # Хвост выдачи ниже порога не режем: порог — только про «в KB ничего нет».
-    tail = [{"score": 0.71}, {"score": 0.44}]
-    assert _dense_top_gate(tail, 0.45) == tail
-    assert _dense_top_gate([{"score": 0.37}], 0.45) == []
-    assert _dense_top_gate([], 0.45) == []
+    class _Point:
+        def __init__(self, i: int, score: float) -> None:
+            self.payload = {
+                "guideline_id": f"g-{i}",
+                "source_title": f"Источник {i}",
+                "topic": "ШКАЛЫ",
+                "text": f"чанк {i}",
+            }
+            self.score = score
+
+    class _Client:
+        def query_points(self, **kwargs):
+            class _Res:
+                pass
+
+            res = _Res()
+            res.points = [_Point(i, s) for i, s in enumerate(scores)]
+            return res
+
+    return _Client()
+
+
+class _DenseOnly(HashEmbedder):
+    use_sparse = False
+
+
+def test_min_score_gates_on_full_pool():
+    """Порог «нет данных» — по лучшему скору пула; хвост выдачи не режется."""
+    emb = _DenseOnly()
+    assert [h["guideline_id"] for h in kb.hybrid_search(_fake_dense_client([0.71, 0.55]), emb, "q", limit=2, min_score=0.45)] == ["g-0", "g-1"]
+    # Хвост ниже порога остаётся: порог — только про «в KB ничего нет».
+    assert len(kb.hybrid_search(_fake_dense_client([0.71, 0.44]), emb, "q", limit=2, min_score=0.45)) == 2
+    assert kb.hybrid_search(_fake_dense_client([0.37]), emb, "q", limit=2, min_score=0.45) == []
+    assert kb.hybrid_search(_fake_dense_client([]), emb, "q", limit=2, min_score=0.45) == []
+
+
+def test_reseed_same_source_does_not_duplicate_chunks(monkeypatch):
+    """Повторный засев КР заменяет чанки прошлой нарезки, статьи не трогает.
+
+    Point id = md5(text): при смене CC_KB_CHUNK_* чанки прошлой генерации
+    остались бы рядом с новыми. upsert_corpus сносит точки источника по
+    source_title + префиксу guideline_id `kr-` перед записью — count тот же,
+    --reset не нужен (P2 ревью).
+    """
+    from app import kb_seed
+
+    probe = "kb_test_reseed"
+    client = _fresh(probe)
+    monkeypatch.setattr(kb, "COLLECTION", probe)
+    base = {"source_title": "КР X", "topic": "РЕКОМЕНДАЦИИ"}
+    gen1 = (
+        {**base, "guideline_id": "kr-x", "text": "A" * 300},
+        {**base, "guideline_id": "kr-x-t0", "text": "B" * 300},
+    )
+    gen2 = (
+        {**base, "guideline_id": "kr-x", "text": "A" * 300},
+        {**base, "guideline_id": "kr-x-t0", "text": "C" * 200},
+    )
+    # Тот же source_title, но не КР: префиксный фильтр обязан его пощадить.
+    article = (
+        {"guideline_id": "who-1", "source_title": "КР X", "topic": "СТАТЬИ",
+         "text": "статья обзора с совпавшим заголовком"},
+    )
+    try:
+        kb_seed.upsert_corpus(client, HashEmbedder(), gen1 + article)
+        assert kb.count_points(client) == 3
+        assert kb_seed.upsert_corpus(client, HashEmbedder(), gen2) == 2
+        assert kb.count_points(client) == 3, "повторный сид добавил чанк прошлой нарезки"
+        hits = kb.hybrid_search(client, HashEmbedder(), "статья обзора", limit=5)
+        assert any(h["guideline_id"] == "who-1" for h in hits), "статья удалена вместе с КР"
+    finally:
+        monkeypatch.undo()
+        client.delete_collection(probe)
+
+def test_seed_embeds_before_deleting(monkeypatch):
+    """Сбой эмбеддера не сносит опубликованные чанки: эмбеддинги ДО удаления."""
+    from app import kb_seed
+
+    probe = "kb_test_seed_order"
+    client = _fresh(probe)
+    monkeypatch.setattr(kb, "COLLECTION", probe)
+    doc = {"guideline_id": "kr-y", "source_title": "КР Y", "topic": "РЕКОМЕНДАЦИИ",
+           "text": "A" * 300}
+
+    class _Broken(HashEmbedder):
+        def dense(self, text: str):  # noqa: ARG002 — эмулируем упавший сайдкар
+            raise RuntimeError("сайдкар лёг")
+
+    try:
+        kb.upsert_documents(client, HashEmbedder(), [doc])
+        assert kb.count_points(client) == 1
+        with pytest.raises(RuntimeError):
+            kb_seed.upsert_corpus(client, _Broken(), ({**doc, "text": "B" * 300},))
+        assert kb.count_points(client) == 1, "старые чанки снесены до эмбеддингов"
+    finally:
+        monkeypatch.undo()
+        client.delete_collection(probe)
+
+def test_build_points_rejects_short_embedder_output():
+    """Короткий ответ эмбеддера не должен молча терять точки (zip-обрезка)."""
+    docs = [
+        {"guideline_id": "kr-z", "source_title": "КР Z", "text": "раз"},
+        {"guideline_id": "kr-z-t0", "source_title": "КР Z", "text": "два"},
+    ]
+
+    class _Short(HashEmbedder):
+        def dense_batch(self, texts):  # noqa: ARG002 — намеренно короткий ответ
+            return [[0.1] * self.dense_size]
+
+    with pytest.raises(RuntimeError, match="dense-векторов"):
+        kb.build_points(_Short(), docs)
