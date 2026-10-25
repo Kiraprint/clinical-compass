@@ -24,7 +24,8 @@ from .audit import record as audit_record
 MOSCOW = ZoneInfo("Europe/Moscow")
 
 #: Итоговые состояния риска, требующие эскалации (docs/16 §3).
-RISK_STATES = ("signal", "review", "unassessed")
+#: `unassessed` сюда не входит: это «риск не оценивался», а не сигнал.
+RISK_STATES = ("signal", "review")
 #: Виды эскалации чек-ина: первичный сигнал и эскалация срочности.
 RISK_KIND = "CHECKIN_RISK"
 URGENT_KIND = "CHECKIN_RISK_URGENT"
@@ -66,8 +67,14 @@ def _not_started() -> dict:
         "phase": None,
         "step": {"kind": None, "items": []},
         "answers": {},
-        "progress": {"answered": 0, "planned": len(engine.CORE_ITEMS)},
-        "safety": "none",
+        "progress": {
+            "answered": 0,
+            "planned": len(engine.CORE_ITEMS),
+            "safety_gate": False,
+            "safety_gate_reason": engine.safety_gate_reason({}),
+        },
+        "safety": "unassessed",
+        "safety_gate": False,
         "modules": [],
         "completed_at": None,
         "clinician_notified": False,
@@ -95,19 +102,28 @@ async def _clinician_notified(db: AsyncSession, escalation: Escalation | None) -
 async def _serialize(db: AsyncSession, session: CheckinSession) -> dict:
     answers = session.answers
     plan = engine.plan(answers)
+    completed = session.status == "completed"
     return {
         "date": session.checkin_date.isoformat(),
         "rules_version": session.rules_version,
         "status": session.status,
         "session_id": str(session.id),
         "phase": session.phase,
-        "step": {"kind": session.phase, "items": [_item_payload(i) for i in plan.items]},
+        # Завершённый сеанс пунктов не предъявляет, даже если правила с тех пор изменились.
+        "step": {
+            "kind": session.phase,
+            "items": [] if completed else [_item_payload(i) for i in plan.items],
+        },
         "answers": answers,
         "progress": {
             "answered": len(answers),
             "planned": len(engine.planned_items(answers)),
+            "safety_gate": plan.safety_gate,
+            "safety_gate_reason": plan.safety_gate_reason,
         },
-        "safety": session.safety,
+        # У завершённого сеанса — зафиксированное значение (аудит правил его версии).
+        "safety": session.safety if completed else plan.safety,
+        "safety_gate": plan.safety_gate,
         "modules": _modules_payload(plan.modules),
         "completed_at": session.completed_at.isoformat() if session.completed_at else None,
         "clinician_notified": await _clinician_notified(db, await _escalation_for(db, session)),
@@ -148,7 +164,7 @@ async def start(db: AsyncSession, patient_id: uuid.UUID) -> tuple[dict, bool]:
         rules_version=engine.RULES_VERSION,
         phase="core",
         status="in_progress",
-        safety="none",
+        safety="unassessed",
     )
     session.answers = {}
     session.presented = {
@@ -277,7 +293,7 @@ async def submit(
     recipients: list[uuid.UUID] = []
     urgent = False
 
-    if new_plan.phase == "safety":
+    if new_plan.phase == "safety" and answers.get(engine.GATE_ITEM) == 1:
         # HR4 = «Да», но модуль RS ещё не пройден: сигнал фиксируем сразу,
         # не дожидаясь завершения чек-ина (P2, ревью security).
         escalation, recipients = await _ensure_escalation(db, session, urgent=False)
