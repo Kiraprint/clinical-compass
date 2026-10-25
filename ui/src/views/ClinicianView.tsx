@@ -24,6 +24,25 @@ import TrendChart from "../TrendChart";
 import ChatsView from "./ChatsView";
 import DrugLibraryTab from "./DrugLibraryTab";
 
+// Текст ошибки для пользователя: ApiError несёт серверный detail.
+const errText = (e: unknown): string =>
+  e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e);
+
+// Ошибка загрузки — это не «пустой список»: 500 от API не должен выглядеть как
+// «пациентов нет». «Повторить» перезапрашивает те же данные без F5.
+function LoadError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="alert-danger" role="alert">
+      <b>Не удалось загрузить данные.</b> <span className="small">{message}</span>
+      <div style={{ marginTop: 6 }}>
+        <button className="ghost" onClick={onRetry}>
+          Повторить
+        </button>
+      </div>
+    </div>
+  );
+}
+
 const MED_STATUS_LABELS: Record<string, string> = {
   active: "активно",
   completed: "завершено",
@@ -207,7 +226,7 @@ function EscalationsQueue({
           пациентам без закреплённого врача.
         </p>
         <p style={{ marginBottom: 12 }}>
-          <button onClick={() => setShowClosed((v) => !v)}>
+          <button aria-pressed={showClosed} onClick={() => setShowClosed((v) => !v)}>
             {showClosed ? "Только открытые" : "Показать закрытые"}
           </button>
         </p>
@@ -537,9 +556,13 @@ function Dashboard({
   reminders,
   chats,
   profile,
+  cardsError,
+  escalationsError,
+  remindersError,
   onResolved,
   onChanged,
   onOpenChats,
+  onRetry,
 }: {
   fio: string | null;
   cards: PatientCard[];
@@ -548,9 +571,13 @@ function Dashboard({
   reminders: ClinicianReminder[];
   chats: PatientChat[];
   profile: ClinicianProfile | null;
+  cardsError: string;
+  escalationsError: string;
+  remindersError: string;
   onResolved: (id: string) => void;
   onChanged: () => void;
   onOpenChats: (patientId: string) => void;
+  onRetry: () => void;
 }) {
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
@@ -565,6 +592,8 @@ function Dashboard({
     .filter((c) => c.last_triage === "RED" || c.open_escalations > 0)
     .sort((a, b) => b.open_escalations - a.open_escalations);
   const overdue = reminders.filter((r) => r.due_state === "overdue").length;
+  // Если список не загрузился, «ухудшений нет» — ложное утверждение.
+  const loadFailed = Boolean(cardsError || escalationsError);
   const openPatient = (patientId: string) => {
     window.location.hash = "patient=" + patientId;
   };
@@ -588,11 +617,19 @@ function Dashboard({
             {now.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}
           </p>
           <p className="muted small">
-            Пациентов в наблюдении: {cards.length} · открытых сигналов: {escalations.length} ·
-            напоминаний: {reminders.length}
+            Пациентов в наблюдении: {cardsError ? "—" : cards.length} · открытых сигналов:{" "}
+            {escalationsError ? "—" : escalations.length} · напоминаний:{" "}
+            {remindersError ? "—" : reminders.length}
             {pendingAe.length > 0 ? ` · НЯ на проверке: ${pendingAe.length}` : ""}
           </p>
         </div>
+
+        {loadFailed && (
+          <LoadError
+            message={[cardsError, escalationsError].filter(Boolean).join(" · ")}
+            onRetry={onRetry}
+          />
+        )}
 
         {worse.length > 0 ? (
           <div className="alert-danger">
@@ -613,7 +650,7 @@ function Dashboard({
               Красный риск скрининга или открытые эскалации — разберите в очереди ниже.
             </p>
           </div>
-        ) : (
+        ) : loadFailed ? null : (
           <div className="alert-info">
             Ухудшений нет: красных рисков и открытых сигналов не зафиксировано.
           </div>
@@ -639,7 +676,11 @@ function Dashboard({
             Напоминания{" "}
             {overdue > 0 && <span className="badge RED">{overdue} просрочено</span>}
           </h2>
-          <ReminderList items={reminders} compact onChanged={onChanged} onOpenPatient={openPatient} />
+          {remindersError ? (
+            <LoadError message={remindersError} onRetry={onRetry} />
+          ) : (
+            <ReminderList items={reminders} compact onChanged={onChanged} onOpenPatient={openPatient} />
+          )}
         </div>
         <DashboardChats chats={chats} onOpenChats={onOpenChats} />
       </aside>
@@ -802,6 +843,10 @@ export default function ClinicianView() {
   const [chatPatient, setChatPatient] = useState<string | null>(null);
   const [filter, setFilter] = useState<(typeof TRIAGE_FILTERS)[number]>("");
   const [cards, setCards] = useState<PatientCard[]>([]);
+  // Ошибки загрузок показываем явно: пустой список из-за 500 — не «нет пациентов».
+  const [cardsError, setCardsError] = useState("");
+  const [remindersError, setRemindersError] = useState("");
+  const [escalationsError, setEscalationsError] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [report, setReport] = useState<Report | null>(null);
   const [reportError, setReportError] = useState("");
@@ -855,10 +900,13 @@ export default function ClinicianView() {
     api
       .clinicianReminders()
       .then((r) => {
-        if (!cancelled) setReminders(r.items);
+        if (!cancelled) {
+          setReminders(r.items);
+          setRemindersError("");
+        }
       })
-      .catch(() => {
-        if (!cancelled) setReminders([]);
+      .catch((e: unknown) => {
+        if (!cancelled) setRemindersError(errText(e));
       });
     return () => {
       cancelled = true;
@@ -870,10 +918,13 @@ export default function ClinicianView() {
     api
       .clinicianPatients(filter || undefined)
       .then((data) => {
-        if (!cancelled) setCards(data.items);
+        if (!cancelled) {
+          setCards(data.items);
+          setCardsError("");
+        }
       })
-      .catch(() => {
-        if (!cancelled) setCards([]);
+      .catch((e: unknown) => {
+        if (!cancelled) setCardsError(errText(e));
       });
     return () => {
       cancelled = true;
@@ -886,10 +937,13 @@ export default function ClinicianView() {
     api
       .openEscalations()
       .then((r) => {
-        if (!cancelled) setEscalations(r.items);
+        if (!cancelled) {
+          setEscalations(r.items);
+          setEscalationsError("");
+        }
       })
-      .catch(() => {
-        if (!cancelled) setEscalations([]);
+      .catch((e: unknown) => {
+        if (!cancelled) setEscalationsError(errText(e));
       });
     return () => {
       cancelled = true;
@@ -985,6 +1039,8 @@ export default function ClinicianView() {
   };
 
   const bump = () => setReminderVersion((v) => v + 1);
+  // Повтор после ошибки: те же загрузчики висят на reportVersion.
+  const retryLoads = () => setReportVersion((v) => v + 1);
 
   const nav = (
     <>
@@ -1075,9 +1131,13 @@ export default function ClinicianView() {
           reminders={reminders}
           chats={chats}
           profile={profile}
+          cardsError={cardsError}
+          escalationsError={escalationsError}
+          remindersError={remindersError}
           onResolved={(id) => setEscalations((prev) => prev.filter((e) => e.id !== id))}
           onChanged={bump}
           onOpenChats={(pid) => openChats(pid || null)}
+          onRetry={retryLoads}
         />
       );
     }
@@ -1123,57 +1183,63 @@ export default function ClinicianView() {
           </div>
         )}
         <div className="card">
-          <h2>Мои пациенты ({cards.length})</h2>
-          {cards.length === 0 && <p className="muted">Нет пациентов в выбранном фильтре.</p>}
-          <div className="table-wrap">
-            <table className="patients">
-              <thead>
-                <tr>
-                  <th>Пациент</th>
-                  <th>Риск</th>
-                  <th>Балл</th>
-                  <th>Эскалации</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {cards.map((c) => (
-                  <tr key={c.patient_id}>
-                    <td>
-                      <a
-                        href={"#patient=" + c.patient_id}
-                        style={{ color: "#2f6fed", textDecoration: "none", fontWeight: 600 }}
-                      >
-                        {c.fio ?? c.email}
-                      </a>
-                      <br />
-                      <small>{c.email}</small>
-                      {c.phone && (
-                        <>
-                          <br />
-                          <small title="Телефон скрыт частично (152-ФЗ)">{c.phone}</small>
-                        </>
-                      )}
-                    </td>
-                    <td>
-                      {c.last_triage ? (
-                        <span className={`badge ${c.last_triage}`}>{c.last_triage}</span>
-                      ) : (
-                        <span className="badge GREEN">без наблюдений</span>
-                      )}
-                    </td>
-                    <td>{c.last_score ?? "—"}</td>
-                    <td>{c.open_escalations}</td>
-                    <td>
-                      <button className="ghost" onClick={() => openPatient(c.patient_id)}>
-                        Открыть
-                      </button>
-                    </td>
+          <h2>Мои пациенты{cardsError ? "" : ` (${cards.length})`}</h2>
+          {cardsError ? (
+            <LoadError message={cardsError} onRetry={retryLoads} />
+          ) : (
+            cards.length === 0 && <p className="muted">Нет пациентов в выбранном фильтре.</p>
+          )}
+          {!cardsError && (
+            <div className="table-wrap">
+              <table className="patients">
+                <thead>
+                  <tr>
+                    <th>Пациент</th>
+                    <th>Риск</th>
+                    <th>Балл</th>
+                    <th>Эскалации</th>
+                    <th></th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {cards.map((c) => (
+                    <tr key={c.patient_id}>
+                      <td>
+                        <a
+                          href={"#patient=" + c.patient_id}
+                          style={{ color: "#2f6fed", textDecoration: "none", fontWeight: 600 }}
+                        >
+                          {c.fio ?? c.email}
+                        </a>
+                        <br />
+                        <small>{c.email}</small>
+                        {c.phone && (
+                          <>
+                            <br />
+                            <small title="Телефон скрыт частично (152-ФЗ)">{c.phone}</small>
+                          </>
+                        )}
+                      </td>
+                      <td>
+                        {c.last_triage ? (
+                          <span className={`badge ${c.last_triage}`}>{c.last_triage}</span>
+                        ) : (
+                          <span className="badge GREEN">без наблюдений</span>
+                        )}
+                      </td>
+                      <td>{c.last_score ?? "—"}</td>
+                      <td>{c.open_escalations}</td>
+                      <td>
+                        <button className="ghost" onClick={() => openPatient(c.patient_id)}>
+                          Открыть
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       </>
     );
@@ -1194,6 +1260,10 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
   const [picked, setPicked] = useState<string[]>([]);
   const [scaleSaved, setScaleSaved] = useState<number | null>(null);
   const [scaleError, setScaleError] = useState("");
+  // in-flight: двойной клик по «Назначить»/«Сохранить оценку» не должен слать
+  // второй запрос и создавать дубли.
+  const [scaleBusy, setScaleBusy] = useState(false);
+  const [assessBusy, setAssessBusy] = useState(false);
   const [aeList, setAeList] = useState<Report["adverse_events"]>([]);
   // FR-28: справочник ГРЛС для связи НЯ с препаратом (доступ врачу).
   const [drugs, setDrugs] = useState<Drug[]>([]);
@@ -1274,22 +1344,26 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
   };
 
   const saveScale = async () => {
-    if (!report || picked.length === 0) return;
+    if (!report || picked.length === 0 || scaleBusy) return;
     setScaleError("");
+    setScaleBusy(true);
     try {
       const res = await api.setPrescribedScales(report.patient_id, picked);
       setScaleSaved(Date.now());
       setPicked(res.scales);
     } catch (e: unknown) {
       setScaleError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setScaleBusy(false);
     }
   };
 
   const submitAssessment = async () => {
-    if (!report || !assessCode) return;
+    if (!report || !assessCode || assessBusy) return;
     const scale = report.available_scales.find((s) => s.code === assessCode);
     if (!scale) return;
     setAssessErr("");
+    setAssessBusy(true);
     try {
       const answers = Object.fromEntries(
         scale.items.map((i) => [i.key, assessAnswers[i.key] ?? 0]),
@@ -1298,6 +1372,8 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
       onRefresh();
     } catch (e: unknown) {
       setAssessErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAssessBusy(false);
     }
   };
 
@@ -1328,10 +1404,12 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
   }
   if (!report) return <div className="card">Загрузка…</div>;
   const last = report.last_assessment;
-  // PHQ-9 q9 пациенту не задаётся: в отчёте это NOT_ASSESSED, а не «риска нет».
-  const notAssessed = (
-    last as { risk_flags?: { kind: string; item_key?: string | null }[] } | null
-  )?.risk_flags?.some((f) => f.kind === "NOT_ASSESSED");
+  // FR-34: пункт о суициде (q9 PHQ-9, h3 HDRS-17) спрашивается не в каждой шкале.
+  // Бэкенд отдаёт пропуски последней шкалы, у которой такой пункт есть, — иначе
+  // после GAD-7 предупреждение пропадало бы, хотя PHQ-9 спрашивали без q9.
+  const lastAudit = last as { omitted_items?: string[]; omitted_scale?: string | null } | null;
+  const omittedItems = lastAudit?.omitted_items ?? [];
+  const omittedScale = lastAudit?.omitted_scale ?? null;
   const pendingAeCount = aeList.filter((e) => e.status === "pending").length;
   const assessScale = report.available_scales.find((s) => s.code === assessCode);
   const clinicianScales = report.available_scales.filter((s) => s.audience === "CLINICIAN");
@@ -1396,9 +1474,10 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
             </span>
           )}
         </div>
-        {notAssessed && (
+        {omittedItems.length > 0 && (
           <div className="risk-note">
-            Пункт 9 не задавался · риск не оценён
+            Пункт {omittedItems.join(", ")} не задавался
+            {omittedScale ? ` в шкале ${omittedScale}` : ""} · риск не оценён
           </div>
         )}
         <div style={{ marginTop: 6 }}>
@@ -1467,7 +1546,9 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
           </tbody>
         </table>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, alignItems: "center" }}>
-          <button onClick={saveScale} disabled={picked.length === 0}>Назначить</button>
+          <button onClick={saveScale} disabled={picked.length === 0 || scaleBusy}>
+            {scaleBusy ? "Сохранение…" : "Назначить"}
+          </button>
           {scaleSaved && <span style={{ color: "#2e7d32", fontSize: 13 }}>Сохранено</span>}
         </div>
         {scaleError && <p className="error">{scaleError}</p>}
@@ -1516,7 +1597,9 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
               </label>
             ))}
             <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8 }}>
-              <button onClick={submitAssessment} disabled={!assessScale}>Сохранить оценку</button>
+              <button onClick={submitAssessment} disabled={!assessScale || assessBusy}>
+                {assessBusy ? "Сохранение…" : "Сохранить оценку"}
+              </button>
               {assessResult && (
                 <span style={{ fontSize: 13 }}>
                   {assessResult.total_score} · {assessResult.severity} · {assessResult.triage}
@@ -2020,8 +2103,12 @@ function VerifyAdverseEvent({ event, medications, drugs, onOpenLibrary, onVerifi
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const drug = drugs.find((d) => d.drug_id === drugId);
+  // Подтвердить НЯ без явно выбранной тяжести нельзя: severity=null выглядел бы
+  // как «тяжесть не оценена», хотя врач событие подтвердил. Отказ тяжести не требует.
+  const needsSeverity = decision === "confirmed" && !severity;
 
   const save = async () => {
+    if (needsSeverity) return;
     setErr("");
     setBusy(true);
     try {
@@ -2058,18 +2145,25 @@ function VerifyAdverseEvent({ event, medications, drugs, onOpenLibrary, onVerifi
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginTop: 8 }}>
         <button
           className={decision === "confirmed" ? "active" : ""}
+          aria-pressed={decision === "confirmed"}
           onClick={() => setDecision("confirmed")}
         >
           Подтвердить
         </button>
         <button
           className={decision === "rejected" ? "active" : ""}
+          aria-pressed={decision === "rejected"}
           onClick={() => setDecision("rejected")}
         >
           Отклонить
         </button>
-        <select aria-label="Тяжесть при проверке" value={severity} onChange={(e) => setSeverity(e.target.value as AdverseSeverity | "")}>
-          <option value="">не оценена</option>
+        <select
+          aria-label="Тяжесть при проверке"
+          aria-invalid={needsSeverity || undefined}
+          value={severity}
+          onChange={(e) => setSeverity(e.target.value as AdverseSeverity | "")}
+        >
+          <option value="" disabled>выберите тяжесть</option>
           <option value="mild">лёгкое</option>
           <option value="moderate">умеренное</option>
           <option value="severe">тяжёлое</option>
@@ -2094,9 +2188,14 @@ function VerifyAdverseEvent({ event, medications, drugs, onOpenLibrary, onVerifi
           <option value="referred">направлен к врачу</option>
         </select>
         <input placeholder="Заметка врача" value={note} onChange={(e) => setNote(e.target.value)} style={{ maxWidth: 260 }} />
-        <button onClick={save} disabled={busy}>
+        <button onClick={save} disabled={busy || needsSeverity}>
           {busy ? "Сохранение…" : "Сохранить проверку"}
         </button>
+        {needsSeverity && (
+          <span className="small" style={{ color: "#a3282d" }}>
+            Укажите тяжесть, чтобы подтвердить НЯ
+          </span>
+        )}
       </div>
       {drug && (
         <p style={{ fontSize: 12, color: "#5a6478", marginBottom: 0 }}>

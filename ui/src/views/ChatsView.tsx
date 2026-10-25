@@ -282,6 +282,7 @@ function PatientChats({
               <button
                 key={c.patient_id}
                 className={`chat-item${c.patient_id === selected ? " active" : ""}`}
+                aria-current={c.patient_id === selected ? "true" : undefined}
                 onClick={() => {
                   onSelect(c.patient_id);
                   setListOpen(false);
