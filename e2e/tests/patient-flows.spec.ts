@@ -41,8 +41,8 @@ test.describe("Пациент: первый запуск и ежедневные
     // Главный экран — это и есть «Сегодня»: чек-ин сразу под напоминаниями.
     await page.getByRole("button", { name: "Начать чек-ин" }).click();
 
-    // Первый шаг — 7 пунктов ядра (docs/16 §1); отвечаем первым вариантом.
-    await expect(page.locator(".qa")).toHaveCount(7);
+    // Первый шаг — 6 пунктов ядра v2.0.0 (docs/16 §1); отвечаем первым вариантом.
+    await expect(page.locator(".qa")).toHaveCount(6);
     for (let step = 0; step < 5; step++) {
       const questions = page.locator(".qa");
       const count = await questions.count();

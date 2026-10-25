@@ -7,6 +7,8 @@ test.describe("Библиотека препаратов", () => {
   test("врач открывает библиотеку, ищет Авиандр и видит НЯ + противопоказания", async ({ page }) => {
     await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
     await openSection(page, "Библиотека");
+    // FR-36: «Библиотека» разделена на вкладки «Статьи» и «Препараты».
+    await page.getByRole("tab", { name: "Препараты" }).click();
 
     const search = page.getByPlaceholder("Например: Авиандр или вортиоксетин");
     await expect(search).toBeVisible();

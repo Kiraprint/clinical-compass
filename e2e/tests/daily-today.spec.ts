@@ -3,8 +3,11 @@
 import { expect, test, type Page } from "@playwright/test";
 import { freshPatientEmail, registerPatient } from "./helpers";
 
-// Ядро чек-ина: MO1, TR1, SL1, IN1, EN1, FU1 и gate-пункт HR4 (docs/16 §1).
-const CORE_ITEMS = 7;
+// Ядро чек-ина v2.0.0: MO1, TR1, SL1, IN1, EN1, FU1 (docs/16 §1). HR4 в ядро не входит
+// и задаётся отдельным шагом безопасности только когда сработал safety-гейт.
+const CORE_ITEMS = 6;
+// Индекс кнопки «Сильно» на шкале 0..4 — им включается гейт (MO1 >= 3).
+const GATE_SEVERITY = 3;
 
 async function openToday(page: Page) {
   await registerPatient(page, freshPatientEmail());
@@ -30,17 +33,18 @@ async function waitForStepSettled(page: Page) {
 }
 
 /**
- * Отвечает на все пункты текущего шага. Первая кнопка — значение 0 («Совсем нет» / «Нет»);
- * yesGate — для gate-пункта HR4 выбрать «Да» (вторая кнопка).
+ * Отвечает на все пункты текущего шага первой кнопкой (значение 0). `mo1` позволяет
+ * поднять MO1 до нужной выраженности: значение ≥ 3 включает safety-гейт.
  */
-async function answerStep(page: Page, yesGate = false) {
+async function answerStep(page: Page, opts: { mo1?: number } = {}) {
   const questions = page.locator(".qa");
   const count = await questions.count();
   expect(count).toBeGreaterThan(0);
   for (let i = 0; i < count; i++) {
     const question = questions.nth(i);
-    const isGate = (await question.getAttribute("data-item")) === "HR4";
-    await question.getByRole("button").nth(yesGate && isGate ? 1 : 0).click();
+    const item = await question.getAttribute("data-item");
+    const index = item === "MO1" && opts.mo1 !== undefined ? opts.mo1 : 0;
+    await question.getByRole("button").nth(index).click();
   }
 }
 
@@ -70,8 +74,7 @@ test("«Сегодня»: первый шаг — 7 пунктов ядра; н�
 
   await page.getByRole("button", { name: "Начать чек-ин" }).click();
   await expect(page.locator(".qa")).toHaveCount(CORE_ITEMS);
-  await expect(page.locator('[data-item="HR4"]')).toBeVisible();
-
+  
   // Отвечен только один пункт шага — «Далее» заблокирована.
   await page.locator(".qa").first().getByRole("button").first().click();
   await expect(page.getByRole("button", { name: "Далее" })).toBeDisabled();
@@ -115,9 +118,9 @@ test("полный чек-ин: шаги до «Чек-ин за сегодня 
   await completeCheckin(page, false);
 
   await expect(page.getByText("Чек-ин за сегодня выполнен")).toBeVisible();
-  // Обычный чек-ин без риска (safety=none): нейтральный текст — ни обещания врача,
-  // ни ложного «закреплённого врача нет».
-  await expect(page.getByText(/Если за вами закреплён врач, он увидит их в карте/)).toBeVisible();
+  // Гейт не сработал → safety=unassessed: день закрыт без вопроса о риске, и текст
+  // честно говорит «риск не оценивался», а не «риска нет».
+  await expect(page.getByText(/Вопросы о риске сегодня не задавались/)).toBeVisible();
   await expect(page.getByText(/Закреплённого врача у вас нет/)).toHaveCount(0);
   await expect(page.getByText(/видит врач/)).toHaveCount(0);
   await expect(page.locator(".qa")).toHaveCount(0);
@@ -127,11 +130,19 @@ test("полный чек-ин: шаги до «Чек-ин за сегодня 
   await expect(page.getByRole("button", { name: "Начать чек-ин" })).toHaveCount(0);
 });
 
-test("ответ «Да» на HR4 ведёт на шаг безопасности, RS3 = «Нет» — экстренный блок", async ({ page }) => {
+test("gate-пункт HR4 «Да» ведёт на шаг безопасности, RS3 = «Нет» — экстренный блок", async ({ page }) => {
   await openToday(page);
   await page.getByRole("button", { name: "Начать чек-ин" }).click();
   await waitForStepSettled(page);
-  await answerStep(page, true);
+  // Ядро: MO1 = «Сильно» включает safety-гейт, остальное — «Совсем нет».
+  await expect(page.locator(".qa")).toHaveCount(CORE_ITEMS);
+  await expect(page.locator('[data-item="HR4"]')).toHaveCount(0);
+  await answerStep(page, { mo1: GATE_SEVERITY });
+  await nextStep(page);
+
+  // Шаг безопасности: единственный пункт HR4 «Были ли у вас мысли о самоповреждении?».
+  await expect(page.locator(".qa")).toHaveCount(1);
+  await page.locator('[data-item="HR4"]').getByRole("button").nth(1).click();
   await nextStep(page);
 
   // Модуль безопасности RS1–RS3, симптоматические модули в этот день не предъявляются.
@@ -165,11 +176,11 @@ test("прогресс чек-ина восстанавливается посл
   await waitForStepSettled(page);
 
   // Ядро отвечено целиком — следующий шаг и прогресс пришли с сервера.
-  await expect(page.getByText(/Прогресс: 7 из \d+/)).toBeVisible();
+  await expect(page.getByText(/Прогресс: \d+ из \d+/)).toBeVisible();
   await expect(page.getByText("Чек-ин за сегодня выполнен")).toHaveCount(0);
 
   await page.reload();
-  await expect(page.getByText(/Прогресс: 7 из \d+/)).toBeVisible();
+  await expect(page.getByText(/Прогресс: \d+ из \d+/)).toBeVisible();
   await expect(page.getByText("Чек-ин за сегодня выполнен")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Начать чек-ин" })).toHaveCount(0);
 });

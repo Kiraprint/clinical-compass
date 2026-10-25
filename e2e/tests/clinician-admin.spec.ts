@@ -20,7 +20,8 @@ test.describe("Врач и администратор", () => {
   });
 
   test("врач: отчёт RED-пациента показывает риск, историю и дневник", async ({ page }) => {
-    await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
+    // Игорь К. (p2) закреплён за вторым врачом: роспись doc — p3…p12 (FR-37).
+    await login(page, "doc2@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
     await openSection(page, "Пациенты");
     await page.getByRole("button", { name: "RED", exact: true }).click();
     const cards = page.locator(".patients tbody tr");
