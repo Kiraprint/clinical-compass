@@ -331,6 +331,9 @@ def serialize_for_clinician(work: KBWork, approval: KBWorkApproval | None) -> di
         "source": work.source,
         "year": meta.get("year"),
         "source_url": meta.get("url") or "",
+        # Полный текст (PMC для open-access статей, карточка IRIS для ВОЗ):
+        # в индексе лежит только аннотация, поэтому ссылку отдаём врачу.
+        "fulltext_url": meta.get("fulltext_url") or "",
         "design": work.design or {},
         "criteria": {
             "decision": criteria.get("decision"),

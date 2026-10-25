@@ -129,6 +129,12 @@ function ArticlesLibrary() {
       )}
 
       {items.length > 0 && (
+        <p className="muted small" style={{ margin: "0 0 8px" }}>
+          В ответах ассистента используется аннотация статьи; полный текст
+          открывается по названию или ссылке «Полный текст».
+        </p>
+      )}
+      {items.length > 0 && (
         <div className="table-wrap">
           <table>
             <thead>
@@ -152,6 +158,19 @@ function ArticlesLibrary() {
                         </a>
                       ) : (
                         w.title
+                      )}
+                      {w.fulltext_url && w.fulltext_url !== w.source_url && (
+                        <div style={{ marginTop: 4 }}>
+                          <a
+                            href={w.fulltext_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{ fontSize: 12 }}
+                            title="В ответах ассистента используется аннотация; полный текст — по этой ссылке"
+                          >
+                            Полный текст
+                          </a>
+                        </div>
                       )}
                     </td>
                     <td style={{ whiteSpace: "normal" }}>

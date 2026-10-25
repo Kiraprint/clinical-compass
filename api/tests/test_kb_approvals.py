@@ -119,6 +119,15 @@ def works(client, headers, **params) -> list[dict]:
     return resp.json()["works"]
 
 
+def test_library_row_exposes_fulltext_link(client, seeded):
+    """В библиотеке у статьи есть ссылка на полный текст: в индексе только абстракт."""
+    clinician, _ = clinician_ctx(client, "c-fulltext@test.ru")
+    rows = works(client, clinician, status="all")
+    row = next(r for r in rows if r["work_id"] == str(seeded["article_id"]))
+    assert row["fulltext_url"].startswith("http")
+    assert row["source_url"].startswith("http")
+
+
 def test_article_requires_personal_approval(client, seeded):
     clinician, _ = clinician_ctx(client, "c-appr@test.ru")
     gid = seeded["article_gid"]
