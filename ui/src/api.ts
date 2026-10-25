@@ -303,6 +303,33 @@ export const api = {
       `/api/v1/assistant/sources/${encodeURIComponent(guidelineId)}/exclude`,
       { method: "POST", body: JSON.stringify({ excluded }) },
     ),
+  // FR-36: персональное ревью статей — видимость в МОИХ ответах ассистента.
+  // Публикация (админский approve) глобальна; решение врача — личное.
+  clinicianKbWorks: (
+    params: {
+      status?: "new" | "approved" | "rejected" | "all";
+      kind?: "article" | "guideline";
+      limit?: number;
+    } = {},
+  ) => {
+    const q = new URLSearchParams();
+    if (params.status) q.set("status", params.status);
+    if (params.kind) q.set("kind", params.kind);
+    if (params.limit !== undefined) q.set("limit", String(params.limit));
+    const query = q.toString();
+    return req<{ works: ClinicianKbWork[] }>(
+      `/api/v1/clinician/kb/works${query ? `?${query}` : ""}`,
+    );
+  },
+  clinicianKbDecision: (
+    workId: string,
+    decision: "approved" | "rejected",
+    note?: string,
+  ) =>
+    req<ClinicianKbWork>(
+      `/api/v1/clinician/kb/works/${encodeURIComponent(workId)}/decision`,
+      { method: "POST", body: JSON.stringify({ decision, ...(note ? { note } : {}) }) },
+    ),
   drugs: (q?: string) =>
     req<{ items: Drug[] }>(`/api/v1/drugs${q ? `?q=${encodeURIComponent(q)}` : ""}`),
   drug: (drugId: string) => req<Drug>(`/api/v1/drugs/${encodeURIComponent(drugId)}`),
@@ -1177,6 +1204,24 @@ export interface KbWorksResp {
 export interface KbSourcesResp {
   sources: KbWork[];
   excluded_guideline_ids: string[];
+}
+
+/** FR-36: карточка статьи для врача — сжатые критерии без админских обоснований. */
+export interface ClinicianKbCriteria {
+  decision: "include" | "exclude" | null;
+  relevance_score: number | null;
+  verdicts: { key: string; label: string; status: KbVerdictStatus }[];
+}
+export interface ClinicianKbWork {
+  work_id: string;
+  title: string;
+  source: "pubmed" | "who";
+  year: number | null;
+  source_url: string;
+  design: KbDesign;
+  criteria: ClinicianKbCriteria;
+  decision: "approved" | "rejected" | null;
+  reviewed_at: string | null;
 }
 
 /** Человекочитаемые названия дизайнов (зеркало api/app/enrichment/design.py). */

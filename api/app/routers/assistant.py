@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field
@@ -184,3 +185,65 @@ async def exclude_source(
     excluded = await kb_review.set_exclusion(db, user.id, guideline_id, body.excluded)
     await db.commit()
     return {"excluded_guideline_ids": excluded}
+
+
+# --- FR-36: персональное ревью статей врачом («Библиотека») -----------------
+
+class ClinicianDecisionBody(BaseModel):
+    decision: Literal["approved", "rejected"]
+    # Свободный текст не хранится и не аудируется (152-ФЗ): параметр в контракте
+    # для UI, сервер проверяет длину и отбрасывает.
+    note: str | None = Field(default=None, max_length=500)
+
+
+@router.get("/clinician/kb/works")
+async def clinician_kb_works(
+    status: Literal["new", "approved", "rejected", "all"] = "new",
+    kind: Literal["article", "guideline"] | None = None,
+    limit: int = 100,
+    user: User = Depends(require_clinician),
+    db: AsyncSession = Depends(get_db),
+):
+    """Опубликованные работы КБ + моё персональное решение (docs/04 FR-36).
+
+    `new` — опубликовано админом, но я ещё не решил; `approved`/`rejected` —
+    мои решения; `all` — все опубликованные. Только своя область: clinician_id
+    всегда из токена.
+    """
+    rows = await kb_review.list_clinician_works(
+        db,
+        user.id,
+        status=status,
+        kind=kind,
+        limit=min(max(limit, 1), 200),
+    )
+    return {
+        "works": [
+            kb_review.serialize_for_clinician(work, approval) for work, approval in rows
+        ]
+    }
+
+
+_DECISION_ERROR_STATUS = {"KB_WORK_NOT_FOUND": 404, "KB_WORK_NOT_PUBLISHED": 409}
+
+
+@router.post("/clinician/kb/works/{work_id}/decision")
+async def clinician_kb_decision(
+    work_id: uuid.UUID,
+    body: ClinicianDecisionBody,
+    user: User = Depends(require_clinician),
+    db: AsyncSession = Depends(get_db),
+):
+    """Одобрить/отклонить статью для себя: видимость в моих ответах ассистента.
+
+    Публикация в индекс (админский approve) не меняется. Повтор того же решения
+    идемпотентен: 200, reviewed_at не меняется.
+    """
+    try:
+        work, approval = await kb_review.set_decision(
+            db, user.id, work_id, body.decision, note=body.note
+        )
+    except kb_review.ApprovalError as exc:
+        raise Problem(_DECISION_ERROR_STATUS.get(exc.code, 400), exc.code, str(exc)) from exc
+    await db.commit()
+    return kb_review.serialize_for_clinician(work, approval)

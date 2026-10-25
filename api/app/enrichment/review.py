@@ -3,6 +3,9 @@
 Апрув — единственный путь статьи в Qdrant. Отклонение хранит причину и не
 удаляет запись: повторный прогон не «воскрешает» отклонённый PMID как новый
 кандидат (он обновится, но статус rejected останется, если версия та же).
+
+FR-36: админский approve — публикация в индекс (глобально), а врач решает
+персонально, видит ли ОН эту статью (kb_work_approvals, docs/15 §12).
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.enrichment import criteria as criteria_mod
 from app.enrichment import index as index_mod
 from app.enrichment.config import EnrichmentConfig
-from app.models import KBExclusion, KBWork
+from app.models import KBExclusion, KBWork, KBWorkApproval
 from app.services import audit
 from app.services.embeddings import get_embedder
 
@@ -249,3 +252,154 @@ def serialize(work: KBWork, *, excluded: bool = False) -> dict:
         "reject_reason": work.reject_reason,
         "excluded": excluded,
     }
+
+
+# --- FR-36: персональное ревью статьи врачом (docs/15 §12) ------------------
+
+class ApprovalError(ValueError):
+    """Решение врача невозможно; `code` — машинный код для HTTP-слоя."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+async def approved_work_ids(db: AsyncSession, clinician_id: uuid.UUID) -> set[str]:
+    """work_id статей, которые этот врач одобрил лично (allow-list retrieval).
+
+    Гайдлайны ВОЗ сюда не входят намеренно: они видны всем и без решения
+    (фильтр в retrieval пропускает kind='guideline' и seed-чанки без work_id).
+    """
+    rows = await db.scalars(
+        select(KBWorkApproval.work_id).where(
+            KBWorkApproval.clinician_id == clinician_id,
+            KBWorkApproval.decision == "approved",
+        )
+    )
+    return {str(work_id) for work_id in rows}
+
+
+async def list_clinician_works(
+    db: AsyncSession,
+    clinician_id: uuid.UUID,
+    *,
+    status: str = "new",
+    kind: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[tuple[KBWork, KBWorkApproval | None]]:
+    """Опубликованные работы + моё решение по ним (FR-36, docs/04 FR-36).
+
+    База — только опубликованное админом (`status='approved'`): неопубликованную
+    статью врач решать не может, и в его библиотеке её быть не должно.
+    `new` — работы без моей записи; `approved`/`rejected` — по моему решению;
+    `all` — все опубликованные.
+    """
+    stmt = (
+        select(KBWork, KBWorkApproval)
+        .outerjoin(
+            KBWorkApproval,
+            (KBWorkApproval.work_id == KBWork.id)
+            & (KBWorkApproval.clinician_id == clinician_id),
+        )
+        .where(KBWork.status == "approved")
+        .order_by(KBWork.published_at.desc().nullslast(), KBWork.last_seen_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    if kind:
+        stmt = stmt.where(KBWork.kind == kind)
+    if status == "new":
+        stmt = stmt.where(KBWorkApproval.id.is_(None))
+    elif status in ("approved", "rejected"):
+        stmt = stmt.where(KBWorkApproval.decision == status)
+    rows = (await db.execute(stmt)).all()
+    return [(work, approval) for work, approval in rows]
+
+
+def serialize_for_clinician(work: KBWork, approval: KBWorkApproval | None) -> dict:
+    """Карточка статьи для экрана «Библиотека»: без полного текста/абстракта.
+
+    `criteria` сжато: решение, релевантность и вердикты без цитат-обоснований —
+    экрану нужен светофор критериев, а не админская карточка ревью.
+    """
+    meta = work.meta or {}
+    criteria = work.criteria or {}
+    return {
+        "work_id": str(work.id),
+        "title": work.title,
+        "source": work.source,
+        "year": meta.get("year"),
+        "source_url": meta.get("url") or "",
+        "design": work.design or {},
+        "criteria": {
+            "decision": criteria.get("decision"),
+            "relevance_score": criteria.get("relevance_score"),
+            "verdicts": [
+                {
+                    "key": verdict.get("key"),
+                    "label": verdict.get("label"),
+                    "status": verdict.get("status"),
+                }
+                for verdict in criteria.get("verdicts") or []
+            ],
+        },
+        "decision": approval.decision if approval else None,
+        "reviewed_at": approval.reviewed_at.isoformat() if approval else None,
+    }
+
+
+async def set_decision(
+    db: AsyncSession,
+    clinician_id: uuid.UUID,
+    work_id: uuid.UUID,
+    decision: str,
+    *,
+    note: str | None = None,
+) -> tuple[KBWork, KBWorkApproval]:
+    """Одобрить/отклонить статью лично для себя (идемпотентно).
+
+    Повтор того же решения — 200 без побочных эффектов: reviewed_at и аудит
+    не трогаем (иначе повторный клик «Одобрить» переписывал бы историю).
+    Смена решения обновляет строку и reviewed_at; аудит `KB_WORK_REVIEW` несёт
+    только work_id — свободный текст `note` не пишем ни в БД, ни в журнал
+    (152-ФЗ: заметка врача может содержать ПДн; параметр принят для контракта
+    с UI, хранение пока не требуется продуктом).
+    """
+    work = await get_work(db, work_id, for_update=True)
+    if work is None:
+        raise ApprovalError("KB_WORK_NOT_FOUND", "Источник не найден.")
+    if work.status != "approved":
+        raise ApprovalError(
+            "KB_WORK_NOT_PUBLISHED",
+            "Статья ещё не опубликована администратором — решение недоступно.",
+        )
+    approval = await db.scalar(
+        select(KBWorkApproval)
+        .where(
+            KBWorkApproval.clinician_id == clinician_id,
+            KBWorkApproval.work_id == work.id,
+        )
+        .with_for_update()
+    )
+    changed = False
+    now = dt.datetime.now(dt.timezone.utc)
+    if approval is None:
+        approval = KBWorkApproval(
+            clinician_id=clinician_id,
+            work_id=work.id,
+            decision=decision,
+            # Явное значение, а не только server_default: ответ на POST должен
+            # нести reviewed_at без дополнительного refresh.
+            reviewed_at=now,
+        )
+        db.add(approval)
+        changed = True
+    elif approval.decision != decision:
+        approval.decision = decision
+        approval.reviewed_at = now
+        changed = True
+    if changed:
+        await audit.record(db, clinician_id, "KB_WORK_REVIEW", "kb_work", str(work.id))
+    await db.flush()
+    return work, approval

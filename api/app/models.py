@@ -621,6 +621,35 @@ class KBExclusion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
 
 
+class KBWorkApproval(Base):
+    """FR-36: персональное решение врача по статье — видимость в его выдаче.
+
+    `kb_works.status='approved'` — глобальная публикация в индекс админом;
+    эта таблица решает, видит ли конкретный врач статью в ответах ассистента.
+    Записи нет → статья врачу не видна (гайдлайны ВОЗ видны всем: kind='guideline').
+    Своё решение врач может поменять (approved ↔ rejected) — строка обновляется,
+    reviewed_at фиксирует последнее изменение.
+    """
+
+    __tablename__ = "kb_work_approvals"
+    __table_args__ = (
+        CheckConstraint("decision in ('approved','rejected')", name="kb_work_approvals_decision"),
+        UniqueConstraint("clinician_id", "work_id", name="kb_work_approvals_clinician_work"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    clinician_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    work_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("kb_works.id", ondelete="CASCADE"), index=True
+    )
+    decision: Mapped[str] = mapped_column(String(16))  # approved | rejected
+    reviewed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
 class AssistantThread(Base):
     """Сессия клинического ассистента врача (FR-21): контекст диалога живёт
     между запросами. Область пациентов — assistant_thread_patients (мультипациент).

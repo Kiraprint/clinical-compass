@@ -22,7 +22,7 @@ import {
 } from "../api";
 import TrendChart from "../TrendChart";
 import ChatsView from "./ChatsView";
-import DrugLibraryTab from "./DrugLibraryTab";
+import LibraryView from "./LibraryView";
 
 // Текст ошибки для пользователя: ApiError несёт серверный detail.
 const errText = (e: unknown): string =>
@@ -1116,7 +1116,7 @@ export default function ClinicianView() {
       );
     }
     if (section === "library") {
-      return <DrugLibraryTab />;
+      return <LibraryView />;
     }
     if (section === "schedule") {
       return <ScheduleView cards={cards} version={reminderVersion} onChanged={bump} />;
