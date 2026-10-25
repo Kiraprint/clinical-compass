@@ -148,7 +148,12 @@ def main() -> None:
         chunk_grades = []
         for (qid, cands), reply in zip(chunk, replies):
             local: dict[int, int] = {}
-            for item in kb.parse_json_array(reply) or []:
+            try:
+                parsed = kb.parse_json_array(reply)
+            except ValueError:
+                # битый ответ — кандидаты уйдут в повторный запрос (retry pass)
+                parsed = None
+            for item in parsed or []:
                 if not isinstance(item, dict):
                     continue
                 try:

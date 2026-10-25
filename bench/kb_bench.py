@@ -83,12 +83,27 @@ def chat_json(prompt: str, *, system: str = "", timeout: float = 180.0, max_toke
 
 
 def parse_json_array(text: str):
-    """Достаёт JSON-массив из ответа модели (снимает ```-забор и мусор вокруг)."""
+    """Достаёт JSON-массив из ответа модели (снимает ```-забор и мусор вокруг).
+
+    Битая разметка (пропущенная запятая, обрезанный хвост) не должна ронять
+    многочасовую разметку: пробуем отрезать хвост до последней целой записи,
+    иначе возвращаем None — вызывающий делает повторный запрос.
+    """
     start = text.find("[")
-    end = text.rfind("]")
-    if start < 0 or end <= start:
+    if start < 0:
         raise ValueError(f"нет JSON-массива в ответе: {text[:200]!r}")
-    return json.loads(text[start : end + 1])
+    end = text.rfind("]")
+    body = text[start : end + 1] if end > start else text[start:] + "]"
+    try:
+        return json.loads(body)
+    except ValueError:
+        last = body.rfind("},")
+        while last > 0:
+            try:
+                return json.loads(body[: last + 1] + "]")
+            except ValueError:
+                last = body.rfind("},", 0, last)
+        return None
 
 
 def parse_json_object(text: str):

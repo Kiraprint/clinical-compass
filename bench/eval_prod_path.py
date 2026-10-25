@@ -78,8 +78,12 @@ def main() -> None:
              "topic": r.get("topic") or "", "text": r["text"]}
             for r in corpus
         ]
+        # Пачками: один upsert 3362 чанков = 76 МБ JSON, Qdrant режет запрос на
+        # 32 МБ (нарезка 600 знаков × 3.4 индекса).
         t0 = time.perf_counter()
-        kb.upsert_documents(client, embedder, docs)
+        batch = 256
+        for i in range(0, len(docs), batch):
+            kb.upsert_documents(client, embedder, docs[i : i + batch])
         print(f"проиндексировано {len(docs)} чанков за {time.perf_counter() - t0:.1f}s")
 
     rankings: dict[str, list[str]] = {}

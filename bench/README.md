@@ -161,18 +161,31 @@ PMC (open access): 10277900, 9790363, 13571187, 13641322, 13653422, 13655782,
 LLM-асессора по пулу из восьми стеков.
 
 ```bash
-# 1) снимок корпуса из Qdrant + набор запросов (LLM-генерация + 30 ручных)
+# 1) снимок корпуса из Qdrant + набор запросов (LLM-генерация + 38 ручных)
 .venv/bin/python bench/build_kb_bench.py --export
+
+# 1b) альтернативный снимок с другим размером чанка — тем же кодом, что прод
+#     (CC_KB_CHUNK_CHARS/CC_KB_CHUNK_OVERLAP; чанки сида переносятся как есть)
+CC_ALLOW_DEMO_SECRETS=true .venv/bin/python bench/rechunk_corpus.py --chars 600     --overlap 120 --out bench/data/kb_corpus_600.jsonl
 
 # 2) разметка пула локальной instruct-моделью на GPU (батчи, идемпотентно,
 #    докачивается построчно; ~17 с/запрос на RTX 5090)
-../bench/.venv/bin/python bench/eval_retrieval.py --stacks all --dump-pools bench/data/kb_pool.jsonl
-../bench/.venv/bin/python bench/grade_local.py --pool bench/data/kb_pool.jsonl
+.venv/bin/python bench/eval_retrieval.py --stacks bge-m3-dense,qwen3-0.6b-dense \
+    user-bge-m3-dense,bge-m3-dense+sparse --candidates 30 \
+    --dump-pools bench/data/pool_bge.jsonl            # по файлу на стек
+.venv/bin/python bench/merge_pools.py bench/data/pool_*.jsonl --cap 30 \
+    --out bench/data/kb_pool_merged30.jsonl
+# судья видит тело чанка без метаданного заголовка источника (--keep-header
+# отключает срезание); --corpus — снапшот, под который размечен пул
+.venv/bin/python bench/grade_local.py --pool bench/data/kb_pool_merged30.jsonl \
+    --corpus bench/data/kb_corpus.jsonl --out bench/data/qrels.jsonl \
+    --chunk-chars 700
 # альтернатива — шлюзовой асессор (медленнее: 60–120 с на вызов):
 # .venv/bin/python bench/grade_kb_qrels.py --pool bench/data/kb_pool.jsonl --workers 4
 
 # 3) проверки набора (анти-предвзятость, детерминированные)
-.venv/bin/python bench/qa_qrels.py --qrels bench/data/qrels.jsonl
+.venv/bin/python bench/qa_qrels.py --qrels bench/data/qrels.jsonl \
+    --corpus bench/data/kb_corpus.jsonl
 
 # 4) матрица стеков: эмбеддеры, RRF-k, реранк; метрики/латентность/VRAM
 .venv/bin/python bench/eval_retrieval.py --stacks all --qrels bench/data/qrels.jsonl \

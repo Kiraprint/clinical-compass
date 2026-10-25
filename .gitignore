@@ -20,6 +20,8 @@ bench/.venv/
 bench/data/*
 !bench/data/qrels.jsonl
 !bench/data/kb_queries.jsonl
+!bench/data/qrels_1800_full.jsonl
+!bench/data/qrels_600_full.jsonl
 bench/sources/
 bench/ner/data/
 bench/__pycache__/

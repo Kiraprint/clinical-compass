@@ -80,6 +80,10 @@ class Reranker(Protocol):
 class CrossEncoderReranker:
     """sentence-transformers CrossEncoder (bge-reranker-v2-m3, jina, DiTy, Qwen3)."""
 
+    # Ширина окна по умолчанию (0 — начало чанка); __init__ берёт CC_RERANK_WINDOW.
+    # Атрибут класса — чтобы подставные объекты (тесты) не падали на score().
+    _window = 0
+
     def __init__(
         self,
         model_id: str,
