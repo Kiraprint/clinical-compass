@@ -1,15 +1,61 @@
-"""Чат-поддержка (FR-10). Правила, не LLM; эскалация на человека при RED."""
+"""Чат-поддержка (FR-10, FR-34). Правила, не LLM; эскалация на человека при RED.
+
+Помощник отвечает автоматически не чаще одного раза в календарные сутки
+(Europe/Moscow) на пациента: ответы «на каждое сообщение» превращались в
+спам-ленту и мешали врачу читать нить. Остальные сообщения сохраняются без
+ответа и видны врачу в карте.
+
+Исключение — кризис: если последняя оценка пациента RED, ответ с телефонами
+помощи уходит всегда, суточный лимит его не режет.
+"""
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Assessment, ChatMessage
 
-FAQ_REPLY = "Спасибо, что поделились. Если состояние резко ухудшается, обратитесь к вашему врачу. Здесь вы можете вести дневник настроения и выполнять ежедневные чек-ины."
+# Спокойный текст без канцелярита и без обещания мгновенного контакта:
+# сообщение сохраняется и попадёт врачу в карту, но это не линия экстренной помощи.
+FAQ_REPLY = (
+    "Спасибо, что написали. Ваше сообщение сохранено — врач увидит его в вашей карте. "
+    "Здесь же можно вести дневник настроения и выполнять ежедневные чек-ины."
+)
+HOTLINE_REPLY = (
+    "Спасибо, что написали. Ваше сообщение сохранено — врач увидит его в вашей карте. "
+    "Если станет тяжелее, позвоните по одному из номеров помощи ниже."
+)
 
-HOTLINE_REPLY = "Мы заметили, что вам сейчас тяжело. Важно, чтобы вы не оставались с этим наедине: свяжитесь с вашим врачом или позвоните по одному из номеров помощи прямо сейчас."
+HELP_RESOURCES = [
+    {"title": "Единый телефон доверия", "phone": "8-800-2000-122"},
+    {"title": "Экстренная служба", "phone": "112"},
+]
+
+
+def _moscow_day(value):
+    """Календарный день по Москве, посчитанный в SQL.
+
+    Границу суток нельзя сравнивать часами приложения: created_at пишет
+    Postgres (`server_default=now()`), и расхождение часов сдвигало бы лимит.
+    """
+    return func.date_trunc("day", func.timezone("Europe/Moscow", value))
+
+
+async def _lock_patient_day(db: AsyncSession, patient_id) -> None:
+    """Сериализует автоответы одного пациента в текущие сутки МСК.
+
+    Advisory-лок живёт до конца транзакции: второй параллельный POST дождётся
+    коммита первого и увидит его автоответ — иначе check-then-insert в гонке
+    даёт два автоответа.
+    """
+    await db.execute(
+        text(
+            "select pg_advisory_xact_lock(hashtextextended("
+            ":key || ':' || date_trunc('day', timezone('Europe/Moscow', now()))::text, 0))"
+        ),
+        {"key": str(patient_id)},
+    )
 
 
 async def _last_triage(db: AsyncSession, patient_id) -> str | None:
@@ -19,36 +65,64 @@ async def _last_triage(db: AsyncSession, patient_id) -> str | None:
     return assessment.triage if assessment else None
 
 
+async def auto_replied_today(db: AsyncSession, patient_id) -> bool:
+    """Был ли уже автоответ помощника за сегодня (по календарю Москвы)."""
+    count = await db.scalar(
+        select(func.count())
+        .select_from(ChatMessage)
+        .where(
+            ChatMessage.patient_id == patient_id,
+            ChatMessage.sender == "SYSTEM",
+            _moscow_day(ChatMessage.created_at) == _moscow_day(func.now()),
+        )
+    )
+    return bool(count)
+
+
 async def post_message(db: AsyncSession, patient_id, content: str) -> dict:
+    """Сохраняет сообщение пациента; автоответ — максимум один в сутки.
+
+    Кризисный ответ лимитом не режется: при RED-оценке пациент получает HOTLINE
+    с номерами помощи, даже если днём уже был FAQ. `reply` — None только для
+    не-кризисного сообщения при исчерпанном лимите (сообщение всё равно
+    сохранено и доступно врачу).
+    """
+    await _lock_patient_day(db, patient_id)
     patient_msg = ChatMessage(patient_id=patient_id, sender="PATIENT", kind="TEXT", content=content)
     db.add(patient_msg)
     red = await _last_triage(db, patient_id) == "RED"
-    reply = ChatMessage(
-        patient_id=patient_id,
-        sender="SYSTEM",
-        kind="HOTLINE" if red else "FAQ",
-        content=HOTLINE_REPLY if red else FAQ_REPLY,
-    )
-    db.add(reply)
+    reply: ChatMessage | None = None
+    if red or not await auto_replied_today(db, patient_id):
+        reply = ChatMessage(
+            patient_id=patient_id,
+            sender="SYSTEM",
+            kind="HOTLINE" if red else "FAQ",
+            content=HOTLINE_REPLY if red else FAQ_REPLY,
+        )
+        db.add(reply)
     await db.commit()
     await db.refresh(patient_msg)
-    await db.refresh(reply)
+    if reply is not None:
+        await db.refresh(reply)
     return {
         "message": {"id": str(patient_msg.id), "sender": "PATIENT", "content": content},
-        "reply": {
+        "reply": None if reply is None else {
             "id": str(reply.id),
             "sender": "SYSTEM",
             "kind": reply.kind,
             "content": reply.content,
-            "help_resources": (
-                [
-                    {"title": "Единый телефон доверия", "phone": "8-800-2000-122"},
-                    {"title": "Экстренная служба", "phone": "112"},
-                ]
-                if red
-                else []
-            ),
+            "help_resources": HELP_RESOURCES if reply.kind == "HOTLINE" else [],
         },
+    }
+
+
+def to_dict(m: ChatMessage) -> dict:
+    return {
+        "id": str(m.id),
+        "sender": m.sender,
+        "kind": m.kind,
+        "content": m.content,
+        "created_at": m.created_at.isoformat(),
     }
 
 
@@ -60,13 +134,3 @@ async def list_messages(db: AsyncSession, patient_id, limit: int = 50) -> list[C
         .limit(limit)
     )).all()
     return list(reversed(rows))
-
-
-def to_dict(msg: ChatMessage) -> dict:
-    return {
-        "id": str(msg.id),
-        "sender": msg.sender,
-        "kind": msg.kind,
-        "content": msg.content,
-        "created_at": msg.created_at.isoformat(),
-    }

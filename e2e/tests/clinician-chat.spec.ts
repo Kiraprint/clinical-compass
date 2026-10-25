@@ -1,6 +1,6 @@
 // Чат врач ↔ пациент (задача кейса 6): сообщение врача видно пациенту, ответ — врачу.
 import { expect, test, type APIResponse } from "@playwright/test";
-import { DEMO_PASSWORD, freshPatientEmail, totp } from "./helpers";
+import { DEMO_PASSWORD, freshPatientEmail, openPatientChat, openSection, totp } from "./helpers";
 
 const BASE = process.env.CC_E2E_URL ?? "http://127.0.0.1:8090";
 const j = async (r: APIResponse) => r.json();
@@ -37,8 +37,9 @@ test.describe("Чат врач ↔ пациент", () => {
     await page.getByLabel("Пароль").fill(DEMO_PASSWORD);
     await page.getByLabel("Код 2FA").fill(totp(docReg.totp_secret as string));
     await page.getByRole("button", { name: "Войти" }).click();
+    await openSection(page, "Пациенты");
 
-    const row = page.locator("tbody tr", { hasText: patReg.email }).first();
+    const row = page.locator(".patients tbody tr", { hasText: patReg.email }).first();
     await expect(row).toBeVisible();
     await row.getByRole("button", { name: "Открыть" }).click();
 
@@ -60,11 +61,11 @@ test.describe("Чат врач ↔ пациент", () => {
     await page2.getByLabel("Email").fill(patReg.email);
     await page2.getByLabel("Пароль").fill(DEMO_PASSWORD);
     await page2.getByRole("button", { name: "Войти" }).click();
-    await page2.getByRole("button", { name: "Чат поддержки" }).click();
+    await openPatientChat(page2);
     await expect(page2.locator(".msg", { hasText: docMsg })).toBeVisible();
 
     const patMsg = `Спасибо, лучше! ${Date.now()}`;
-    await page2.locator("input").fill(patMsg);
+    await page2.getByLabel("Сообщение врачу").fill(patMsg);
     await page2.getByRole("button", { name: "Отправить" }).click();
     await expect(page2.locator(".msg", { hasText: patMsg })).toBeVisible();
 

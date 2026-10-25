@@ -1,7 +1,7 @@
-// e2e экрана «Чаты» врача (FR-29): ассистент по базе знаний и переписка с пациентами
-// в одном разделе; навигация «Пациенты · Чаты · Библиотека · Напоминания».
+// e2e экрана «Чаты» врача (FR-29): ассистент по базе знаний и переписка с пациентами;
+// навигация кабинета врача — левое меню под «три полоски» (FR-32).
 import { expect, test, type APIResponse } from "@playwright/test";
-import { DEMO_PASSWORD, DEMO_TOTP, freshPatientEmail, login, totp } from "./helpers";
+import { DEMO_PASSWORD, DEMO_TOTP, freshPatientEmail, login, openSection, totp } from "./helpers";
 
 const BASE = process.env.CC_E2E_URL ?? "http://127.0.0.1:8090";
 const j = async (r: APIResponse) => r.json();
@@ -10,8 +10,7 @@ test.describe("Экран чатов врача", () => {
   test("Чаты → Ассистент: диалог создаётся и отвечает по базе знаний", async ({ page }) => {
     await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
 
-    await page.getByRole("button", { name: "Чаты" }).click();
-    await page.getByRole("tab", { name: "Ассистент" }).click();
+    await openSection(page, "Ассистент");
     await expect(page.getByRole("heading", { name: "Ассистент врача" })).toBeVisible();
 
     await page.locator('.icon-btn[title="Новый диалог"]').click();
@@ -65,8 +64,7 @@ test.describe("Экран чатов врача", () => {
     await page.getByLabel("Код 2FA").fill(totp(docReg.totp_secret as string));
     await page.getByRole("button", { name: "Войти" }).click();
 
-    await page.getByRole("button", { name: "Чаты" }).click();
-    await page.getByRole("tab", { name: "Пациенты" }).click();
+    await openSection(page, "Чаты с пациентами");
     await expect(
       page.getByRole("heading", { name: "Переписка с пациентами" }),
     ).toBeVisible();
@@ -85,15 +83,15 @@ test.describe("Экран чатов врача", () => {
 
   test("старые разделы врача доступны: Пациенты и Библиотека", async ({ page }) => {
     await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
-
+    await openSection(page, "Пациенты");
     await expect(page.getByRole("heading", { name: /Мои пациенты/ })).toBeVisible();
     await expect(page.getByText("Сначала красные")).toBeVisible();
 
-    await page.getByRole("button", { name: "Библиотека" }).click();
-    await page.getByRole("button", { name: "Пациенты", exact: true }).click();
+    await openSection(page, "Библиотека");
+    await openSection(page, "Пациенты");
     await expect(page.getByRole("heading", { name: /Мои пациенты/ })).toBeVisible();
 
-    await page.getByRole("button", { name: /^Напоминания/ }).click();
+    await openSection(page, "Кабинет");
     await expect(page.getByRole("heading", { name: /Напоминания/ })).toBeVisible();
   });
 });

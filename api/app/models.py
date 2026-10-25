@@ -366,7 +366,9 @@ class AdverseEvent(Base):
     patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
     clinician_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     event_text: Mapped[str] = mapped_column(EncryptedText())
-    severity: Mapped[str] = mapped_column(String(16))   # mild | moderate | severe
+    # FR-33/34: пациент тяжесть не оценивает — severity NULL до проверки врачом
+    # (mild | moderate | severe выставляет врач). У врачебных/исторических строк заполнено.
+    severity: Mapped[str | None] = mapped_column(String(16), nullable=True)
     onset_date: Mapped[datetime] = mapped_column(Date)
     suspected_drug: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)  # NEW-3: контекст лечения
     action_taken: Mapped[str | None] = mapped_column(String(32))  # none|monitoring|dose_reduced|stopped|referred

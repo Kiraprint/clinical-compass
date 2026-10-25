@@ -1,7 +1,7 @@
 // Врачебная шкала (HDRS-17): врач заполняет в карточке, отчёт сразу показывает
-// новые триаж/эскалацию. Шкала недоступна пациенту (audience=CLINICIAN).
+// новый риск. Шкала недоступна пациенту (audience=CLINICIAN).
 import { expect, test, type APIResponse } from "@playwright/test";
-import { DEMO_PASSWORD, freshPatientEmail, totp } from "./helpers";
+import { DEMO_PASSWORD, freshPatientEmail, openSection, totp } from "./helpers";
 
 const BASE = process.env.CC_E2E_URL ?? "http://127.0.0.1:8090";
 const j = async (r: APIResponse) => r.json();
@@ -38,22 +38,22 @@ test.describe("Врачебная оценка (HDRS-17)", () => {
     await page.getByLabel("Пароль").fill(DEMO_PASSWORD);
     await page.getByLabel("Код 2FA").fill(totp(docReg.totp_secret as string));
     await page.getByRole("button", { name: "Войти" }).click();
+    await openSection(page, "Пациенты");
 
-    const row = page.locator("tbody tr", { hasText: patReg.email }).first();
+    const row = page.locator(".patients tbody tr", { hasText: patReg.email }).first();
     await expect(row).toBeVisible();
     await row.getByRole("button", { name: "Открыть" }).click();
 
-    // Форма врачебной оценки: шкала HDRS-17, пункт h3 = 2 (суицидальные мысли).
-    // Блок свёрнут/раскрыт через <details>; по умолчанию раскрыт.
-    await expect(page.locator("summary", { hasText: "Оценка врачом" })).toBeVisible();
+    // Форма врачебной оценки теперь внутри блока «Назначить скрининг»
+    // (по умолчанию раскрыт): шкала HDRS-17, пункт h3 = 2 (суицидальные мысли).
+    await expect(page.locator("summary", { hasText: "Назначить скрининг" })).toBeVisible();
     await expect(page.getByLabel("Шкала врачебной оценки")).toHaveValue("HDRS-17");
     await page.getByLabel("Суицидальные мысли").selectOption("2");
     await page.getByRole("button", { name: "Сохранить оценку" }).click();
 
-    // Итог сразу в форме, а карточка перезагружается — появляется эскалация.
-    // Карточка/форма перезагружаются после получения ответа — даём запас на холодный старт CI.
-    await expect(page.getByText(/· RED/)).toBeVisible({ timeout: 15000 });
-    await expect(page.getByText("Открытые эскалации:")).toBeVisible({ timeout: 15000 });
+    // Итог сразу в форме, а карточка перезагружается — появляется алёрт риска.
+    await expect(page.getByText(/· RED/).first()).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText("Высокий риск: требуется разбор.")).toBeVisible({ timeout: 15000 });
 
     // Пациенту такая шкала недоступна: каталог её не содержит.
     const cat = await request.get(`${BASE}/api/v1/questionnaires`, {

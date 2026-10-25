@@ -6,7 +6,7 @@
 
 ## 1. Стратегия
 
-- Пирамида (фактически достигнуто на 2026-10-24, см. `core/tests` + `api/tests` + `ml/tests`): unit (ядро) 158, integration (API+БД) 640 (из них 78 — обогащение КБ, FR-20; 18 — rate limiter на общем Redis-счётчике, docs/03 §12; 43 — деперсонализация/NER/remote, docs/12; 9 — клиент ML-сайдкара, docs/08 §4), ML-сайдкар в stub-режиме (без БД/GPU/torch) 30, e2e (UI-флоу) 42. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
+- Пирамида (фактически достигнуто на 2026-10-25, см. `core/tests` + `api/tests` + `ml/tests` + `e2e/tests`): unit (ядро) 159, integration (API+БД) 663 (из них 78 — обогащение КБ, FR-20; 18 — rate limiter на общем Redis-счётчике, docs/03 §12; 43 — деперсонализация/NER/remote, docs/12; 9 — клиент ML-сайдкара, docs/08 §4; 10 — пациентский кабинет и FR-34 в `test_patient_ux.py`), ML-сайдкар в stub-режиме (без БД/GPU/torch) 30, e2e (UI-флоу) 46. Числа в 05/06 задавались как ориентир; приоритет — честная трассировка, а не набивка количества.
 - Ядро: 100% детерминированные чистые функции — табличные параметризованные тесты порогов.
 - Интеграция: реальные HTTP-запросы к тестовому Postgres (отдельная БД), не мок-эхо.
 - Запрещены тесты «на копирование»: только поведение контрактов (вход → выход/инвариант/ошибка).
@@ -38,6 +38,9 @@
 | phq9_severe_symptoms_with_nonzero_q9 | total 15 + item 9 = 1 | risk_flags() | оба флага |
 | gad7_no_suicidal_flag_but_severe_symptoms | GAD-7 total 15 | risk_flags() | SUICIDAL_IDEATION нет, SEVERE_SYMPTOMS есть |
 | hads_has_no_severe_bound_no_severe_flag | HADS-A/HADS-D максимум баллов | risk_flags() | SEVERE_SYMPTOMS нет (потолок MODERATE) |
+| `test_risk_flags_rejects_visible_omitted_item` | HADS-D, `omitted={d1}` (видимый обратный пункт) | risk_flags() | ValueError «cannot be omitted» — тот же guard, что у `score()`, а не молчаливый NOT_ASSESSED |
+| `test_risk_flags_requires_complete_answers` | PHQ-9 q1..q8 без q9 и без `omitted` | risk_flags() | `IncompleteAnswersError` — неполный набор не считается по `.get(..., 0)` |
+| `test_risk_flags_uses_scored_total_with_hidden_item` | PHQ-8 15 / 14, q9 скрыт | risk_flags() | сумма из `score()`: 15 → SEVERE_SYMPTOMS + NOT_ASSESSED, 14 → только NOT_ASSESSED |
 | gad7_severity_boundaries | GAD-7 total 0/5/10/15 | score() | NONE/MILD/MODERATE/SEVERE |
 | triage_red_suicidal | flag SUICIDAL, severity MILD | triage() | RED (флаг важнее severity) |
 | triage_red_severe | severity SEVERE, флагов нет | triage() | RED |
@@ -233,6 +236,8 @@
 | `test_patients_sorted_by_escalations_then_freshness` (FR-30) | два GREEN-пациента: открытая эскалация, затем состаренная оценка | выше тот, у кого больше открытых эскалаций; при равенстве — свежая оценка |
 | `test_clinician_chats_only_roster_sorted_with_preview` (FR-29) | `GET /clinician/chats` для двух roster-пациентов и одного вне roster | только roster; `last_at` desc; `preview` ≤120 с «…», дешифрован сервером; `message_count`/`last_sender` |
 | `test_clinician_chats_scoped_to_clinician_and_role` (FR-29) | второй врач и пациент | чужой врач видит пустой список; пациенту — 403 `ROLE_MISMATCH` |
+| `clinician-admin.spec.ts`, `chats.spec.ts`, `escalations-queue.spec.ts` (FR-32) | врач после входа | кабинет с приветствием/напоминаниями/очередью; левое меню открывается и ведёт в «Пациенты», «Ассистент», «Чаты с пациентами», «Расписание», «Библиотеку»; фильтры называются «Риск» |
+| `clinician-assessment.spec.ts`, `clinician-visit.spec.ts`, `clinician-adverse-event.spec.ts`, `clinician-links.spec.ts` (FR-32) | карточка пациента | сверху риск и алёрт при RED; HDRS-17 внутри «Назначить скрининг»; «Приёмы»/НЯ доступны; deep-link `#patient=` работает; «Динамика»/«История скринингов» свёрнуты |
 | `test_analyze_creates_pending_encrypted_and_dedupes` (FR-31) | fake `/chat/completions` вернул 2 факта; повторный `POST .../chat/analyze` | оба факта `pending`, `text` в БД — bytea, `source_message_ids` заполнены; повтор: `created=0`, `skipped=2`, строк по-прежнему 2 |
 | `test_prompt_masks_fio_and_limits` (FR-31) | в переписке ФИО пациента и врача, телефон | в теле запроса к LLM нет ФИО/телефона; есть `[ФИО]`; промпт ограничивает 10 фактов и 200 символов |
 | `test_disabled_returns_503_without_llm_call` (FR-31) | `CC_CHAT_INSIGHTS_ENABLED=false`, URL задан | `503 CHAT_INSIGHTS_DISABLED` (detail ссылается на docs/17); `urlopen` не вызван; list — тоже 503 |
@@ -269,8 +274,9 @@
 | `test_patient_reports_pending_event` | пациент отправляет НЯ с назначением | `201`, `status=pending`, `status_label=на проверке`, `reported_by=patient`, `clinician_id`/`verified_by` пусты; событие видно в `GET /me/adverse-events` |
 | `test_patient_report_requires_consent` | без активного согласия | 403 `CONSENT_REQUIRED` |
 | `test_patient_foreign_medication_rejected` | `medication_id` чужого пациента, затем своё | 422 `MEDICATION_NOT_FOUND`; своё — 201 с `medication_title` |
-| `test_severe_report_notifies_roster_without_pdn` | `severity=severe` при roster-враче | один `Notification` с `kind=ADVERSE_EVENT`, текст «Пациент сообщил о серьёзном нежелательном явлении», без имени и описания |
-| `test_mild_report_does_not_notify` | `severity=mild` | уведомлений нет |
+| `test_patient_report_notifies_roster_without_pdn` | любое сообщение пациента при roster-враче | один `Notification` с `kind=ADVERSE_EVENT`, текст «Пациент сообщил о нежелательном явлении», без имени и описания; `severity: null` |
+| `test_patient_cannot_set_severity` | пациент присылает `severity: severe` | поле не принимается: в ответе и в БД `null`, пуш уходит всё равно (тяжесть — колонка врача) |
+| `test_verify_confirm_requires_severity` | PATCH confirm без `severity` | 422 `SEVERITY_REQUIRED`, событие остаётся `pending` |
 | `test_clinician_queue_contains_pending` | `GET /clinician/adverse-events?status=pending` | событие с полями пациента/статусом, `reference=null` без препарата |
 | `test_verify_confirm_sets_verifier_and_drug_reference` | PATCH confirm с `drug_id` и заметкой | `verified_by/at`, `reference.trade_name`, пациент видит «проверено врачом» без заметки; очередь pending пустеет; повтор того же статуса — 200 без изменения `verified_at`; смена на rejected — 409 `ADVERSE_ALREADY_VERIFIED` |
 | `test_verify_reject` | PATCH rejected | статус `rejected`, пациент видит «отклонено» |
@@ -286,6 +292,28 @@
 | `test_seed_drugs_is_idempotent`: повторный `_seed_drugs` | два прогона подряд | 3 строки, `id` не изменились — upsert по `drug_id`, не DELETE+INSERT |
 | `test_kb_search_finds_new_drugs` (`test_assistant.py`): «сертралин дозировка», «эсциталопрам противопоказания» | `kb.hybrid_search` | в топе чанки `drug-zoloft*` / `drug-escitalopram-canon-safety` с `topic=ЛЕКАРСТВА` |
 
+
+### 3.1.1 Пациентский кабинет и FR-34 (`test_patient_ux.py`)
+
+| Тест | Given | When | Then |
+|---|---|---|---|
+| `test_catalog_hides_suicidal_item` | шкала PHQ-9 | `GET /questionnaires` | у PHQ-9 ровно 8 пунктов `q1..q8`, текста про «умереть» нет |
+| `test_screening_without_item9_scores_phq8` | ответы `q1..q8 = 0` | `finish` | `total_score=0`, GREEN, `omitted_items=["q9"]`, в `risk_flags` только `NOT_ASSESSED` (не `SUICIDAL_IDEATION`) |
+| `test_screening_without_item9_can_be_red` | `q1..q8 = 3` | `finish` | `total_score=24` (максимум неполной шкалы), SEVERE → RED, эскалация создана |
+| `test_legacy_client_item9_answer_still_scored` | старый клиент присылает `q9=2` | `finish` | балл учитывается, `SUICIDAL_IDEATION` → RED (явно сообщённый риск не теряем) |
+| `test_chat_auto_reply_once_per_moscow_day` | два сообщения подряд | `POST /chat/thread` ×2 | первый ответ `FAQ`, второй `reply=null`; в треде 3 сообщения и 1 `SYSTEM`; перенос SYSTEM-строки на вчера снова разрешает ответ |
+| `test_chat_hotline_copy_is_supportive` | RED-скрининг | `POST /chat/thread` | ответ `HOTLINE` без «специалисты уведомлены» / «требуется внимание» / обещания мгновенного контакта |
+| `test_my_drug_reference_contains_only_own_medications` | два своих назначения: точное название ГРЛС и «название + дозировка» | `GET /me/drugs` | карточка только у точного совпадения (подстрочный матч не подставляет похожий препарат); аудит `READ_MY_DRUGS` без названий |
+| `test_checkin_history_aggregates_without_raw_answers` | завершённый сеанс с ответами ядра | `GET /checkins/history?days=7` | `{date, wellbeing, safety}`, `wellbeing` — среднее 0..4, сырых ответов в payload нет |
+| `test_checkin_history_returns_aggregate_without_raw_answers` (`test_patient_ux.py`) | пустая история | `GET /checkins/history` | `{items: []}` + аудит `READ_CHECKIN_HISTORY` (значений нет) |
+| `test_questionnaire_catalog_exposes_scale_maxima` | пациентский каталог | `GET /questionnaires` | `max_total` = сумма `max_value` пунктов: PHQ-9 24, GAD-7 21, HADS 21, HCL-32 32, PSS-10 40 |
+| `test_timeline_exposes_scale_max_total` | завершённый PHQ-9 | `GET /me/timeline` | у run `max_total=24` — график берёт верх шкалы с сервера, а не по коду шкалы |
+| `test_prescribed_scale_completion_hides_banner` | назначена PHQ-9 | `GET /me/prescribed-scales` до и после finish | `completed_at: null` → ISO-время: баннер «Назначен скрининг» гаснет после прохождения |
+| `test_crisis_reply_ignores_daily_quota` | утром израсходован FAQ, затем RED-оценка | второй POST в чат | `reply.kind=HOTLINE` с `help_resources` (112, 8-800-2000-122); лимит режет только не-кризисный FAQ |
+| `test_concurrent_chat_posts_yield_one_auto_reply` | два параллельных POST в двух async-сессиях | `chat.post_message` | ровно один автоответ: `pg_advisory_xact_lock` на (пациент, сутки МСК) |
+| `test_contacts_include_fio_and_email` | пациент с ФИО | `GET /profile/contacts` | в ответе `fio` и `email` (только self-service) |
+
+`test_adverse_events.py::test_patient_report_has_no_severity_until_clinician_verifies`: пациент шлёт НЯ без `severity` → 201 и `severity: null` в БД, врач `PATCH` с обязательной `severity=moderate` подтверждает (без неё — 422 `SEVERITY_REQUIRED`, FR-34). `test_screening.py::test_finish_incomplete_422`: неполный набор (7 из 8 пунктов) → 422 `VALIDATION`.
 
 ### 3.2 Async-рантайм, пулы и кеш корпуса
 
@@ -356,9 +384,11 @@
 
 ## 4. e2e (UI-флоу, playwright против docker compose, `e2e/tests/`)
 
+Навигация пациента: разделы — через меню «Меню» (три полоски), скрининг — баннером «Перейти к скринингу», чат — плашкой «Чат с врачом» (хелперы `openPatientMenu`/`patientSection`/`openScreening`/`openPatientChat`).
+
 `pitch.spec.ts` — питч-сценарий (docs/04 §6):
-1. Пациент: скрининг с суицидальным ответом (PHQ-9 item 9 = 3) → RED + контакты помощи (8-800-2000-122, 112).
-2. Пациент с RED-историей: чат с горячей линией отвечает контактами.
+1. Пациент: скрининг по 8 пунктам (PHQ-8, пункт 9 не предъявляется; все по 3 → 24 ⇒ RED) + примечание «Пункт 9 не задавался» + контакты помощи (8-800-2000-122, 112).
+2. Свежий пациент с RED-историей: чат-плашка («Чат с врачом») отвечает горячей линией один раз в сутки — второе сообщение сохраняется без автоответа.
 3. Врач: вход с 2FA (TOTP), фильтр RED, открытие отчёта первого RED-пациента.
 
 `patient-flows.spec.ts` — первый запуск и ежедневные действия (недостижимы на предсозданных пациентах симулятора, у которых согласие уже есть):

@@ -92,7 +92,11 @@ async def event_dict(db: AsyncSession, e: AdverseEvent, patient_fio: str | None 
 async def _validate_medication(
     db: AsyncSession, patient_id: uuid.UUID, medication_id: uuid.UUID | None
 ) -> None:
-    """Назначение должно быть активным назначением этого пациента."""
+    """Назначение должно принадлежать этому пациенту.
+
+    Статус назначения здесь не проверяется: событие могло начаться на уже
+    отменённом препарате, и врач должен уметь связать его с историей.
+    """
     if medication_id is None:
         return
     med = await db.get(PatientMedication, medication_id)
@@ -114,24 +118,27 @@ async def report_patient_event(
     patient: User,
     *,
     event_text: str,
-    severity: str,
     onset_date: date,
     medication_id: uuid.UUID | None = None,
     ip: str | None = None,
 ) -> dict:
-    """Пациент сообщает о НЯ: status='pending', проверки ещё не было."""
+    """Пациент сообщает о НЯ: status='pending', severity пока не оценена (None).
+
+    Тяжесть пациент не задаёт — это колонка врачебной проверки. Врачи ростера
+    получают уведомление о любом сообщении: раньше пуш уходил только при
+    severity='severe', а пациентская форма её больше не присылает.
+    """
     await _validate_medication(db, patient.id, medication_id)
     ev = AdverseEvent(
         patient_id=patient.id, clinician_id=None,
-        event_text=event_text, severity=severity, onset_date=onset_date,
+        event_text=event_text, severity=None, onset_date=onset_date,
         medication_id=medication_id, reported_by="patient", status="pending",
     )
     db.add(ev)
     await db.flush()
     await audit_record(db, patient.id, "ADVERSE_REPORT", "patient", str(patient.id), ip=ip)
-    if severity == "severe":
-        # Текст без ПДн: ни имени, ни описания события.
-        await push.notify_adverse_event_clinicians(db, patient.id)
+    # Текст без ПДн: ни имени, ни описания события.
+    await push.notify_adverse_event_clinicians(db, patient.id)
     await db.commit()
     return await _patient_dict(db, ev)
 
@@ -208,6 +215,12 @@ async def verify_event(
         if ev.status == status:
             return await event_dict(db, ev, patient.fio if patient else None)
         raise Problem(409, "ADVERSE_ALREADY_VERIFIED", "Нежелательное явление уже проверено")
+    # Подтверждение — клиническое решение, оно обязано нести оценку тяжести:
+    # у пациента severity всегда NULL, и «подтверждено без тяжести» оставило бы
+    # очередь с пустой колонкой. Идемпотентный повтор уже принятого решения
+    # тяжести не требует — он ничего не меняет.
+    if status == "confirmed" and severity is None:
+        raise Problem(422, "SEVERITY_REQUIRED", "Для подтверждения нужна оценка тяжести")
 
     ev.status = status
     ev.verified_by = clinician_id

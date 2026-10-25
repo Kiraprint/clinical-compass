@@ -13,7 +13,7 @@ def test_questionnaire_catalog_serves_scales(client):
     # поэтому в пациентском каталоге его нет.
     assert codes == ["PHQ-9", "GAD-7", "HADS-A", "HADS-D", "HCL-32", "PSS-10"]
     phq = next(q for q in resp.json() if q["code"] == "PHQ-9")
-    assert len(phq["items"]) == 9
+    assert len(phq["items"]) == 8  # q9 не предъявляется пациенту (FR-34)
     assert phq["items"][0]["key"] == "q1"
     assert phq["items"][0]["max_value"] == 3
     pss = next(q for q in resp.json() if q["code"] == "PSS-10")

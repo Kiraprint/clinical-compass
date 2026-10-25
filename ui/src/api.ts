@@ -177,10 +177,16 @@ export const api = {
   getDiary: () => req<{ items: DiaryEntry[] }>("/api/v1/diary"),
   getMyAdherence: (days = 14) =>
     req<AdherenceSummary>(`/api/v1/me/adherence?days=${days}`),
+  // FR-33: тренд чек-инов — только агрегат (среднее по пунктам ядра), без сырых ответов.
+  getCheckinHistory: (days = 90) =>
+    req<{ items: CheckinHistoryPoint[] }>(`/api/v1/checkins/history?days=${days}`),
+  // FR-33: справочник ГРЛС по препаратам, назначенным пациенту (полный каталог — врачу).
+  getMyDrugs: () => req<{ items: MyDrugReference[] }>("/api/v1/me/drugs"),
   // FR-28: нежелательные явления. Пациент сообщает, врач проверяет.
   myAdverseEvents: () => req<{ items: MyAdverseEvent[] }>("/api/v1/me/adverse-events"),
+  // Тяжесть пациент не передаёт: её выставляет врач при проверке (severity — колонка врача).
   reportAdverseEvent: (body: {
-    event_text: string; severity: AdverseSeverity; onset_date: string; medication_id?: string;
+    event_text: string; onset_date: string; medication_id?: string;
   }) =>
     req<MyAdverseEvent>("/api/v1/me/adverse-events", {
       method: "POST",
@@ -287,7 +293,16 @@ export const api = {
   drugs: (q?: string) =>
     req<{ items: Drug[] }>(`/api/v1/drugs${q ? `?q=${encodeURIComponent(q)}` : ""}`),
   drug: (drugId: string) => req<Drug>(`/api/v1/drugs/${encodeURIComponent(drugId)}`),
-  prescribedScales: () => req<{ scales: { code: string; title: string }[] }>("/api/v1/me/prescribed-scales"),
+  prescribedScales: () =>
+    req<{
+      scales: {
+        code: string;
+        title: string;
+        prescribed_at: string | null;
+        // Не null — по этому назначению уже есть завершённая оценка.
+        completed_at: string | null;
+      }[];
+    }>("/api/v1/me/prescribed-scales"),
   setPrescribedScales: (patientId: string, scales: string[]) =>
     req<{ patient_id: string; scales: string[] }>(`/api/v1/clinician/patients/${patientId}/prescribed-scales`, {
       method: "PUT",
@@ -315,6 +330,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  // FR-32: карточка врача в личном кабинете (ФИО, e-mail, роли).
+  clinicianMe: () => req<ClinicianProfile>("/api/v1/clinician/me"),
   clinicianChats: () => req<{ items: PatientChat[] }>("/api/v1/clinician/chats"),
   clinicianChatList: (patientId: string) =>
     req<{ items: PatientChatMessage[] }>(`/api/v1/clinician/patients/${patientId}/chat`),
@@ -469,6 +486,9 @@ export interface Consent {
 export interface Questionnaire {
   code: string;
   title: string;
+  // Сумма максимумов предъявленных пациенту пунктов (PHQ-9 → 24, GAD-7 → 21,
+  // HCL-32 → 32, PSS-10 → 40): верхняя граница графика тренда по этой шкале.
+  max_total: number;
   items: { key: string; text: string; max_value: number; anchors: string[] }[];
 }
 export interface Assessment {
@@ -478,6 +498,8 @@ export interface Assessment {
   severity: string;
   triage: string;
   risk_flags: { kind: string; item_key: string | null }[];
+  // FR-34: пункты шкалы, которые пациенту не задавались (PHQ-9 q9) — шкала неполная.
+  omitted_items?: string[];
   computed_at: string;
   escalation?: {
     id: string;
@@ -518,7 +540,14 @@ export interface CheckinState {
   clinician_notified: boolean;
 }
 export interface Timeline {
-  runs: { total_score: number; severity: string; triage: string; computed_at: string }[];
+  runs: {
+    total_score: number; severity: string; triage: string; computed_at: string;
+    // FR-33: код шкалы — у пациента несколько назначенных, тренд строится по каждой.
+    questionnaire_code?: string;
+    // Верх шкалы (сумма максимумов пунктов): 24/21/32/40/52 — граница графика.
+    // Нет у клиницистского отчёта (Report.history) — график берёт верх по наблюдениям.
+    max_total?: number;
+  }[];
   trend: { moving_avg: number[]; delta_7: number | null; delta_30: number | null; slope: number | null };
 }
 
@@ -592,7 +621,8 @@ export interface ChatMessage {
 }
 export interface ChatReply {
   message: ChatMessage;
-  reply: ChatMessage & { help_resources: { title: string; phone: string }[] };
+  // FR-34: не более одного автоответа в сутки (Europe/Moscow); иначе null.
+  reply: (ChatMessage & { help_resources: { title: string; phone: string }[] }) | null;
 }
 export interface PatientCard {
   patient_id: string;
@@ -613,10 +643,20 @@ export interface PatientContacts {
   birth_date: string | null;
   age: number | null;
   adult: boolean | null;
+  // FR-33: только self-service (/profile/contacts); витрины врача их не отдают.
+  fio?: string | null;
+  email?: string;
 }
 export interface ContactPatch {
   phone?: string | null;
   birth_date?: string | null;
+}
+// FR-32: свой профиль врача для личного кабинета.
+export interface ClinicianProfile {
+  fio: string | null;
+  email: string;
+  role: string;
+  roles: string[];
 }
 // FR-24: личное напоминание врача по пациенту. note — свободный текст (может
 // содержать ПДн), в списке приходит расшифрованным (доступ только владельцу).
@@ -769,6 +809,12 @@ export interface Report {
     total_score: number;
     severity: string;
     triage: string;
+    // FR-34: kind="NOT_ASSESSED" — пункт 9 не задавался, риск не оценён.
+    risk_flags?: { kind: string; item_key: string | null }[];
+    omitted_items?: string[];
+    // Шкала, из которой взят omitted_items (последняя с suicidal_item): после
+    // заполненного GAD-7 пропуск q9 всё ещё относится к PHQ-9.
+    omitted_scale?: string | null;
     computed_at: string;
   } | null;
   history: { total_score: number; severity: string; triage: string; computed_at: string }[];
@@ -930,7 +976,8 @@ export interface DrugReference {
 export interface MyAdverseEvent {
   id: string;
   event_text: string;
-  severity: AdverseSeverity;
+  // FR-33/34: пациент тяжесть не указывает — NULL до проверки врачом.
+  severity: AdverseSeverity | null;
   onset_date: string;
   status: AdverseStatus;
   status_label: string;
@@ -939,13 +986,42 @@ export interface MyAdverseEvent {
   verified_at: string | null;
   created_at: string;
 }
+/** FR-33: точка тренда чек-инов — агрегат 0–4, без расшифровки ответов. */
+export interface CheckinHistoryPoint {
+  date: string;
+  wellbeing: number;
+  safety: string;
+}
+/** FR-33: препарат из назначений пациента + карточка ГРЛС (если нашлась по названию). */
+export interface MyDrugReference {
+  medication_id: string;
+  title: string;
+  dosage: string | null;
+  status: string;
+  status_label: string;
+  times_per_day: number | null;
+  drug: {
+    drug_id: string;
+    trade_name: string;
+    inn: string | null;
+    form: string | null;
+    pharmacology: string | null;
+    indications: string | null;
+    dosage: string | null;
+    contraindications: string | null;
+    adverse_events: string | null;
+    special_notes: string | null;
+    source_urls: string[];
+  } | null;
+}
 /** Событие для врача: проверка, назначение и ссылка на справочник. */
 export interface ClinicianAdverseEvent {
   id: string;
   patient_id: string;
   patient_fio: string | null;
   event_text: string;
-  severity: AdverseSeverity;
+  // Пациент может сообщить НЯ без оценки тяжести (UxPatient: severity nullable).
+  severity: AdverseSeverity | null;
   onset_date: string;
   status: AdverseStatus;
   reported_by: "clinician" | "patient";

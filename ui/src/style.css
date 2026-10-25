@@ -97,6 +97,201 @@ small { color: #8a94a8; }
 .chat-view { overflow-x: hidden; }
 .muted { color: #5a6478; }
 .muted.small { font-size: 12px; }
+
+/* FR-32: кабинет врача — меню, дашборд, sticky-колонка, карточка пациента. */
+.small { font-size: 12px; }
+.clinician-app { position: relative; }
+.clinician-content { min-width: 0; transition: margin-left 0.2s ease; }
+.nav-toggle {
+  position: sticky;
+  top: 8px;
+  z-index: 30;
+  margin-bottom: 10px;
+  background: #e4e8f0;
+  color: #1c2333;
+  border: 1px solid #cfd6e2;
+}
+.nav-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(16, 22, 38, 0.45);
+  z-index: 39;
+  display: none;
+  border: 0;
+  padding: 0;
+}
+.clinician-nav {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 240px;
+  z-index: 40;
+  background: #1c2333;
+  color: #e7ecf7;
+  padding: 14px 12px;
+  overflow-y: auto;
+  transform: translateX(-100%);
+  transition: transform 0.2s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.clinician-nav.open { transform: none; }
+.nav-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 14px;
+  padding: 4px 6px 10px;
+  color: #fff;
+}
+.clinician-nav .icon-btn.ghost { background: transparent; color: #e7ecf7; border-color: #4a5b8c; }
+.clinician-nav .nav-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: #dfe6f5;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 14px;
+}
+.clinician-nav .nav-item:hover { background: #2a3350; }
+.clinician-nav .nav-item.active { background: #2f6fed; color: #fff; }
+.clinician-nav .count-badge { margin-left: auto; }
+@media (min-width: 901px) {
+  .clinician-app.nav-open .clinician-content { margin-left: 248px; }
+}
+@media (max-width: 900px) {
+  .nav-backdrop { display: block; }
+}
+
+.dash {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 16px;
+  align-items: start;
+}
+.dash-main { min-width: 0; }
+.dash-side {
+  position: sticky;
+  top: 12px;
+  align-self: start;
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-bottom: 4px;
+}
+.dash-side .card { margin-bottom: 0; }
+.dash-hello h2 { margin-bottom: 4px; }
+.dash-alert-list { margin: 6px 0; padding-left: 18px; font-size: 13px; }
+.dash-alert-list a { color: #8f1d13; font-weight: 600; }
+.dash-chat-list { max-height: 320px; }
+.dash-chat-list li { list-style: none; }
+.dash-chat-list .chat-item { border-left: 0; }
+.profile-links { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0 0; font-size: 13px; }
+.profile-links a { color: #2f6fed; }
+.link-patient {
+  background: transparent;
+  color: #2f6fed;
+  border: 0;
+  padding: 0;
+  font-size: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+}
+.collapse-summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 16px;
+  margin-bottom: 8px;
+}
+.subhead { margin: 12px 0 6px; font-size: 14px; color: #3d4657; }
+.hint { font-size: 13px; color: #5a6478; margin: 4px 0 8px; }
+.hint summary { cursor: pointer; color: #2f6fed; }
+.patient-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 12px; }
+.patient-risk {
+  background: #f6f8fc;
+  border: 1px solid #dbe2ee;
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+.risk-note {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #7a5a12;
+  background: #fdf3d8;
+  border-radius: 6px;
+  padding: 2px 8px;
+  display: inline-block;
+}
+.schedule-groups { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+.schedule-group h3 { font-size: 14px; margin: 0 0 4px; color: #3d4657; }
+
+/* FR-32: автодополнение препарата из справочника ГРЛС. */
+.drug-autocomplete { position: relative; flex: 0 1 240px; min-width: 160px; }
+.drug-suggestions {
+  position: absolute;
+  z-index: 20;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin: 2px 0 0;
+  padding: 4px;
+  list-style: none;
+  background: #fff;
+  border: 1px solid #cfd6e2;
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(28, 35, 51, 0.14);
+  max-height: 240px;
+  overflow-y: auto;
+}
+.drug-suggestion {
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #1c2333;
+  white-space: normal;
+}
+.drug-suggestion.active { background: #e8eefc; }
+.drug-suggestion .muted { display: block; color: #5a6478; font-size: 11px; }
+.drug-suggestion mark { background: #fff3d9; color: #7a5a12; padding: 0 1px; border-radius: 2px; }
+
+/* FR-32: чипы контекста ассистента — явный цвет текста (белый по белому был багом). */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #f6f7fb;
+  color: #1c2333;
+  border: 1px solid #d4d8e3;
+  border-radius: 12px;
+  padding: 2px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.chip.active { background: #eef2ff; color: #1b3a8a; border-color: #c7d2fe; }
+.chip:disabled { color: #5a6478; }
+
+@media (max-width: 900px) {
+  .dash { grid-template-columns: 1fr; }
+  .dash-side { position: static; max-height: none; overflow: visible; }
+}
+@media (max-width: 700px) {
+  .nav-toggle { position: static; width: 100%; }
+  .drug-autocomplete { flex: 1 1 100%; }
+  .reminder-item { flex-direction: column; }
+}
 .notice { color: #1f7a3d; font-size: 13px; }
 .count-badge {
   margin-left: 6px;
@@ -291,4 +486,94 @@ small { color: #8a94a8; }
   .legal .legal-doc { padding: 14px 14px 16px; }
   .legal h2 { font-size: 18px; }
   .legal ul { padding-left: 18px; }
+/* FR-33 F: выбранная эмоция — серая заливка, а не синяя кнопка действия. */
+.row.mood button.on {
+  background: #d8dde6;
+  color: #1c2333;
+  border-color: #aab3c2;
+}
+
+/* FR-33: шапка пациента — «3 полоски» слева, личный кабинет справа. */
+.patient-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.patient-bar-spacer { flex: 1; }
+.patient-burger span { margin-right: 4px; }
+.patient-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 14px;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid #dde1e9;
+  border-radius: 12px;
+  box-shadow: 0 6px 18px rgba(28, 35, 51, 0.08);
+}
+.patient-menu button {
+  text-align: left;
+  background: transparent;
+  color: #1c2333;
+  padding: 10px 12px;
+  border-radius: 8px;
+}
+.patient-menu button.active { background: #e8eefc; color: #1e4fd1; }
+
+.patient-home h2 { margin-bottom: 2px; }
+.patient-now { color: #5a6478; font-size: 14px; margin: 0 0 12px; }
+.patient-banner {
+  border: 1px solid #c8d6f6;
+  background: #f2f6ff;
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+.patient-banner p { margin: 4px 0 10px; font-size: 14px; color: #3b4560; }
+.patient-reminders { margin: 0; padding-left: 20px; font-size: 14px; }
+.patient-reminders li { margin-bottom: 4px; }
+
+.patient-account { display: grid; grid-template-columns: 160px 1fr; gap: 8px 12px; margin: 0; }
+.patient-account dt { color: #5a6478; font-size: 13px; }
+.patient-account dd { margin: 0; }
+.patient-account input { max-width: 260px; }
+.patient-drug { border-top: 1px solid #e6e9f0; padding-top: 12px; margin-top: 12px; }
+.patient-drug:first-of-type { border-top: none; }
+
+/* FR-33 C: чат — пассивная плашка справа снизу. */
+.patient-chat {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+.patient-chat-toggle {
+  background: #2f6fed;
+  color: #fff;
+  border-radius: 999px;
+  padding: 10px 16px;
+  box-shadow: 0 6px 18px rgba(47, 111, 237, 0.3);
+}
+.patient-chat-body {
+  width: 340px;
+  max-width: calc(100vw - 32px);
+  max-height: 70vh;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #dde1e9;
+  border-radius: 14px;
+  padding: 14px;
+  box-shadow: 0 12px 32px rgba(28, 35, 51, 0.18);
+}
+.patient-chat-inner h2 { font-size: 17px; margin: 0 0 8px; }
+
+@media (max-width: 700px) {
+  .patient-account { grid-template-columns: 1fr; }
+  .patient-chat { right: 8px; bottom: 8px; left: 8px; align-items: stretch; }
+  .patient-chat-toggle { align-self: flex-end; }
 }

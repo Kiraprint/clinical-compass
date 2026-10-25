@@ -210,23 +210,33 @@ async def list_patients(db: AsyncSession, clinician_id, triage: str | None = Non
 
 async def patient_timeline(db: AsyncSession, patient_id, days: int) -> dict:
     since = datetime.now(timezone.utc) - timedelta(days=days)
-    rows = (await db.scalars(
-        select(Assessment)
+    rows = (await db.execute(
+        select(Assessment, Run.questionnaire_code)
+        .join(Run, Run.id == Assessment.run_id)
         .where(Assessment.patient_id == patient_id, Assessment.computed_at >= since)
         .order_by(Assessment.computed_at.asc())
     )).all()
+    def _max_total(code: str) -> int:
+        # Верх шкалы для графика пациента: сумма максимумов пунктов. Считается на
+        # сервере, чтобы UI не угадывал порог по коду шкалы (HDRS-17 → 52).
+        scale = ALL_SCALES.get(code)
+        return sum(i.max_value for i in scale.patient_items()) if scale else 0
+
     runs = [
         {
             "assessment_id": str(a.id),
+            "questionnaire_code": code,
+            "max_total": _max_total(code),
             "total_score": a.total_score,
             "severity": a.severity,
             "triage": a.triage,
             "computed_at": a.computed_at.isoformat(),
         }
-        for a in rows
+        for a, code in rows
     ]
     results = [
-        ScaleResult(code="", total_score=a.total_score, severity=a.severity, per_item={}) for a in rows
+        ScaleResult(code=code, total_score=a.total_score, severity=a.severity, per_item={})
+        for a, code in rows
     ]
     t = trends(results)
     return {
@@ -240,6 +250,35 @@ async def patient_timeline(db: AsyncSession, patient_id, days: int) -> dict:
     }
 
 
+async def _suicidal_omission(db: AsyncSession, patient_id) -> tuple[list[str], str | None]:
+    """Пункты о суициде, не заданные в последней оценке шкалы, где они есть.
+
+    Пункт о суициде есть не в каждой шкале (q9 PHQ-9, h3 HDRS-17). Брать флаг
+    NOT_ASSESSED из последней оценки вообще нельзя: после GAD-7 (у неё такого
+    пункта нет) предупреждение «пункт 9 не задавался» пропадало бы, хотя PHQ-9
+    спрашивали без q9. Поэтому смотрим последнюю оценку шкалы с suicidal_item.
+
+    Возвращает (item_keys, scale_code); scale_code — None, если пропусков нет.
+    """
+    suicidal_codes = [code for code, scale in ALL_SCALES.items() if scale.suicidal_item]
+    if not suicidal_codes:
+        return [], None
+    row = (await db.execute(
+        select(Assessment.risk_flags, Run.questionnaire_code)
+        .join(Run, Run.id == Assessment.run_id)
+        .where(Assessment.patient_id == patient_id, Run.questionnaire_code.in_(suicidal_codes))
+        .order_by(Assessment.computed_at.desc(), Assessment.id.desc())
+        .limit(1)
+    )).first()
+    items = [
+        flag.get("item_key")
+        for flag in ((row.risk_flags or []) if row else [])
+        if flag.get("kind") == "NOT_ASSESSED" and flag.get("item_key")
+    ]
+    if not items:
+        return [], None
+    return items, row.questionnaire_code
+
 async def _patient_card(db: AsyncSession, patient_id) -> dict:
     """Сборка карты пациента (только данные; roster/consent/audit — у вызывающих).
 
@@ -252,6 +291,7 @@ async def _patient_card(db: AsyncSession, patient_id) -> dict:
     last = await db.scalar(
         select(Assessment).where(Assessment.patient_id == patient_id).order_by(Assessment.computed_at.desc())
     )
+    omitted_items, omitted_scale = await _suicidal_omission(db, patient_id)
     history = (await db.scalars(
         select(Assessment)
         .where(Assessment.patient_id == patient_id)
@@ -308,6 +348,11 @@ async def _patient_card(db: AsyncSession, patient_id) -> dict:
                 "total_score": last.total_score,
                 "severity": last.severity,
                 "triage": last.triage,
+                # FR-34: NOT_ASSESSED означает, что пункт о суициде пациенту не
+                # задавался, то есть риск не оценён, а не отрицателен.
+                "risk_flags": last.risk_flags or [],
+                "omitted_items": omitted_items,
+                "omitted_scale": omitted_scale,
                 "computed_at": last.computed_at.isoformat(),
             }
             if last
