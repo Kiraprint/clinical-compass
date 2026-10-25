@@ -168,6 +168,11 @@ services:
       CC_ML_URL: "${CC_ML_URL:-http://ml:8080}"
       CC_ML_TOKEN: "${CC_ML_TOKEN:-}"
       CC_ML_TIMEOUT: "${CC_ML_TIMEOUT:-5}"
+    # С remote-профилем сид эмбеддит через ML-сайдкар: он виден только из mlnet,
+    # поэтому одной default-сети недостаточно (остаётся для postgres/qdrant).
+    networks:
+      - default
+      - mlnet
     depends_on:
       qdrant:
         condition: service_healthy
@@ -198,6 +203,12 @@ services:
       CC_ML_URL: "${CC_ML_URL:-http://ml:8080}"
       CC_ML_TOKEN: "${CC_ML_TOKEN:-}"
       CC_ML_TIMEOUT: "${CC_ML_TIMEOUT:-5}"
+      # Нарезка обогащения обязана совпадать с нарезкой сида и api (docs/08 §4).
+      CC_ENRICH_CHUNK_CHARS: "${CC_KB_CHUNK_CHARS:-1800}"
+      CC_ENRICH_CHUNK_OVERLAP: "${CC_KB_CHUNK_OVERLAP:-120}"
+    networks:
+      - default
+      - mlnet
     depends_on:
       # api прогоняет alembic upgrade head в lifespan — ждём схему, а не гоняем
       # миграции из двух процессов одновременно.
