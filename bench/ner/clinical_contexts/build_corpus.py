@@ -6,11 +6,19 @@
 отвечает на вопрос «что утечёт в LLM из чата пациента / дневника / вопроса
 врача / батча инсайтов».
 
-Корпус — 200+ синтетических контекстов четырёх форм egress-пути:
+Корпус — 418 синтетических контекстов четырёх форм egress-пути:
   patient_chat       — сообщение пациента в чате с врачом
   diary              — свободный текст дневника/чек-ина
   clinician_question — вопрос врача ассистенту
   insights_batch     — батч реплик для chat_insights (FR-31)
+
+332 из них — 83 базовых шаблона × 4 варианта; 86 — кейсы форматов
+представления (FORMAT_TEMPLATES): телефоны 8/+7/7 со скобками, пробелами и
+дефисами; даты дд.мм.гггг / «12 марта 1954» / ISO / «мне 34»; ФИО строчными,
+инициалами в обе стороны, капсом; документы с разделителями и без; адрес
+«живу в Москве на Ленина 5»; ИБ/медкарта без слова-маркера. 20 из 86 —
+negative: клинический текст, который маскировать нельзя (тревога, бессонница,
+«5 дней», «2 раза в день», клинические даты).
 
 Шаблоны и пулы значений написаны вручную (людей нет — все ФИО/документы
 вымышлены и генерируются детерминированно). Gold-спаны вычисляются по
@@ -85,6 +93,24 @@ EMAILS = [
     "morozov.s@mail.ru",
     "novikova.e@inbox.ru",
 ]
+
+# Формы одного и того же телефона (a=3, b=3, c=2, e=2 цифры).
+PHONE_FORMATS = {
+    "phone_7": "7 {a} {b}-{c}-{e}",
+    "phone_7_paren": "7({a}){b}-{c}-{e}",
+    "phone_7_plain": "7{a}{b}{c}{e}",
+    "phone_space": "8 {a} {b} {c} {e}",
+    "phone_dash": "8-{a}-{b}-{c}-{e}",
+    "phone_paren": "8 ({a}) {b}-{c}-{e}",
+    "phone_plus_spaced": "+7 {a} {b} {c} {e}",
+}
+DOB_DOTS = ["12.03.1954", "05.11.1968", "23.07.1972"]
+DOB_ISO = ["1954-03-12", "1985-04-17", "1963-12-21"]
+ADDR_ON = ["Москве на Ленина 5", "Казани на Баумана 9",
+           "Химках на Мира 12", "Москве на Гагарина 7"]
+ADDR_SHORT = ["г. Химки, ул. Мира, 12", "г. Казань, ул. Баумана, 9",
+              "г. Тверь, ул. Советская, 3"]
+EMAIL_CYR = "иванов@демо.рф"
 DOC_MARKS = ["СНИЛС", "СНИЛС:", "снилс", "СНИЛС №", "СНИЛС"]
 DOB_FORMS = [
     "12.03.1954",
@@ -245,6 +271,112 @@ TEMPLATES: list[tuple[str, str]] = [
     ("insights_batch", "'Здравствуйте, {fio}'. 'Беспокоит {drug}' 'Какая доза?' '5 мг'. 'Оставьте пока'."),
 ]
 
+# ------------------------------------------------- кейсы форматов представления
+# Отдельный набор (рендерится по одному разу): одна и та же сущность в разных
+# формах, которыми пациент реально её пишет — телефоны 8/+7/7 со скобками,
+# дефисами и пробелами; даты дд.мм.гггг / «12 марта 1954» / ISO / «мне 34»;
+# ФИО строчными, инициалами в обе стороны, капсом; документы с разделителями
+# и без; адрес в обороте «живу в … на …»; медкарта без слова-маркера.
+# Последние строки — negative: клинический текст не должен маскироваться.
+FORMAT_TEMPLATES: list[tuple[str, str]] = [
+    # ФИО
+    ("patient_chat", "Здравствуйте, меня зовут {fio_lower_full}, записана на завтра."),
+    ("patient_chat", "Добрый день, {fio_lower}. Подскажите по дозировке {drug}."),
+    ("patient_chat", "Здравствуйте, это {fio_initials_first}. Пришла на приём."),
+    ("patient_chat", "Пациентка {fio_caps}, направлена на УЗИ."),
+    ("patient_chat", "Меня зовут {fio_caps}, мне {age_num}, беспокоит бессонница."),
+    ("patient_chat", "Это {fio_initials}, результаты анализов во вложении."),
+    ("diary", "Пишу от имени {fio_lower_full}, доверенность у сына."),
+    ("diary", "Обратилась {fio_caps} с жалобами на тревогу."),
+    ("clinician_question", "Пациент {fio_lower}, дата рождения {dob_dots}. Нужна ли консультация?"),
+    ("clinician_question", "{fio_initials_first}, {age_num} года, просит справку для бассейна."),
+    ("insights_batch", "'Здравствуйте, {fio_lower_full}'. 'Беспокоит {drug}' 'Какая доза?'"),
+    ("insights_batch", "Пациент: 'это {fio_initials}'. Врач: 'вижу карту'."),
+    # телефоны: 8/+7/7, пробелы/дефисы/скобки
+    ("patient_chat", "Телефон для связи {phone_7}, звоните после 18."),
+    ("patient_chat", "{phone_7_paren} — мой новый номер."),
+    ("patient_chat", "Мой номер {phone_7_plain}, если что."),
+    ("patient_chat", "Перезвоните на {phone_space}, пожалуйста."),
+    ("diary", "Контакт: {phone_dash}."),
+    ("diary", "Записывалась с номера {phone_paren}."),
+    ("clinician_question", "Связаться с пациентом: {phone_plus_spaced}."),
+    ("insights_batch", "'Мой телефон {phone_space}' 'Записал' 'И {phone_7_paren} тоже'."),
+    ("patient_chat", "Лучше звонить на {phone_7}, после обеда."),
+    # даты рождения: точки / словами / ISO
+    ("patient_chat", "Дата рождения {dob_dots}, наблюдаюсь с 2010 года."),
+    ("patient_chat", "Дата рождения {dob_word}, давление 150/90."),
+    ("patient_chat", "Дата рождения {dob_iso}, принимаю {drug}."),
+    ("diary", "Родилась {dob_word}, сейчас беспокоит кашель."),
+    ("clinician_question", "Пациент, дата рождения {dob_iso}, СД 2 типа. Стартовая схема?"),
+    ("insights_batch", "'Дата рождения {dob_dots}' 'Принято'."),
+    # возраст: «мне 34» / «34 года» (только в связке с ФИО)
+    ("patient_chat", "Меня зовут {fio_lower}, мне {age_num}."),
+    ("patient_chat", "Пациентка {fio_caps}, {age_num} года, беременность 12 недель."),
+    ("diary", "{fio_lower_full}, мне {age_num}, бессонница третью неделю."),
+    ("patient_chat", "Здравствуйте, {fio_lower} на связи, мне {age_num}."),
+    # документы: пробелы/дефисы/слитно
+    ("patient_chat", "СНИЛС {snils_spaced}, прикреплена к поликлинике."),
+    ("patient_chat", "Мой СНИЛС {snils_plain}."),
+    ("patient_chat", "ИНН {inn_spaced} нужен для вычета."),
+    ("patient_chat", "Полис ОМС {oms_spaced}."),
+    ("patient_chat", "Номер полиса {oms}."),
+    ("patient_chat", "Паспорт {passport_spaced}, серия и номер верные."),
+    ("patient_chat", "Паспорт {passport}."),
+    ("clinician_question", "Проверьте: СНИЛС {snils_spaced}, ИНН {inn_spaced}."),
+    ("clinician_question", "Паспорт {passport_spaced} пациента совпадает с картой?"),
+    ("insights_batch", "'СНИЛС {snils_plain}' 'ИНН {inn_spaced}'."),
+    ("diary", "СНИЛС {snils_spaced}, полис {oms_spaced}."),
+    ("clinician_question", "Полис {oms_spaced}, ИНН {inn_spaced}, всё верно?"),
+    # медкарта / ИБ: с маркером и без
+    ("patient_chat", "№ {medcard_bare_num} — номер моей карты."),
+    ("patient_chat", "Доктор, посмотрите карту {medcard_card_num}."),
+    ("patient_chat", "ИБ {medcard_ib_num}, выписали направление."),
+    ("clinician_question", "ГБУЗ «ГКБ № 2», ИБ {medcard_ib_num}. Нужна госпитализация?"),
+    ("insights_batch", "'Номер карты {medcard_card_num}' 'Записал'."),
+    ("diary", "медкарта № {medcard_bare_num}, приём у кардиолога."),
+    # адреса: ул./г./кв. и «живу в … на …»
+    ("patient_chat", "Живу в {addr_on}."),
+    ("patient_chat", "Прописана: {addr_kv}."),
+    ("patient_chat", "Адрес: {addr_short}."),
+    ("diary", "Живу в {addr_on}, до поликлиники 10 минут."),
+    ("clinician_question", "Пациент прикреплён по адресу {addr_kv}."),
+    ("insights_batch", "'Живу в {addr_on}' 'Адрес записан'."),
+    # email
+    ("patient_chat", "Почта {email}, отвечайте туда."),
+    ("patient_chat", "Пишите на {email_cyr}."),
+    ("diary", "Мой e-mail {email}."),
+    ("insights_batch", "'Почта {email}' 'Принято'."),
+    # комбинированные форматы
+    ("patient_chat", "Телефон {phone_plus_spaced}, звоните вечером."),
+    ("patient_chat", "Дата рождения {dob_iso}, беременность 8 недель."),
+    ("diary", "Меня зовут {fio_initials_first}, телефон {phone_paren}."),
+    ("clinician_question", "Пациент {fio_caps}, {age_num} лет, паспорт {passport_spaced}."),
+    ("insights_batch", "'Дата рождения {dob_word}' 'СНИЛС {snils_spaced}'."),
+    ("patient_chat", "Живу в {addr_on}, почта {email}."),
+    ("diary", "Карта {medcard_card_num}, ИБ {medcard_ib_num}, выписан {drug}."),
+    # negative: клинический текст — не ПДн
+    ("diary", "Тревога усилилась за последние 5 дней, бессонница."),
+    ("diary", "Принимаю 2 раза в день по 5 мг, стало легче."),
+    ("patient_chat", "Температура 38,5 держится 5 дней, кашель."),
+    ("patient_chat", "Головная боль и тошнота, слабость."),
+    ("patient_chat", "Давление 160/95, пульс 95, одышка."),
+    ("patient_chat", "Пришла на приём 12.03.2024 в 14:30."),
+    ("patient_chat", "Записана на 12 марта 2026, кабинет 5."),
+    ("clinician_question", "Шкала HDRS-17: 18 баллов, PHQ-8: 12."),
+    ("clinician_question", "Анализ от 14.05, гемоглобин 120, лейкоциты 6,2."),
+    ("patient_chat", "Мне 34, беспокоит бессонница."),
+    ("diary", "Таблетку выпила 7 дней назад."),
+    ("diary", "Принимаю 7 таблеток в день."),
+    ("patient_chat", "Живу одна, уход не нужен."),
+    ("patient_chat", "Работаю в больнице на 0,5 ставки."),
+    ("clinician_question", "Госпитализация в городскую больницу № 2."),
+    ("clinician_question", "Результаты КТ от 08.04.2025: без динамики."),
+    ("diary", "Сон 5 часов, аппетит снижен 2 недели."),
+    ("diary", "Пью воду 2 литра в день, соль ограничиваю."),
+    ("patient_chat", "Бессонница и тревога, пульс 92, температура 36,8."),
+    ("clinician_question", "Принимаю метформина 1000 мг два раза в день."),
+]
+
 # слоты, у которых вид не выводится из имени
 SLOT_KIND = {
     "fio": "FIO", "fio_short": "FIO", "fio_initials": "FIO",
@@ -257,6 +389,20 @@ SLOT_KIND = {
     "medcard_num": "MEDCARD", "age_combo": "AGE", "age_combo_short": "AGE",
     "age_age": "AGE", "age_child": "AGE",
 }
+
+SLOT_KIND.update({
+    "fio_lower_full": "FIO", "fio_initials_first": "FIO", "fio_caps": "FIO",
+    "phone_7": "PHONE", "phone_7_paren": "PHONE", "phone_7_plain": "PHONE",
+    "phone_space": "PHONE", "phone_dash": "PHONE", "phone_paren": "PHONE",
+    "phone_plus_spaced": "PHONE",
+    "dob_dots": "DOB", "dob_iso": "DOB", "age_num": "AGE",
+    "snils_spaced": "SNILS", "snils_plain": "SNILS", "inn_spaced": "INN",
+    "oms_spaced": "OMS", "passport_spaced": "PASSPORT",
+    "addr_on": "ADDRESS", "addr_kv": "ADDRESS", "addr_short": "ADDRESS",
+    "email_cyr": "EMAIL",
+    "medcard_bare_num": "MEDCARD", "medcard_card_num": "MEDCARD",
+    "medcard_ib_num": "MEDCARD",
+})
 
 # клинические decoy-даты (не ПДн): прием/начало симптомов/анализы
 DECOY_DATES = ["12.03.2024", "14.05", "08.04.2025", "вчера", "02.02.2026"]
@@ -302,6 +448,51 @@ def _values(rng: random.Random, slot: str, taken: set[str]) -> str:
         elif slot == "medcard":
             v = rng.choice(medcards())
         elif slot == "medcard_num":
+            v = str(rng.randint(100000, 999999))
+        elif slot == "fio_lower_full":
+            v = f"{rng.choice(SUR_M)} {rng.choice(NAME_M)} {rng.choice(PAT_M)}".lower()
+        elif slot == "fio_initials_first":
+            s, nm, p = rng.choice(SUR_M), rng.choice(NAME_M), rng.choice(PAT_M)
+            v = f"{nm[0]}.{p[0]}. {s}"
+        elif slot == "fio_caps":
+            v = rng.choice(SUR_F).upper()
+        elif slot in PHONE_FORMATS:
+            d = "9" + "".join(str(rng.randint(0, 9)) for _ in range(9))
+            v = PHONE_FORMATS[slot].format(a=d[:3], b=d[3:6], c=d[6:8], e=d[8:])
+        elif slot == "dob_dots":
+            v = rng.choice(DOB_DOTS)
+        elif slot == "dob_iso":
+            v = rng.choice(DOB_ISO)
+        elif slot == "age_num":
+            v = rng.choice(AGES)
+        elif slot == "snils_spaced":
+            d = re.sub(r"\D", "", snils(rng.randint(100000000, 999999999)))
+            v = f"{d[:3]} {d[3:6]} {d[6:9]} {d[9:]}"
+        elif slot == "snils_plain":
+            v = re.sub(r"\D", "", snils(rng.randint(100000000, 999999999)))
+        elif slot == "inn_spaced":
+            raw = (inn12(str(rng.randint(1000000000, 9999999999)))
+                   if rng.random() < 0.5
+                   else inn10(str(rng.randint(100000000, 999999999))))
+            if len(raw) == 10:
+                v = f"{raw[:2]} {raw[2:4]} {raw[4:7]} {raw[7:]}"
+            else:
+                v = f"{raw[:2]} {raw[2:4]} {raw[4:7]} {raw[7:10]} {raw[10:]}"
+        elif slot == "oms_spaced":
+            d = oms16(str(rng.randint(10**12, 10**13 - 1)))
+            v = " ".join(d[i:i + 4] for i in range(0, 16, 4))
+        elif slot == "passport_spaced":
+            s, num = str(rng.randint(4000, 9999)), str(rng.randint(100000, 999999))
+            v = f"{s[:2]} {s[2:]} {num}"
+        elif slot == "addr_on":
+            v = rng.choice(ADDR_ON)
+        elif slot == "addr_kv":
+            v = rng.choice(STREETS)
+        elif slot == "addr_short":
+            v = rng.choice(ADDR_SHORT)
+        elif slot == "email_cyr":
+            v = EMAIL_CYR
+        elif slot in ("medcard_bare_num", "medcard_card_num", "medcard_ib_num"):
             v = str(rng.randint(100000, 999999))
         elif slot in ("age_combo", "age_combo_short", "age_age"):
             a = rng.choice(AGES)
@@ -359,7 +550,14 @@ def main() -> None:
             text, gold = render(tpl, rng)
             rows.append({"id": f"cc-{n:03d}", "kind": kind, "text": text,
                          "gold": gold})
-    assert len(rows) >= 150, len(rows)
+    # кейсы форматов представления — по одному разу, минимум +80 контекстов
+    assert len(FORMAT_TEMPLATES) >= 80, len(FORMAT_TEMPLATES)
+    for kind, tpl in FORMAT_TEMPLATES:
+        n += 1
+        text, gold = render(tpl, rng)
+        rows.append({"id": f"cc-{n:03d}", "kind": kind, "text": text,
+                     "gold": gold})
+    assert len(rows) >= 230, len(rows)
     OUT.write_text(
         "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
         encoding="utf-8",
