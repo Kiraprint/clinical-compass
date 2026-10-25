@@ -69,6 +69,23 @@ def test_missing_collection_is_not_a_config_error(monkeypatch):
         monkeypatch.undo()
 
 
+
+def test_search_on_absent_collection_returns_empty_not_500(monkeypatch):
+    """Коллекции нет (сброс индекса / до kb_seed) — поиск пуст, а не исключение.
+
+    Без этой проверки Qdrant отвечал `Not found: Collection ... doesn't exist`,
+    и ассистент отдавал 500 вместо «в базе знаний нет данных».
+    """
+    probe = "kb_test_absent_search"
+    client = _fresh(probe)
+    monkeypatch.setattr(kb, "COLLECTION", probe)
+    try:
+        assert not kb.collection_available(client)
+        assert kb.hybrid_search(client, HashEmbedder(), "порог тяжести PHQ-9") == []
+    finally:
+        monkeypatch.undo()
+
+
 def test_startup_validation_fails_on_mismatched_index(monkeypatch):
     from qdrant_client.http import models as qm
 
@@ -142,6 +159,9 @@ def _fake_dense_client(scores: list[float]):
             self.score = score
 
     class _Client:
+        def collection_exists(self, name):  # как у настоящего QdrantClient
+            return True
+
         def query_points(self, **kwargs):
             class _Res:
                 pass

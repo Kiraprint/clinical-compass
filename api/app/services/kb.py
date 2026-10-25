@@ -231,6 +231,22 @@ def is_visible(hit: dict, work_ids: set[str] | None) -> bool:
     return str(hit["work_id"]) in work_ids
 
 
+def collection_available(client: QdrantClient) -> bool:
+    """Есть ли коллекция KB: её отсутствие — пустая база, а не сбой запроса.
+
+    Сброс индекса (`kb_seed --reset`) и первый запуск до индексации оставляют
+    Qdrant без коллекции; без этой проверки каждый вопрос ассистента отвечал
+    бы 500 вместо «в базе знаний нет данных» (docs/08 §4).
+    """
+    try:
+        return bool(client.collection_exists(COLLECTION))
+    except Exception:  # noqa: BLE001 — недоступный Qdrant не должен ронять запрос
+        log.warning(
+            "Qdrant недоступен: проверка коллекции '%s' не удалась", COLLECTION, exc_info=True
+        )
+        return False
+
+
 def hybrid_search(
     client: QdrantClient,
     embedder: Embedder,
@@ -279,6 +295,11 @@ def hybrid_search(
     kb_min_score). work_id/kind — для персонального фильтра видимости в агенте.
     """
     if not query.strip():
+        return []
+    if not collection_available(client):
+        log.warning(
+            "Коллекция '%s' не найдена: KB-поиск пуст до `python -m app.kb_seed`", COLLECTION
+        )
         return []
     fetch = candidates if candidates and candidates > 0 else max(limit * 3, 10)
     fetch = max(fetch, limit)

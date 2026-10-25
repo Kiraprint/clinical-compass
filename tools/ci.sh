@@ -132,6 +132,12 @@ services:
     ports: !override ["127.0.0.1:${E2E_PORT}:80"]
 YAML
   cleanup() {
+    if [ "${CI_E2E_FAILED:-0}" = 1 ]; then
+      # Красный e2e без логов api не диагностируется (стек сейчас снесём).
+      docker compose -f infra/docker-compose.yml -f "$E2E_OVERRIDE" -p "$E2E_PROJECT" \
+        logs --no-color --tail=300 api > /tmp/cc-ci-e2e-api.log 2>&1 || true
+      log "логи api упавшего e2e: /tmp/cc-ci-e2e-api.log"
+    fi
     CC_ALLOW_DEMO_SECRETS=true CC_COOKIE_SECURE=false \
       docker compose -f infra/docker-compose.yml -f "$E2E_OVERRIDE" -p "$E2E_PROJECT" \
       --profile seed down -v >/dev/null 2>&1 || true
@@ -152,10 +158,23 @@ YAML
     sleep 2
   done
   curl -sf "http://127.0.0.1:${E2E_PORT}/" >/dev/null || fail "UI не поднялся на :$E2E_PORT"
+  # kb-seed — one-shot: UI поднимается раньше, чем коллекция создана, и ассистент
+  # в первые секунды получил бы пустую базу. Ждём завершения индексатора.
+  kb_state=""
+  for _ in $(seq 1 120); do
+    kb_id="$($COMPOSE -p "$E2E_PROJECT" --profile seed ps -aq kb-seed 2>/dev/null || true)"
+    if [ -n "$kb_id" ]; then
+      kb_state="$(docker inspect -f '{{.State.Status}}/{{.State.ExitCode}}' "$kb_id" 2>/dev/null || true)"
+    fi
+    [ "$kb_state" = "exited/0" ] && break
+    sleep 1
+  done
+  [ "$kb_state" = "exited/0" ] || fail "kb-seed не завершился успешно: ${kb_state:-нет контейнера}"
   if [ ! -d e2e/node_modules ]; then
     ( cd e2e && npm ci )
   fi
-  ( cd e2e && CC_E2E_URL="http://127.0.0.1:${E2E_PORT}" npx playwright test )
+  ( cd e2e && CC_E2E_URL="http://127.0.0.1:${E2E_PORT}" npx playwright test ) \
+    || { CI_E2E_FAILED=1; fail "e2e упали"; }
 else
   log "[5/5] e2e: пропущено (добавьте --e2e)"
 fi

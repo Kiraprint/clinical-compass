@@ -302,6 +302,7 @@
 | `test_drug_detail_and_404`: `/drugs/{drug_id}` | карточка препарата | поля и `source_urls`; 404 на неизвестный `drug_id` |
 | `test_seed_drugs_is_idempotent`: повторный `_seed_drugs` | два прогона подряд | 3 строки, `id` не изменились — upsert по `drug_id`, не DELETE+INSERT |
 | `test_kb_search_finds_new_drugs` (`test_assistant.py`): «сертралин дозировка», «эсциталопрам противопоказания» | `kb.hybrid_search` | в топе чанки `drug-zoloft*` / `drug-escitalopram-canon-safety` с `topic=ЛЕКАРСТВА` |
+| `test_search_on_absent_collection_returns_empty_not_500` (`test_kb_index.py`) | коллекции в Qdrant нет (`--reset`, до `kb_seed`) | `kb.hybrid_search` | `collection_available=False`, выдача `[]` — ассистент уходит в keyword-fallback, а не в 500 |
 
 
 ### 3.1.1 Пациентский кабинет и FR-34 (`test_patient_ux.py`)
