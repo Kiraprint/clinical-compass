@@ -26,6 +26,9 @@ SPARSE_BUCKETS = 65536    # пространство хеш-индексов spa
 # Сколько текстов держать в кэше энкодера (upsert считает dense и sparse одного
 # и того же текста по отдельности; кэш убирает второй прогон модели).
 _CACHE_SIZE = 256
+# Потолок сайдкара на /v1/embeddings (ml/models.py MAX_TEXTS): больше — 4xx,
+# а 4xx ml_client не ретраит. Пачки режет клиент.
+_MAX_EMBED_BATCH = 64
 
 
 class EmbedderConfigError(RuntimeError):
@@ -370,22 +373,33 @@ class RemoteEmbedder:
         self.dense_size = size
 
     def _vectors(self, texts: list[str], kind: str) -> list[list[float]]:
-        """Батч векторов: недостающие считаются ОДНИМ HTTP-запросом к сайдкару.
+        """Векторы пачкой: недостающие считаются пачками по `_MAX_EMBED_BATCH`.
 
-        Ре-сид индексирует тысячи чанков; по одному POST на текст это ~3362
-        запроса вместо ~14 пачек. Кеш — тот же, что у одиночного пути.
+        Сайдкар отвечает 4xx на /v1/embeddings с >MAX_TEXTS текстами (ml/models.py),
+        поэтому пачки режем сами: ре-сид на 3362 чанках — 53 запроса по 64.
+        Ответ собирается из локальной карты, а не перечитывается из FIFO-кеша:
+        кеш на `_CACHE_SIZE` записей не обязан вместить всю пачку (300 текстов
+        вытеснили бы первые).
         """
         from app.services import ml_client
         from app.services.ml_client import MlUnavailable
 
-        missing = [t for t in dict.fromkeys(texts) if (kind, t) not in self._cache]
-        if missing:
-            vectors = ml_client.embed(missing, kind=kind, profile=self.profile_id)
-            if not vectors or len(vectors) != len(missing):
+        vectors: dict[str, list[float]] = {}
+        missing: list[str] = []
+        for text in dict.fromkeys(texts):
+            hit = self._cache.get((kind, text))
+            if hit is None:
+                missing.append(text)
+            else:
+                vectors[text] = hit
+        for start in range(0, len(missing), _MAX_EMBED_BATCH):
+            part = missing[start : start + _MAX_EMBED_BATCH]
+            raw_vectors = ml_client.embed(part, kind=kind, profile=self.profile_id)
+            if not raw_vectors or len(raw_vectors) != len(part):
                 raise MlUnavailable(
-                    f"/v1/embeddings: {len(vectors or [])} векторов на {len(missing)} текстов"
+                    f"/v1/embeddings: {len(raw_vectors or [])} векторов на {len(part)} текстов"
                 )
-            for text, raw in zip(missing, vectors):
+            for text, raw in zip(part, raw_vectors):
                 if not isinstance(raw, list):
                     raise MlUnavailable("/v1/embeddings: пустой ответ")
                 vec = [float(v) for v in raw]
@@ -397,7 +411,8 @@ class RemoteEmbedder:
                 if len(self._cache) >= _CACHE_SIZE:
                     self._cache.pop(next(iter(self._cache)))
                 self._cache[(kind, text)] = vec
-        return [self._cache[(kind, t)] for t in texts]
+                vectors[text] = vec
+        return [vectors[text] for text in texts]
 
     def _vector(self, text: str, kind: str) -> list[float]:
         return self._vectors([text], kind)[0]

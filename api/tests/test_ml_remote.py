@@ -46,10 +46,23 @@ class FakeMl:
         self._guard()
         return {"status": "ok", "device": "cuda", "models": {"qwen3-0.6b": {"dense_size": self.dense_size}}}
 
+    # Потолок сайдкара (ml/models.py MAX_TEXTS): больше — 4xx, клиент обязан резать.
+    max_texts = 64
+
     def embed(self, texts, *, kind="query", profile=""):
         self._guard()
         self.calls.append(("embeddings", {"kind": kind, "profile": profile, "texts": list(texts)}))
-        return [[0.1] * self.dense_size for _ in texts]
+        if len(texts) > self.max_texts:
+            raise MlUnavailable(
+                f"/v1/embeddings: не больше {self.max_texts} текстов, пришло {len(texts)}"
+            )
+        return [self._vector_for(t) for t in texts]
+
+    def _vector_for(self, text: str) -> list[float]:
+        """Вектор, кодирующий номер текста: так проверяется порядок ответа."""
+        tail = text.rpartition("-")[2]
+        lead = float(tail) if tail.isdigit() else 0.1
+        return [lead] + [0.0] * (self.dense_size - 1)
 
     def rerank(self, query, documents, *, top_k=None):
         self._guard()
@@ -174,6 +187,24 @@ def test_remote_embedder_batches_passages(fake_client):
     # Повторный вызов — из кеша, без сети.
     emb.dense_batch(texts)
     assert len([c for c in fake_client.calls if c[0] == "embeddings"]) == 1
+
+def test_remote_embedder_splits_sidecar_batches(fake_client):
+    """Пачки режет клиент: сайдкар отбивает >64 текстов (4xx не ретраится)."""
+    emb = RemoteEmbedder("qwen3-0.6b", expected_dense_size=1024)
+    texts = [f"чанк-{i}" for i in range(65)]
+    vectors = emb.dense_batch(texts)
+    assert len(vectors) == 65
+    sizes = [len(c[1]["texts"]) for c in fake_client.calls if c[0] == "embeddings"]
+    assert sizes == [64, 1]
+
+def test_remote_embedder_more_texts_than_cache(fake_client):
+    """300 текстов > FIFO-кеша (256): ответ не перечитывается из кеша, порядок цел."""
+    emb = RemoteEmbedder("qwen3-0.6b", expected_dense_size=1024)
+    texts = [f"чанк-{i}" for i in range(300)]
+    vectors = emb.dense_batch(texts)
+    assert [v[0] for v in vectors] == [float(i) for i in range(300)]
+    sizes = [len(c[1]["texts"]) for c in fake_client.calls if c[0] == "embeddings"]
+    assert sizes == [64, 64, 64, 64, 44]
 
 
 def test_remote_rerank_never_resurrects_excluded(monkeypatch):
