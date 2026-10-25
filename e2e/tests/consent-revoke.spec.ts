@@ -18,8 +18,13 @@ test.describe("Отзыв согласия на обработку ПДн", () =
     await page.getByRole("button", { name: "Сохранить за сегодня" }).click();
     await expect(page.getByText(content)).toBeVisible();
 
-    // Отзыв согласия → возвращается гейт 152-ФЗ, скрининг недоступен.
-    await page.getByRole("button", { name: "Отозвать" }).click();
+    // Отзыв согласия живёт в личном кабинете: свёрнутая «Опасная зона» + подтверждение в диалоге.
+    await page.getByRole("button", { name: "Личный кабинет" }).click();
+    await page.locator("summary", { hasText: "Опасная зона" }).click();
+    await page.getByRole("button", { name: "Отозвать согласие" }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("button", { name: "Отозвать и удалить" }).click();
     await expect(
       page.getByRole("heading", { name: "Согласие на обработку персональных данных (152-ФЗ)" })
     ).toBeVisible();
@@ -32,7 +37,8 @@ test.describe("Отзыв согласия на обработку ПДн", () =
 
     // Повторное согласие → данные уничтожены: дневник пуст.
     await page.getByRole("button", { name: "Даю согласие" }).click();
-    await expect(page.getByText("Согласие активно")).toBeVisible();
+    // Экран личного кабинета остаётся открытым: согласие подтверждено его строкой «Активно с …».
+    await expect(page.getByText(/^Активно с /)).toBeVisible();
     await patientSection(page, "Дневник");
     await expect(page.getByText(content)).toHaveCount(0);
   });

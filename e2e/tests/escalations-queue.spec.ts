@@ -54,17 +54,31 @@ const riskCheckin = async (page: Page): Promise<string> => {
   };
   expect(core.step.kind).toBe("core");
 
+  // v2.0.0: HR4 не в ядре. Гейт включает MO1 ≥ 3, дальше отдельный шаг безопасности.
   const coreAnswers: Record<string, number> = Object.fromEntries(core.step.items.map((i) => [i.id, 0]));
-  coreAnswers.HR4 = 1;
-  const safetyStep = await asPatient.post(`/api/v1/checkins/${core.session_id}/answers`, {
+  coreAnswers.MO1 = 3;
+  const gateStep = await asPatient.post(`/api/v1/checkins/${core.session_id}/answers`, {
     data: { answers: coreAnswers },
   });
-  expect(safetyStep.status()).toBe(200);
-  const afterCore = (await safetyStep.json()) as { phase: string; step: { items: { id: string }[] } };
+  expect(gateStep.status()).toBe(200);
+  const afterCore = (await gateStep.json()) as {
+    phase: string;
+    safety_gate: boolean;
+    step: { kind: string; items: { id: string }[] };
+  };
+  expect(afterCore.safety_gate).toBe(true);
   expect(afterCore.phase).toBe("safety");
+  expect(afterCore.step.items.map((i) => i.id)).toEqual(["HR4"]);
+
+  const riskStep = await asPatient.post(`/api/v1/checkins/${core.session_id}/answers`, {
+    data: { answers: { HR4: 1 } },
+  });
+  expect(riskStep.status()).toBe(200);
+  const afterRisk = (await riskStep.json()) as { phase: string; step: { items: { id: string }[] } };
+  expect(afterRisk.phase).toBe("safety");
 
   const safetyAnswers: Record<string, number> = Object.fromEntries(
-    afterCore.step.items.map((i) => [i.id, 0]),
+    afterRisk.step.items.map((i) => [i.id, 0]),
   );
   const done = await asPatient.post(`/api/v1/checkins/${core.session_id}/answers`, {
     data: { answers: safetyAnswers },
