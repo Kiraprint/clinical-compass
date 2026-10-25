@@ -67,6 +67,7 @@ def _hash_rerank(
     *,
     topic: str | None,
     exclude_ids: set[str] | None,
+    allowed_work_ids: set[str] | None = None,
     corpus_drugs: list[dict] | None = None,
 ) -> list[dict]:
     """Лексический гейт + keyword-fallback для hash-профиля (демо/тесты).
@@ -78,7 +79,13 @@ def _hash_rerank(
     БД здесь открывать нельзя. Загрузку препаратов владеет вызывающий
     (`load_drug_docs` в async-сессии запроса); `corpus_drugs is None` означает
     «препаратов в корпусе нет», а не «сходи в БД».
+
+    allowed_work_ids (FR-36): allow-list статей, одобренных врачом лично.
+    Фильтр применяется и к хитам Qdrant, и к keyword-fallback (точки seed-корпуса
+    work_id не имеют и видны всегда).
     """
+    if allowed_work_ids is not None:
+        hits = [h for h in hits if kb_store.is_visible(h, allowed_work_ids)]
     hits = _relevance_gate(query, hits, limit)
     if len(hits) >= limit:
         return hits
@@ -88,7 +95,8 @@ def _hash_rerank(
         ((_lexical_overlap(query, d["text"]), d)
          for d in build_corpus(drug_docs=corpus_drugs or [])
          if (topic is None or d.get("topic") == topic)
-         and (not exclude_ids or d["guideline_id"] not in exclude_ids)),
+         and (not exclude_ids or d["guideline_id"] not in exclude_ids)
+         and kb_store.is_visible(d, allowed_work_ids)),
         key=lambda x: x[0],
     )
     for ov, d in reversed(kw):
@@ -108,6 +116,7 @@ class AgentState(TypedDict, total=False):
     limit: int
     chunks: list[RAGChunk]
     exclude_ids: set[str]
+    allowed_work_ids: set[str] | None
     patient_context: dict | None
     patient_contexts: list[dict] | None
     corpus_drugs: list[dict] | None
@@ -125,6 +134,7 @@ class AgentFactory:
         topic: str | None = None,
         limit: int = 5,
         exclude_ids: set[str] | None = None,
+        allowed_work_ids: set[str] | None = None,
         redline_query: str | None = None,
         corpus_drugs: list[dict] | None = None,
     ) -> list[RAGChunk]:
@@ -137,6 +147,9 @@ class AgentFactory:
         query; при LLM-переформулировке уточняющего вопроса (FR-21) сюда
         передаётся исходный вопрос врача, чтобы redline-реплика из истории
         диалога не глушила поиск.
+
+        allowed_work_ids (FR-36): статьи, которые врач одобрил лично; всё
+        остальное из статей в выдачу не попадает (гайдлайны ВОЗ и seed — всегда).
         """
         if detect_redline(redline_query if redline_query is not None else query) is not None:
             return []
@@ -165,13 +178,20 @@ class AgentFactory:
             topic=topic,
             limit=limit,
             exclude_ids=exclude_ids,
+            work_ids=allowed_work_ids,
             candidates=settings.retrieval_candidates or None,
             reranker=reranker,
             min_score=min_score,
         )
         if use_sparse:
             hits = _hash_rerank(
-                query, hits, limit, topic=topic, exclude_ids=exclude_ids, corpus_drugs=corpus_drugs
+                query,
+                hits,
+                limit,
+                topic=topic,
+                exclude_ids=exclude_ids,
+                allowed_work_ids=allowed_work_ids,
+                corpus_drugs=corpus_drugs,
             )
         return [
             RAGChunk(
@@ -196,6 +216,7 @@ class AgentFactory:
                 topic=state.get("topic"),
                 limit=state.get("limit", 5),
                 exclude_ids=state.get("exclude_ids"),
+                allowed_work_ids=state.get("allowed_work_ids"),
                 redline_query=state["query"],
                 corpus_drugs=state.get("corpus_drugs"),
             )
@@ -247,6 +268,7 @@ class AgentFactory:
         patient_context: dict | None = None,
         patient_contexts: list[dict] | None = None,
         exclude_ids: set[str] | None = None,
+        allowed_work_ids: set[str] | None = None,
         retrieval_query: str | None = None,
         corpus_drugs: list[dict] | None = None,
     ) -> dict:
@@ -271,6 +293,10 @@ class AgentFactory:
                 "patient_contexts": patient_contexts,
                 "corpus_drugs": corpus_drugs,
                 "exclude_ids": exclude_ids or set(),
+                # FR-36: None — фильтр не нужен, set() (в т.ч. пустой) — статьи
+                # видны только из allow-list. Вызывающий клинический путь всегда
+                # передаёт множество (возможно пустое).
+                "allowed_work_ids": allowed_work_ids,
             }
         )["answer"]
 

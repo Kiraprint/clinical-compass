@@ -287,6 +287,9 @@ async def answer_query(
         await clinician.patient_context(db, clinician_id, pid, ip=ip) for pid in patient_ids or []
     ]
     exclude_ids = await kb_review.excluded_ids(db, clinician_id)
+    # FR-36: статьи видит только тот врач, кто одобрил их лично (пустое
+    # множество — ни одной статьи; гайдлайны ВОЗ/seed идут мимо фильтра).
+    allowed_work_ids = await kb_review.approved_work_ids(db, clinician_id)
     corpus_drugs = await load_drug_docs(db)
     await db.commit()  # PDn-access audit персистируется до вызова агента (152-ФЗ)
 
@@ -306,6 +309,7 @@ async def answer_query(
         limit=limit,
         patient_contexts=scrubbed_contexts or None,
         exclude_ids=exclude_ids,
+        allowed_work_ids=allowed_work_ids,
         corpus_drugs=corpus_drugs,
     )
     result["depersonalization"] = report
@@ -350,6 +354,8 @@ async def post_message(
             # Врач потерял доступ (roster/согласие) — тред не ломаем, сообщаем.
             skipped.append(str(pid))
     exclude_ids = await kb_review.excluded_ids(db, clinician_id)
+    # FR-36: персональная видимость статей — тот же allow-list, что в /ask.
+    allowed_work_ids = await kb_review.approved_work_ids(db, clinician_id)
     corpus_drugs = await load_drug_docs(db)
     await db.commit()  # PDn-access audit + вопрос персистируются до вызова агента
 
@@ -379,6 +385,7 @@ async def post_message(
         limit=5,
         patient_contexts=scrubbed_contexts or None,
         exclude_ids=exclude_ids,
+        allowed_work_ids=allowed_work_ids,
         corpus_drugs=corpus_drugs,
     )
 
