@@ -239,6 +239,26 @@ def test_agent_uses_profile_gate_and_explicit_override(monkeypatch):
     assert seen["min_score"] is None
 
 
+def test_search_kb_passes_multiple_topics_as_one_filter(monkeypatch):
+    """FR-14: две темы уходят в hybrid_search одним вызовом (topics=...), не двумя."""
+    from app.services import agent as agent_mod
+    from app.services.embeddings import HashEmbedder
+
+    calls: list[dict] = []
+
+    def _search(*_a, **kw):
+        calls.append(kw)
+        return []
+
+    monkeypatch.setattr(agent_mod, "get_embedder", lambda: HashEmbedder())
+    monkeypatch.setattr(agent_mod.kb_store, "hybrid_search", _search)
+    factory = agent_mod.AgentFactory(client=None)
+
+    factory.search_kb("семаглутид и риск депрессии", topics=("ЛЕКАРСТВА", "НАУЧНЫЕ-СТАТЬИ"))
+
+    assert len(calls) == 1, "должен быть один поиск, а не два"
+    assert calls[0]["topics"] == ("ЛЕКАРСТВА", "НАУЧНЫЕ-СТАТЬИ")
+
 def test_candidates_and_rrf_k_reach_qdrant(monkeypatch):
     captured: dict = {}
 

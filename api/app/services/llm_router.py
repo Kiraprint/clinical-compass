@@ -86,9 +86,13 @@ _TOPIC_HINT = {
 
 _SYSTEM_PROMPT = (
     "Ты — маршрутизатор запросов к базе знаний клинического помощника врача. "
-    "Определи, к какому разделу относится вопрос пользователя, и вызови ровно одну "
-    "тулзу поиска. Если вопрос не относится ни к одному разделу — не вызывай тулзу. "
-    "Никогда не отвечай текстом от себя: только вызов тулзы (или ничего)."
+    "Определи, к каким разделам относится вопрос пользователя, и вызови тулзу "
+    "поиска по каждому из них. Обычно раздел один. Вызови две тулзы, только если "
+    "вопрос явно про них обе: например, про препарат и одновременно про "
+    "исследования/доказательства/обзоры (search_lekarstva + "
+    "search_nauchnye_stati), или про шкалу и триаж. Больше двух тулз не вызывай. "
+    "Если вопрос не относится ни к одному разделу — не вызывай тулзу. "
+    "Никогда не отвечай текстом от себя: только вызов тулз (или ничего)."
 )
 
 
@@ -134,15 +138,21 @@ def chat_completion(
     )
 
 
-def route_topic(query: str) -> str | None:
-    """Выбирает topic (ШКАЛЫ/ТРИАЖ/РЕКОМЕНДАЦИИ/ЛЕКАРСТВА) через LLM.
+MAX_TOPICS = 2  # больше двух разделов на один вопрос — это уже «поиск по всем»
 
-    None = поиск по всем разделам (LLM выключен/ошибка/вопрос вне разделов).
+
+def route_topics(query: str) -> tuple[str, ...]:
+    """Выбирает 1–2 темы (ШКАЛЫ/ТРИАЖ/РЕКОМЕНДАЦИИ/ЛЕКАРСТВА/НАУЧНЫЕ-СТАТЬИ).
+
+    Пустой кортеж = поиск по всем разделам (LLM выключен/ошибка/вопрос вне
+    разделов). Модель может вызвать две тулзы: вопрос «препарат X и его
+    доказательства» относится и к ЛЕКАРСТВАМ, и к НАУЧНЫМ-СТАТЬЯМ. Оба фильтра
+    уходят в Qdrant одним запросом (MatchAny), поэтому лишних поисков нет.
     """
     if not _enabled():
-        return None
+        return ()
     if not query.strip():
-        return None
+        return ()
     try:
         payload = {
             "model": settings.assistant_llm_model,
@@ -163,16 +173,28 @@ def route_topic(query: str) -> str | None:
         msg = body["choices"][0]["message"]
         tool_calls = msg.get("tool_calls") or []
         if not tool_calls:
-            return None  # вне разделов — поиск по всем
-        fn = tool_calls[0].get("function", {}).get("name", "")
-        topic = TOPIC_TOOLS.get(fn)
-        if topic is None:
-            logger.warning("assistant LLM вернул неизвестную тулзу %r — поиск по всем", fn)
-            return None
-        return topic
+            return ()  # вне разделов — поиск по всем
+        topics: list[str] = []
+        for call in tool_calls:
+            fn = call.get("function", {}).get("name", "")
+            topic = TOPIC_TOOLS.get(fn)
+            if topic is None:
+                logger.warning("assistant LLM вернул неизвестную тулзу %r — пропускаю", fn)
+                continue
+            if topic not in topics:
+                topics.append(topic)
+            if len(topics) >= MAX_TOPICS:
+                break
+        return tuple(topics)
     except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError, ValueError) as exc:
         logger.warning("assistant LLM-роутинг недоступен (%s: %s) — поиск по всем", type(exc).__name__, exc)
-        return None
+        return ()
+
+
+def route_topic(query: str) -> str | None:
+    """Первая (основная) тема — для вызовов, которым нужен один раздел."""
+    topics = route_topics(query)
+    return topics[0] if topics else None
 
 
 _REWRITE_SYSTEM_PROMPT = (
