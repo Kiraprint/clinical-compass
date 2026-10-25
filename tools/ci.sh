@@ -9,9 +9,12 @@
 #   tools/ci.sh --e2e            # + полный e2e-проход
 #   tools/ci.sh --skip-docker    # без docker build
 #
-# Изоляция: тестовая БД по умолчанию «compass_ci» и коллекция Qdrant «kb_ci»,
-# чтобы не пересекаться с чужими прогонами (compass_test/kb_test). Свои адреса
-# можно передать через CC_TEST_DATABASE_URL / CC_QDRANT_COLLECTION.
+# Изоляция: гейт поднимает СВОЙ контур (compose-проект cci-infra: Postgres на
+# 127.0.0.1:55432, Qdrant на 127.0.0.1:56333) с базой compass_ci и коллекцией
+# kb_ci. Рабочий Postgres :5432 (база compass) и Qdrant :6333 (kb/kb_600) не
+# используются: фикстура тестов дропает схему целевой базы, поэтому чужая БД
+# здесь означала бы потерю данных. Порты/имена — CC_CI_PG_PORT,
+# CC_CI_QDRANT_PORT, CC_CI_DB_NAME, CC_CI_COLLECTION.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,9 +29,14 @@ if [ ! -x "$PY" ]; then
 fi
 export PYTHONPATH="$ROOT/api:$ROOT/core${PYTHONPATH:+:$PYTHONPATH}"
 COMPOSE="docker compose -f infra/docker-compose.yml"
-DEV_COMPOSE="docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml"
+# Свой контур для тестов: отдельный compose-проект и свои порты. Прод-кластер
+# (infra-postgres/infra-qdrant на 5432/6333 с базами compass и коллекцией kb)
+# гейт не трогает вообще — фикстура api/tests/conftest.py дропает схему.
+CI_INFRA_PROJECT="cci-infra"
+CI_PG_PORT="${CC_CI_PG_PORT:-55432}"
+CI_QDRANT_PORT="${CC_CI_QDRANT_PORT:-56333}"
 TEST_DB_NAME="${CC_CI_DB_NAME:-compass_ci}"
-TEST_DB="${CC_TEST_DATABASE_URL:-postgresql+psycopg://compass:compass@127.0.0.1:5432/${TEST_DB_NAME}}"
+TEST_DB="postgresql+psycopg://compass:compass@127.0.0.1:${CI_PG_PORT}/${TEST_DB_NAME}"
 CI_COLLECTION="${CC_CI_COLLECTION:-kb_ci}"
 E2E_PROJECT="cci"
 E2E_PORT="${CC_CI_E2E_PORT:-8096}"
@@ -41,7 +49,7 @@ for arg in "$@"; do
     --e2e) WITH_E2E=1 ;;
     --skip-e2e) WITH_E2E=0 ;;
     --skip-docker) WITH_DOCKER=0 ;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "неизвестный аргумент: $arg" >&2; exit 2 ;;
   esac
 done
@@ -51,40 +59,57 @@ fail() { printf '\033[1;31mОТКАЗ:\033[0m %s\n' "$*" >&2; exit 1; }
 
 [ -x "$PY" ] || fail "нет $PY — собери окружение: uv sync --all-packages"
 
-# Защита от прогона против «настоящей» БД: фикстура api/tests/conftest.py дропает схему.
+# Защита от прогона против «настоящей» БД: фикстура api/tests/conftest.py дропает
+# схему целевой базы. Разрешена только БД контура гейта на порту гейта.
 case "$TEST_DB" in
-  *"/compass"|*"/compass_demo"|*"/compass_alembic")
-    fail "тестовая БД '$TEST_DB' похожа на рабочую — задайте CC_CI_DB_NAME" ;;
+  "postgresql+psycopg://compass:compass@127.0.0.1:${CI_PG_PORT}/compass_ci"*) ;;
+  *) fail "тестовая БД '$TEST_DB' не из контура гейта (ожидается 127.0.0.1:${CI_PG_PORT}/compass_ci*)" ;;
+esac
+case "$CI_COLLECTION" in
+  kb_ci*) ;;
+  *) fail "коллекция '$CI_COLLECTION' не из контура гейта (ожидается kb_ci*)" ;;
 esac
 
 # Унаследованные CC_* меняют поведение тестов (cookie-secure ломает ожидания
 # 401, эмбеддер/коллекция подменяют индекс) — чистим и задаём свои.
 unset CC_COOKIE_SECURE CC_EMBEDDER CC_RERANKER CC_ML_URL CC_ML_TOKEN \
       CC_DEPERSONALIZE_NER CC_ASSISTANT_LLM_URL CC_CHAT_INSIGHTS_ENABLED \
-      CC_ALLOW_DEMO_SECRETS CC_QDRANT_COLLECTION
+      CC_ALLOW_DEMO_SECRETS CC_QDRANT_COLLECTION CC_QDRANT_URL
 export CC_ALLOW_DEMO_SECRETS=true
 export CC_QDRANT_COLLECTION="$CI_COLLECTION"
 
-# --- 1. Postgres + Qdrant ----------------------------------------------------
-# Если dev-порты уже опубликованы (обычно infra с docker-compose.dev.yml), берём
-# их: второй проект в этой же рабочей папке конфликтовал бы на 5432/6333.
+# --- 1. Postgres + Qdrant (свой контур) --------------------------------------
+# Отдельный compose-проект и свои порты: рабочий Postgres :5432 (база compass)
+# и Qdrant :6333 (коллекции kb/kb_600) гейт не трогает вообще.
 port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
-if port_open 5432 && port_open 6333; then
-  log "использую уже опубликованные Postgres :5432 и Qdrant :6333"
+if port_open "$CI_PG_PORT" && port_open "$CI_QDRANT_PORT"; then
+  log "контур гейта уже поднят (Postgres :$CI_PG_PORT, Qdrant :$CI_QDRANT_PORT)"
 else
-  log "поднимаю Postgres + Qdrant (compose services)…"
-  $DEV_COMPOSE up -d postgres qdrant >/dev/null
-  for _ in $(seq 1 40); do port_open 5432 && port_open 6333 && break; sleep 1; done
-  port_open 5432 || fail "Postgres не поднялся на 127.0.0.1:5432"
-  port_open 6333 || fail "Qdrant не поднялся на 127.0.0.1:6333"
+  log "поднимаю контур гейта (проект $CI_INFRA_PROJECT)…"
+  CI_INFRA_DIR="$(mktemp -d)"
+  cat > "$CI_INFRA_DIR/ci-infra.yml" <<YAML
+services:
+  postgres:
+    ports: !override ["127.0.0.1:${CI_PG_PORT}:5432"]
+  qdrant:
+    ports: !override ["127.0.0.1:${CI_QDRANT_PORT}:6333"]
+YAML
+  docker compose -f infra/docker-compose.yml -f "$CI_INFRA_DIR/ci-infra.yml" \
+    -p "$CI_INFRA_PROJECT" up -d postgres qdrant >/dev/null
+  rm -rf "$CI_INFRA_DIR"
+  for _ in $(seq 1 60); do port_open "$CI_PG_PORT" && port_open "$CI_QDRANT_PORT" && break; sleep 1; done
+  port_open "$CI_PG_PORT" || fail "Postgres не поднялся на 127.0.0.1:$CI_PG_PORT"
+  port_open "$CI_QDRANT_PORT" || fail "Qdrant не поднялся на 127.0.0.1:$CI_QDRANT_PORT"
 fi
-curl -sf http://127.0.0.1:6333/healthz >/dev/null || fail "Qdrant не отвечает на 127.0.0.1:6333"
+curl -sf "http://127.0.0.1:${CI_QDRANT_PORT}/healthz" >/dev/null \
+  || fail "Qdrant не отвечает на 127.0.0.1:${CI_QDRANT_PORT}"
+export CC_QDRANT_URL="http://127.0.0.1:${CI_QDRANT_PORT}"
 
-log "БД для тестов: $TEST_DB_NAME"
-$PY - "$TEST_DB_NAME" <<'PY'
+log "БД для тестов: $TEST_DB_NAME (127.0.0.1:$CI_PG_PORT)"
+$PY - "$TEST_DB_NAME" "$CI_PG_PORT" <<'PY'
 import sys, psycopg
-name = sys.argv[1]
-admin = "postgresql://compass:compass@127.0.0.1:5432/compass"
+name, port = sys.argv[1], sys.argv[2]
+admin = f"postgresql://compass:compass@127.0.0.1:{port}/compass"
 with psycopg.connect(admin, autocommit=True) as conn:
     exists = conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,)).fetchone()
     if not exists:

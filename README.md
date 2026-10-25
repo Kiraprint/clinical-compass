@@ -263,9 +263,13 @@ python -m app.enrichment serve
 ./tools/ci.sh --skip-docker
 ```
 
-Изоляция прогона: БД `compass_ci` и коллекция `kb_ci` (переопределяются
-`CC_CI_DB_NAME` / `CC_TEST_DATABASE_URL` / `CC_CI_COLLECTION`), e2e-стек —
-проект `cci` на порту `8096`, после прогона удаляется вместе с томами.
+Изоляция прогона: гейт поднимает **свой** docker-контур — compose-проект
+`cci-infra` с Postgres на `127.0.0.1:55432` и Qdrant на `127.0.0.1:56333`, БД
+`compass_ci`, коллекция `kb_ci` (`CC_CI_PG_PORT` / `CC_CI_QDRANT_PORT` /
+`CC_CI_DB_NAME` / `CC_CI_COLLECTION`). Рабочий Postgres `:5432` (база
+`compass`) и Qdrant `:6333` (`kb`, `kb_600`) не используются никогда:
+фикстура api-тестов дропает схему целевой базы. e2e-стек — проект `cci` на
+порту `8096`, после прогона удаляется вместе с томами.
 
 Релиз (тесты → образы → APK → тег → GitHub Release с APK):
 
