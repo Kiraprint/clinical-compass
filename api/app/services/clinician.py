@@ -250,6 +250,35 @@ async def patient_timeline(db: AsyncSession, patient_id, days: int) -> dict:
     }
 
 
+async def _suicidal_omission(db: AsyncSession, patient_id) -> tuple[list[str], str | None]:
+    """Пункты о суициде, не заданные в последней оценке шкалы, где они есть.
+
+    Пункт о суициде есть не в каждой шкале (q9 PHQ-9, h3 HDRS-17). Брать флаг
+    NOT_ASSESSED из последней оценки вообще нельзя: после GAD-7 (у неё такого
+    пункта нет) предупреждение «пункт 9 не задавался» пропадало бы, хотя PHQ-9
+    спрашивали без q9. Поэтому смотрим последнюю оценку шкалы с suicidal_item.
+
+    Возвращает (item_keys, scale_code); scale_code — None, если пропусков нет.
+    """
+    suicidal_codes = [code for code, scale in ALL_SCALES.items() if scale.suicidal_item]
+    if not suicidal_codes:
+        return [], None
+    row = (await db.execute(
+        select(Assessment.risk_flags, Run.questionnaire_code)
+        .join(Run, Run.id == Assessment.run_id)
+        .where(Assessment.patient_id == patient_id, Run.questionnaire_code.in_(suicidal_codes))
+        .order_by(Assessment.computed_at.desc(), Assessment.id.desc())
+        .limit(1)
+    )).first()
+    items = [
+        flag.get("item_key")
+        for flag in ((row.risk_flags or []) if row else [])
+        if flag.get("kind") == "NOT_ASSESSED" and flag.get("item_key")
+    ]
+    if not items:
+        return [], None
+    return items, row.questionnaire_code
+
 async def _patient_card(db: AsyncSession, patient_id) -> dict:
     """Сборка карты пациента (только данные; roster/consent/audit — у вызывающих).
 
@@ -262,6 +291,7 @@ async def _patient_card(db: AsyncSession, patient_id) -> dict:
     last = await db.scalar(
         select(Assessment).where(Assessment.patient_id == patient_id).order_by(Assessment.computed_at.desc())
     )
+    omitted_items, omitted_scale = await _suicidal_omission(db, patient_id)
     history = (await db.scalars(
         select(Assessment)
         .where(Assessment.patient_id == patient_id)
@@ -318,13 +348,11 @@ async def _patient_card(db: AsyncSession, patient_id) -> dict:
                 "total_score": last.total_score,
                 "severity": last.severity,
                 "triage": last.triage,
-                # FR-34: NOT_ASSESSED означает, что пункт 9 пациенту не задавался,
-                # то есть риск не оценён, а не отрицателен.
+                # FR-34: NOT_ASSESSED означает, что пункт о суициде пациенту не
+                # задавался, то есть риск не оценён, а не отрицателен.
                 "risk_flags": last.risk_flags or [],
-                "omitted_items": [
-                    f.get("item_key") for f in (last.risk_flags or [])
-                    if f.get("kind") == "NOT_ASSESSED" and f.get("item_key")
-                ],
+                "omitted_items": omitted_items,
+                "omitted_scale": omitted_scale,
                 "computed_at": last.computed_at.isoformat(),
             }
             if last
