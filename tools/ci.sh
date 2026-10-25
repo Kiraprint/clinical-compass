@@ -101,9 +101,21 @@ YAML
   port_open "$CI_PG_PORT" || fail "Postgres не поднялся на 127.0.0.1:$CI_PG_PORT"
   port_open "$CI_QDRANT_PORT" || fail "Qdrant не поднялся на 127.0.0.1:$CI_QDRANT_PORT"
 fi
+# Открытый порт ≠ готовый Qdrant: ждём /healthz (контейнер стартует ~3 с).
+for _ in $(seq 1 60); do
+  curl -sf "http://127.0.0.1:${CI_QDRANT_PORT}/healthz" >/dev/null 2>&1 && break
+  sleep 1
+done
 curl -sf "http://127.0.0.1:${CI_QDRANT_PORT}/healthz" >/dev/null \
   || fail "Qdrant не отвечает на 127.0.0.1:${CI_QDRANT_PORT}"
 export CC_QDRANT_URL="http://127.0.0.1:${CI_QDRANT_PORT}"
+
+# Postgres принимает соединения не в ту же секунду, что открывает порт.
+for _ in $(seq 1 60); do
+  $PY -c "import psycopg; psycopg.connect('postgresql://compass:compass@127.0.0.1:${CI_PG_PORT}/compass', connect_timeout=2)" \
+    2>/dev/null && break
+  sleep 1
+done
 
 log "БД для тестов: $TEST_DB_NAME (127.0.0.1:$CI_PG_PORT)"
 $PY - "$TEST_DB_NAME" "$CI_PG_PORT" <<'PY'
