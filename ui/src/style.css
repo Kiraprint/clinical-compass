@@ -486,6 +486,8 @@ small { color: #8a94a8; }
   .legal .legal-doc { padding: 14px 14px 16px; }
   .legal h2 { font-size: 18px; }
   .legal ul { padding-left: 18px; }
+}
+
 /* FR-33 F: выбранная эмоция — серая заливка, а не синяя кнопка действия. */
 .row.mood button.on {
   background: #d8dde6;
