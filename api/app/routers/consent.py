@@ -91,6 +91,7 @@ async def _destroy_patient_pdn(db: AsyncSession, patient_id) -> None:
         Escalation,
         ClinicianReminder,
         Notification,
+        PatientAnamnesis,
         PatientMedication,
         PushSubscription,
         Run,
@@ -123,6 +124,8 @@ async def _destroy_patient_pdn(db: AsyncSession, patient_id) -> None:
     # F2 (re-audit): каналы доставки push — уничтожаем, иначе отозванный пациент
     # продолжает получать уведомления (утечка канала, 152-ФЗ ст.9 ч.2-3).
     await db.execute(sa_delete(PushSubscription).where(PushSubscription.user_id == patient_id))
+    # FR-37: анамнез — спецкатегория ПДн, после отзыва согласия удаляется.
+    await db.execute(sa_delete(PatientAnamnesis).where(PatientAnamnesis.patient_id == patient_id))
     await db.execute(sa_delete(DeviceToken).where(DeviceToken.user_id == patient_id))
     # FR-25: история назначений ЕМИАС (title/dosage косвенно указывают на диагноз)
     # и связка (snils_hash) — спецкатегория ПДн; без явного удаления переживали

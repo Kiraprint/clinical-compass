@@ -19,7 +19,7 @@ from pathlib import Path
 from sqlalchemy import select, text
 
 from app import db, security
-from app.models import Answer, Assessment, Consent, DiaryEntry, Drug, Prescription, Run, User
+from app.models import Answer, Assessment, Consent, DiaryEntry, Drug, PatientAnamnesis, Prescription, Run, User
 from app.services import screening as screening_service
 
 MOSCOW_TZ = timezone(timedelta(hours=3))
@@ -169,14 +169,24 @@ async def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: b
             password_hash=security.hash_password("Demo-Pass-1"), role="CLINICIAN",
             totp_secret=DEMO_TOTP or security.generate_totp_secret(),
         )
-        s.add_all([admin, doc])
+        # FR-37: третий врач для демонстрации изоляции roster. Свои пациенты
+        # (p1–p2) не видны первому врачу, а пациенты первого — не видны ему.
+        doc2 = User(
+            email="doc2@compass.demo", fio="Второй врач (демо)",
+            password_hash=security.hash_password("Demo-Pass-1"), role="CLINICIAN",
+            # Фиксированный TOTP (base32) — воспроизводимый вход на демо/тестах.
+            totp_secret="JBSWY3DPEHPK3PXP",
+        )
+        s.add_all([admin, doc, doc2])
         await s.flush()
         doc_id = doc.id
+        doc2_id = doc2.id
         await s.commit()
         print(f"[seed] admin={admin.email} clinician={doc.email} (TOTP: {doc.totp_secret})")
 
         await _seed_drugs_async(s)
 
+        elena_pid = None
         profiles = (PATIENT_PROFILES * ((n_patients // len(PATIENT_PROFILES)) + 1))[:n_patients]
         for idx, profile in enumerate(profiles, start=1):
             fio, code, base, slope, noise, _ = profile
@@ -188,12 +198,16 @@ async def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: b
             s.add(patient)
             await s.flush()
             pid = patient.id
+            if fio == "Елена В.":
+                elena_pid = pid
             s.add(Consent(user_id=pid, version=1, text_hash="consent-v1",
                          signed_at=datetime.now(timezone.utc) - timedelta(days=days)))
             s.add(Prescription(patient_id=pid, scale_code=code))
+            # p1–p2 закреплены за doc2; остальные — за первым врачом.
+            owner_id = doc2_id if idx <= 2 else doc_id
             await s.execute(
                 text("INSERT INTO clinician_roster(clinician_id, patient_id) VALUES (:cid, :pid) ON CONFLICT DO NOTHING"),
-                {"cid": doc_id, "pid": pid},
+                {"cid": owner_id, "pid": pid},
             )
             await s.flush()  # чтобы prescribed_scales() видел назначение в цикле скринингов ниже
 
@@ -231,6 +245,39 @@ async def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: b
                     created_at=datetime.now(timezone.utc) - timedelta(days=days - day),
                 ))
             print(f"[seed] patient {email} ({fio}) scale={code} 1..{days}d: {totals[0]}→{totals[-1]} triage-last={assessment['triage']}")
+
+        # FR-37: демо-анамнез «Елены В.» по карточке — 34 года, после COVID
+        # тревожность/утомляемость/нарушение сна/внутреннее напряжение/страх
+        # ухудшения здоровья; лёгкая/средняя выраженность, без тяжёлой депрессии.
+        if elena_pid is not None:
+            s.add(PatientAnamnesis(
+                patient_id=elena_pid,
+                brief=(
+                    "34 года. После перенесённого COVID-19 сохраняются тревожность, "
+                    "утомляемость, нарушение сна, ощущение внутреннего напряжения, "
+                    "страх ухудшения здоровья. Симптомы лёгкой/средней выраженности, "
+                    "тяжёлой депрессии нет."
+                ),
+                text=(
+                    "Жалобы\n"
+                    "- Тревожность, ощущение внутреннего напряжения.\n"
+                    "- Утомляемость, снижение работоспособности.\n"
+                    "- Нарушение сна.\n"
+                    "- Страх ухудшения здоровья.\n\n"
+                    "Анамнез заболевания\n"
+                    "- Симптомы сохраняются после перенесённой коронавирусной инфекции (COVID-19).\n"
+                    "- Выраженность лёгкая/средняя; признаков тяжёлой депрессии нет.\n\n"
+                    "Анамнез жизни\n"
+                    "- 34 года.\n"
+                    "- Перенесённая COVID-19.\n"
+                    "- Иные сведения в карточке отсутствуют.\n\n"
+                    "Текущий статус\n"
+                    "- Тревожно-напряжённое состояние, утомляемость, нарушения сна.\n"
+                    "- Тяжёлая депрессивная симптоматика не выявлена."
+                ),
+                created_by=doc_id,
+                updated_by=doc_id,
+            ))
         await s.commit()
     finally:
         await s.close()
@@ -239,6 +286,7 @@ async def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: b
     print("[seed] done. Учётные данные демо:")
     print("  admin: admin@compass.demo / Demo-Pass-1 (2FA: см. выше)")
     print("  doc:   doc@compass.demo / Demo-Pass-1 (2FA: см. выше)")
+    print("  doc2:  doc2@compass.demo / Demo-Pass-1 (2FA: JBSWY3DPEHPK3PXP; roster: p1–p2)")
     print("  пациенты: p1..pN@compass.demo / Demo-Pass-1")
 
 

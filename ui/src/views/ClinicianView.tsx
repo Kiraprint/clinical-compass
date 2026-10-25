@@ -1504,6 +1504,8 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
 
       <ContactsBlock patientId={report.patient_id} hasConsent={report.contacts !== null} />
 
+      <AnamnesisBlock patientId={report.patient_id} initial={report.anamnesis} />
+
       <Collapsible storageKey="cc.clinician.reminders" summary="Напоминания">
         <PatientReminders patientId={report.patient_id} />
       </Collapsible>
@@ -2210,6 +2212,159 @@ function VerifyAdverseEvent({ event, medications, drugs, onOpenLibrary, onVerifi
     </div>
   );
 }
+function AnamnesisBlock({
+  patientId,
+  initial,
+}: {
+  patientId: string;
+  initial: Report["anamnesis"];
+}) {
+  const [data, setData] = useState(initial);
+  const [brief, setBrief] = useState(initial?.brief ?? "");
+  const [draft, setDraft] = useState<{ draft: string; masked_report: { applied: boolean; counts: Record<string, number> } } | null>(null);
+  const [draftText, setDraftText] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState("");
+
+  if (!initial) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <h3 style={{ margin: 0 }}>Анамнез</h3>
+        <p style={{ color: "#5a6478", fontSize: 13, margin: 0 }}>
+          Нет активного согласия пациента — анамнез недоступен (152-ФЗ).
+        </p>
+      </div>
+    );
+  }
+
+  const generate = async () => {
+    setBusy(true);
+    setErr("");
+    setSaved(false);
+    try {
+      const res = await api.clinicianAnamnesisDraft(patientId, brief);
+      setDraft(res);
+      setDraftText(res.draft);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveAnamnesis = async () => {
+    setBusy(true);
+    setErr("");
+    setSaved(false);
+    try {
+      const updated = await api.clinicianAnamnesisSave(patientId, {
+        brief,
+        ...(draft ? { text: draftText } : {}),
+      });
+      setData(updated);
+      setBrief(updated.brief ?? "");
+      setDraft(null);
+      setDraftText("");
+      setEditing(false);
+      setSaved(true);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cancel = () => {
+    setBrief(data?.brief ?? "");
+    setDraft(null);
+    setDraftText("");
+    setErr("");
+    setEditing(false);
+  };
+
+  const masked = draft
+    ? Object.entries(draft.masked_report.counts)
+        .map(([kind, count]) => `${kind}: ${count}`)
+        .join(", ")
+    : "";
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <h3 style={{ margin: 0 }}>Анамнез</h3>
+      {!editing && (
+        <>
+          {data?.text ? (
+            <div style={{ whiteSpace: "pre-wrap", fontSize: 14, lineHeight: 1.5 }}>{data.text}</div>
+          ) : (
+            <p style={{ color: "#5a6478", fontSize: 13, margin: 0 }}>
+              Анамнез не заполнен.
+            </p>
+          )}
+          <div className="row" style={{ gap: 8, alignItems: "center" }}>
+            <button className="ghost" onClick={() => { setEditing(true); setSaved(false); }}>
+              Редактировать
+            </button>
+            {data?.updated_at && (
+              <span style={{ color: "#5a6478", fontSize: 12 }}>
+                обновлён {data.updated_at.slice(0, 10)}
+              </span>
+            )}
+            {saved && <span style={{ color: "#2f7a4b", fontSize: 12 }}>сохранено</span>}
+          </div>
+        </>
+      )}
+      {editing && (
+        <>
+          <label htmlFor="anamnesis-brief" style={{ fontSize: 14 }}>
+            Краткие вводные
+          </label>
+          <textarea
+            id="anamnesis-brief"
+            rows={4}
+            maxLength={4000}
+            value={brief}
+            placeholder="Возраст, жалобы, динамика, значимые события (без ФИО и контактов)"
+            onChange={(e) => setBrief(e.target.value)}
+          />
+          <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <button onClick={generate} disabled={busy}>
+              {busy ? "Формирование…" : "Сформировать черновик (ИИ)"}
+            </button>
+            <button onClick={saveAnamnesis} disabled={busy}>
+              Сохранить
+            </button>
+            <button className="ghost" onClick={cancel} disabled={busy}>
+              Отмена
+            </button>
+            {draft && (
+              <span style={{ color: "#5a6478", fontSize: 12 }}>
+                перед отправкой замаскировано: {masked || "нет"}
+              </span>
+            )}
+          </div>
+          {draft && (
+            <>
+              <p style={{ color: "#5a6478", fontSize: 12, margin: 0 }}>
+                Черновик модели — проверьте и отредактируйте перед сохранением. В карточку
+                попадёт только после «Сохранить».
+              </p>
+              <textarea
+                rows={12}
+                maxLength={20000}
+                value={draftText}
+                onChange={(e) => setDraftText(e.target.value)}
+              />
+            </>
+          )}
+          {err && <p className="error">{err}</p>}
+        </>
+      )}
+    </div>
+  );
+}
+
 // (аудит READ_PATIENT_CONTACTS); в списке и карте телефон маскирован.
 function ContactsBlock({ patientId, hasConsent }: { patientId: string; hasConsent: boolean }) {
   const [contacts, setContacts] = useState<PatientContacts | null>(null);

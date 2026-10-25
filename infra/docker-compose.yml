@@ -93,6 +93,8 @@ services:
       # FR-31: анализ переписки (факты-черновики). Требует и LLM URL выше, и флаг;
       # по умолчанию выключен — ПДн переписки в LLM не уходят (docs/10 R23, docs/17).
       CC_CHAT_INSIGHTS_ENABLED: "${CC_CHAT_INSIGHTS_ENABLED:-false}"
+      # FR-37: анамнез пациента. Выключен — 503 ANAMNESIS_DISABLED (docs/10 R27).
+      CC_ANAMNESIS_ENABLED: "${CC_ANAMNESIS_ENABLED:-false}"
       <<: *vapid
       CC_QDRANT_URL: http://qdrant:6333
       # ML-сайдкар (docs/08 §4): GPU-профиль, http://ml:8080 во внутренней
