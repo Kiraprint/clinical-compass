@@ -74,13 +74,11 @@ test.describe("Пациент: первый запуск и ежедневные
     await expect(page.getByText(content)).toBeVisible();
   });
 
-  test("тренд пациента: график и последний балл при наличии истории", async ({ page }) => {
+  test("тренд пациента: графики по шкалам с точками истории", async ({ page }) => {
     await login(page, "p1@compass.demo", DEMO_PASSWORD);
     await patientSection(page, "Мой тренд");
-
-    // 14 скринингов → polyline рисуется, есть текст с последним баллом и дельтой.
+    // Пункт «Мой тренд» рисует отдельный SVG на шкалу (FR-33); у p1 есть история PHQ-9.
+    await expect(page.getByRole("img", { name: /PHQ-9: \d+ точек/ }).first()).toBeVisible();
     await expect(page.locator("svg polyline").first()).toBeVisible();
-    await expect(page.getByText(/Последний балл: \d+/)).toBeVisible();
-    await expect(page.getByText(/Дельта за 30 дней/)).toBeVisible();
   });
 });
