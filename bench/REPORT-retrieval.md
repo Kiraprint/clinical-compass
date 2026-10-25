@@ -38,9 +38,11 @@
 ```
 запрос (+ LLM-переформулировка уточнения, FR-21)
   → эмбеддер профиля (CC_EMBEDDER)
-  → Qdrant: dense / dense+sparse → RrfQuery(k)     [CC_RRF_K, CC_RETRIEVAL_CANDIDATES]
+  → Qdrant: dense / dense+sparse → FusionQuery(RRF)  [CC_RETRIEVAL_CANDIDATES;
+             RrfQuery(k) — только при явном CC_RRF_K]
+  → порог «нет релевантного ответа» по ЛУЧШЕМУ скору пула,
+    до реранка и отсечки                            [CC_KB_MIN_SCORE / профиль]
   → кросс-энкодерный реранк пула                    [CC_RERANKER, CC_RERANK_WINDOW]
-  → порог «нет релевантного ответа» по профилю      [CC_KB_MIN_SCORE / default]
   → top-5 чанков с цитатами
 ```
 
