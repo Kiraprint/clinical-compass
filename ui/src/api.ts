@@ -545,7 +545,15 @@ export interface CheckinState {
   phase: string | null;
   step: { kind: string | null; items: CheckinStepItem[] };
   answers: Record<string, number>;
-  progress: { answered: number; planned: number };
+  progress: {
+    answered: number;
+    planned: number;
+    // v2.0.0: задавался ли HR4 и на каком основании (docs/16 §2).
+    safety_gate: boolean;
+    safety_gate_reason: string;
+  };
+  // true — сегодня задавался вопрос о риске после ядра.
+  safety_gate: boolean;
   safety: string; // none | review | signal | unassessed
   modules: CheckinModule[];
   completed_at: string | null;
