@@ -1226,6 +1226,8 @@ export interface ClinicianKbWork {
   source: "pubmed" | "who";
   year: number | null;
   source_url: string;
+  /** Полный текст (PMC/IRIS); пусто — открытого полного текста нет. */
+  fulltext_url?: string;
   design: KbDesign;
   criteria: ClinicianKbCriteria;
   decision: "approved" | "rejected" | null;
