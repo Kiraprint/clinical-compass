@@ -582,6 +582,10 @@ export interface CheckinState {
   // true — сегодня задавался вопрос о риске после ядра.
   safety_gate: boolean;
   safety: string; // none | review | signal | unassessed
+  // true — HR4 задан и отвечен; false — «риск сегодня не оценивался» (не «риска нет»).
+  risk_assessed: boolean;
+  // suicidal | self_harm | negative | unknown — подсказка, не диагноз.
+  risk_pattern: "suicidal" | "self_harm" | "negative" | "unknown";
   modules: CheckinModule[];
   completed_at: string | null;
   // true — сигнал ушёл закреплённому врачу; false — врача нет (docs/16 §3).
@@ -896,6 +900,8 @@ export interface Report {
     recent: {
       session_id: string; date: string; status: string; phase: string | null;
       safety: "none" | "review" | "signal" | "unassessed"; rules_version: string;
+      risk_assessed?: boolean;
+      risk_pattern?: "suicidal" | "self_harm" | "negative" | "unknown";
       answers: Record<string, number>;
       modules: { code: string; included: boolean; reason: string }[];
       completed_at: string | null;
@@ -932,6 +938,8 @@ export interface Escalation {
   in_roster: boolean;
   /** Ответы риска из чек-ина: {"HR4":1,"RS1":0,...}; на которые не ответили — ключа нет. */
   risk_answers: Record<string, number> | null;
+  /** suicidal | self_harm | negative | unknown — клиническая подсказка очереди (docs/16 §2). */
+  risk_pattern?: "suicidal" | "self_harm" | "negative" | "unknown" | null;
   created_at: string | null;
   /** Заполнены только у закрытых сигналов (status=resolved|all). */
   resolved_at: string | null;

@@ -115,6 +115,56 @@ def test_router_topic_mapping(monkeypatch, tool_name, expected):
     assert llm_router.route_topic("вопрос") == expected
 
 
+def _fake_chat_multi(monkeypatch, names: list[str]):
+    """Фейковый /chat/completions, где модель вызвала несколько тулз."""
+    import urllib.request
+
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data)
+        return _FakeResp({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"type": "function", "function": {"name": n, "arguments": "{}"}}
+                        for n in names
+                    ],
+                }
+            }]
+        })
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    return captured
+
+
+def test_router_selects_two_topics_for_drug_evidence_question(monkeypatch):
+    """«Препарат + доказательства» → две темы: ЛЕКАРСТВА и НАУЧНЫЕ-СТАТЬИ (FR-14)."""
+    from app.services import llm_router
+
+    monkeypatch.setattr(settings, "assistant_llm_url", "http://llm:18080/v1")
+    _fake_chat_multi(monkeypatch, ["search_lekarstva", "search_nauchnye_stati"])
+    assert llm_router.route_topics("семаглутид и риск депрессии: что показывают обзоры") == (
+        "ЛЕКАРСТВА",
+        "НАУЧНЫЕ-СТАТЬИ",
+    )
+    # route_topic остаётся совместимой обёрткой над первой темой
+    assert llm_router.route_topic("семаглутид и риск депрессии") == "ЛЕКАРСТВА"
+
+
+def test_router_caps_topics_and_skips_unknown_tools(monkeypatch):
+    """Не больше двух тем; неизвестная тулза пропускается, дубликаты схлопываются."""
+    from app.services import llm_router
+
+    monkeypatch.setattr(settings, "assistant_llm_url", "http://llm:18080/v1")
+    _fake_chat_multi(monkeypatch, [
+        "search_skaly", "search_unknown", "search_skaly", "search_triazh", "search_lekarstva",
+    ])
+    assert llm_router.route_topics("вопрос") == ("ШКАЛЫ", "ТРИАЖ")
+
+
 def test_router_no_tool_call_means_all(monkeypatch):
     """Модель не вызвала тулзу (вопрос вне разделов) → None = все разделы."""
     from app.services import llm_router

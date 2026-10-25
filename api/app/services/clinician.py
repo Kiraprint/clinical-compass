@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from compass import checkin as engine
 from compass.models import AUDIENCE_CLINICIAN, AUDIENCE_PATIENT, RiskFlag, ScaleResult
 from compass.routing import routing_for
 from compass.scales import ALL_SCALES
@@ -513,6 +514,10 @@ def _checkin_dict(c: CheckinSession) -> dict:
         "status": c.status,
         "phase": c.phase,
         "safety": c.safety,
+        # risk_assessed=False — риск не оценивался; risk_pattern («self_harm»
+        # при HR4=Да и отрицательных RS) — подсказка, а не диагноз (docs/16 §2).
+        "risk_assessed": engine.risk_assessed(c.answers or {}),
+        "risk_pattern": engine.risk_pattern(c.answers or {}),
         "rules_version": c.rules_version,
         "answers": c.answers or {},
         "modules": [

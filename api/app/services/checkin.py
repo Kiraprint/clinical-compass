@@ -75,6 +75,9 @@ def _not_started() -> dict:
         },
         "safety": "unassessed",
         "safety_gate": False,
+        # Риск не оценивался — это не «риска нет» (docs/16 §3).
+        "risk_assessed": False,
+        "risk_pattern": engine.risk_pattern({}),
         "modules": [],
         "completed_at": None,
         "clinician_notified": False,
@@ -124,6 +127,11 @@ async def _serialize(db: AsyncSession, session: CheckinSession) -> dict:
         # У завершённого сеанса — зафиксированное значение (аудит правил его версии).
         "safety": session.safety if completed else plan.safety,
         "safety_gate": plan.safety_gate,
+        # Плоский флаг для потребителей, которым мало строкового safety:
+        # True — HR4 задавался и отвечен; False — риск сегодня не оценивался.
+        "risk_assessed": engine.risk_assessed(answers),
+        # suicidal | self_harm | negative | unknown (не диагноз, подсказка врачу).
+        "risk_pattern": engine.risk_pattern(answers),
         "modules": _modules_payload(plan.modules),
         "completed_at": session.completed_at.isoformat() if session.completed_at else None,
         "clinician_notified": await _clinician_notified(db, await _escalation_for(db, session)),
