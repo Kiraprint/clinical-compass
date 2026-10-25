@@ -31,20 +31,35 @@ function fmtTime(iso: string): string {
 
 // FR-29: отдельный экран врача «Чаты» — два раздела в сегмент-контроле.
 export default function ChatsView({
+  mode: initialMode,
   patientId,
   onSelectPatient,
+  onModeChange,
 }: {
-  patientId: string | null;
+  mode?: "assistant" | "patients";
+  patientId?: string | null;
   onSelectPatient: (id: string | null) => void;
+  onModeChange?: (mode: "assistant" | "patients") => void;
 }) {
+  // FR-32: режим задаёт левое меню («Ассистент» / «Чаты с пациентами»),
+  // сегмент-контроль внутри экрана остаётся быстрым переключателем.
   const [mode, setMode] = useState<"assistant" | "patients">(
-    patientId ? "patients" : "assistant",
+    initialMode ?? (patientId ? "patients" : "assistant"),
   );
+
+  useEffect(() => {
+    if (initialMode) setMode(initialMode);
+  }, [initialMode]);
 
   // Переход из карточки пациента («Открыть в чатах») сразу показывает переписку.
   useEffect(() => {
     if (patientId) setMode("patients");
   }, [patientId]);
+
+  const switchMode = (next: "assistant" | "patients") => {
+    setMode(next);
+    onModeChange?.(next);
+  };
 
   return (
     <div className="chat-view">
@@ -53,7 +68,7 @@ export default function ChatsView({
           role="tab"
           aria-selected={mode === "assistant"}
           className={mode === "assistant" ? "active" : ""}
-          onClick={() => setMode("assistant")}
+          onClick={() => switchMode("assistant")}
         >
           Ассистент
         </button>
@@ -61,7 +76,7 @@ export default function ChatsView({
           role="tab"
           aria-selected={mode === "patients"}
           className={mode === "patients" ? "active" : ""}
-          onClick={() => setMode("patients")}
+          onClick={() => switchMode("patients")}
         >
           Пациенты
         </button>
@@ -69,7 +84,7 @@ export default function ChatsView({
       {mode === "assistant" ? (
         <AssistantTab />
       ) : (
-        <PatientChats selected={patientId} onSelect={onSelectPatient} />
+        <PatientChats selected={patientId ?? null} onSelect={onSelectPatient} />
       )}
     </div>
   );
@@ -267,6 +282,7 @@ function PatientChats({
               <button
                 key={c.patient_id}
                 className={`chat-item${c.patient_id === selected ? " active" : ""}`}
+                aria-current={c.patient_id === selected ? "true" : undefined}
                 onClick={() => {
                   onSelect(c.patient_id);
                   setListOpen(false);

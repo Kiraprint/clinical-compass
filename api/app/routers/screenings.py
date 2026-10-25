@@ -33,17 +33,22 @@ async def list_questionnaires(user: User = Depends(require_consent), db: AsyncSe
     """
     from compass.scales import patient_administered_scales
 
-    return [
-        {
+    catalog = []
+    for s in patient_administered_scales():
+        items = s.patient_items()
+        catalog.append({
             "code": s.code,
             "title": s.title,
+            # Сумма максимумов предъявленных пунктов: у PHQ-9 (пациентская PHQ-8) 24,
+            # у GAD-7 21, у HCL-32 32, у PSS-10 40 — график тренда берёт верх шкалы отсюда,
+            # а не угадывает его по коду шкалы.
+            "max_total": sum(i.max_value for i in items),
             "items": [
                 {"key": i.key, "text": i.text, "max_value": i.max_value, "anchors": list(i.anchors)}
-                for i in s.items
+                for i in items
             ],
-        }
-        for s in patient_administered_scales()
-    ]
+        })
+    return catalog
 
 
 @router.get("/me/prescribed-scales")
@@ -57,8 +62,20 @@ async def my_prescribed_scales(request: Request, user: User = Depends(require_co
     ip = request.client.host if request.client else None
     await services.audit.record(db, user.id, "READ_PRESCRIBED_SCALES", "patient", ip=ip)
     await db.commit()
-    codes = await services.screening.prescribed_scales(db, user.id)
-    return {"scales": [{"code": c, "title": ALL_SCALES[c].title} for c in codes]}
+    # completed_at — есть ли по этому назначению завершённая оценка; главный экран
+    # прячет баннер «Назначен скрининг», когда шкала уже пройдена (FR-33).
+    rows = await services.screening.prescription_status(db, user.id)
+    return {
+        "scales": [
+            {
+                "code": r["code"],
+                "title": ALL_SCALES[r["code"]].title,
+                "prescribed_at": r["prescribed_at"].isoformat() if r["prescribed_at"] else None,
+                "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
+            }
+            for r in rows
+        ]
+    }
 
 @router.post("/screenings", status_code=201)
 async def create_screening(body: ScreeningBody, user: User = Depends(require_consent), db: AsyncSession = Depends(get_db)):

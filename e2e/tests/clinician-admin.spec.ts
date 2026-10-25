@@ -1,10 +1,11 @@
-// e2e клинического и административного интерфейса: фильтры триажа, отчёт врача, журнал аудита.
+// e2e клинического и административного интерфейса: фильтры риска, отчёт врача, журнал аудита.
 import { expect, test, type APIResponse } from "@playwright/test";
-import { DEMO_PASSWORD, DEMO_TOTP, freshPatientEmail, login, totp } from "./helpers";
+import { DEMO_PASSWORD, DEMO_TOTP, freshPatientEmail, login, openSection, totp } from "./helpers";
 
 test.describe("Врач и администратор", () => {
-  test("врач: фильтр по триажу (GREEN и YELLOW)", async ({ page }) => {
+  test("врач: фильтр по риску (GREEN и YELLOW)", async ({ page }) => {
     await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
+    await openSection(page, "Пациенты");
     await expect(page.getByRole("button", { name: "Все" })).toBeVisible();
 
     await page.getByRole("button", { name: "GREEN", exact: true }).click();
@@ -18,8 +19,9 @@ test.describe("Врач и администратор", () => {
     await expect(yellow.locator(".badge.YELLOW")).toBeVisible();
   });
 
-  test("врач: отчёт RED-пациента показывает эскалации, историю и дневник", async ({ page }) => {
+  test("врач: отчёт RED-пациента показывает риск, историю и дневник", async ({ page }) => {
     await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
+    await openSection(page, "Пациенты");
     await page.getByRole("button", { name: "RED", exact: true }).click();
     const cards = page.locator(".patients tbody tr");
     await expect(cards.first()).toBeVisible();
@@ -30,10 +32,12 @@ test.describe("Врач и администратор", () => {
     const row = page.locator(".patients tbody tr", { hasText: "Игорь" }).first();
     await expect(row).toBeVisible();
     await row.getByRole("button", { name: "Открыть" }).click();
-    await expect(page.getByText("Открытые эскалации:")).toBeVisible();
-    await expect(page.getByRole("heading", { name: "История скринингов" })).toBeVisible();
+    await expect(page.getByText("Высокий риск: требуется разбор.")).toBeVisible();
+    await expect(page.getByText("История скринингов", { exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Дневник пациента" })).toBeVisible();
-    await expect(page.locator("svg polyline")).toBeVisible(); // динамика за 90 дней
+    // Динамика свёрнута по умолчанию — раскрываем, чтобы увидеть график.
+    await page.getByText("Динамика (90 дней)", { exact: true }).click();
+    await expect(page.locator("svg polyline")).toBeVisible();
   });
 
   test("админ: журнал аудита содержит записи после отработанной сессии", async ({ page }) => {

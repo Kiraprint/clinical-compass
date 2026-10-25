@@ -4,14 +4,14 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.deps import require_consent
 from app.models import User
-from app.services import checkin as checkin_service
+from app.services import audit, checkin as checkin_service
 
 router = APIRouter(tags=["checkins"])
 
@@ -25,6 +25,23 @@ class AnswersBody(BaseModel):
 @router.get("/checkins/today")
 async def today(user: User = Depends(require_consent), db: AsyncSession = Depends(get_db)):
     return await checkin_service.today(db, user.id)
+
+
+@router.get("/checkins/history")
+async def history(
+    request: Request,
+    days: int = Query(default=90, ge=1, le=365),
+    user: User = Depends(require_consent),
+    db: AsyncSession = Depends(get_db),
+):
+    """Тренд чек-инов: агрегат по завершённым сеансам (FR-33), без сырых ответов.
+
+    F6: агрегат самонаблюдения — PHI, чтение пишется в аудит (без значений).
+    """
+    ip = request.client.host if request.client else None
+    await audit.record(db, user.id, "READ_CHECKIN_HISTORY", "patient", str(user.id), ip=ip)
+    await db.commit()
+    return {"items": await checkin_service.history(db, user.id, days)}
 
 
 @router.post("/checkins")

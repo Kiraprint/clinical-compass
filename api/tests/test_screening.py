@@ -31,6 +31,21 @@ def test_screening_flow_phq9(client):
     assert assessment["triage"] == "YELLOW"
 
 
+def test_questionnaire_catalog_exposes_scale_maxima(client):
+    """Верх шкалы — сумма max_value предъявленных пунктов: графики берут его отсюда."""
+    h, _ = patient_ctx(client, "maxima@test.ru")
+    catalog = {q["code"]: q for q in client.get("/api/v1/questionnaires", headers=h).json()}
+    assert {code: q["max_total"] for code, q in catalog.items()} == {
+        "PHQ-9": 24,   # пациентская PHQ-8, без q9
+        "GAD-7": 21,
+        "HADS-A": 21,
+        "HADS-D": 21,
+        "HCL-32": 32,
+        "PSS-10": 40,
+    }
+    assert all(q["max_total"] == sum(i["max_value"] for i in q["items"]) for q in catalog.values())
+
+
 def test_questionnaires_expose_answer_anchors(client):
     """Каталог шкал: у каждого варианта ответа есть подпись (docs/04 §3.1)."""
     h, _ = patient_ctx(client, "anchors@test.ru")
@@ -78,8 +93,9 @@ def test_answers_unknown_item_422(client):
 def test_finish_incomplete_422(client):
     h, _ = patient_ctx(client, "inc@test.ru")
     run_id = client.post("/api/v1/screenings", json={}, headers=h).json()["run_id"]
+    # Пациенту предъявляются q1..q8 (q9 скрыт); не хватает q8 → прогон неполный.
     resp = client.post(
-        f"/api/v1/runs/{run_id}/answers", json={"answers": {f"q{i}": 0 for i in range(1, 9)}}, headers=h
+        f"/api/v1/runs/{run_id}/answers", json={"answers": {f"q{i}": 0 for i in range(1, 8)}}, headers=h
     )
     assert resp.status_code == 204
     resp = client.post(f"/api/v1/runs/{run_id}/finish", headers=h)

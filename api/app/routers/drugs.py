@@ -2,18 +2,25 @@
 
 Доступен врачу/админу для справки и автодополнения в формах (напр. suspected_drug
 в НЯ). Не gated по consent — это публичные факты регистрационного удостоверения.
+
+Пациенту доступен только срез справочника по СВОИМ назначениям (`/me/drugs`):
+полный каталог — не его данные, а название препарата раскрывает контекст лечения.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.deps import get_db, require_roles
+from app.deps import get_db, require_consent, require_roles
 from app.errors import Problem
-from app.models import Drug, User
+from app.models import Drug, PatientMedication, User
+from app.services.audit import record as audit_record
 
 router = APIRouter(tags=["drugs"])
+
+# Подписи статусов назначения — как в истории пациента (FR-23), без второго словаря.
+from app.services.patient_history import MED_STATUS_LABELS  # noqa: E402
 
 
 def _drug_dict(d: Drug) -> dict:
@@ -55,6 +62,68 @@ async def list_drugs(
     return {"items": [_drug_dict(d) for d in rows]}
 
 
+def _as_key(value: str | None) -> str:
+    return " ".join((value or "").split()).casefold()
+
+
+def _match_drug(title: str, index: dict[str, Drug]) -> Drug | None:
+    """Связь назначения с ГРЛС по названию/МНН (FK в patient_medications нет).
+
+    Только точное совпадение нормализованной строки: подстрочный матч цеплял
+    чужую карточку («Авиандр» в «Авиандр 150 мг» — угадывание), а порядок
+    справочника делал результат недетерминированным. Нет совпадения — нет
+    карточки: препарат не показываем, а не показываем похожий.
+    """
+    normalized = _as_key(title)
+    if not normalized:
+        return None
+    return index.get(normalized)
+
+
+@router.get("/me/drugs")
+async def my_drug_reference(
+    request: Request,
+    user: User = Depends(require_consent), db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Справочник по препаратам, назначенным пациенту (свои назначения + ГРЛС).
+
+    F6: назначения и названия препаратов — контекст лечения, чтение аудируется.
+    """
+    ip = request.client.host if request.client else None
+    await audit_record(db, user.id, "READ_MY_DRUGS", "patient", str(user.id), ip=ip)
+    await db.commit()  # аудит чтения своего PHI сохраняется, даже если items пуст
+    meds = (await db.scalars(
+        select(PatientMedication)
+        .where(PatientMedication.patient_id == user.id)
+        .order_by(
+            PatientMedication.started_on.desc().nullslast(),
+            PatientMedication.created_at.desc(),
+            PatientMedication.id.desc(),
+        )
+    )).all()
+    if not meds:
+        return {"items": []}
+    drugs = (await db.scalars(select(Drug).order_by(Drug.drug_id))).all()
+    index: dict[str, Drug] = {}
+    for drug in drugs:
+        for value in (drug.trade_name, drug.inn):
+            key = _as_key(value)
+            if key:
+                index.setdefault(key, drug)
+    return {
+        "items": [
+            {
+                "medication_id": str(m.id),
+                "title": m.title,
+                "dosage": m.dosage,
+                "status": m.status,
+                "status_label": MED_STATUS_LABELS.get(m.status, m.status),
+                "times_per_day": m.times_per_day,
+                "drug": _drug_dict(drug) if (drug := _match_drug(m.title, index)) else None,
+            }
+            for m in meds
+        ]
+    }
 @router.get("/drugs/{drug_id}")
 async def get_drug(
     drug_id: str,

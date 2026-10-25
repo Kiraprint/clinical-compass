@@ -1,11 +1,12 @@
 import { expect, test } from "@playwright/test";
-import { login, DEMO_PASSWORD, DEMO_TOTP } from "./helpers";
+import { login, DEMO_PASSWORD, DEMO_TOTP, openSection } from "./helpers";
 
 // Карточка пациента — адресуемая ссылка #patient=<id>: из списка, из уведомления
 // об эскалации и по прямой ссылке (её можно отправить коллеге).
 
 test("имя пациента в списке даёт ссылку #patient и открывает карточку", async ({ page }) => {
   await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
+  await openSection(page, "Пациенты");
   await expect(page.getByRole("button", { name: "Все" })).toBeVisible();
 
   const link = page.locator('a[href^="#patient="]').first();
@@ -31,6 +32,7 @@ test("имя пациента в списке даёт ссылку #patient и 
 
 test("клик по уведомлению об эскалации открывает карточку пациента", async ({ page }) => {
   await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
+  await openSection(page, "Пациенты");
   await expect(page.getByRole("button", { name: "Все" })).toBeVisible();
 
   await page.getByRole("button", { name: "Уведомления" }).click();

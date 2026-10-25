@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Mapping
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from compass.models import AUDIENCE_PATIENT
@@ -62,6 +62,45 @@ async def prescribed_scale(db: AsyncSession, patient_id) -> str:
     """Первичная (первая назначенная) шкала — для чек-инов и дефолта старта. Без назначения — PHQ-9."""
     return (await prescribed_scales(db, patient_id))[0]
 
+
+async def _completed_since(db: AsyncSession, patient_id, scale_code: str, since) -> datetime | None:
+    """Последняя завершённая оценка по шкале не раньше `since` (None — любая)."""
+    stmt = (
+        select(func.max(Assessment.computed_at))
+        .join(Run, Run.id == Assessment.run_id)
+        .where(Assessment.patient_id == patient_id, Run.questionnaire_code == scale_code)
+    )
+    if since is not None:
+        stmt = stmt.where(Assessment.computed_at >= since)
+    return await db.scalar(stmt)
+
+
+async def prescription_status(db: AsyncSession, patient_id) -> list[dict]:
+    """Назначенные шкалы + признак выполнения по каждому назначению (FR-33).
+
+    `completed_at` — завершённая оценка по шкале не раньше даты назначения:
+    баннер «Назначен скрининг» гаснет, когда скрининг пройден, и снова
+    появляется, если врач назначил шкалу повторно. Без назначений — дефолт
+    первой линии PHQ-9 (как prescribed_scales), выполнение — любая PHQ-9.
+    """
+    rows = (await db.scalars(
+        select(Prescription).where(Prescription.patient_id == patient_id).order_by(Prescription.created_at)
+    )).all()
+    if not rows:
+        return [{
+            "code": DEFAULT_SCALE,
+            "prescribed_at": None,
+            "completed_at": await _completed_since(db, patient_id, DEFAULT_SCALE, None),
+        }]
+    return [
+        {
+            "code": r.scale_code,
+            "prescribed_at": r.created_at,
+            "completed_at": await _completed_since(db, patient_id, r.scale_code, r.created_at),
+        }
+        for r in rows
+    ]
+
 async def start_screening(db: AsyncSession, patient_id, questionnaire_code: str | None = None) -> Run:
     """Старт скрининга. Шкала: явно указанная пациентом (если она в назначенном множестве),
     иначе первичная. Пациент не может выбрать произвольную шкалу — 403 SCALE_NOT_PRESCRIBED.
@@ -105,6 +144,22 @@ async def _validate_answers(db: AsyncSession, run: Run, answers: Mapping[str, in
             raise Problem(422, "VALIDATION", f"Значение {value} вне диапазона для пункта {key}")
 
 
+def _omitted_items(scale, mode: str, answers: Mapping[str, int]) -> tuple[str, ...]:
+    """Пункты, скрытые от пациента, на которые он не ответил (PHQ-9 q9).
+
+    Новый каталог и скрининг q9 не предъявляют → пункт считается не заданным,
+    сумма идёт по остальным, в отчёт попадает флаг NOT_ASSESSED. Если старый
+    клиент всё же прислал ответ на q9, он учитывается как раньше (в т.ч. как
+    SUICIDAL_IDEATION → RED): терять явно сообщённый риск нельзя.
+    Клиницистский прогон (HDRS-17) заполняется целиком — скрытых пунктов нет.
+    """
+    if mode != "SCREENING":
+        return ()
+    return tuple(
+        i.key for i in scale.items if not i.patient_visible and i.key not in answers
+    )
+
+
 async def add_answers(db: AsyncSession, run_id, patient_id, answers: Mapping[str, int]) -> None:
     run = await _own_run(db, run_id, patient_id)
     if run.finished_at is not None:
@@ -127,11 +182,12 @@ async def finish_screening(db: AsyncSession, run_id, patient_id, *, audit_action
     scale = _scale(run.questionnaire_code)
     rows = (await db.scalars(select(Answer).where(Answer.run_id == run_id))).all()
     answers = {a.item_key: a.value for a in rows}
+    omitted = _omitted_items(scale, run.mode, answers)
     try:
-        result = score(scale, answers)
+        result = score(scale, answers, omitted=omitted)
     except ValueError as exc:
         raise Problem(422, "VALIDATION", str(exc))
-    flags = risk_flags(scale, answers)
+    flags = risk_flags(scale, answers, omitted=omitted)
     level = triage(result, flags)
 
     assessment = Assessment(
@@ -175,6 +231,7 @@ async def finish_screening(db: AsyncSession, run_id, patient_id, *, audit_action
         "triage": assessment.triage,
         "risk_flags": assessment.risk_flags,
         "computed_at": assessment.computed_at.isoformat(),
+        "omitted_items": list(result.omitted_items),
     }
     if escalation is not None:
         await db.refresh(escalation)

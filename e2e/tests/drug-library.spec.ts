@@ -1,12 +1,12 @@
 // Библиотека препаратов (задача кейса 6): врач ищет препарат по ГРЛС и видит
 // разделы безопасности — НЯ и противопоказания (обязательное условие кейса).
 import { expect, test } from "@playwright/test";
-import { DEMO_PASSWORD, DEMO_TOTP, login } from "./helpers";
+import { DEMO_PASSWORD, DEMO_TOTP, login, openSection } from "./helpers";
 
 test.describe("Библиотека препаратов", () => {
   test("врач открывает библиотеку, ищет Авиандр и видит НЯ + противопоказания", async ({ page }) => {
     await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
-    await page.getByRole("button", { name: "Библиотека" }).click();
+    await openSection(page, "Библиотека");
 
     const search = page.getByPlaceholder("Например: Авиандр или вортиоксетин");
     await expect(search).toBeVisible();

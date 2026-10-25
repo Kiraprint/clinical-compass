@@ -703,3 +703,46 @@ def test_clinician_chats_scoped_to_clinician_and_role(client):
     resp = client.get("/api/v1/clinician/chats", headers=h)
     assert resp.status_code == 403
     assert resp.json()["code"] == "ROLE_MISMATCH"
+
+
+def test_omitted_suicidal_item_comes_from_last_suicidal_scale(client, db_session):
+    """FR-34: пропуск q9 берётся из последней оценки шкалы с пунктом о суициде.
+
+    Пункт о суициде есть не в каждой шкале (q9 PHQ-9, h3 HDRS-17). Если смотреть
+    последнюю оценку вообще, после GAD-7 предупреждение «пункт 9 не задавался»
+    исчезало бы, хотя PHQ-9 спрашивали без q9.
+    """
+    _, pid = patient_ctx(client, "pomit@test.ru")
+    c, cid = clinician_ctx(client, "comit@test.ru")
+    a, _ = admin_ctx(client, "aomit@test.ru")
+    _grant(client, a, pid, cid)
+    patient_uuid = uuid.UUID(pid)
+    base = datetime(2026, 2, 1, 9, 0, tzinfo=timezone.utc)
+
+    def _assessment(code: str, when, risk_flags: list[dict]) -> None:
+        run = Run(patient_id=patient_uuid, questionnaire_code=code, mode="SCREENING", finished_at=when)
+        db_session.add(run)
+        db_session.flush()
+        db_session.add(Assessment(
+            run_id=run.id, patient_id=patient_uuid, total_score=0,
+            severity="NONE", triage="GREEN", risk_flags=risk_flags, computed_at=when,
+        ))
+
+    # PHQ-9 без q9 (NOT_ASSESSED), затем более свежая GAD-7 — у неё такого пункта нет.
+    _assessment("PHQ-9", base, [{"kind": "NOT_ASSESSED", "item_key": "q9"}])
+    _assessment("GAD-7", base + timedelta(days=1), [])
+    db_session.commit()
+
+    resp = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=c)
+    assert resp.status_code == 200, resp.text
+    last = resp.json()["last_assessment"]
+    assert last["omitted_items"] == ["q9"]
+    assert last["omitted_scale"] == "PHQ-9"
+
+    # Свежий PHQ-9 с отвеченным q9 снимает предупреждение — смотрим последнюю
+    # оценку такой шкалы, а не любую неполную в истории.
+    _assessment("PHQ-9", base + timedelta(days=2), [])
+    db_session.commit()
+    last = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=c).json()["last_assessment"]
+    assert last["omitted_items"] == []
+    assert last["omitted_scale"] is None

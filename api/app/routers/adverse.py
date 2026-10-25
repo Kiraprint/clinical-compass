@@ -31,7 +31,8 @@ def _moscow_today() -> date:
 
 class PatientEventBody(BaseModel):
     event_text: str = Field(min_length=1, max_length=1000)
-    severity: str = Field(pattern="^(mild|moderate|severe)$")
+    # Тяжесть пациент не задаёт: severity — колонка врачебной проверки
+    # (PATCH …/adverse-events/{id}), поэтому лишнее поле не принимается.
     onset_date: date
     medication_id: uuid.UUID | None = None
     # Справочный препарат пациент не выбирает: связь ставит врач при проверке.
@@ -46,7 +47,7 @@ async def report_adverse_event(
         raise Problem(422, "VALIDATION", "Дата начала не может быть в будущем")
     ip = request.client.host if request.client else None
     return await services.adverse.report_patient_event(
-        db, user, event_text=body.event_text, severity=body.severity,
+        db, user, event_text=body.event_text,
         onset_date=body.onset_date, medication_id=body.medication_id, ip=ip,
     )
 
