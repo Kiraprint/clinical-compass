@@ -20,6 +20,7 @@ import {
   Report,
   Visit,
 } from "../api";
+import { stripIntakeFrequency } from "../dosage";
 import TrendChart from "../TrendChart";
 import ChatsView from "./ChatsView";
 import LibraryView from "./LibraryView";
@@ -2515,11 +2516,18 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
     setPickedDrug(d);
     setSuggestOpen(false);
     setSuggestIdx(-1);
+    // Частота приёма из инструкции сразу заполняет «сколько раз в день»
+    // (FR-27: знаменатель приверженности). Дальше врач правит её как обычно.
+    if (d.times_per_day != null) setTimesPerDay(d.times_per_day);
   };
 
-  // Источник канонической дозировки: dosage, при его отсутствии — special_notes или форма.
+  // Источник канонической дозировки: dosage, при его отсутствии — special_notes
+  // или форма. Частоту приёма из текста вырезаем: она живёт в отдельном select,
+  // иначе режим дублируется в свободном тексте.
   const dosageHint = pickedDrug
-    ? pickedDrug.dosage.trim() || pickedDrug.special_notes.trim() || pickedDrug.form.trim()
+    ? stripIntakeFrequency(pickedDrug.dosage.trim()) ||
+      pickedDrug.special_notes.trim() ||
+      pickedDrug.form.trim()
     : "";
   const dosageApplied = dosageHint !== "" && dosage.trim() === dosageHint;
 

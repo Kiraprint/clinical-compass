@@ -1027,6 +1027,8 @@ export interface Drug {
   pharmacology: string;
   indications: string;
   dosage: string;
+  /** Частота приёма из текста инструкции; null — не определить (врач задаёт сам). */
+  times_per_day: number | null;
   contraindications: string;
   adverse_events: string;
   special_notes: string;
