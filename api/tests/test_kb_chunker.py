@@ -25,10 +25,10 @@ def _settings(**kwargs):
 @pytest.mark.parametrize(
     "chars,overlap",
     [
-        (150, 0),     # size < 200: chunk_text скользит шагом >= 200 и теряет текст
+        (150, 0),     # size < 200: шаг = max(size-overlap, 200) > окна, текст теряется
         (0, 0),       # пустой корпус без ошибки
         (-600, 0),
-        (600, 600),   # overlap == size: шаг 0, нарезка не сдвигается
+        (600, 600),   # overlap == size: шаг упирается в 200, нарезка бессмысленна
         (600, -1),
     ],
 )
@@ -42,6 +42,27 @@ def test_settings_reject_lossy_chunker_bounds(chars: int, overlap: int) -> None:
 def test_settings_accept_historical_chunking() -> None:
     cfg = _settings(kb_chunk_chars=600, kb_chunk_overlap=120)
     assert (cfg.kb_chunk_chars, cfg.kb_chunk_overlap) == (600, 120)
+
+@pytest.mark.parametrize("chars,overlap", [(150, 0), (0, 0), (600, 600), (600, -1)])
+def test_enrichment_config_rejects_same_lossy_bounds(chars: int, overlap: int) -> None:
+    """CC_ENRICH_CHUNK_* — свой dataclass, но контракт чанкера тот же (P3 ревью)."""
+    with pytest.raises(ValueError):
+        EnrichmentConfig(chunk_chars=chars, chunk_overlap=overlap)
+
+def test_enrichment_config_accepts_historical_chunking() -> None:
+    cfg = EnrichmentConfig(chunk_chars=600, chunk_overlap=120)
+    assert (cfg.chunk_chars, cfg.chunk_overlap) == (600, 120)
+
+def test_enrichment_config_env_bounds_are_enforced(monkeypatch) -> None:
+    monkeypatch.setenv("CC_ENRICH_CHUNK_CHARS", "100")
+    with pytest.raises(ValueError, match="CC_ENRICH_CHUNK_CHARS"):
+        EnrichmentConfig.from_env()
+
+@pytest.mark.parametrize("raw,expected", [("", None), ("0", None), ("-3", None), ("60", 60)])
+def test_rrf_k_empty_or_nonpositive_means_server_default(monkeypatch, raw: str, expected) -> None:
+    """CC_RRF_K= (пусто) и <=0 — «не задан»: серверный FusionQuery(RRF)."""
+    monkeypatch.setenv("CC_RRF_K", raw)
+    assert _settings().rrf_k == expected
 
 
 def test_chunk_text_short_text_single_chunk() -> None:
