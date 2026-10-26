@@ -34,7 +34,9 @@ DELIVERY_STATUSES = ("queued", "sending", "registered", "rejected", "failed")
 TERMINAL_STATUSES = frozenset({"registered", "rejected"})
 # Коды каталога НСИ, которые docs/18 §8.4 помечает «повтор: да»: такой ответ РЭМД
 # не «отказ в документе», а сбой, поэтому он даёт `failed` (повторяемо), не `rejected`.
-RETRYABLE_ERROR_CODES = frozenset({"RATE_LIMITED", "MIS_NOT_AVAILABLE", "INTERNAL_ERROR"})
+RETRYABLE_ERROR_CODES = frozenset(
+    {"RATE_LIMITED", "MIS_NOT_AVAILABLE", "INTERNAL_ERROR", "INSUFFICIENT_SCOPE"}
+)
 
 _SNILS_WEIGHTS = (9, 8, 7, 6, 5, 4, 3, 2, 1)
 

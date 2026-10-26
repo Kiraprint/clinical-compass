@@ -191,7 +191,7 @@ def test_repeated_submit_returns_existing_delivery(client, remd):
     calls = len(sink.calls)
 
     again = _submit(client, context, session)
-    assert again.status_code == 200
+    assert again.status_code == 200, again.json()
     assert again.json()["request_id"] == first.json()["request_id"]
     assert again.json()["external_id"] == payload["data"]["emdr_id"]
     assert len(mock.registry) == 1
@@ -220,12 +220,13 @@ def test_concurrent_submit_registers_once(client, remd):
     results = asyncio.run(race())
     # Оба ответа 202: доставка ещё в `sending` (регистрация уже принята).
     assert [status for status, _ in results] == [202, 202]
-    # Второй submit мог ответить до того, как первый сохранил request_id:
-    # одинаковым обязан быть не ответ, а сама регистрация в РЭМД.
-    request_ids = {payload["request_id"] for _, payload in results if payload["request_id"]}
-    assert len(request_ids) <= 1
+    # Ровно один request_id, и он есть в каждом ответе: конкурент видит уже
+    # сохранённый id, а не `null` из гонки.
+    request_ids = [payload["request_id"] for _, payload in results]
+    assert all(request_ids), request_ids
+    assert len(set(request_ids)) == 1
     session_row = client.get(f"{BASE}/sessions/{session['id']}", headers=context["doctor"]).json()
-    assert session_row["delivery"]["request_id"] is not None
+    assert session_row["delivery"]["request_id"] == request_ids[0]
     entries = [e for e in mock.registry.values() if e.get("local_document_uid")]
     assert len(entries) == 1
     assert mock.module._register_calls == 1
@@ -287,8 +288,8 @@ def test_consent_gate(client, remd):
     assert response.json()["code"] == "CONSENT_REQUIRED"
 
 
-def test_stale_sending_is_retried(client, remd, monkeypatch):
-    """Потерянный callback: `sending` протухает и передача повторяется (P2)."""
+def test_stale_sending_becomes_failed_then_retried(client, remd, monkeypatch):
+    """Потерянный callback: `sending` протухает в `failed`, а клик после — повтор (P2)."""
     mock, sink = remd
     monkeypatch.setenv("CC_REMD_MOCK_CALLBACK_ATTEMPTS", "1")
     sink.status = 500
@@ -299,42 +300,65 @@ def test_stale_sending_is_retried(client, remd, monkeypatch):
     assert first["status"] == "sending" and first["external_id"] is None
 
     monkeypatch.setattr(settings, "remd_sending_stale_sec", 0)
+    expired = _submit(client, context, session)
+    assert expired.status_code == 202
+    assert expired.json()["status"] == "failed"
+    assert expired.json()["last_error_code"] == "CALLBACK_TIMEOUT"
+    assert mock.module._register_calls == 1  # протухание само ничего не отправляет
+
     again = _submit(client, context, session)
     assert again.status_code == 202
     assert again.json()["status"] == "sending"
     assert again.json()["attempts"] == 2
     assert mock.module._register_calls == 2
+    assert again.json()["request_id"] == first["request_id"]  # тот же документ, тот же UID
 
 
-def test_sending_is_reconciled_against_registry(client, remd, db_session, monkeypatch):
-    """Если РЭМД уже знает emdr_id, повтор не отправляет документ, а сверяется (P2)."""
+def test_stale_threshold_default_keeps_fresh_sending(client, remd, monkeypatch):
+    """Без протухания доставка не переводится в `failed` (дефолтные 900 с)."""
     mock, sink = remd
     monkeypatch.setenv("CC_REMD_MOCK_CALLBACK_ATTEMPTS", "1")
     sink.status = 500
-    session, context = _signed(client, "rd-reconcile")
+    session, context = _signed(client, "rd-fresh")
     assert _submit(client, context, session).status_code == 202
     sink.wait_calls(1, timeout=10)
-    delivery = db_session.execute(
-        text(
-            "SELECT id, request_id FROM emias_deliveries WHERE protocol_id = "
-            "(SELECT id FROM session_protocols WHERE session_id = CAST(:s AS uuid) "
-            "ORDER BY version DESC LIMIT 1)"
-        ).bindparams(s=session["id"])
-    ).one()
-    emdr_id = mock.registry[delivery.request_id]["emdr_id"]
-    db_session.execute(
-        text("UPDATE emias_deliveries SET external_id = :e WHERE id = :i").bindparams(
-            e=emdr_id, i=delivery.id
-        )
-    )
-    db_session.commit()
-    mock.registry[delivery.request_id]["status"] = "REGISTERED"
+    repeat = _submit(client, context, session)
+    assert repeat.status_code == 202
+    assert repeat.json()["status"] == "sending"
+    assert mock.module._register_calls == 1
 
-    reconciled = _submit(client, context, session)
-    assert reconciled.status_code == 200
-    assert reconciled.json()["status"] == "registered"
-    assert reconciled.json()["external_id"] == emdr_id
-    assert mock.module._register_calls == 1  # повторной отправки не было
+
+def test_retry_after_failed_uses_full_envelope(client, remd, monkeypatch):
+    """Повтор после `failed` отправляет полный конверт, а не пустой (P1)."""
+    mock, _ = remd
+    from app.remd.client import RemdClient, RemdRejected
+
+    calls: list[dict] = []
+    original = RemdClient.register_document
+
+    def recording(self, envelope):
+        calls.append(dict(envelope))
+        return original(self, envelope)
+
+    monkeypatch.setattr(RemdClient, "register_document", recording)
+    session, context = _signed(client, "rd-envelope")
+    monkeypatch.setattr(
+        RemdClient,
+        "register_document",
+        lambda self, envelope: (_ for _ in ()).throw(
+            RemdRejected("INTERNAL_ERROR", "сбой", 500)
+        ),
+    )
+    assert _submit(client, context, session).status_code == 502
+    assert _delivery(client, context, session).json()["status"] == "failed"
+
+    monkeypatch.setattr(RemdClient, "register_document", recording)
+    retried = _submit(client, context, session)
+    assert retried.status_code == 202
+    assert retried.json()["status"] == "sending"
+    assert calls and calls[0]["local_document_uid"]
+    assert calls[0]["cda"] and calls[0]["sig"] and calls[0]["patient"]["snils"]
+    assert mock.module._register_calls == 1
 
 
 def test_retryable_callback_codes_become_failed(client, remd):

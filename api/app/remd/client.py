@@ -40,7 +40,6 @@ _BACKOFF_CAP = 8.0
 _TOKEN_PATH = "/oauth/token"
 _REGISTER_PATH = "/remd/v1/register-document/"
 _SCOPE = "remd.write"
-_REGISTRY_PATH = "/remd/v1/registry/{emdr_id}"
 
 
 class RemdRejected(Exception):
@@ -223,6 +222,9 @@ class RemdClient:
         except (TypeError, ValueError):
             ttl = 60.0
         scopes = str(body.get("scope") or "").split()
+        if scopes and _SCOPE not in scopes:
+            # Права пришли урезанными: 403 будет на регистрации, диагностируем заранее.
+            log.warning("REMd token без scope %s (выдан: %s)", _SCOPE, " ".join(scopes))
         self._tokens.put(str(access_token), ttl, scopes)
         return str(access_token)
 
@@ -240,13 +242,6 @@ class RemdClient:
         if not request_id:
             raise Problem(502, "EMIAS_UNAVAILABLE", "РЭМД не вернул request_id")
         return str(request_id)
-
-    def registry_item(self, emdr_id: str) -> dict:
-        """Элемент реестра (мок-only polling): status/errors/created_at."""
-        _, body = self._call(
-            "GET", _REGISTRY_PATH.format(emdr_id=urllib.parse.quote(emdr_id, safe=""))
-        )
-        return body
 
 
 def _rejected(status: int, body: dict) -> RemdRejected:
