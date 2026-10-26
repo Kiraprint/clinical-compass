@@ -236,3 +236,40 @@ def test_smtp_failure_keeps_202_for_existing_and_unknown(client, engine, monkeyp
                                "where action = 'PASSWORD_RESET_DELIVERY_FAILED'")) == 1
         assert conn.scalar(text("select count(*) from audit_log "
                                "where action = 'PASSWORD_RESET_REQUEST'")) == 1
+
+def test_demo_code_needs_explicit_flag(client, engine, monkeypatch):
+    """CC_ALLOW_DEMO_SECRETS сам по себе код не отдаёт.
+
+    Публичный демо-контур запускается с allow_demo_secrets (иначе api не
+    стартует на демо-JWT), поэтому одного этого флага мало: без явного
+    CC_MAIL_DEMO_CODES запрос сброса не должен возвращать код чужого аккаунта.
+    """
+    register(client, "gate@test.ru", OLD_PASSWORD)
+    monkeypatch.setattr(settings, "smtp_host", "")
+    monkeypatch.setattr(settings, "smtp_from", "")
+    monkeypatch.setattr(settings, "mail_demo_codes", False)
+    for address in ("gate@test.ru", "ghost-gate@test.ru"):
+        resp = _reset_request(client, address)
+        # 503 одинаков для существующего и несуществующего адреса.
+        assert resp.status_code == 503, (address, resp.text)
+        body = resp.json()
+        assert body["code"] == "MAIL_UNAVAILABLE"
+        assert "demo_code" not in body
+
+    # Второй шаг входа по e-mail тоже закрыт тем же отказом, а не 500.
+    monkeypatch.setattr(settings, "email_otp", True)
+    resp = client.post("/api/v1/auth/login",
+                       json={"email": "gate@test.ru", "password": OLD_PASSWORD})
+    assert resp.status_code == 503, resp.text
+    assert resp.json()["code"] == "MAIL_UNAVAILABLE"
+
+    with engine.begin() as conn:
+        # Ни одного кода в БД: отказ случился до выпуска.
+        assert conn.scalar(text("select count(*) from auth_codes")) == 0
+
+    # С явным флагом демо-стенд работает как раньше.
+    monkeypatch.setattr(settings, "mail_demo_codes", True)
+    monkeypatch.setattr(settings, "email_otp", False)
+    resp = _reset_request(client, "gate@test.ru")
+    assert resp.status_code == 202, resp.text
+    assert len(resp.json()["demo_code"]) == 6

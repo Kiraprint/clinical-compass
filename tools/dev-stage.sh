@@ -83,8 +83,8 @@ done
 # cookie-secure). Чистим и задаём ровно те значения, что и в CI.
 unset CC_COOKIE_SECURE CC_EMBEDDER CC_RERANKER CC_ML_URL CC_ML_TOKEN CC_ML_TIMEOUT \
       CC_DEPERSONALIZE_NER CC_ASSISTANT_LLM_URL CC_CHAT_INSIGHTS_ENABLED \
-      CC_ALLOW_DEMO_SECRETS CC_QDRANT_COLLECTION CC_QDRANT_URL CC_KB_CHUNK_CHARS \
-      CC_KB_CHUNK_OVERLAP CC_ENRICH_CHUNK_CHARS CC_ENRICH_CHUNK_OVERLAP
+      CC_ALLOW_DEMO_SECRETS CC_MAIL_DEMO_CODES CC_QDRANT_COLLECTION CC_QDRANT_URL \
+      CC_KB_CHUNK_CHARS CC_KB_CHUNK_OVERLAP CC_ENRICH_CHUNK_CHARS CC_ENRICH_CHUNK_OVERLAP
 # FR-25/FR-41: адреса внешних интеграций тоже не наследуем — экспорт
 # CC_REMD_BASE_URL/CC_EMIAS_BASE_URL с боевого стенда увёл бы egress мимо
 # моков профиля emias, а гейт остался бы зелёным. unset перекрывает
@@ -113,6 +113,9 @@ export CC_ML_URL= CC_ML_TOKEN= CC_ML_TIMEOUT=5
 export CC_DEPERSONALIZE_NER=off CC_RERANKER=off
 export CC_ASSISTANT_LLM_URL= CC_CHAT_INSIGHTS_ENABLED=false
 export CC_ALLOW_DEMO_SECRETS=true CC_COOKIE_SECURE=false
+# FR-48: демо-код сброса пароля в ответе — на стенде явно включён (SMTP нет),
+# иначе поведение зависело бы от шелла, а сброс молча отвечал бы 503.
+export CC_MAIL_DEMO_CODES=true
 # Внешние интеграции в стенде включены и указывают на моки профиля emias:
 # без них e2e-спеки протокола приёма (docs/18, FR-39…FR-41) проверяют только
 # выключенное состояние. Адреса (CC_EMIAS_BASE_URL/CC_REMD_*) НЕ переопределяем —

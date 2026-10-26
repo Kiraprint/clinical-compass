@@ -82,8 +82,8 @@ services:
       CC_ALLOW_DEMO_SECRETS: "${CC_ALLOW_DEMO_SECRETS:-false}"  # NEW-5: по умолчанию fail-fast
       CC_COOKIE_SECURE: "${CC_COOKIE_SECURE:-false}"  # демо HTTP; prod HTTPS → true
       CC_REQUIRE_OTP: "${CC_REQUIRE_OTP:-true}"  # false — вход без TOTP (секрет остаётся в БД); прод — true
-      # FR-48: почтовый канал кодов (docs/03 §15). Пусто → демо отдаёт demo_code,
-      # прод fail-closed 503 MAIL_UNAVAILABLE.
+      # FR-48: почтовый канал кодов (docs/03 §15). Пусто → 503 MAIL_UNAVAILABLE
+      # всем адресам; demo_code в ответе — только при CC_MAIL_DEMO_CODES=true.
       CC_SMTP_HOST: "${CC_SMTP_HOST:-}"
       CC_SMTP_PORT: "${CC_SMTP_PORT:-587}"
       CC_SMTP_USER: "${CC_SMTP_USER:-}"
@@ -91,6 +91,7 @@ services:
       CC_SMTP_FROM: "${CC_SMTP_FROM:-}"
       CC_SMTP_TLS: "${CC_SMTP_TLS:-true}"
       CC_EMAIL_OTP: "${CC_EMAIL_OTP:-false}"
+      CC_MAIL_DEMO_CODES: "${CC_MAIL_DEMO_CODES:-false}"
       # LLM-роутер раздела БЗ (docs/04 FR-17): пусто → поиск по всем разделам.
       # host.docker.internal:18080 — llama.cpp с tools/llm.sh на хосте.
       # Локальная модель в контуре: docker-compose.local-llm.yml (http://local-llm:8080/v1),

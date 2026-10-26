@@ -13,6 +13,7 @@ os.environ.setdefault("CC_PUSH_ENABLED", "0")  # тесты без сетево�
 os.environ.setdefault("CC_QDRANT_COLLECTION", "kb_test")  # не затираем демо-коллекцию kb
 os.environ.setdefault("CC_DATA_KEY", "test-data-key-0123456789abcdef0123456789abcdef")  # F1: pgcrypto ключ для тестов
 os.environ.setdefault("CC_ALLOW_DEMO_SECRETS", "true")  # F3: тесты используют демо-секреты
+os.environ.setdefault("CC_MAIL_DEMO_CODES", "true")  # FR-48: тесты читают код из demo_code
 # Rate limiter: тесты не зависят от живого Redis (своя БД/сеть) — memory;
 # redis-бэкенд проверяется в test_ratelimit_redis.py на фейковом клиенте.
 os.environ.setdefault("CC_RATE_BACKEND", "memory")

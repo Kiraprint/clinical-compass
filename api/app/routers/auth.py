@@ -126,17 +126,23 @@ def _cooldown_clear(key: str) -> None:
     with _cooldowns_lock:
         _cooldowns.pop(key, None)
 
+def _demo_codes_allowed() -> bool:
+    """Демо-код в ответе — только по явному CC_MAIL_DEMO_CODES и вне прод-режима."""
+    return settings.mail_demo_codes and not settings.prod_mode
+
 def _ensure_channel() -> None:
     """FR-48: канал проверяется ДО выборки пользователя.
 
     Прод без SMTP обязан ответить 503 всем адресам одинаково: иначе 503
     превращается в признак «такой аккаунт есть» (202 у несуществующего и 503
-    у существующего). Демо/тест продолжают работать на `demo_code`.
+    у существующего). Демо-код отдаётся только при явном `CC_MAIL_DEMO_CODES`
+    (стенды и e2e): сам по себе `CC_ALLOW_DEMO_SECRETS` публичный контур к
+    сбросу чужого пароля не открывает.
     """
     if mailer.configured():
         return
     mailer.warn_unconfigured()
-    if settings.prod_mode or not settings.allow_demo_secrets:
+    if not _demo_codes_allowed():
         raise Problem(503, "MAIL_UNAVAILABLE", "Канал e-mail не настроен: коды подтверждения недоступны")
 
 def _new_code() -> str:
@@ -189,7 +195,7 @@ async def _deliver_code(email: str, subject: str, code: str) -> dict:
     """Отправить код письмом; без SMTP — `demo_code` (решение о режиме — в
     `_ensure_channel`, вызывается до выборки пользователя)."""
     if not mailer.configured():
-        return {"demo_code": code}
+        return {"demo_code": code} if _demo_codes_allowed() else {}
     try:
         await mailer.send_code(email, subject, code)
     except mailer.MailUnavailable:
@@ -345,8 +351,8 @@ async def password_reset_request(body: EmailBody, request: Request,
     await audit.record(db, None, "PASSWORD_RESET_REQUEST", "user", str(user.id), client)
     await db.commit()
     if not mailer.configured():
-        # демо/тест (CC_ALLOW_DEMO_SECRETS): SMTP нет — код отдаём в ответе
-        return {"sent": True, "demo_code": code}
+        # SMTP нет: код отдаём только по явному CC_MAIL_DEMO_CODES (стенды/e2e)
+        return {"sent": True, "demo_code": code} if _demo_codes_allowed() else {"sent": True}
     background.add_task(_send_reset_code, user.id, email, code, client)
     return {"sent": True}
 
