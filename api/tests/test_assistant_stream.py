@@ -156,3 +156,22 @@ def test_agent_stream_cleans_markdown_before_done(monkeypatch):
     events = asyncio.run(collect())
     assert events[-1]["answer"]["answer"] == "По базе знаний [1]."
     assert events[-1]["answer"]["citations"][0]["guideline_id"] == "g1"
+
+def test_stream_empty_agent_answer_is_domain_error(client, monkeypatch):
+    """Пустой ответ агента — доменный ASSISTANT_NO_ANSWER, а не 500-заглушка."""
+    async def empty(*args, **kwargs):
+        if False:
+            yield {}
+
+    monkeypatch.setattr(assistant_chat, "_stream_agent", empty)
+    ch, _ = clinician_ctx(client, "stream-empty@test.ru")
+    tid = client.post("/api/v1/assistant/threads", json={}, headers=ch).json()["id"]
+    resp = client.post(
+        f"/api/v1/assistant/threads/{tid}/messages/stream",
+        json={"content": "PHQ-9?"},
+        headers=ch,
+    )
+    events = _events(resp.text)
+    assert [e["event"] for e in events] == ["meta", "error"]
+    assert events[1]["data"]["code"] == "ASSISTANT_NO_ANSWER"
+    assert events[1]["data"]["status"] == 500

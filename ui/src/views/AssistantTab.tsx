@@ -185,8 +185,8 @@ export default function AssistantTab() {
     const targetId = detail.id;
     const seq = ++selectSeq.current;
     const text = input.trim();
-    // done уже сохранил ответ на сервере: при последующем сбое refetch не
-    // возвращаем вопрос в поле и не показываем два пузыря одновременно.
+    // done уже сохранил ответ на сервере, но detail ещё старый: потоковые
+    // пузыри держим до применения fresh, иначе ответ мигает в пустоту.
     const outcome = { done: false };
     setBusy(true);
     setStreaming(true);
@@ -204,10 +204,6 @@ export default function AssistantTab() {
           onToken: (t) => setStreamText((cur) => cur + t),
           onDone: (answer) => {
             outcome.done = true;
-            setStreaming(false);
-            setPendingUser("");
-            setStreamThreadId(null);
-            setStreamText("");
             if (answer.skipped_patient_ids.length > 0) {
               setNotice(
                 `Пропущены пациенты без доступа: ${answer.skipped_patient_ids
@@ -220,16 +216,24 @@ export default function AssistantTab() {
       );
       const fresh = await api.assistantThread(targetId);
       if (selectSeq.current === seq) setDetail(fresh); // врач не переключил тред
+      setStreaming(false);
+      setPendingUser("");
+      setStreamThreadId(null);
+      setStreamText("");
       await refreshThreads();
     } catch (e: unknown) {
       if (!outcome.done) setInput(text); // не терять вопрос при обрыве
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
-      setStreaming(false);
-      setPendingUser("");
-      setStreamThreadId(null);
-      setStreamText("");
+      // После done ответ сохранён: если refetch упал, оставляем пузыри видны,
+      // чтобы врач не потерял ответ; вопрос в поле не возвращаем.
+      if (!outcome.done) {
+        setStreaming(false);
+        setPendingUser("");
+        setStreamThreadId(null);
+        setStreamText("");
+      }
     }
   };
 
