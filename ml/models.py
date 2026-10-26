@@ -371,6 +371,10 @@ class StubTranscriber:
 
     def transcribe(self, source: Any, language: str) -> dict:
         # Stub'у нужен только размер: у него нет декодера, читаем файл целиком.
+        # Rewind обязателен: поток мог остаться на позиции после size-проверки
+        # или второго вызова (реальный бэкенд делает то же самое).
+        if hasattr(source, "seek"):
+            source.seek(0)
         data = source if isinstance(source, bytes) else source.read()
         duration = round(max(len(data) / _ASR_STUB_BYTES_PER_S, 0.5), 3)
         segments: list[dict[str, Any]] = []

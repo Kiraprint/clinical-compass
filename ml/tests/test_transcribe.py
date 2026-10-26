@@ -6,6 +6,7 @@ backend (faster-whisper) в CI не грузится — для него нуж�
 
 from __future__ import annotations
 
+import io
 import threading
 import time
 
@@ -13,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import create_app
-from models import Registry
+from models import Registry, StubTranscriber
 
 # 32 000 байт/с — оценка stub'а (16 кГц, mono, int16).
 _BYTES_PER_S = 32_000
@@ -331,12 +332,26 @@ def test_bad_max_mb_does_not_break_disabled_asr(monkeypatch):
         assert client.get("/health").status_code == 200
 
 
-def test_bad_max_mb_with_enabled_asr_answers_envelope(monkeypatch):
+def test_bad_max_mb_is_clamped_for_enabled_asr(monkeypatch):
+    """Мусор в CC_ML_ASR_MAX_MB: старт живой, запрос в пределах дефолта — 200."""
     monkeypatch.setenv("CC_ML_ASR_MAX_MB", "abc")
     app, _ = _app(monkeypatch)  # create_app не должен упасть
     with TestClient(app) as client:
         response = _post(client)
     assert response.status_code == 200, response.text
+
+
+def test_oversize_rejected_before_parsing_when_asr_disabled(monkeypatch):
+    """Выключенная транскрипция не должна спулить 12 МиБ ради 503."""
+    monkeypatch.setenv("CC_ML_ASR_MAX_MB", "5")
+    app, _ = _app(monkeypatch, asr=False)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/transcribe",
+            files={"file": ("session.webm", b"\x00" * (12 * 1024 * 1024), "audio/webm")},
+        )
+    assert response.status_code == 413, response.text
+    assert _detail(response)["code"] == "payload_too_large"
 
 
 # --- занятые слоты распознавания ------------------------------------------
@@ -394,3 +409,70 @@ def test_second_concurrent_transcribe_gets_busy(monkeypatch):
     assert _detail(second)["code"] == "busy"
     assert second.headers.get("Retry-After") == "5"
     assert first["response"].status_code == 200, first["response"].text
+
+
+def test_slot_released_after_backend_failure(monkeypatch):
+    """Сбой бэкенда не должен навсегда съедать слот распознавания."""
+    monkeypatch.setenv("CC_ML_ASR_CONCURRENCY", "1")
+    app, registry = _app(monkeypatch)
+
+    class _Broken:
+        model_id = "stub"
+        device = "stub"
+
+        def transcribe(self, source, language):
+            raise ValueError("не декодируется")
+
+    registry._asr = _Broken()  # noqa: SLF001
+    with TestClient(app) as client:
+        for _ in range(3):
+            assert _post(client).status_code == 422
+        assert registry._asr_slots.acquire(blocking=False)  # noqa: SLF001
+        registry._asr_slots.release()  # noqa: SLF001
+        registry._asr = None  # noqa: SLF001 — вернуть stub-бэкенд
+        registry.load_asr()
+        assert _post(client).status_code == 200
+
+
+def test_backend_receives_stream_at_start(monkeypatch):
+    """Backend получает поток с позиции 0, а не после size-проверки."""
+    app, registry = _app(monkeypatch)
+    seen: dict = {}
+
+    class _Probe:
+        model_id = "stub"
+        device = "stub"
+
+        def transcribe(self, source, language):
+            seen["tell"] = source.tell()
+            return {
+                "duration_s": 1.0,
+                "language": language,
+                "segments": [{"start": 0.0, "end": 1.0, "speaker": None, "text": "x"}],
+            }
+
+    registry._asr = _Probe()  # noqa: SLF001
+    with TestClient(app) as client:
+        assert _post(client).status_code == 200
+    assert seen["tell"] == 0
+
+
+def test_stub_rewinds_same_stream(monkeypatch):
+    """Повторный вызов на том же потоке даёт ту же длительность."""
+
+    stub = StubTranscriber()
+    stream = io.BytesIO(_audio(12.0))
+    first = stub.transcribe(stream, "ru")
+    second = stub.transcribe(stream, "ru")
+    assert first["duration_s"] == second["duration_s"] == 12.0
+    assert len(second["segments"]) == len(first["segments"]) == 3
+
+
+def test_405_keeps_allow_header(monkeypatch):
+    """Конверт не должен терять заголовки Starlette: у 405 это Allow."""
+    app, _ = _app(monkeypatch)
+    with TestClient(app) as client:
+        response = client.get("/v1/transcribe")
+    assert response.status_code == 405, response.text
+    assert _detail(response)["code"] == "invalid_request"
+    assert "POST" in response.headers.get("allow", "")

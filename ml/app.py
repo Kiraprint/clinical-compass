@@ -212,7 +212,9 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
         """
         code = "invalid_request" if exc.status_code < 500 else "internal_error"
         message = str(exc.detail) if exc.detail else "некорректный запрос"
-        return _error(exc.status_code, code, message)
+        # Заголовки Starlette не теряем: у 405 это Allow, без него клиент не
+        # узнает допустимые методы.
+        return _error(exc.status_code, code, message, dict(exc.headers or {}))
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:  # noqa: ARG001
@@ -250,12 +252,11 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
         return registry
 
     # Лимит тела для транскрипции: аудио + ~64 КБ мультипарт-обвязки.
-    # Считаем только при включённой транскрипции: кривой CC_ML_ASR_MAX_MB у
-    # стека без ASR не должен ронять старт (иначе рестарт-луп утащит за собой
-    # эмбеддинги и маскирование).
+    # Ставим всегда, даже при CC_ML_ASR=0: иначе гигабайтная загрузка
+    # спулится на диск целиком, и только потом приходит 503 asr_disabled.
+    # asr_max_mb() не бросает — кривой env даёт дефолт с предупреждением.
     limits = dict(_BODY_LIMITS)
-    if registry.asr_enabled:
-        limits["/v1/transcribe"] = asr_max_mb() * 1024 * 1024 + 64 * 1024
+    limits["/v1/transcribe"] = asr_max_mb() * 1024 * 1024 + 64 * 1024
 
     @app.middleware("http")
     async def _limit_body(request: Request, call_next):  # noqa: ANN001 — сигнатура Starlette
