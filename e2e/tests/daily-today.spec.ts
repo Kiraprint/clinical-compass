@@ -111,7 +111,7 @@ test("«Сегодня»: первый шаг — 7 пунктов ядра; н�
   // Режим не задан → одна отметка в день; в блоке «за сегодня» видно и счётчик,
   // и что именно отмечено.
   await expect(page.getByText("Сегодня всё отмечено: 1 из 1 приёма")).toBeVisible();
-  await expect(page.getByText(/Принял \(Авиандр\)/)).toBeVisible();
+  await expect(page.getByText(/Принял\(а\) всё \(Авиандр\)/)).toBeVisible();
   await expect(page.getByText("Чек-ин за сегодня выполнен")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Далее" })).toBeVisible();
 

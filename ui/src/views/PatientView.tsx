@@ -308,11 +308,13 @@ function ScreeningTab() {
   );
 }
 
+// Подписи отметок в истории и в записях дня: те же слова, что на «Сегодня»,
+// но без счёта таблеток — одна запись всегда один приём.
 const ADH_LABELS: Record<string, string> = {
-  taken: "Принял",
-  partial: "Частично",
-  missed: "Не принял",
-  not_scheduled: "Не назначено сегодня",
+  taken: "Принял(а) всё",
+  partial: "Принял(а) меньше",
+  missed: "Не принимал(а)",
+  not_scheduled: "Врач не назначал",
 };
 type AdherenceStatus = "taken" | "partial" | "missed" | "not_scheduled";
 const ADH_STATUSES: AdherenceStatus[] = ["taken", "partial", "missed", "not_scheduled"];
