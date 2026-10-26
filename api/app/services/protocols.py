@@ -238,14 +238,15 @@ async def _create_draft(db: AsyncSession, session_id, sections: dict, code, clin
             # UNIQUE(session_id, version): параллельный PUT забрал номер — берём следующий.
             await db.rollback()
             continue
-        # §3.4: активна максимум одна версия. Победившая в гонке/подписанная версия
-        # уходит в `superseded` (в истории остаётся, в `_active` — уже нет).
+        # §3.4: активна максимум одна версия. В `superseded` уходят только
+        # неотправленные версии: `submitted` уже зарегистрирована в РЭМД (FR-41),
+        # и её статус не должен меняться за спиной доставки.
         await db.execute(
             update(SessionProtocol)
             .where(
                 SessionProtocol.session_id == session_id,
                 SessionProtocol.id != row.id,
-                SessionProtocol.status.in_(PROTOCOL_ACTIVE),
+                SessionProtocol.status.in_(("draft", "approved", "signed")),
             )
             .values(status="superseded", updated_at=_now())
         )

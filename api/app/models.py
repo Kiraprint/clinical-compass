@@ -1119,3 +1119,57 @@ class ProtocolSignature(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )
+
+
+class EmiasDelivery(Base):
+    """FR-41: передача подписанного СЭМД в ЕМИАС/ЕГИСЗ РЭМД (docs/18 §3.8, §8).
+
+    Одна строка на версию протокола: `protocol_id` уникален. `local_document_uid`
+    — детерминированный UUIDv5 от `protocol_id:version`; это ключ идемпотентности
+    РЭМД: повторная отправка той же версии не создаёт второй записи реестра, а
+    новый контент под тем же UID РЭМД отвергает (409 `NOT_UNIQUE_PROVIDED_ID`).
+
+    Статусы: `queued → sending → registered | rejected | failed`. `registered` и
+    `rejected` терминальны и не переписываются callback'ом; `failed` — транспортная
+    ошибка после всех ретраев, повторная отправка разрешена. Тело документа здесь
+    не хранится: только sha256 отправленных байт (сверка идемпотентности) и
+    результат РЭМД (`result`), в котором нет содержимого СЭМД.
+    """
+
+    __tablename__ = "emias_deliveries"
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('queued','sending','registered','rejected','failed')",
+            name="emias_deliveries_status",
+        ),
+        UniqueConstraint("protocol_id", name="emias_deliveries_protocol"),
+        Index("emias_deliveries_session", "session_id", "submitted_at"),
+        Index("emias_deliveries_request", "request_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    session_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("clinical_sessions.id"))
+    protocol_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("session_protocols.id"))
+    status: Mapped[str] = mapped_column(String(16), server_default=text("'queued'"))
+    # GUID идемпотентности стороны ИС (РЭМД сверяет по нему повторные отправки).
+    local_document_uid: Mapped[uuid.UUID] = mapped_column()
+    # sha256 байт отправленного СЭМД (hex): второй отправитель того же UID с другим
+    # содержимым — это ошибка передачи, а не новая версия.
+    document_sha256: Mapped[str] = mapped_column(CHAR(64))
+    kind: Mapped[int] = mapped_column(Integer)  # вид СЭМД, НСИ 1520
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    external_id: Mapped[str | None] = mapped_column(String(64), nullable=True)  # emdr_id
+    attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error_message: Mapped[str | None] = mapped_column(String(400), nullable=True)
+    # Ответ РЭМД как есть (без СЭМД и ПДн): emdr_id, status, errors, даты.
+    result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    submitted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    registered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), onupdate=text("now()")
+    )

@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import services
 from app.db import get_db
 from app.deps import require_clinician
+from app.remd import service as remd
 from app.models import User
 
 router = APIRouter(tags=["sessions"])
@@ -191,13 +192,17 @@ async def get_session(
     user: User = Depends(require_clinician),
     db: AsyncSession = Depends(get_db),
 ):
-    """SessionDetail: сессия + протокол + артефакты + подпись (передача — PR P5)."""
+    """SessionDetail: сессия + протокол + артефакты + подпись + передача (§4.2)."""
     payload = await services.sessions.get_session(db, user.id, session_id)
     if payload.get("protocol"):
         # §4.2: подпись — сводка по protocol_signatures; нет подписей → None.
         payload["signature"] = await services.signing.summary(
             db, uuid.UUID(payload["protocol"]["id"])
         )
+    # §4.5: передача в РЭМД — последняя строка emias_deliveries (нет → None).
+    payload["delivery"] = remd.delivery_payload(
+        await remd.latest_delivery(db, session_id)
+    )
     return payload
 
 
