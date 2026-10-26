@@ -20,7 +20,7 @@ import {
   Report,
   Visit,
 } from "../api";
-import { resolveTimesPerDay, stripIntakeFrequency } from "../dosage";
+import { formatTimesPerDay, parseIntakeFrequency, resolveTimesPerDay } from "../dosage";
 import TrendChart from "../TrendChart";
 import ChatsView from "./ChatsView";
 import LibraryView from "./LibraryView";
@@ -2516,22 +2516,20 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
     setPickedDrug(d);
     setSuggestOpen(false);
     setSuggestIdx(-1);
-    // Частота приёма из инструкции сразу заполняет «сколько раз в день»
-    // (FR-27: знаменатель приверженности). null из справочника (частоты нет,
-    // она неоднозначна или вне 1..6) → 1, а не значение прошлого препарата:
-    // его частота из подставленного текста уже вырезана. Дальше врач правит сам.
+    // Черновое значение select, пока дозировка ещё не подставлена: как только
+    // в тексте появится кратность, select скроется и режим возьмётся из текста.
     setTimesPerDay(resolveTimesPerDay(d));
   };
 
   // Источник канонической дозировки: dosage, при его отсутствии — special_notes
-  // или форма. Частоту приёма из текста вырезаем: она живёт в отдельном select,
-  // иначе режим дублируется в свободном тексте.
+  // или форма. Подсказка — полный текст: кратность в нём задаёт режим приёма,
+  // поэтому её не вырезаем и отдельно не спрашиваем (см. dosageTimes ниже).
   const dosageHint = pickedDrug
-    ? stripIntakeFrequency(pickedDrug.dosage.trim()) ||
-      pickedDrug.special_notes.trim() ||
-      pickedDrug.form.trim()
+    ? pickedDrug.dosage.trim() || pickedDrug.special_notes.trim() || pickedDrug.form.trim()
     : "";
   const dosageApplied = dosageHint !== "" && dosage.trim() === dosageHint;
+  // Кратность, уже записанная врачом в дозировку («Внутрь по 20 мг 2 раза/сут»).
+  const dosageTimes = parseIntakeFrequency(dosage);
 
   const onDrugKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Escape") {
@@ -2577,7 +2575,8 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
         title: title.trim(),
         dosage: dosage.trim() || undefined,
         started_on: startedOn || undefined,
-        times_per_day: timesPerDay,
+        // Кратность из дозировки важнее select: селект скрыт, когда она есть.
+        times_per_day: dosageTimes ?? timesPerDay,
         notes: notes.trim() || undefined,
       });
       setTitle("");
@@ -2634,7 +2633,12 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
               <tr><th>Препарат</th><th>Дозировка</th><th>Режим</th><th>С</th><th>По</th><th>Статус</th><th>Заметка</th><th></th></tr>
             </thead>
             <tbody>
-              {items.map((m) => (
+              {items.map((m) => {
+                // Кратность из текста дозировки задаёт режим: если она есть,
+                // отдельный выбор (и правка) количества раз в день не нужен.
+                const derived = parseIntakeFrequency(m.dosage ?? "");
+                const shown = derived ?? m.times_per_day;
+                return (
                 <tr key={m.id}>
                   <td>
                     {m.title}{" "}
@@ -2647,7 +2651,7 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
                   </td>
                   <td>{m.dosage ?? "—"}</td>
                   <td style={{ whiteSpace: "nowrap" }}>
-                    {editId === m.id ? (
+                    {editId === m.id && derived == null ? (
                       <>
                         <select
                           aria-label="Раз в день"
@@ -2660,8 +2664,10 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
                           Сохранить
                         </button>
                       </>
-                    ) : m.times_per_day != null ? (
-                      `${m.times_per_day} р/день`
+                    ) : shown != null ? (
+                      <span title={derived != null ? "Из текста дозировки" : undefined}>
+                        {shown} р/день
+                      </span>
                     ) : (
                       <span style={{ color: "#5a6478", fontSize: 12 }}>не задан</span>
                     )}
@@ -2678,7 +2684,7 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
                             Остановить
                           </button>
                         )}
-                        {m.editable && editId !== m.id && m.source === "clinician" && (
+                        {m.editable && editId !== m.id && m.source === "clinician" && derived == null && (
                           <button
                             className="link"
                             style={{ fontSize: 12, marginLeft: 8 }}
@@ -2696,7 +2702,8 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
                     )}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -2771,12 +2778,19 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
           )}
         </div>
         <input type="date" aria-label="Дата начала" value={startedOn} onChange={(e) => setStartedOn(e.target.value)} />
-        <label style={{ fontSize: 13, color: "#3d4657" }}>
-          Раз в день:{" "}
-          <select aria-label="Раз в день" value={timesPerDay} onChange={(e) => setTimesPerDay(Number(e.target.value))}>
-            {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n}</option>)}
-          </select>
-        </label>
+        {dosageTimes != null ? (
+          // Кратность уже в дозировке — второй раз её не спрашиваем.
+          <span style={{ fontSize: 13, color: "#3d4657" }}>
+            Из дозировки: {formatTimesPerDay(dosageTimes)}
+          </span>
+        ) : (
+          <label style={{ fontSize: 13, color: "#3d4657" }}>
+            Раз в день:{" "}
+            <select aria-label="Раз в день" value={timesPerDay} onChange={(e) => setTimesPerDay(Number(e.target.value))}>
+              {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </label>
+        )}
         <input placeholder="Заметка" value={notes} onChange={(e) => setNotes(e.target.value)} style={{ maxWidth: 240 }} />
         <button onClick={add} disabled={busy || !title.trim()}>Назначить</button>
       </div>
