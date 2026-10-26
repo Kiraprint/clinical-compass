@@ -21,7 +21,7 @@ from app.models import User
 
 router = APIRouter(tags=["sessions"])
 
-# FR-42 (docs/18 §4.5): роли участников. `Literal` — чтобы мусор в теле давал
+# FR-42 (docs/18 §4.3): роли участников. `Literal` — чтобы мусор в теле давал
 # 422 VALIDATION до обращения к БД; `unknown` нужен, когда врач не уверен.
 SpeakerRole = Literal["clinician", "patient", "unknown"]
 
@@ -30,9 +30,6 @@ class SpeakerRolesBody(BaseModel):
     """`{"roles": {"A": "clinician", "B": "patient"}}` — метка кластера → роль."""
 
     roles: dict[str, SpeakerRole] = Field(min_length=1, max_length=2)
-
-router = APIRouter(tags=["sessions"])
-
 
 def _ip(request: Request) -> str | None:
     return request.client.host if request.client else None

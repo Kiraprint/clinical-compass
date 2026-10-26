@@ -66,8 +66,9 @@ ROLE_PATIENT = "patient"
 ROLE_UNKNOWN = "unknown"
 SPEAKER_ROLES = (ROLE_CLINICIAN, ROLE_PATIENT, ROLE_UNKNOWN)
 # Роли для LLM: латинские метки кластеров модель путает с участниками, а
-# «Врач:/Пациент:» сразу задаёт, чья это реплика (§4.5).
-ROLE_RU = {ROLE_CLINICIAN: "Врач", ROLE_PATIENT: "Пациент", ROLE_UNKNOWN: "Говорящий"}
+# «Врач:/Пациент:» сразу задаёт, чья это реплика (§4.3). `unknown` сюда не
+# входит: это не роль, а «не знаю» — ниже он подписывается меткой кластера.
+ROLE_RU = {ROLE_CLINICIAN: "Врач", ROLE_PATIENT: "Пациент"}
 
 # §4.3: допустимые типы аудио. Проверяем и mime, и расширение — браузеры шлют
 # `application/octet-stream` для webm/opus, а имя файла приходит от клиента.
@@ -1103,7 +1104,7 @@ def _speaker_name(segment: dict) -> str:
     """Подпись реплики для LLM/логов: роль по-русски, метка кластера — иначе.
 
     Латиница («A:») путала модель: она начинала приписывать реплики не тому
-    участнику, поэтому роль идёт как «Врач:/Пациент:» (§4.5).
+    участнику, поэтому роль идёт как «Врач:/Пациент:» (§4.3).
     """
     role = segment.get("role")
     if role in ROLE_RU:
@@ -1111,7 +1112,7 @@ def _speaker_name(segment: dict) -> str:
     speaker = segment.get("speaker")
     if isinstance(speaker, str) and speaker:
         return f"Говорящий {speaker}"
-    return "реплика"
+    return "Говорящий" if role == ROLE_UNKNOWN else "реплика"
 
 
 def _text(value) -> str:

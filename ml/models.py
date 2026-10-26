@@ -93,7 +93,7 @@ _ASR_STUB_SEGMENT_S = 5.0
 #   3D-Speaker CAM++ zh/en advanced (Apache-2.0) → эмбеддинги голоса,
 #   кластеризация AHC внутри sherpa.
 # Замер на 50.6 с синтетического русского диалога (2 голоса piper):
-# RTF 0.086 (2 потока CPU), 12/12 реплик размечены верно; подробности —
+# RTF 0.08–0.12 (2 потока CPU, зависит от загрузки хоста), 12/12 реплик
 # ml/README.md (раздел «Диаризация»). pyannote.audio не используется: их веса на HF gated.
 DIARIZE_MODEL_DIR = "/models/diarize"
 DIARIZE_SEGMENTATION_FILE = "segmentation.onnx"
@@ -686,10 +686,16 @@ class WhisperTranscriber:
 
 
 class DiarizeUnavailable(RuntimeError):
-    """Моделей диаризации нет/они не открылись: путь деградации, не 5xx."""
+    """Моделей диаризации нет/они не открылись: путь деградации, не 5xx.
 
-    # Единый код причины для логов и статуса: бэкенд выбран, но не поднялся.
-    code = "diarize_backend_unavailable"
+    ``code`` — причина для лога и статуса: ``diarize_unavailable`` (нет весов
+    или библиотеки) и ``diarize_backend_unavailable`` (неизвестное значение
+    ``CC_ML_DIARIZE_BACKEND``) — разные поломки, чинить их тоже по-разному.
+    """
+
+    def __init__(self, message: str, *, code: str = "diarize_unavailable") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def diarize_labels(count: int) -> list[str]:
@@ -1196,7 +1202,8 @@ class Registry:
         if self.diarize_backend == "sortformer":
             return SortformerDiarizer()
         raise DiarizeUnavailable(
-            f"неизвестный бэкенд {self.diarize_backend!r}: {', '.join(DIARIZE_BACKENDS)}"
+            f"неизвестный бэкенд {self.diarize_backend!r}: {', '.join(DIARIZE_BACKENDS)}",
+            code="diarize_backend_unavailable",
         )
 
     def _diarize_turns(self, source: Any, duration_s: float) -> dict:

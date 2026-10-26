@@ -1,8 +1,8 @@
-"""Диаризация (FR-42, docs/18 §4.5): маппинг кластеров на сегменты — без GPU.
+"""Диаризация (FR-42, docs/18 §4.3): маппинг кластеров на сегменты — без GPU.
 
 Настоящие веса (sherpa-onnx) в CI не грузятся: здесь проверяются чистые
 функции маппинга, stub-бэкенд и честная деградация при отсутствии весов.
-Качество модели измерено отдельно — REPORT-diarization.md.
+Качество модели измерено отдельно — числа в docs/18 §4.3 и ml/README.md.
 """
 
 from __future__ import annotations
@@ -120,7 +120,7 @@ def test_sortformer_without_nemo_degrades():
     registry.stub = False
     registry.diarize_backend = "sortformer"
     assert registry.diarizer() is None
-    assert "diarize_backend_unavailable" in (registry._diarizer_error or "")
+    assert "diarize_unavailable" in (registry._diarizer_error or "")
 
 
 def test_default_backend_is_sherpa(monkeypatch):

@@ -155,7 +155,7 @@ curl -s -X POST http://ml:8080/v1/transcribe \
 
 | Бэкенд | Лицензия и вес | Замер на 50.6 с русского диалога | Вывод |
 |---|---|---|---|
-| `sherpa` (дефолт) | MIT + Apache-2.0, веса 33 МБ, `sherpa-onnx` 2.0 (CPU) | 12/12 реплик верно, RTF 0.078–0.100 (2 потока CPU), VRAM 0, RSS ~1.3 ГБ | дефолт: встаёт из PyPI, веса с GitHub k2-fsa, работает без GPU |
+| `sherpa` (дефолт) | MIT + Apache-2.0, веса 33 МБ, `sherpa-onnx` 2.0 (CPU) | 12/12 реплик верно, RTF 0.08–0.12 (2 потока CPU: 0.08 на свободном хосте, 0.10–0.12 при load ≈6/16), VRAM 0, RSS ~1.3 ГБ | дефолт: встаёт из PyPI, веса с GitHub k2-fsa, работает без GPU |
 | `sortformer` | NVIDIA Open Model License (коммерческое использование разрешено), `nvidia/diar_streaming_sortformer_4spk-v2.1`; `nemo_toolkit[asr]` тянет свой torch 2.14.1+cu130, venv 6.3 ГБ | 12/12 реплик верно, RTF 0.33 (GPU), 918 МБ VRAM, RAM-пик 2.5 ГБ на CPU, до 4 спикеров | проверен вживую, но в образ ml не входит: конфликтует с пином torch 2.11, нужен отдельный образ |
 
 Почему не pyannote.audio и не «SOTA»-модели: `pyannote/speaker-diarization-community-1`
@@ -178,7 +178,7 @@ curl -s -X POST http://ml:8080/v1/transcribe \
 | Embeddings | 3D-Speaker CAM++ zh/en advanced ONNX, **Apache-2.0**, 27 МБ |
 | Кластеризация | AHC внутри sherpa, `num_clusters=2` (врач + пациент) |
 | Источник весов | релизы k2-fsa на GitHub (не HF: pyannote.audio там gated), sha256 в `ml/models.py`, качает `ml-warmup` в `/models/diarize` |
-| Замер | 50.6 с синтетического русского диалога (2 голоса piper, 12 реплик): **12/12** реплик размечены верно, RTF **0.078–0.095** на 2 потоках CPU, VRAM 0, RSS процесса ~1.3 ГБ вместе с весами |
+| Замер | 50.6 с синтетического русского диалога (2 голоса piper, 12 реплик): **12/12** реплик размечены верно, RTF **0.08–0.12** на 2 потоках CPU (три прогона: 0.100 / 0.117 / 0.121 при load 5.6–7.1), VRAM 0, RSS процесса ~1.3 ГБ вместе с весами |
 
 Аудио берётся из того же PyAV-декодера, что у Whisper (16 кГц mono float32), —
 повторного декодирования нет. Сшивка с сегментами ASR — по максимальному

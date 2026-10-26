@@ -90,19 +90,21 @@ const mimeExtension = (value: string) =>
   value.includes("mp4") ? "m4a" : value.includes("ogg") ? "ogg" : "webm";
 
 
-
-const ROLE_LABELS: Record<SpeakerRole, string> = {
+const ROLE_LABELS: Record<"clinician" | "patient", string> = {
   clinician: "Врач",
   patient: "Пациент",
-  unknown: "Говорящий",
 };
 
 function SpeakerBadge({ segment }: { segment: TranscriptSegment }) {
-  const label = segment.role
-    ? ROLE_LABELS[segment.role]
-    : segment.speaker
-      ? `Говорящий ${segment.speaker}`
-      : null;
+  // `unknown` — не роль, а «врач не знает, кто это»: показываем метку кластера.
+  const label =
+    segment.role === "clinician" || segment.role === "patient"
+      ? ROLE_LABELS[segment.role]
+      : segment.speaker
+        ? `Говорящий ${segment.speaker}`
+        : segment.role === "unknown"
+          ? "Говорящий"
+          : null;
   if (!label) return null;
   // Врач и пациент различаются цветом: в длинной расшифровке читают по бейджу.
   const color =
@@ -123,7 +125,11 @@ function TranscriptView({
   const speakers = Array.from(
     new Set(segments.map((s) => s.speaker).filter((s): s is string => !!s)),
   );
-  const roles = transcript.speaker_roles;
+  // API на шаг старше бандла (раскатка контейнеров) может не прислать поля
+  // диаризации: без значений по умолчанию карточка падала бы на `roles[first]`.
+  const roles = transcript.speaker_roles ?? {};
+  const diarized = transcript.diarized ?? false;
+  const assumed = transcript.speaker_roles_assumed ?? false;
   const [first, second] = speakers;
   const firstIsDoctor = roles[first] === "clinician" || !roles[first];
   return (
@@ -134,19 +140,19 @@ function TranscriptView({
         {transcript.duration_sec ? ` Длительность ${mmss(transcript.duration_sec)}.` : ""}
         {transcript.model ? ` Модель: ${transcript.model}.` : ""}
       </p>
-      {!transcript.diarized && (
+      {!diarized && (
         <p className="small muted">
           Говорящие не разделены (модель диаризации недоступна) — реплики идут одним потоком.
         </p>
       )}
-      {transcript.diarized && speakers.length === 2 && (
+      {diarized && speakers.length === 2 && (
         <div className="row" style={{ marginTop: 8 }}>
           <span className="small muted">
-            {transcript.speaker_roles_assumed
+            {assumed
               ? `Роли проставлены автоматически: «${first}» говорит первой — проверьте.`
               : "Роли участников подтверждены врачом."}
           </span>
-          {transcript.speaker_roles_assumed && (
+          {assumed && (
             <button
               type="button"
               data-testid="speakers-confirm-role"

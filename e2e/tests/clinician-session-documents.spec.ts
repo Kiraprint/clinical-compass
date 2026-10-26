@@ -181,11 +181,23 @@ test("черновик ИИ не перезаписывает текст, вве
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        segments: [{ start: 0, end: 12, speaker: "врач", text: "Здравствуйте, что вас беспокоит?" }],
+        // FR-42: расшифровка с ролями — бейдж «Врач», без плашки деградации.
+        segments: [
+          {
+            start: 0,
+            end: 12,
+            speaker: "A",
+            role: "clinician",
+            text: "Здравствуйте, что вас беспокоит?",
+          },
+        ],
         model: "whisper-e2e",
         duration_sec: 12,
         mask_categories: {},
         depersonalized: true,
+        diarized: true,
+        speaker_roles: { A: "clinician" },
+        speaker_roles_assumed: false,
       }),
     }),
   );
