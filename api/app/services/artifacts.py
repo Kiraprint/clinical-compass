@@ -271,6 +271,29 @@ def temp_dir() -> Path:
     return _root() / "tmp"
 
 
+def sweep_orphans(known: set[str]) -> int:
+    """Удалить файлы артефактов, на которые нет строки в БД (старт приложения).
+
+    Строка и файл пишутся в разных шагах: отмена между `os.replace` в
+    `put_stream` и коммитом оставляет шифротекст без ссылки, а такой файл
+    живёт вне ретенции (docs/18 §4.6). Свип только на старте — в этот момент
+    незавершённых загрузок нет. `known` — множество относительных путей из
+    `document_artifacts.path` (имя файла не совпадает с id артефакта).
+    """
+    removed = 0
+    root = _root()
+    for kind in KINDS:
+        directory = root / kind
+        if not directory.is_dir():
+            continue
+        for path in directory.glob("*.bin"):
+            if f"{kind}/{path.name}" in known:
+                continue
+            path.unlink(missing_ok=True)
+            removed += 1
+    return removed
+
+
 def purge_temp(*, max_age_sec: float) -> int:
     """Удалить остатки открытого текста старше `max_age_sec` из `tmp`.
 

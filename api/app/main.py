@@ -55,6 +55,7 @@ async def lifespan(app: FastAPI):
         await _reap_stale_sessions()
         # Открытый текст аудио не должен переживать рестарт процесса (§4.6).
         await _purge_artifacts_tmp()
+        await _sweep_orphan_artifacts()
         yield
     finally:
         # Закрываем пулы явно: иначе при рестарте/перезагрузке процесса воркеры
@@ -63,6 +64,31 @@ async def lifespan(app: FastAPI):
             await db.engine.dispose()
         if db.sync_engine is not None:
             await asyncio.to_thread(db.sync_engine.dispose)
+
+
+async def _sweep_orphan_artifacts() -> None:
+    """Старт приложения: удалить шифротекст, на который нет строки в БД (§4.6)."""
+    from sqlalchemy import select
+
+    from .db import AsyncSessionLocal
+    from .models import DocumentArtifact
+    from .services import artifacts
+
+    if AsyncSessionLocal is None:
+        return
+    try:
+        async with AsyncSessionLocal() as db:
+            known = set(
+                (await db.execute(select(DocumentArtifact.path))).scalars().all()
+            )
+        removed = await asyncio.to_thread(artifacts.sweep_orphans, known)
+    except Exception:  # noqa: BLE001 — уборка не должна блокировать старт
+        logging.getLogger(__name__).exception("Свип осиротевших артефактов не отработал")
+        return
+    if removed:
+        logging.getLogger(__name__).warning(
+            "Удалено %d файлов артефактов без строки в БД", removed
+        )
 
 
 async def _purge_artifacts_tmp() -> None:

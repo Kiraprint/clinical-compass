@@ -1032,3 +1032,27 @@ def test_cancel_mid_upload_keeps_no_artifact(monkeypatch):
 
     asyncio.run(_run())
     assert (set() if not audio_dir.exists() else {p.name for p in audio_dir.glob("*")}) == before
+
+def test_startup_sweep_removes_orphan_artifacts(client, monkeypatch):
+    """Файл без строки в `document_artifacts` удаляется свипом на старте (§4.6)."""
+    import asyncio
+    import uuid as _uuid
+
+    from app.main import _sweep_orphan_artifacts
+
+    _enable(monkeypatch)
+    ctx = _ctx(client, "sweep")
+    sid = _session(client, ctx)["id"]
+    assert _upload(client, ctx, sid).status_code == 201
+
+    audio_dir = pathlib.Path(settings.artifacts_dir) / "audio"
+    kept = {p.name for p in audio_dir.glob("*.bin")}
+    assert kept, "загрузка не оставила артефакта"
+
+    # Так выглядит отмена между os.replace и коммитом: файл есть, строки нет.
+    orphan = audio_dir / f"{_uuid.uuid4().hex}.bin"
+    orphan.write_bytes(b"CCART1" + b"\x00" * 32)
+
+    asyncio.run(_sweep_orphan_artifacts())
+    assert not orphan.exists()
+    assert {p.name for p in audio_dir.glob("*.bin")} == kept, "свип снёс живой артефакт"
