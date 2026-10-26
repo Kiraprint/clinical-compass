@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import importlib.util
+
 import pytest
 
 import models
@@ -98,3 +100,32 @@ def test_registry_diarizer_caches_failure(monkeypatch):
     )
     assert registry.diarizer() is None
     assert attempts == []
+
+
+def test_unknown_backend_degrades_with_code():
+    """Опечатка в CC_ML_DIARIZE_BACKEND — деградация с понятным кодом, не 500."""
+    registry = models.Registry(stub=True)
+    registry.stub = False
+    registry.diarize_backend = "pyannote"
+    assert registry.diarizer() is None
+    assert registry._diarizer_status == "error"
+    assert "diarize_backend_unavailable" in (registry._diarizer_error or "")
+
+
+def test_sortformer_without_nemo_degrades():
+    """Бэкенд sortformer без nemo_toolkit: diarized=false, причина — в логе."""
+    if importlib.util.find_spec("nemo") is not None:
+        pytest.skip("nemo_toolkit установлен: ветка деградации не воспроизводится")
+    registry = models.Registry(stub=True)
+    registry.stub = False
+    registry.diarize_backend = "sortformer"
+    assert registry.diarizer() is None
+    assert "diarize_backend_unavailable" in (registry._diarizer_error or "")
+
+
+def test_default_backend_is_sherpa(monkeypatch):
+    """Дефолт — sherpa (ONNX, CPU): sortformer требует отдельного образа."""
+    monkeypatch.delenv("CC_ML_DIARIZE_BACKEND", raising=False)
+    assert models.Registry(stub=True).diarize_backend == "sherpa"
+    monkeypatch.setenv("CC_ML_DIARIZE_BACKEND", "SortFormer")
+    assert models.Registry(stub=True).diarize_backend == "sortformer"

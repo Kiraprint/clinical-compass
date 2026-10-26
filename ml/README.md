@@ -148,6 +148,29 @@ curl -s -X POST http://ml:8080/v1/transcribe \
 
 ### Диаризация (`diarize=true`, FR-42)
 
+Бэкенд выбирается `CC_ML_DIARIZE_BACKEND` — обе реализации живут за одним
+интерфейсом `diarize(audio, duration_s) -> [{start, end, speaker}]`, метки
+кластеров нумеруются одинаково, поэтому маппинг на сегменты и метки `A`/`B`
+от бэкенда не зависят.
+
+| Бэкенд | Лицензия и вес | Замер на 50.6 с русского диалога | Вывод |
+|---|---|---|---|
+| `sherpa` (дефолт) | MIT + Apache-2.0, веса 33 МБ, `sherpa-onnx` 2.0 (CPU) | 12/12 реплик верно, RTF 0.078–0.100 (2 потока CPU), VRAM 0, RSS ~1.3 ГБ | дефолт: встаёт из PyPI, веса с GitHub k2-fsa, работает без GPU |
+| `sortformer` | NVIDIA Open Model License (коммерческое использование разрешено), `nvidia/diar_streaming_sortformer_4spk-v2.1`; `nemo_toolkit[asr]` тянет свой torch 2.14.1+cu130, venv 6.3 ГБ | 12/12 реплик верно, RTF 0.33 (GPU), 918 МБ VRAM, RAM-пик 2.5 ГБ на CPU, до 4 спикеров | проверен вживую, но в образ ml не входит: конфликтует с пином torch 2.11, нужен отдельный образ |
+
+Почему не pyannote.audio и не «SOTA»-модели: `pyannote/speaker-diarization-community-1`
+и `pyannote/segmentation-3.0` на HF **gated** (CC-BY-4.0 / MIT, но нужно ручное
+принятие условий, веса не перераздаваемы) — поэтому берём их ONNX-порт от k2-fsa,
+который раздаётся свободно. `BUT-FIT/diarizen-wavlm-large-s80-md` и
+`nvidia/diar_sortformer_4spk-v1` — **CC-BY-NC-4.0**, некоммерческие, исключены.
+
+Если выбранный бэкенд не поднялся (нет `nemo_toolkit`, нет весов sherpa, опечатка
+в имени бэкенда), ответ остаётся 200 с `diarized=false`, `degraded=true`, а в лог
+один раз уходит код **`diarize_backend_unavailable`** с причиной.
+
+
+### sherpa-onnx (дефолт)
+
 | Что | Значение |
 |---|---|
 | Библиотека | `sherpa-onnx` 2.0 (pip-колесо, свой onnxruntime внутри, **CPU**; GPU-сборки в PyPI нет и не нужна) |

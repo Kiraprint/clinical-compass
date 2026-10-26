@@ -382,6 +382,10 @@ services:
       # выключить: diarize=true тогда отдаёт diarized=false без деградации.
       CC_ML_DIARIZE: "${CC_ML_DIARIZE:-1}"
       CC_ML_DIARIZE_MODEL_DIR: "${CC_ML_DIARIZE_MODEL_DIR:-/models/diarize}"
+      # sherpa (ONNX, CPU, дефолт) | sortformer (NeMo; нужен образ с
+      # nemo_toolkit[asr], иначе diarize=true деградирует с
+      # diarize_backend_unavailable в логах).
+      CC_ML_DIARIZE_BACKEND: "${CC_ML_DIARIZE_BACKEND:-sherpa}"
       HF_HOME: /models
       HF_HUB_DISABLE_TELEMETRY: "1"
       HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-1}"

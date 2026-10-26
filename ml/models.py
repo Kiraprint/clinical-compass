@@ -131,6 +131,16 @@ DIARIZE_EMBEDDING_URL = (
 DIARIZE_EMBEDDING_SHA256 = (
     "aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2"
 )
+# Бэкенды диаризации за одним интерфейсом (`diarize(audio, duration_s)`):
+#   sherpa     — дефолт: ONNX, CPU, веса из релизов k2-fsa (MIT/Apache-2.0);
+#   sortformer — NVIDIA Sortformer v2.1 через NeMo, точнее и умеет 4 спикера,
+#                но тянет свой torch (2.14+cu130) и 6.3 ГБ venv, поэтому в образ
+#                ml не входит: включается CC_ML_DIARIZE_BACKEND=sortformer в
+#                образе, где nemo_toolkit[asr] доустановлен. Без него — честная
+#                деградация с кодом diarize_backend_unavailable.
+DIARIZE_BACKENDS = ("sherpa", "sortformer")
+DIARIZE_DEFAULT_BACKEND = "sherpa"
+SORTFORMER_MODEL = "nvidia/diar_streaming_sortformer_4spk-v2.1"
 
 # Окно NER: rubert видит 512 токенов, поэтому длинный текст режется на
 # перекрывающиеся куски с привязкой к пробелам (см. HybridMasker).
@@ -678,6 +688,9 @@ class WhisperTranscriber:
 class DiarizeUnavailable(RuntimeError):
     """Моделей диаризации нет/они не открылись: путь деградации, не 5xx."""
 
+    # Единый код причины для логов и статуса: бэкенд выбран, но не поднялся.
+    code = "diarize_backend_unavailable"
+
 
 def diarize_labels(count: int) -> list[str]:
     """Индексы кластеров → ``A``, ``B``, … (роли назначает api, не сайдкар)."""
@@ -793,6 +806,50 @@ class SherpaDiarizer:
         ]
 
 
+class SortformerDiarizer:
+    """NVIDIA Sortformer v2.1 через NeMo: end-to-end, до 4 спикеров.
+
+    Альтернативный бэкенд (``CC_ML_DIARIZE_BACKEND=sortformer``), не дефолт:
+    ``nemo_toolkit[asr]`` приносит собственный torch (проверено на 2.14.1+cu130)
+    и раздувает окружение до 6.3 ГБ, то есть живёт в отдельном образе, а не в
+    ``ml/requirements.txt``. Замер на том же русском диалоге: сшивка 12/12
+    реплик, RTF 0.33 на GPU (918 МБ VRAM), RAM-пик 2.5 ГБ на CPU — против
+    RTF 0.08 у sherpa, поэтому дефолтом остаётся sherpa.
+    """
+
+    device = "torch"
+    model_id = SORTFORMER_MODEL
+
+    def __init__(self, model_id: str = SORTFORMER_MODEL) -> None:
+        try:
+            from nemo.collections.asr.models import SortformerEncLabelModel
+        except ImportError as exc:  # нет nemo_toolkit в образе
+            raise DiarizeUnavailable(f"nemo_toolkit не установлен: {exc}") from exc
+        self._model = SortformerEncLabelModel.from_pretrained(model_id)
+        self._model.eval()
+        self.model_id = model_id
+        self._lock = threading.Lock()
+
+    def diarize(self, audio: Any, duration_s: float) -> list[dict]:
+        with self._lock:
+            batches = self._model.diarize(
+                audio=[audio], batch_size=1, sample_rate=DIARIZE_SAMPLE_RATE
+            )
+        turns: list[dict] = []
+        for line in batches[0]:
+            start, end, speaker = line.split()
+            # NeMo отдаёт метку строкой speaker_N — приводим к тем же int, что у
+            # sherpa, чтобы маппинг на сегменты и метки A/B не зависели от бэкенда.
+            turns.append(
+                {
+                    "start": round(float(start), 3),
+                    "end": round(float(end), 3),
+                    "speaker": int(speaker.rsplit("_", 1)[-1]),
+                }
+            )
+        return turns
+
+
 # ---------------------------------------------------------------------------
 # Реестр
 # ---------------------------------------------------------------------------
@@ -884,6 +941,10 @@ class Registry:
         # загрузки липкая (как у ASR): деградация вместо ретрая на каждом
         # запросе, причина — в логах один раз.
         self.diarize_enabled = _env_bool("CC_ML_DIARIZE", True)
+        self.diarize_backend = (
+            os.environ.get("CC_ML_DIARIZE_BACKEND", "").strip().lower()
+            or DIARIZE_DEFAULT_BACKEND
+        )
         self.diarize_model_dir = (
             os.environ.get("CC_ML_DIARIZE_MODEL_DIR", "").strip() or DIARIZE_MODEL_DIR
         )
@@ -933,6 +994,7 @@ class Registry:
                     "diarize": {
                         "enabled": self.diarize_enabled,
                         "status": self._diarizer_status,
+                        "backend": "stub" if self.stub else self.diarize_backend,
                     },
                 },
                 # Никаких путей к весам/текстов ошибок наружу: только флаг.
@@ -1104,28 +1166,38 @@ class Registry:
         with self._diarizer_lock:
             if self._diarizer_status == "idle":
                 try:
-                    self._diarizer = (
-                        StubDiarizer()
-                        if self.stub
-                        else SherpaDiarizer(self.diarize_model_dir)
-                    )
+                    self._diarizer = self._build_diarizer()
                     self._diarizer_status = "ready"
                     log.info(
-                        "Диаризация готова: %s (каталог %s)",
+                        "Диаризация готова: бэкенд %s, модель %s",
+                        self.diarize_backend,
                         self._diarizer.model_id,
-                        self.diarize_model_dir,
                     )
                 except Exception as exc:  # noqa: BLE001 — деградация, не падение
                     self._diarizer_status = "error"
+                    code = getattr(exc, "code", type(exc).__name__)
                     # Причина — в лог один раз: дальше только флаг статуса.
-                    self._diarizer_error = f"{type(exc).__name__}: {exc}"[:300]
+                    self._diarizer_error = f"{code}: {exc}"[:300]
                     log.warning(
-                        "Диаризация недоступна (каталог %s), diarize=true будет "
-                        "деградировать: %s",
+                        "Диаризация недоступна (бэкенд %s, каталог %s), "
+                        "diarize=true будет деградировать: %s",
+                        self.diarize_backend,
                         self.diarize_model_dir,
                         self._diarizer_error,
                     )
             return self._diarizer if self._diarizer_status == "ready" else None
+
+    def _build_diarizer(self) -> Any:
+        """Бэкенд по `CC_ML_DIARIZE_BACKEND`; неизвестное значение — деградация."""
+        if self.stub:
+            return StubDiarizer()
+        if self.diarize_backend == "sherpa":
+            return SherpaDiarizer(self.diarize_model_dir)
+        if self.diarize_backend == "sortformer":
+            return SortformerDiarizer()
+        raise DiarizeUnavailable(
+            f"неизвестный бэкенд {self.diarize_backend!r}: {', '.join(DIARIZE_BACKENDS)}"
+        )
 
     def _diarize_turns(self, source: Any, duration_s: float) -> dict:
         """Повороты спикеров для транскрипции; никогда не бросает.
