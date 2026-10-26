@@ -1146,7 +1146,7 @@ export default function ClinicianView() {
       return <RemindersView cards={cards} version={reminderVersion} onChanged={bump} />;
     }
     if (section === "schedule") {
-      return <ScheduleView cards={cards} />;
+      return <ScheduleView />;
     }
     if (section === "dashboard") {
       return (

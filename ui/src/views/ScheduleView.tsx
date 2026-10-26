@@ -63,7 +63,21 @@ function gridStart(month: Date): Date {
   return addDays(first, -offset);
 }
 
-export default function ScheduleView({ cards }: { cards: PatientCard[] }) {
+/** Окно запроса — кусками по 31 дню: сервер отдаёт ≤ 200 строк на страницу (§4). */
+async function fetchWindow<T>(
+  fn: (from: string, to: string) => Promise<{ items: T[] }>,
+  from: Date,
+  to: Date,
+): Promise<T[]> {
+  const calls: Promise<{ items: T[] }>[] = [];
+  for (let start = from; start < to; start = addDays(start, 31)) {
+    const next = addDays(start, 31);
+    calls.push(fn(start.toISOString(), (next > to ? to : next).toISOString()));
+  }
+  return (await Promise.all(calls)).flatMap((page) => page.items);
+}
+
+export default function ScheduleView() {
   // «Сегодня» фиксируем на монтировании: полночь посреди приёма не должна прыгать.
   const [today] = useState(() => {
     const now = new Date();
@@ -73,6 +87,8 @@ export default function ScheduleView({ cards }: { cards: PatientCard[] }) {
   const [selected, setSelected] = useState(today);
   const [items, setItems] = useState<Appointment[]>([]);
   const [sessions, setSessions] = useState<ClinicalSession[]>([]);
+  const [patients, setPatients] = useState<PatientCard[]>([]);
+  const [rosterError, setRosterError] = useState("");
   const [version, setVersion] = useState(0);
   const [loadError, setLoadError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -89,13 +105,13 @@ export default function ScheduleView({ cards }: { cards: PatientCard[] }) {
     const to = addDays(gridFrom, GRID_DAYS);
     setLoading(true);
     Promise.all([
-      api.clinicianAppointments(gridFrom.toISOString(), to.toISOString()),
-      api.clinicianSessions(gridFrom.toISOString(), to.toISOString()),
+      fetchWindow(api.clinicianAppointments, gridFrom, to),
+      fetchWindow(api.clinicianSessions, gridFrom, to),
     ])
       .then(([apps, sess]) => {
         if (cancelled) return;
-        setItems(apps.items);
-        setSessions(sess.items);
+        setItems(apps);
+        setSessions(sess);
         setLoadError("");
       })
       .catch((e: unknown) => {
@@ -108,6 +124,24 @@ export default function ScheduleView({ cards }: { cards: PatientCard[] }) {
       cancelled = true;
     };
   }, [gridFrom, version]);
+
+  // Пациенты для записи — весь roster врача, без фильтра риска вкладки «Пациенты».
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .clinicianPatients()
+      .then((r) => {
+        if (cancelled) return;
+        setPatients(r.items);
+        setRosterError("");
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setRosterError(errText(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const byDay = useMemo(() => {
     const map = new Map<string, Appointment[]>();
@@ -147,8 +181,8 @@ export default function ScheduleView({ cards }: { cards: PatientCard[] }) {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (!patientId && cards.length > 0) setPatientId(cards[0].patient_id);
-  }, [cards, patientId]);
+    if (!patientId && patients.length > 0) setPatientId(patients[0].patient_id);
+  }, [patients, patientId]);
 
   const create = async () => {
     if (!patientId) {
@@ -384,10 +418,11 @@ export default function ScheduleView({ cards }: { cards: PatientCard[] }) {
                           <button
                             className="ghost"
                             onClick={() => {
-                              // Список записей несёт только флаг `has_session` — id сессии ищем по окну.
+                              // Список записей несёт только флаг `has_session`: сессию ищем
+                              // по окну, а если её нет в выдаче — start вернёт существующую.
                               const s = sessions.find((x) => x.appointment_id === a.id);
                               if (s) setSession(s);
-                              else setRowErr("Сессия не найдена в окне календаря");
+                              else start(a);
                             }}
                           >
                             Открыть приём
@@ -491,11 +526,16 @@ export default function ScheduleView({ cards }: { cards: PatientCard[] }) {
 
       <div className="card">
         <h2>Новый приём</h2>
+        {rosterError && (
+          <p className="error" role="alert">
+            Не удалось загрузить пациентов: {rosterError}
+          </p>
+        )}
         <div className="row">
           <label>
             Пациент
             <select value={patientId} onChange={(e) => setPatientId(e.target.value)}>
-              {cards.map((c) => (
+              {patients.map((c) => (
                 <option key={c.patient_id} value={c.patient_id}>
                   {c.fio ?? c.email}
                 </option>
@@ -550,7 +590,7 @@ export default function ScheduleView({ cards }: { cards: PatientCard[] }) {
         )}
         {formSaved && !formErr && <p className="small muted">Запись создана.</p>}
         <div className="row">
-          <button type="button" onClick={create} disabled={busy || !cards.length}>
+          <button type="button" onClick={create} disabled={busy || !patients.length}>
             {busy ? "Сохраняем…" : "Записать"}
           </button>
           <button type="button" className="ghost" onClick={() => setWalkIn((v) => !v)}>
@@ -563,7 +603,7 @@ export default function ScheduleView({ cards }: { cards: PatientCard[] }) {
               Пациент без записи
               <select value={walkPatient} onChange={(e) => setWalkPatient(e.target.value)}>
                 <option value="">— выберите —</option>
-                {cards.map((c) => (
+                {patients.map((c) => (
                   <option key={c.patient_id} value={c.patient_id}>
                     {c.fio ?? c.email}
                   </option>

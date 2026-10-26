@@ -203,6 +203,9 @@ export default function SessionPanel({
     setErr("");
     setNote("");
     try {
+      // Подтверждаем ровно то, что видит врач: approve уходит по последнему черновику,
+      // поэтому несохранённые правки сначала сохраняем (§4.4 PUT → approve).
+      await api.putProtocol(session.id, sections, sections.diagnosis.icd10.trim() || null);
       const p = await api.approveProtocol(session.id);
       setProtocol(p);
       setSections(withDefaults(base, p.sections));
