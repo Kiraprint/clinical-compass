@@ -3,6 +3,7 @@ import {
   api,
   AssistantThread,
   AssistantThreadDetail,
+  AssistantThreadMessage,
   KB_DESIGN_LABELS,
   KbWork,
   PatientCard,
@@ -185,8 +186,8 @@ export default function AssistantTab() {
     const targetId = detail.id;
     const seq = ++selectSeq.current;
     const text = input.trim();
-    // done уже сохранил ответ на сервере: при последующем сбое refetch не
-    // возвращаем вопрос в поле и не показываем два пузыря одновременно.
+    // done уже сохранил ответ на сервере, но detail ещё старый: потоковые
+    // пузыри держим до применения fresh, иначе ответ мигает в пустоту.
     const outcome = { done: false };
     setBusy(true);
     setStreaming(true);
@@ -204,6 +205,41 @@ export default function AssistantTab() {
           onToken: (t) => setStreamText((cur) => cur + t),
           onDone: (answer) => {
             outcome.done = true;
+            // Сразу кладём сохранённый ход в detail: refetch лишь заменит его
+            // серверной копией. Если refetch упадёт, ответ уже на экране и не
+            // дублируется при повторной загрузке треда.
+            const ts = new Date().toISOString();
+            const saved: AssistantThreadMessage[] = [
+              {
+                id: answer.message_ids[0] ?? `${targetId}-local-${seq}-q`,
+                role: "CLINICIAN",
+                content: text,
+                citations: [],
+                topic: null,
+                created_at: ts,
+              },
+              {
+                id: answer.message_ids[1] ?? `${targetId}-local-${seq}-a`,
+                role: "ASSISTANT",
+                content: answer.answer,
+                citations: answer.citations,
+                topic: answer.topic,
+                created_at: ts,
+              },
+            ];
+            setDetail((cur) => {
+              if (!cur || cur.id !== targetId) return cur;
+              // Повторная загрузка могла уже принести эти сообщения: не дублируем.
+              const have = new Set(cur.messages.map((m) => m.id));
+              const added = saved.filter((m) => !have.has(m.id));
+              if (added.length === 0) return cur;
+              return {
+                ...cur,
+                messages: [...cur.messages, ...added],
+                message_count: cur.message_count + added.length,
+                updated_at: ts,
+              };
+            });
             setStreaming(false);
             setPendingUser("");
             setStreamThreadId(null);
@@ -219,7 +255,8 @@ export default function AssistantTab() {
         },
       );
       const fresh = await api.assistantThread(targetId);
-      if (selectSeq.current === seq) setDetail(fresh); // врач не переключил тред
+      // По id, а не только по seq: врач мог уйти в другой тред и вернуться.
+      setDetail((cur) => (cur?.id === targetId ? fresh : cur));
       await refreshThreads();
     } catch (e: unknown) {
       if (!outcome.done) setInput(text); // не терять вопрос при обрыве

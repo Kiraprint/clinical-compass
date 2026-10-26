@@ -544,6 +544,6 @@ async def post_message_stream(
         else:
             result = item["answer"]
     if result is None:
-        raise RuntimeError("агент не вернул ответ")
+        raise Problem(500, "ASSISTANT_NO_ANSWER", "Ассистент не вернул ответ")
     payload = await _store_answer(db, clinician_id, turn, result, ip=ip)
     yield {"event": "done", "data": payload}

@@ -400,6 +400,11 @@ class AgentFactory:
         return {"answer": _answer_dict(state, result)}
 
     def build(self):
+        """Граф retrieve → answer.
+
+        Инвариант: `stream()` повторяет те же шаги; новый узел графа нужно
+        добавить и в поток, иначе batch и SSE разойдутся.
+        """
         if self._graph is None:
             graph = StateGraph(AgentState)
             graph.add_node("retrieve", self._retrieve)
