@@ -13,6 +13,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+import models
 from app import create_app
 from models import Registry, StubTranscriber
 
@@ -73,6 +74,7 @@ def test_transcribe_stub_shape(monkeypatch):
         "model",
         "device",
         "duration_s",
+        "diarized",
         "rtf",
         "language",
         "segments",
@@ -144,15 +146,79 @@ def test_segments_monotonic(monkeypatch, seconds):
     assert len(segments) == expected
 
 
-def test_diarize_degrades_honestly(monkeypatch):
+def test_diarize_stub_assigns_speakers(monkeypatch):
+    """Stub-диаризация: реплики получают A/B, метки и суммарные секунды."""
     app, _ = _app(monkeypatch)
     with TestClient(app) as client:
         response = _post(client, diarize="true")
     assert response.status_code == 200, response.text
     body = response.json()
+    assert body["diarized"] is True
+    assert body["degraded"] is False
+    labels = [segment["speaker"] for segment in body["segments"]]
+    assert labels, body
+    assert set(labels) == {"A", "B"}
+    # Stub чередует спикеров каждые 5 с: 12 с = три сегмента A, B, A.
+    assert labels == ["A", "B", "A"]
+    speakers = {item["id"]: item for item in body["speakers"]}
+    assert set(speakers) == {"A", "B"}
+    for item in body["speakers"]:
+        assert item["label"] is None  # роли назначает api, не сайдкар
+        assert item["segments"] > 0
+        assert item["seconds"] > 0
+    # Сумма секунд по спикерам равна сумме длительностей размеченных сегментов.
+    total = sum(segment["end"] - segment["start"] for segment in body["segments"])
+    assert sum(item["seconds"] for item in body["speakers"]) == pytest.approx(total, abs=0.01)
+
+
+def test_diarize_disabled_is_not_degraded(monkeypatch):
+    """CC_ML_DIARIZE=0: спикеров нет, но это решение конфига, а не сбой."""
+    monkeypatch.setenv("CC_ML_DIARIZE", "0")
+    app, _ = _app(monkeypatch)
+    with TestClient(app) as client:
+        response = _post(client, diarize="true")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["diarized"] is False
+    assert body["degraded"] is False
+    assert body["speakers"] == []
+    assert all(segment["speaker"] is None for segment in body["segments"])
+
+
+def test_diarize_failure_degrades_honestly(monkeypatch):
+    """Упавшая диаризация — 200 с diarized=false, а не 422/500."""
+
+    class Broken:
+        model_id = "broken"
+        device = "stub"
+
+        def diarize(self, audio, duration_s):
+            raise RuntimeError("модель развалилась")
+
+    monkeypatch.setattr(models, "StubDiarizer", Broken)
+    app, _ = _app(monkeypatch)
+    with TestClient(app) as client:
+        response = _post(client, diarize="true")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["diarized"] is False
     assert body["degraded"] is True
     assert body["speakers"] == []
     assert all(segment["speaker"] is None for segment in body["segments"])
+
+
+def test_diarize_missing_weights_degrades(monkeypatch):
+    """Нет весов (каталог пуст) — реестр деградирует, статус остаётся error."""
+    app, registry = _app(monkeypatch)
+    registry.stub = False  # как в проде: настоящий backend, но весов нет
+    registry.diarize_model_dir = "/nonexistent/diarize"
+    with TestClient(app) as client:
+        response = _post(client, diarize="true")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["diarized"] is False
+    assert body["degraded"] is True
+    assert registry.status()["models"]["diarize"]["status"] == "error"
 
 
 # --- ошибки ---------------------------------------------------------------

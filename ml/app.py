@@ -8,7 +8,7 @@ CC_ML_ALLOW_ANONYMOUS=1):
 - ``POST /v1/rerank`` {query, documents, top_k} -> {scores}
 - ``POST /v1/mask`` {text, names} -> {text, spans, model, degraded}
 - ``POST /v1/transcribe`` multipart {file, language=ru, diarize=false} ->
-  {model, device, duration_s, rtf, language, segments, speakers, degraded}
+  {model, device, duration_s, rtf, language, segments, speakers, diarized, degraded}
 - ``GET  /health`` -> {status, device, models, error: bool}
 
 ``model`` в ответе маскирования — ``hybrid`` только когда NER реально
@@ -19,8 +19,11 @@ CC_ML_ALLOW_ANONYMOUS=1):
 ``asr_disabled``; пока веса ASR грузятся — 503 ``model_loading`` (ответ
 отдаётся сразу, без ожидания замка загрузчика); сбой декодирования на самом
 аудио — 422 ``asr_failed``. Код языка сверяется с ``ASR_LANGUAGES`` до
-бэкенда (иначе 400). Диаризация не реализована, поэтому ``diarize=true`` —
-всегда ``degraded=true`` со ``speaker: null`` (см. ml/README.md).
+бэкенда (иначе 400). ``diarize=true`` (FR-42) размечивает реплики по
+спикерам через sherpa-onnx (pyannote segmentation 3.0 + 3D-Speaker CAM++,
+ONNX, CPU, без HF-гейта); метки кластеров — ``A``/``B``, роль врач/пациент
+назначает api. Нет весов/диаризация упала — 200 с ``diarized=false``,
+``degraded=true`` и ``speaker: null`` (см. ml/README.md).
 
 Ошибки всегда структурированы: ``{"detail": {"code": ..., "message": ...}}``.
 Пока модели грузятся — 503 ``model_loading`` (с Retry-After); упавшая
@@ -326,9 +329,12 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
         """Русская расшифровка аудио сессии (§4.3 «Клинические сессии»).
 
         Аудио читается целиком: потолок — CC_ML_ASR_MAX_MB (200 МБ ≈ 3 часа
-        opus), размер проверяется и по Content-Length, и по факту. Диаризация
-        не реализована (веса pyannote gated): ``diarize=true`` возвращает
-        ``degraded=true``, спикеры — null и пустой список.
+        opus), размер проверяется и по Content-Length, и по факту.
+
+        ``diarize=true`` (FR-42) добавляет разметку реплик по спикерам:
+        кластеры ``A``/``B`` (роли врач/пациент назначает api, не сайдкар).
+        Нет весов или диаризация упала — ответ всё равно 200: ``diarized=false``,
+        ``degraded=true``, ``speaker: null`` (демо не должно падать).
         """
         if not registry.asr_enabled:
             raise ApiError(

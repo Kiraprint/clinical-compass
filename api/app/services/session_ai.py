@@ -58,6 +58,18 @@ TRANSCRIPT_MAX_BYTES = 5 * 1024 * 1024  # §4.6: потолок JSON расши�
 PART_HEAD_LIMIT = 16 * 1024  # заголовки одной части multipart: больше не бывает
 REAP_GRACE = 2  # запас реапера к CC_SESSION_AI_TIMEOUT: ASR + маски + запись
 
+# FR-42: роли участников приёма. Метки кластеров (A/B) — от сайдкара, роли
+# назначает api: первый заговоривший = врач (врач обычно начинает приём),
+# но это допущение, поэтому флаг `speaker_roles_assumed` виден клиенту.
+ROLE_CLINICIAN = "clinician"
+ROLE_PATIENT = "patient"
+ROLE_UNKNOWN = "unknown"
+SPEAKER_ROLES = (ROLE_CLINICIAN, ROLE_PATIENT, ROLE_UNKNOWN)
+# Роли для LLM: латинские метки кластеров модель путает с участниками, а
+# «Врач:/Пациент:» сразу задаёт, чья это реплика (§4.3). `unknown` сюда не
+# входит: это не роль, а «не знаю» — ниже он подписывается меткой кластера.
+ROLE_RU = {ROLE_CLINICIAN: "Врач", ROLE_PATIENT: "Пациент"}
+
 # §4.3: допустимые типы аудио. Проверяем и mime, и расширение — браузеры шлют
 # `application/octet-stream` для webm/opus, а имя файла приходит от клиента.
 MIME_BY_EXT = {
@@ -736,7 +748,12 @@ async def _mark_failed(session_id: uuid.UUID, code: str) -> None:
 
 
 def _normalize_segments(result: dict) -> list[dict]:
-    """Сегменты сайдкара → `[{start, end, speaker, text}]` (пустые выбрасываем)."""
+    """Сегменты сайдкара → `[{start, end, speaker, role, text}]`.
+
+    `speaker` — метка кластера от диаризации (`A`/`B`) или None, если сайдкар
+    не разделил говорящих; `role` заполняет `_apply_roles` по карте ролей.
+    Пустые сегменты выбрасываем: у них нет ни текста, ни времени.
+    """
     segments: list[dict] = []
     for item in result.get("segments") or []:
         if not isinstance(item, dict):
@@ -750,10 +767,44 @@ def _normalize_segments(result: dict) -> list[dict]:
                 "start": round(float(item.get("start") or 0.0), 3),
                 "end": round(float(item.get("end") or 0.0), 3),
                 "speaker": speaker if isinstance(speaker, str) else None,
+                "role": None,
                 "text": text.strip(),
             }
         )
     return segments
+
+
+def _speaker_labels(segments: list[dict]) -> list[str]:
+    """Метки спикеров в порядке первого появления (хронология сегментов)."""
+    labels: list[str] = []
+    for segment in segments:
+        speaker = segment.get("speaker")
+        if isinstance(speaker, str) and speaker not in labels:
+            labels.append(speaker)
+    return labels
+
+
+def _default_speaker_roles(result: dict, segments: list[dict]) -> tuple[dict, bool]:
+    """Роли по умолчанию → `(roles, assumed)`.
+
+    Ровно два кластера: первый заговоривший — врач (врач открывает приём),
+    `assumed=true` — врач может переставить PATCH'ем. Любое другое число
+    кластеров или отсутствие диаризации — роли не назначаем (`{}`, false):
+    угадывать роль при трёх голосах опаснее, чем показать «Говорящий A».
+    """
+    if not result.get("diarized"):
+        return {}, False
+    labels = _speaker_labels(segments)
+    if len(labels) != 2:
+        return {}, False
+    return {labels[0]: ROLE_CLINICIAN, labels[1]: ROLE_PATIENT}, True
+
+
+def _apply_roles(segments: list[dict], roles: dict[str, str]) -> None:
+    """Проставить `role` каждому сегменту по карте «метка → роль» (in place)."""
+    for segment in segments:
+        speaker = segment.get("speaker")
+        segment["role"] = roles.get(speaker) if isinstance(speaker, str) else None
 
 
 def _mask_segments(
@@ -813,6 +864,10 @@ async def _pipeline(session_id: uuid.UUID) -> None:
         await anyio.to_thread.run_sync(lambda: plain_path.unlink(missing_ok=True))
 
     segments = _normalize_segments(result)
+    # FR-42: роли считаем ДО маскирования и пишем в артефакт вместе с метками
+    # кластеров — расшифровка без ролей бесполезна для чтения и для LLM.
+    speaker_roles, roles_assumed = _default_speaker_roles(result, segments)
+    _apply_roles(segments, speaker_roles)
     masked, counts, depersonalized = await anyio.to_thread.run_sync(
         lambda: _mask_segments(segments, names)
     )
@@ -858,6 +913,11 @@ async def _pipeline(session_id: uuid.UUID) -> None:
         row.mask_categories = counts
         # Флаг честный: true только если маскировал ML-детектор, а не regex.
         row.depersonalized = depersonalized
+        # FR-42: диаризация. `assumed` — роли назначены по умолчанию; PATCH
+        # врача сбрасывает флаг. Пустые роли храним как NULL, а не {}.
+        row.diarized = bool(result.get("diarized"))
+        row.speaker_roles = dict(speaker_roles) or None
+        row.speaker_roles_assumed = bool(roles_assumed)
 
         session.ai_status = "transcribed"
         session.ai_error = None
@@ -912,6 +972,11 @@ async def _transcript_payload(db: AsyncSession, session: ClinicalSession) -> dic
         "duration_sec": row.duration_sec,
         "mask_categories": row.mask_categories or {},
         "depersonalized": row.depersonalized,
+        # FR-42: без diarized/roles UI не отличит «разделили» от «модель
+        # недоступна» и не покажет честную плашку.
+        "diarized": bool(row.diarized),
+        "speaker_roles": row.speaker_roles or {},
+        "speaker_roles_assumed": bool(row.speaker_roles_assumed),
     }
 
 
@@ -920,6 +985,98 @@ async def transcript(db: AsyncSession, clinician_id, session_id: uuid.UUID) -> d
     _ensure_enabled()
     session = await require_session(db, clinician_id, session_id)
     await require_patient_access(db, clinician_id, session.patient_id)
+    return await _transcript_payload(db, session)
+
+
+async def set_speaker_roles(
+    db: AsyncSession,
+    clinician_id,
+    session_id: uuid.UUID,
+    roles: dict[str, str],
+    *,
+    ip: str | None = None,
+) -> dict:
+    """PATCH …/transcript/speakers: врач подтвердил, кто врач, а кто пациент.
+
+    Роли пишутся и в метаданные (`speaker_roles`), и в артефакт сегментов
+    (поле `role`): артефакт — единственный источник текста, и разъехавшиеся
+    роли дали бы разную расшифровку в UI и в черновике протокола. Текст при
+    этом не меняется: перешифровывается тот же деперсонализированный JSON.
+
+    `assumed=false` после PATCH: роли больше не догадка api, а выбор врача.
+    """
+    _ensure_enabled()
+    session = await require_session(db, clinician_id, session_id)
+    await require_patient_access(db, clinician_id, session.patient_id)
+    row = await _transcript_row(db, session.id)
+    if row is None or row.segments_artifact_id is None:
+        raise Problem(404, "TRANSCRIPT_MISSING", "Расшифровки ещё нет")
+    values = list(roles.values())
+    if any(value not in SPEAKER_ROLES for value in values):
+        raise Problem(
+            422,
+            "SPEAKER_ROLE_INVALID",
+            "Роль участника: clinician, patient или unknown",
+        )
+    if len(set(values)) != len(values):
+        raise Problem(
+            422, "SPEAKER_ROLE_DUPLICATE", "Роли должны быть разными: врач и пациент"
+        )
+    artifact = await db.get(DocumentArtifact, row.segments_artifact_id)
+    if artifact is None:
+        raise Problem(404, "TRANSCRIPT_MISSING", "Расшифровки ещё нет")
+    raw = await anyio.to_thread.run_sync(artifacts.get_bytes, artifact)
+    try:
+        segments = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise Problem(500, "ARTIFACT_CORRUPT", "Артефакт расшифровки повреждён") from None
+    if not isinstance(segments, list):
+        raise Problem(500, "ARTIFACT_CORRUPT", "Артефакт расшифровки повреждён")
+    unknown = sorted(set(roles) - set(_speaker_labels(segments)))
+    if unknown:
+        # Метка, которой нет в этой расшифровке, — ошибка клиента, а не 200:
+        # иначе UI показал бы роли, которых в тексте нет.
+        raise Problem(
+            422,
+            "SPEAKER_UNKNOWN",
+            f"Метки {', '.join(unknown)} нет в расшифровке",
+        )
+
+    _apply_roles(segments, roles)
+    payload = json.dumps(segments, ensure_ascii=False).encode("utf-8")
+    if len(payload) > TRANSCRIPT_MAX_BYTES:
+        raise Problem(413, "TRANSCRIPT_TOO_LARGE", "Расшифровка больше 5 МБ")
+    updated = await anyio.to_thread.run_sync(
+        lambda: artifacts.put_bytes(
+            "transcript", payload, session_id=session.id, mime="application/json"
+        )
+    )
+    db.add(updated)
+    await db.flush()
+    previous_id = row.segments_artifact_id
+    row.segments_artifact_id = updated.id
+    row.speaker_roles = dict(roles)
+    row.speaker_roles_assumed = False
+    # §2: только id сессии; роли — в ответе и метаданных, не в журнале.
+    await audit.record(
+        db,
+        clinician_id,
+        "SESSION_TRANSCRIPT_SPEAKERS",
+        "clinical_session",
+        str(session.id),
+        ip=ip,
+    )
+    await db.commit()
+
+    if previous_id and previous_id != updated.id:
+        old = await db.get(DocumentArtifact, previous_id)
+        if old is not None:
+            path = old.path
+            await db.delete(old)
+            await db.commit()
+            await anyio.to_thread.run_sync(
+                lambda: artifacts.remove(SimpleNamespace(path=path, id=previous_id))
+            )
     return await _transcript_payload(db, session)
 
 
@@ -939,9 +1096,23 @@ def _transcript_text(segments: list[dict]) -> str:
         text = segment.get("text")
         if not isinstance(text, str) or not text.strip():
             continue
-        speaker = segment.get("speaker") or "реплика"
-        lines.append(f"[{_stamp(segment.get('start') or 0)}] {speaker}: {text.strip()}")
+        lines.append(f"[{_stamp(segment.get('start') or 0)}] {_speaker_name(segment)}: {text.strip()}")
     return "\n".join(lines)
+
+
+def _speaker_name(segment: dict) -> str:
+    """Подпись реплики для LLM/логов: роль по-русски, метка кластера — иначе.
+
+    Латиница («A:») путала модель: она начинала приписывать реплики не тому
+    участнику, поэтому роль идёт как «Врач:/Пациент:» (§4.3).
+    """
+    role = segment.get("role")
+    if role in ROLE_RU:
+        return ROLE_RU[role]
+    speaker = segment.get("speaker")
+    if isinstance(speaker, str) and speaker:
+        return f"Говорящий {speaker}"
+    return "Говорящий" if role == ROLE_UNKNOWN else "реплика"
 
 
 def _text(value) -> str:

@@ -8,8 +8,10 @@
 from __future__ import annotations
 
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Request
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import services
@@ -19,6 +21,15 @@ from app.models import User
 
 router = APIRouter(tags=["sessions"])
 
+# FR-42 (docs/18 §4.3): роли участников. `Literal` — чтобы мусор в теле давал
+# 422 VALIDATION до обращения к БД; `unknown` нужен, когда врач не уверен.
+SpeakerRole = Literal["clinician", "patient", "unknown"]
+
+
+class SpeakerRolesBody(BaseModel):
+    """`{"roles": {"A": "clinician", "B": "patient"}}` — метка кластера → роль."""
+
+    roles: dict[str, SpeakerRole] = Field(min_length=1, max_length=2)
 
 def _ip(request: Request) -> str | None:
     return request.client.host if request.client else None
@@ -62,6 +73,25 @@ async def transcript(
     return await services.session_ai.transcript(db, user.id, session_id)
 
 
+@router.patch("/clinician/sessions/{session_id}/transcript/speakers")
+async def set_speaker_roles(
+    session_id: uuid.UUID,
+    body: SpeakerRolesBody,
+    request: Request,
+    user: User = Depends(require_clinician),
+    db: AsyncSession = Depends(get_db),
+):
+    """Роли реплик: 200 — расшифровка с ролями; 422 дубли/чужие метки; 404/403.
+
+    PATCH, а не PUT: врач меняет только разметку участников, текст расшифровки
+    и метрики маскирования остаются прежними. После вызова
+    `speaker_roles_assumed=false` — роли подтверждены человеком.
+    """
+    return await services.session_ai.set_speaker_roles(
+        db, user.id, session_id, dict(body.roles), ip=_ip(request)
+    )
+
+
 @router.post("/clinician/sessions/{session_id}/protocol/draft", status_code=201)
 async def draft_protocol(
     session_id: uuid.UUID,
@@ -71,3 +101,4 @@ async def draft_protocol(
 ):
     """Черновик протокола ИИ: 201 Protocol (`source='llm'`, `needs_review`)."""
     return await services.session_ai.draft(db, user.id, session_id, ip=_ip(request))
+

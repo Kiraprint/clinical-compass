@@ -23,3 +23,9 @@ av==18.*
 onnxruntime==1.31.0
 # Мультипарт-разбор тела /v1/transcribe (FastAPI Form/File без него не работает).
 python-multipart==0.0.32
+# Диаризация (FR-42): sherpa-onnx считает ONNX-модели собственным рантаймом
+# (колесо везёт свой onnxruntime, CPU; GPU-сборки в PyPI нет и не нужна —
+# RTF 0.086 на двух потоках). Веса — не с HF, а из релизов k2-fsa:
+# ml-warmup качает pyannote segmentation 3.0 (MIT, 6 МБ) и 3D-Speaker
+# CAM++ zh/en (Apache-2.0, 28 МБ) в /models/diarize, sha256 зафиксирован.
+sherpa-onnx==2.0.0

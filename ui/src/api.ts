@@ -319,10 +319,14 @@ export interface Delivery {
   registered_at: string | null;
   updated_at: string | null;
 }
+/** FR-42: роль участника. `unknown` — врач явно сказал «не знаю, кто это». */
+export type SpeakerRole = "clinician" | "patient" | "unknown";
 export interface TranscriptSegment {
   start: number;
   end: number;
+  /** Метка кластера диаризации (`A`/`B`) или null, если говорящих не разделили. */
   speaker: string | null;
+  role: SpeakerRole | null;
   text: string;
 }
 /** §4.3: расшифровка уже деперсонализирована — исходной речи сервер не хранит. */
@@ -332,6 +336,15 @@ export interface SessionTranscript {
   duration_sec: number | null;
   mask_categories: Record<string, number>;
   depersonalized: boolean;
+  /**
+   * false — сайдкар не разделил говорящих (модель недоступна/выключена).
+   * Поля необязательны: API на шаг старше бандла их не присылает.
+   */
+  diarized?: boolean;
+  /** Метка кластера → роль; пусто, когда роли не назначались. */
+  speaker_roles?: Record<string, SpeakerRole>;
+  /** true — роли проставлены автоматически (первый заговоривший = врач). */
+  speaker_roles_assumed?: boolean;
 }
 export interface AudioUploadResult {
   artifact_id: string;
@@ -858,6 +871,12 @@ export const api = {
     }),
   getTranscript: (sessionId: string) =>
     req<SessionTranscript>(`/api/v1/clinician/sessions/${sessionId}/transcript`),
+  /** §4.3: роли участников (`{"A":"clinician","B":"patient"}`); 422 на дубли. */
+  setSpeakerRoles: (sessionId: string, roles: Record<string, SpeakerRole>) =>
+    req<SessionTranscript>(
+      `/api/v1/clinician/sessions/${sessionId}/transcript/speakers`,
+      { method: "PATCH", body: JSON.stringify({ roles }) },
+    ),
   /** §4.3: черновик ИИ (source='llm', needs_review); подтверждённый протокол → 409. */
   draftProtocol: (sessionId: string) =>
     req<SessionProtocol>(`/api/v1/clinician/sessions/${sessionId}/protocol/draft`, {
