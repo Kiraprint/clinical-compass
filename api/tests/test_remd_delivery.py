@@ -159,6 +159,11 @@ def test_callback_requires_token(client, remd):
     unknown = dict(payload, response_to_request_id="00000000-0000-0000-0000-000000000000")
     assert _callback(client, unknown).status_code == 404
 
+    other_message = dict(payload, message_type="getMetadataResult")
+    rejected = _callback(client, other_message)
+    assert rejected.status_code == 400
+    assert rejected.json()["code"] == "VALIDATION_ERROR"
+
 
 def test_repeated_submit_returns_existing_delivery(client, remd):
     mock, sink = remd

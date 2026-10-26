@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 from app.config import settings
 
 DEMO_SECRETS = frozenset({"remd-secret"})  # креды remd-mock из compose
+DEMO_CALLBACK_TOKENS = frozenset({"remd-callback-token"})  # токен callback из compose
 CALLBACK_HEADER = "X-Remd-Token"
 
 
@@ -110,10 +111,15 @@ class RemdConfig:
             raise RemdConfigError(
                 "CC_REMD_CALLBACK_URL: http допустим только при CC_REMD_ALLOW_INSECURE=true"
             )
-        if self.client_secret in DEMO_SECRETS and not self.allow_insecure:
+        if not self.allow_insecure and (
+            self.client_secret in DEMO_SECRETS
+            or self.callback_token in DEMO_CALLBACK_TOKENS
+        ):
+            # Оба демо-значения есть в git (compose): вне контура мока это
+            # известный секрет, а не секрет.
             raise RemdConfigError(
-                "CC_REMD_CLIENT_SECRET: демо-секрет мока допустим только с "
-                "CC_REMD_ALLOW_INSECURE=true"
+                "CC_REMD_CLIENT_SECRET/CC_REMD_CALLBACK_TOKEN: демо-значения из git "
+                "допустимы только с CC_REMD_ALLOW_INSECURE=true"
             )
         if self.document_kind <= 0:
             raise RemdConfigError("CC_REMD_DOCUMENT_KIND должен быть положительным кодом НСИ 1520")

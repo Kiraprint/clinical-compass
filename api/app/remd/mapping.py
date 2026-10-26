@@ -56,7 +56,8 @@ def snils_valid(snils: str | None) -> bool:
     total = sum(int(d) * w for d, w in zip(digits[:9], _SNILS_WEIGHTS))
     if total > 101:
         total %= 101
-    if total == 100:
+    if total in (100, 101):
+        # 100/101 → контрольное число «00» (алгоритм ПФР).
         total = 0
     return total == int(digits[9:])
 

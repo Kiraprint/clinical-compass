@@ -60,6 +60,7 @@ _registry: dict[str, dict] = {}  # request_id → запись реестра
 _documents: dict[str, dict] = {}  # local_document_uid → {sha256, request_id}
 _document_numbers: dict[tuple, str] = {}  # (number, kind, snils) → local_document_uid
 _callbacks: dict[str, dict] = {}  # request_id → последний отправленный callback
+_requests: dict[str, dict] = {}  # request_id → get-metadata/search (не документы)
 _register_calls = 0  # сколько раз вызывали registerDocument (ретраи клиента)
 
 
@@ -74,6 +75,7 @@ def reset_state() -> None:
         _documents.clear()
         _document_numbers.clear()
         _callbacks.clear()
+        _requests.clear()
 
 def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
@@ -152,7 +154,7 @@ def _unauthorized() -> JSONResponse:
 # --- инъекция сбоев ----------------------------------------------------------
 
 
-def _simulate(request: Request, request_id: str | None = None) -> JSONResponse | None:
+async def _simulate(request: Request, request_id: str | None = None) -> JSONResponse | None:
     """`?simulate=500|429|timeout` — как в моке ЕМИАС (docs/06 §3)."""
     mode = request.query_params.get("simulate")
     if not mode:
@@ -163,7 +165,9 @@ def _simulate(request: Request, request_id: str | None = None) -> JSONResponse |
         return _error(429, "RATE_LIMITED", "simulated quota", request_id,
                       headers={"Retry-After": "1"})
     if mode == "timeout":
-        time.sleep(max(0.0, _env_float("CC_REMD_MOCK_TIMEOUT_S", 2.0)))
+        # Не блокируем loop мока: иначе «таймаут» одного запроса останавливает
+        # и обработку callback'ов.
+        await asyncio.sleep(max(0.0, _env_float("CC_REMD_MOCK_TIMEOUT_S", 2.0)))
         return _error(504, "INTERNAL_ERROR", "simulated timeout", request_id)
     return None
 
@@ -264,7 +268,7 @@ def _callback_payload(entry: dict, message_type: str) -> dict:
 def _deliver(request_id: str) -> bool:
     """Доставить последний callback: настоящий HTTP POST, ретраи с backoff."""
     with _lock:
-        entry = _registry.get(request_id)
+        entry = _registry.get(request_id) or _requests.get(request_id)
         payload = _callbacks.get(request_id)
     if entry is None or payload is None:
         return False
@@ -273,8 +277,8 @@ def _deliver(request_id: str) -> bool:
         with _lock:
             entry["callback_error"] = "callback_url_missing"
         return False
-    attempts = max(1, _env_int("CC_REMD_MOCK_CALLBACK_ATTEMPTS", 3))
-    base_delay = max(0.0, _env_float("CC_REMD_MOCK_CALLBACK_BACKOFF_S", 0.05))
+    attempts = max(1, _env_int("CC_REMD_MOCK_CALLBACK_ATTEMPTS", 5))
+    base_delay = max(0.0, _env_float("CC_REMD_MOCK_CALLBACK_BACKOFF_S", 0.2))
     body = json.dumps(payload, ensure_ascii=False).encode()
     headers = {"Content-Type": "application/json"}
     token = _env("CC_REMD_MOCK_CALLBACK_TOKEN", "")
@@ -358,7 +362,7 @@ async def register_document(request: Request, tasks: BackgroundTasks):
         return _error(400, "VALIDATION_ERROR", "тело должно быть объектом")
     request_id = body.get("request_id")
 
-    simulated = _simulate(request, request_id) or _forced_fault() or _fail_first()
+    simulated = await _simulate(request, request_id) or _forced_fault() or _fail_first()
     if simulated is not None:
         return simulated
 
@@ -446,7 +450,7 @@ async def get_metadata(request: Request, tasks: BackgroundTasks):
         return _unauthorized()
     body = await request.json()
     request_id = body.get("request_id")
-    simulated = _simulate(request, request_id) or _forced_fault()
+    simulated = await _simulate(request, request_id) or _forced_fault()
     if simulated is not None:
         return simulated
     emdr_id = str(body.get("emdr_id") or "")
@@ -457,7 +461,7 @@ async def get_metadata(request: Request, tasks: BackgroundTasks):
         reply = dict(entry)
         reply["request_id"] = str(request_id or uuid.uuid4())
         _callbacks[reply["request_id"]] = _callback_payload(reply, "getMetadataResult")
-        _registry[reply["request_id"]] = reply
+        _requests[reply["request_id"]] = reply
     _queue(reply["request_id"], tasks)
     return _accepted(reply["request_id"])
 
@@ -468,7 +472,7 @@ async def search_registry_item(request: Request, tasks: BackgroundTasks):
         return _unauthorized()
     body = await request.json()
     request_id = body.get("request_id")
-    simulated = _simulate(request, request_id) or _forced_fault()
+    simulated = await _simulate(request, request_id) or _forced_fault()
     if simulated is not None:
         return simulated
     snils = str((body.get("patient") or {}).get("snils") or "")
@@ -495,7 +499,7 @@ async def search_registry_item(request: Request, tasks: BackgroundTasks):
             "updated_at": _now(),
             "items": items,
         }
-        _registry[reply_id] = reply
+        _requests[reply_id] = reply
         _callbacks[reply_id] = _callback_payload(reply, "searchRegistryItemResult")
     _queue(reply_id, tasks)
     return _accepted(reply_id)

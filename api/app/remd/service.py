@@ -271,17 +271,25 @@ async def submit(
 # --- callback ----------------------------------------------------------------
 
 
-async def callback(db: AsyncSession, payload: dict, token: str | None) -> dict:
-    """Приём `registerDocumentResult`. Идемпотентно, без клинической сессии."""
+def check_callback_token(token: str | None) -> RemdConfig:
+    """Гейт callback'а: включённая интеграция + constant-time сверка секрета."""
     cfg = RemdConfig.from_settings()
     if not cfg.enabled:
         raise Problem(
             503, "EMIAS_DISABLED", "Передача в ЕМИАС выключена (CC_REMD_ENABLED=false)"
         )
-    if not cfg.callback_token or not hmac.compare_digest(
-        token or "", cfg.callback_token
-    ):
+    if not cfg.callback_token or not hmac.compare_digest(token or "", cfg.callback_token):
         raise Problem(401, "UNAUTHORIZED", "Неверный callback-токен")
+    return cfg
+
+
+async def callback(db: AsyncSession, payload: dict, token: str | None) -> dict:
+    """Приём `registerDocumentResult`. Идемпотентно, без клинической сессии."""
+    cfg = check_callback_token(token)
+    if payload.get("message_type") != "registerDocumentResult":
+        # Callback-эндпоинт принимает только результат регистрации: иначе
+        # getMetadataResult мог бы перевести доставку в registered.
+        raise Problem(400, "VALIDATION_ERROR", "Ожидается registerDocumentResult")
     request_id = str(payload.get("response_to_request_id") or "").strip()
     if not request_id:
         raise Problem(400, "VALIDATION_ERROR", "Нет response_to_request_id")

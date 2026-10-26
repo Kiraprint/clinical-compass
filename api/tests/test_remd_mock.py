@@ -289,3 +289,20 @@ def test_registry_lookup(api):
     assert item.status_code == 200
     assert item.json()["status"] == "VALIDATING"
     assert api.get("/remd/v1/registry/nope").status_code == 404
+
+
+def test_metadata_request_is_not_a_registry_item(api):
+    """get-metadata не должен выглядеть зарегистрированным документом в реестре."""
+    token = _token(api)
+    request_id = _register(api, token, envelope()).json()["request_id"]
+    emdr_id = remd_mock._registry[request_id]["emdr_id"]
+
+    reply = api.post(
+        "/remd/v1/get-metadata/",
+        json={"lpu_uid": "1.2.643.5.1.13.13.12.2.77.1.1", "emdr_id": emdr_id},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert reply.status_code == 202
+    assert reply.json()["request_id"] not in remd_mock._registry
+    assert reply.json()["request_id"] in remd_mock._requests
+    assert api.get(f"/remd/v1/registry/{emdr_id}").status_code == 200
