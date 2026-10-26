@@ -6,7 +6,7 @@
 
 ## 1. Стратегия
 
-- Пирамида (фактически достигнуто на 2026-10-25, см. `core/tests` + `api/tests` + `ml/tests` + `e2e/tests`): unit (ядро) 187, integration (API+БД) 744 (из них 78 — обогащение КБ, FR-20; 18 — rate limiter на общем Redis-счётчике, docs/03 §12; 43 — деперсонализация/NER/remote, docs/12; 9 — клиент ML-сайдкара, docs/08 §4; 10 — пациентский кабинет и FR-34 в `test_patient_ux.py`; 24 — retrieval: чанкер/окно реранка/remote-эмбеддер/порог пула, docs/08 §3-4; 8 — персональное ревью статей врачом, FR-36; 14 — анамнез и изоляция росписи, FR-37; 4 — маршрутизация двух тем на вопрос (FR-14); 2 — риск-паттерн чек-ина self_harm/suicidal и risk_assessed (docs/16 §2); 1 — fulltext-ссылка в библиотеке врача (FR-36); 1 — идемпотентность сида и сохранность реестра КБ при деплое (docs/03 §13)), ML-сайдкар в stub-режиме (без БД/GPU/torch) 30, e2e (UI-флоу) 46.
+- Пирамида (фактически достигнуто на 2026-10-25, см. `core/tests` + `api/tests` + `ml/tests` + `e2e/tests`): unit (ядро) 187, integration (API+БД) 773 (из них 78 — обогащение КБ, FR-20; 18 — rate limiter на общем Redis-счётчике, docs/03 §12; 43 — деперсонализация/NER/remote, docs/12; 9 — клиент ML-сайдкара, docs/08 §4; 10 — пациентский кабинет и FR-34 в `test_patient_ux.py`; 24 — retrieval: чанкер/окно реранка/remote-эмбеддер/порог пула, docs/08 §3-4; 8 — персональное ревью статей врачом, FR-36; 14 — анамнез и изоляция росписи, FR-37; 29 — календарь приёмов, сессии и протокол приёма, FR-38/39 (`test_sessions_*.py`); 4 — маршрутизация двух тем на вопрос (FR-14); 2 — риск-паттерн чек-ина self_harm/suicidal и risk_assessed (docs/16 §2); 1 — fulltext-ссылка в библиотеке врача (FR-36); 1 — идемпотентность сида и сохранность реестра КБ при деплое (docs/03 §13)), ML-сайдкар в stub-режиме (без БД/GPU/torch) 30, e2e (UI-флоу) 46.
 - Ядро: 100% детерминированные чистые функции — табличные параметризованные тесты порогов.
 - Интеграция: реальные HTTP-запросы к тестовому Postgres (отдельная БД), не мок-эхо.
 - Запрещены тесты «на копирование»: только поведение контрактов (вход → выход/инвариант/ошибка).
@@ -326,6 +326,31 @@
 | `test_contacts_include_fio_and_email` | пациент с ФИО | `GET /profile/contacts` | в ответе `fio` и `email` (только self-service) |
 
 `test_adverse_events.py::test_patient_report_has_no_severity_until_clinician_verifies`: пациент шлёт НЯ без `severity` → 201 и `severity: null` в БД, врач `PATCH` с обязательной `severity=moderate` подтверждает (без неё — 422 `SEVERITY_REQUIRED`, FR-34). `test_screening.py::test_finish_incomplete_422`: неполный набор (7 из 8 пунктов) → 422 `VALIDATION`.
+
+### 3.1.2 Клинические сессии и протокол приёма (FR-38/39, `test_sessions_*.py`)
+
+| Тест | Given | When | Then |
+|---|---|---|---|
+| `test_calendar_requires_clinician_role` | пациент с токеном | `GET /clinician/appointments` | 403 `ROLE_MISMATCH` |
+| `test_roster_gate_and_consent` | пациент вне roster / пациент без согласия | календарь и `POST /appointments` | 403 `NO_ROSTER` / 403 `CONSENT_REQUIRED` |
+| `test_slot_conflict_and_cancel_frees_slot` | приём 50 мин | второй приём внахлёст; затем отмена первого | 409 `SLOT_CONFLICT`; после отмены слот свободен |
+| `test_terminal_appointment_not_rescheduled_and_not_started` | запись в статусе `no_show` | `PATCH starts_at`, `POST …/start` | 409 `APPOINTMENT_NOT_ACTIVE` в обоих случаях |
+| `test_start_appointment_is_idempotent` | запись календаря | два `POST …/start` | 201 и 200 с тем же `session_id`, `has_session=true` |
+| `test_offline_session_without_appointment` | пациент roster | `POST /clinician/sessions` без `appointment_id` | 201, `appointment_id=null`, вторая сессия разрешена |
+| `test_session_idor_returns_404` | сессия первого врача | запросы второго врача | 404 `SESSION_NOT_FOUND` на GET/finish/PATCH |
+| `test_finish_creates_exactly_one_visit` | сессия + подтверждённый протокол | `finish` дважды | ровно один `visits` (по `session_id`), сводка протокола в `notes` |
+| `test_session_detail_contains_protocol_and_artifacts` | сессия с протоколом | `GET /sessions/{id}` | `protocol {version,status}`, `artifacts=[]`, `signature/delivery=null` |
+| `test_audit_rows_written_for_write_paths` | запись/старт/правка/finish | — | в `audit_log` есть `APPOINTMENT_CREATE/UPDATE`, `SESSION_START/FINISH`; текста нет |
+| `test_put_creates_draft_and_stores_ciphertext` | `PUT …/protocol` | сырой `SELECT sections_cipher` | `version=1`, `draft`, в БД bytea без plaintext и имени раздела |
+| `test_section_limits_and_icd10` | разделы сверх §5.2 | `PUT …/protocol` | 422 `PROTOCOL_SECTION_TOO_LONG` / `PROTOCOL_ICD10_INVALID` |
+| `test_approve_requires_mandatory_sections` | заполнены только жалобы | `approve` | 409 `PROTOCOL_NOT_READY` со списком пустых разделов |
+| `test_approve_hashes_canonical_json_and_locks` | полный протокол | `approve`, затем `PUT` | `content_sha256` = sha256 канонического JSON; 409 `PROTOCOL_LOCKED` |
+| `test_edit_after_signed_creates_new_version` | версия 1 в статусе `signed` | `PUT…/protocol` | версия 2 `draft`, версия 1 `superseded`, approve новой версии |
+| `test_protocol_access_gates` | чужая сессия; отзыв согласия | `GET/PUT/approve` | 404 `SESSION_NOT_FOUND`; после отзыва 403 `CONSENT_REQUIRED` |
+| `test_roundtrip_format_and_no_plaintext_on_disk` | байты расшифровки | `put_bytes`/`get_bytes` | `CCART1`+nonce, plaintext на диске отсутствует, sha256 по шифротексту |
+| `test_tampered_file_is_detected` | файл артефакта | подмена одного байта | 500 `ARTIFACT_CORRUPT` (не молчаливый мусор) |
+| `test_path_outside_root_rejected` / `test_missing_file_reported` | путь из БД / удалённый файл | `get_bytes` | `ARTIFACT_CORRUPT` / `ARTIFACT_MISSING` |
+| `test_session_detail_lists_artifacts` | артефакт сессии | `GET /sessions/{id}` | метаданные артефакта видны, в БД нет текста |
 
 ### 3.2 Async-рантайм, пулы и кеш корпуса
 

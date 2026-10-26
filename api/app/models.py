@@ -6,7 +6,7 @@ import json
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import BigInteger, CheckConstraint, Date, DateTime, ForeignKey, Float, Identity, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Float, Identity, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -475,6 +475,11 @@ class Visit(Base):
     notes: Mapped[str] = mapped_column(EncryptedText())  # F1: запись беседы
     source: Mapped[str] = mapped_column(String(8), server_default=text("'local'"))  # local | emias
     emias_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    # docs/18 §3.3: приём, созданный завершением клинической сессии (FR-38/39).
+    # UNIQUE — идемпотентность finish: повторный вызов не плодит второй приём.
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("clinical_sessions.id"), unique=True, nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
 
     __table_args__ = (
@@ -854,3 +859,212 @@ class PatientAnamnesis(Base):
     # Поле `text` объявлено последним: имя класса-скоупа иначе затеняет
     # sqlalchemy.text в server_default выше.
     text: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
+
+
+class Appointment(Base):
+    """FR-38: запись в календаре врача (docs/18 §3.1) — план приёма, не факт.
+
+    Факт приёма — `clinical_sessions`; запись связывается с ним через
+    `clinical_sessions.appointment_id`. Пересечения интервалов у одного врача
+    запрещены на уровне сервиса (409 SLOT_CONFLICT) под `SELECT … FOR UPDATE`
+    по врачу — exclusion constraint/btree_gist не вводим (docs/18 §3.1).
+    `location` — кабинет или ссылка, не ПДн.
+    """
+
+    __tablename__ = "appointments"
+    __table_args__ = (
+        CheckConstraint("duration_min between 10 and 480", name="appointments_duration"),
+        CheckConstraint(
+            "channel in ('in_person','online','phone')", name="appointments_channel"
+        ),
+        CheckConstraint(
+            "status in ('planned','confirmed','completed','cancelled','no_show')",
+            name="appointments_status",
+        ),
+        Index("appointments_clinician_starts", "clinician_id", "starts_at"),
+        Index("appointments_patient_starts", "patient_id", "starts_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    clinician_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    duration_min: Mapped[int] = mapped_column(
+        Integer, server_default=text("50")
+    )  # 10..480, дефолт приёма врача — 50 мин
+    channel: Mapped[str] = mapped_column(
+        String(16), server_default=text("'in_person'")
+    )  # in_person | online | phone
+    status: Mapped[str] = mapped_column(
+        String(16), server_default=text("'planned'")
+    )  # planned | confirmed | completed | cancelled | no_show
+    location: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), onupdate=text("now()")
+    )
+
+
+class ClinicalSession(Base):
+    """FR-38/39: фактическая клиническая сессия (docs/18 §3.2).
+
+    `appointment_id IS NULL` — приём «без записи в календаре». `audio_consent` —
+    отдельное согласие на запись (docs/18 §1.3), не покрытое согласием 152-ФЗ:
+    без него загрузка аудио запрещена (422 AUDIO_CONSENT_REQUIRED, PR P3).
+    `ai_status` — состояние ИИ-блока (PR P3), по умолчанию `off`.
+    """
+
+    __tablename__ = "clinical_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "channel in ('in_person','online','phone')", name="clinical_sessions_channel"
+        ),
+        CheckConstraint("status in ('active','finished')", name="clinical_sessions_status"),
+        CheckConstraint(
+            "ai_status in ('off','recording','transcribing','transcribed','failed')",
+            name="clinical_sessions_ai_status",
+        ),
+        CheckConstraint(
+            "ended_at is null or ended_at >= started_at", name="clinical_sessions_interval"
+        ),
+        # Одна сессия на запись календаря: partial unique (offline-сессии не мешают).
+        Index(
+            "clinical_sessions_appointment",
+            "appointment_id",
+            unique=True,
+            postgresql_where=text("appointment_id is not null"),
+        ),
+        Index("clinical_sessions_clinician_started", "clinician_id", "started_at"),
+        Index("clinical_sessions_patient_started", "patient_id", "started_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    appointment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("appointments.id"), nullable=True
+    )
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    clinician_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    channel: Mapped[str] = mapped_column(String(16), server_default=text("'in_person'"))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), server_default=text("'active'"))
+    audio_consent: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false")
+    )  # отдельное согласие на запись (docs/18 §1.3)
+    ai_status: Mapped[str] = mapped_column(String(16), server_default=text("'off'"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
+class SessionProtocol(Base):
+    """FR-39: протокол приёма — версии записи врача (docs/18 §3.4, §5).
+
+    `sections` (канонический JSON §5.1) — свободный текст, поэтому EncryptedText:
+    в БД только шифротекст (pgcrypto, ключ CC_DATA_KEY). Хэш `content_sha256`
+    считается по каноническому JSON и заполняется при approve — эти же байты
+    подписываются УКЭП в PR P4. Активна максимум одна версия из
+    `draft|approved|signed|submitted` (инвариант сервиса, docs/18 §3.4).
+    """
+
+    __tablename__ = "session_protocols"
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('draft','approved','signed','submitted','superseded','rejected')",
+            name="session_protocols_status",
+        ),
+        CheckConstraint("source in ('manual','llm')", name="session_protocols_source"),
+        UniqueConstraint("session_id", "version", name="session_protocols_session_version"),
+        Index("session_protocols_session_status", "session_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    session_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("clinical_sessions.id"))
+    version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16), server_default=text("'draft'"))
+    source: Mapped[str] = mapped_column(String(16), server_default=text("'manual'"))
+    # Канонический JSON разделов §5.1; свободный текст → шифруется (F1).
+    sections_cipher: Mapped[str] = mapped_column(EncryptedText())
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    diagnosis_code: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    prompt_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # [{"section": "...", "reason": "..."}] — заполняет ИИ-блок (PR P3).
+    needs_review: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), onupdate=text("now()")
+    )
+
+
+class DocumentArtifact(Base):
+    """FR-38…41: шифрованный файл сессии (docs/18 §3.6, §4.6).
+
+    Аудио, расшифровки, PDF, подпись — спецкатегория ПДн: на диске только
+    AES-256-GCM (сервис `app.services.artifacts`), в БД — метаданные без текста.
+    `sha256` — хэш **шифротекста** (сверка целостности файла), `path` —
+    относительный путь под CC_ARTIFACTS_DIR, без ПДн в имени.
+    """
+
+    __tablename__ = "document_artifacts"
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('audio','transcript','protocol_pdf','protocol_cda','signature')",
+            name="document_artifacts_kind",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    kind: Mapped[str] = mapped_column(String(24))
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("clinical_sessions.id"), nullable=True, index=True
+    )
+    protocol_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("session_protocols.id"), nullable=True
+    )
+    path: Mapped[str] = mapped_column(String(400))
+    sha256: Mapped[str] = mapped_column(String(64))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    mime: Mapped[str] = mapped_column(String(128))
+    encrypted: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
+class SessionTranscript(Base):
+    """FR-39 (PR P3): метаданные расшифровки сессии (docs/18 §3.5).
+
+    Текст сегментов живёт только в шифрованном артефакте (`segments_artifact_id`):
+    в jsonb — категории масок, в аудите — только счётчики. Одна расшифровка на
+    сессию (UNIQUE session_id).
+    """
+
+    __tablename__ = "session_transcripts"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("clinical_sessions.id"), unique=True
+    )
+    language: Mapped[str] = mapped_column(String(2), server_default=text("'ru'"))
+    model: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    duration_sec: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    segments_artifact_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("document_artifacts.id"), nullable=True
+    )
+    mask_categories: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    depersonalized: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )

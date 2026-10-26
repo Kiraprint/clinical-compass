@@ -117,6 +117,21 @@ class Settings(BaseSettings):
     anamnesis_enabled: bool = False  # CC_ANAMNESIS_ENABLED
     # CC_ANAMNESIS_TIMEOUT: таймаут одного вызова LLM при формировании черновика.
     anamnesis_timeout: float = Field(default=60.0, gt=0)
+    # docs/18 §9 (FR-38…FR-41): клинические сессии врача. ИИ-блок (аудио,
+    # расшифровка, черновик протокола) — PR P3 и по умолчанию ВЫКЛЮЧЕН: календарь,
+    # ручной протокол, подпись и передача в ЕМИАС работают без него.
+    session_ai_enabled: bool = False  # CC_SESSION_AI_ENABLED
+    # CC_SESSION_AUDIO_MAX_MB: потолок аудио на сессию (413, PR P3).
+    session_audio_max_mb: int = Field(default=200, ge=1)
+    # CC_ARTIFACTS_DIR: каталог шифрованных артефактов (AES-256-GCM, docs/18 §4.6;
+    # в compose — volume, в тестах — tmp-каталог).
+    artifacts_dir: str = "/var/lib/compass/artifacts"
+    # CC_SIGNER_BACKEND: mock-ca — тестовый УЦ (PR P4). Ключ подписи — только в
+    # демо-конфигурации и никогда не логируется.
+    signer_backend: str = "mock-ca"
+    # CC_EMIAS_SUBMIT_ENABLED: исходящая передача документа в ЕМИАС (PR P5).
+    # Как и CC_EMIAS_ENABLED, по умолчанию egress запрещён.
+    emias_submit_enabled: bool = False
     # CC_DEPERSONALIZE_NER: off | natasha | rubert | hybrid | remote (docs/12).
     # true/1 = natasha (обратная совместимость). rubert — redmadrobot-rnd/
     # rubert-base-pii-ner: Apache-2.0, FIO F1 0.933 (bench/ner); hybrid — rubert

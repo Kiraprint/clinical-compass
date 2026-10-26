@@ -23,6 +23,8 @@ dependencies = [
     "pydantic-settings>=2.3",
     "clinical-compass-core>=0.1",
     "greenlet>=3",
+    # docs/18 §4.6: AES-256-GCM + HKDF для шифрованных артефактов сессий.
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]
