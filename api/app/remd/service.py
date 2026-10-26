@@ -52,8 +52,10 @@ from .config import RemdConfig
 log = logging.getLogger(__name__)
 
 SIGNATURE_ROLE_PRIORITY = ("clinician", "mo")
-# Сколько ждать `request_id`, если по этой версии уже идёт отправка (ответ без гонки).
+# Сколько ждать `request_id`, если по этой версии уже идёт отправка (ответ без гонки),
+# и период опроса. Ожидание идёт вне транзакции — см. `_wait_request_id`.
 _REQUEST_ID_WAIT_SEC = 5.0
+_REQUEST_ID_POLL_SEC = 0.02
 
 
 async def _signed_protocol(
@@ -176,6 +178,24 @@ def _age_seconds(row: EmiasDelivery, now) -> float:
     return (now - since).total_seconds()
 
 
+async def _wait_request_id(db: AsyncSession, row: EmiasDelivery) -> None:
+    """Дождаться `request_id` от конкурентной отправки, не занимая пул соединений.
+
+    Транзакция чтения закрывается перед каждым `sleep`, поэтому ожидание (до
+    `_REQUEST_ID_WAIT_SEC`) не держит соединение из пула и не блокирует соседние
+    запросы. По выходу сессия остаётся в открытой транзакции — её закрывает вызывающий.
+    """
+    if row.request_id is not None or row.status != "sending":
+        return  # лидер уже дописал `request_id` — ждать нечего
+    deadline = asyncio.get_running_loop().time() + _REQUEST_ID_WAIT_SEC
+    while asyncio.get_running_loop().time() < deadline:
+        await db.commit()  # ожидание — вне транзакции: соединение возвращается в пул
+        await asyncio.sleep(_REQUEST_ID_POLL_SEC)
+        await db.refresh(row)  # свежее чтение; транзакция закроется перед следующим sleep
+        if row.request_id is not None or row.status != "sending":
+            return
+
+
 async def _lock_delivery(db: AsyncSession, delivery_id) -> EmiasDelivery:
     """Строка доставки под FOR UPDATE: короткая транзакция записи результата."""
     row = await db.scalar(
@@ -236,16 +256,10 @@ async def submit(
             # Свежий `sending`: callback ещё может прийти, второй регистрации нет.
             # Запрос-конкурент отдаёт `request_id`, когда первая отправка его допишет:
             # контракт ответа не должен зависеть от гонки (иначе клиент видит `null`).
+            await _wait_request_id(db, row)
+            payload = delivery_payload(row)
             await db.commit()
-            deadline = asyncio.get_running_loop().time() + _REQUEST_ID_WAIT_SEC
-            while (
-                row.request_id is None
-                and row.status == "sending"
-                and asyncio.get_running_loop().time() < deadline
-            ):
-                await asyncio.sleep(0.02)
-                await db.refresh(row)
-            return 202, delivery_payload(row)
+            return 202, payload
         # Callback потерян. Фиксируем это как `failed`, а не как отправку: РЭМД ничего
         # не подтвердил, и повторный клик зарегистрирует документ заново тем же UID.
         row.status = "failed"
@@ -265,6 +279,9 @@ async def submit(
         row.submitted_at = now
         row.last_error_code = None
         row.last_error_message = None
+        # Исход прошлой попытки не переигрывается: `result` хранит ответ на конкретную
+        # отправку, и старая ошибка не должна выглядеть ответом новой попытки.
+        row.result = None
 
     cda, signature, signature_der = await _prepared(db, session, protocol)
     patient = await db.get(User, session.patient_id)

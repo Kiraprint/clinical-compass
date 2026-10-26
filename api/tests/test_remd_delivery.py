@@ -464,3 +464,185 @@ def test_submit_does_not_hold_protocol_lock_during_network(client, remd, db_sess
     assert waited < 2.0, f"строка версии была заблокирована {waited:.1f} с"
     assert status == 202 and payload["status"] == "sending"
     assert payload["request_id"] == "slow-request-id"
+
+
+def test_unknown_request_id_callback_is_404_and_keeps_delivery(client, remd):
+    """Неизвестный `response_to_request_id` → 404 UNKNOWN_REQUEST, доставка цела (§8.5)."""
+    _, sink = remd
+    session, context = _signed(client, "rd-unknown")
+    assert _submit(client, context, session).status_code == 202
+    before = _delivery(client, context, session).json()
+    payload = sink.wait(timeout=15)["body"]
+    assert payload["response_to_request_id"] == before["request_id"]
+
+    unknown = dict(payload, response_to_request_id=str(uuid.uuid4()))
+    response = _callback(client, unknown)
+    assert response.status_code == 404
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "UNKNOWN_REQUEST",
+        "status": 404,
+        "code": "UNKNOWN_REQUEST",
+        "detail": "Запрос с таким request_id не найден",
+        "instance": "/api/v1/remd/callback",
+    }
+    # 404 не пишет в базу: ни одно поле сводки доставки не изменилось.
+    assert _delivery(client, context, session).json() == before
+
+    # At-least-once: повтор того же callback'а с известным request_id регистрирует документ.
+    accepted = _callback(client, payload)
+    assert accepted.status_code == 200
+    registered = _delivery(client, context, session).json()
+    assert registered["status"] == "registered"
+    assert registered["external_id"] == payload["data"]["emdr_id"]
+    assert registered["request_id"] == before["request_id"]
+
+
+def test_request_id_wait_does_not_hold_connection(client, remd, monkeypatch):
+    """Ожидание `request_id` идёт вне транзакции: соединение из пула не занято (P2)."""
+    import asyncio
+    import threading
+    import time as _time
+
+    from app import db as db_module
+    from app.remd import service
+    from app.remd.client import RemdClient
+
+    session, context = _signed(client, "rd-wait-pool")
+    clinician_id = uuid.UUID(context["clinician_id"])
+    session_id = uuid.UUID(session["id"])
+    started, release = threading.Event(), threading.Event()
+
+    def slow(self, envelope):
+        started.set()
+        release.wait(10)
+        return "wait-request-id"
+
+    monkeypatch.setattr(RemdClient, "register_document", slow)
+    monkeypatch.setattr(service, "_REQUEST_ID_WAIT_SEC", 10.0)
+
+    # Проба на каждой итерации ожидания: открыта ли транзакция у сессии ожидающего.
+    # `asyncio.sleep` патчится глобально, поэтому сэмплим только из своего loop'а
+    # (фоновый loop TestClient тоже спит и не должен попадать в выборку).
+    real_sleep = asyncio.sleep
+    sample: list = []
+    loop_ref: list = []
+    open_transactions: list[bool] = []
+
+    async def probe(delay, *args, **kwargs):
+        if sample and asyncio.get_running_loop() is loop_ref[0]:
+            open_transactions.append(sample[0].in_transaction())
+        await real_sleep(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", probe)
+
+    async def scenario():
+        loop_ref.append(asyncio.get_running_loop())
+        async with db_module.AsyncSessionLocal() as first, db_module.AsyncSessionLocal() as second:
+            leader = asyncio.create_task(service.submit(first, clinician_id, session_id))
+            deadline = _time.monotonic() + 10
+            while not started.is_set() and _time.monotonic() < deadline:
+                await real_sleep(0.01)
+            assert started.is_set(), "первая отправка не дошла до сети"
+
+            # Второй клик по тому же протоколу: свежий `sending` → ожидание `request_id`.
+            sample.append(second)
+            waiter = asyncio.create_task(service.submit(second, clinician_id, session_id))
+            await real_sleep(0.2)
+            assert not waiter.done(), "ожидание request_id не началось"
+
+            release.set()
+            payload = (await waiter)[1]
+            sample.clear()  # проба смотрит только на окно ожидания
+            await leader
+            return payload
+
+    payload = asyncio.run(scenario())
+    assert len(open_transactions) >= 3, "ожидание не опрашивало строку доставки"
+    assert not any(open_transactions), "между опросами держится транзакция (пул занят)"
+
+    assert payload["status"] == "sending"
+    assert payload["request_id"] == "wait-request-id"
+
+
+def test_request_id_wait_deadline_returns_null_request_id(client, remd, monkeypatch):
+    """Ожидание ограничено: за отведённое время `request_id` не появился → 202, `null` (§8.3)."""
+    import asyncio
+    import threading
+    import time as _time
+
+    from app import db as db_module
+    from app.remd import service
+    from app.remd.client import RemdClient
+
+    session, context = _signed(client, "rd-wait-deadline")
+    clinician_id = uuid.UUID(context["clinician_id"])
+    session_id = uuid.UUID(session["id"])
+    started, release = threading.Event(), threading.Event()
+
+    def slow(self, envelope):
+        started.set()
+        release.wait(10)  # лидер не успевает сохранить `request_id` до дедлайна
+        return "late-request-id"
+
+    monkeypatch.setattr(RemdClient, "register_document", slow)
+    monkeypatch.setattr(service, "_REQUEST_ID_WAIT_SEC", 0.2)
+
+    async def scenario():
+        async with db_module.AsyncSessionLocal() as first, db_module.AsyncSessionLocal() as second:
+            leader = asyncio.create_task(service.submit(first, clinician_id, session_id))
+            deadline = _time.monotonic() + 10
+            while not started.is_set() and _time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            assert started.is_set(), "первая отправка не дошла до сети"
+
+            began = _time.monotonic()
+            payload = (await service.submit(second, clinician_id, session_id))[1]
+            waited = _time.monotonic() - began
+
+            release.set()
+            await leader
+            return payload, waited
+
+    payload, waited = asyncio.run(scenario())
+    assert waited >= 0.2 and waited < 1, f"дедлайн ожидания не сработал: {waited:.2f} с"
+    assert payload["status"] == "sending"
+    assert payload["request_id"] is None
+
+
+def test_retry_clears_previous_result(client, remd, db_session, monkeypatch):
+    """Повтор после `failed` не переигрывает `result` прошлой попытки (P2)."""
+    _, sink = remd
+    from app.remd.client import RemdClient, RemdRejected
+
+    def stored_result():
+        return db_session.execute(
+            text("SELECT result FROM emias_deliveries WHERE session_id = CAST(:s AS uuid)")
+            .bindparams(s=session["id"])
+        ).scalar_one()
+
+    original = RemdClient.register_document
+    session, context = _signed(client, "rd-result")
+    monkeypatch.setattr(
+        RemdClient,
+        "register_document",
+        lambda self, envelope: (_ for _ in ()).throw(
+            RemdRejected("INTERNAL_ERROR", "сбой", 500)
+        ),
+    )
+    assert _submit(client, context, session).status_code == 502
+    assert _delivery(client, context, session).json()["status"] == "failed"
+    stale = stored_result()
+    assert stale["errors"][0]["code"] == "INTERNAL_ERROR"
+
+    monkeypatch.setattr(RemdClient, "register_document", original)
+    retried = _submit(client, context, session)
+    assert retried.status_code == 202 and retried.json()["attempts"] == 2
+    assert stored_result() is None  # результат прошлой попытки не переигрывается
+
+    payload = sink.wait(timeout=15)["body"]
+    assert _callback(client, payload).status_code == 200
+    fresh = stored_result()
+    assert fresh["status"] == "success"
+    assert fresh["emdr_id"] == payload["data"]["emdr_id"]
+    assert "INTERNAL_ERROR" not in str(fresh)
