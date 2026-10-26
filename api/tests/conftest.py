@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 
 os.environ.setdefault("CC_FAST_ARGON2", "1")
 os.environ.setdefault("CC_PUSH_ENABLED", "0")  # тесты без сетевого Web Push (уведомления в БД остаются)
@@ -15,6 +16,8 @@ os.environ.setdefault("CC_ALLOW_DEMO_SECRETS", "true")  # F3: тесты исп�
 # Rate limiter: тесты не зависят от живого Redis (своя БД/сеть) — memory;
 # redis-бэкенд проверяется в test_ratelimit_redis.py на фейковом клиенте.
 os.environ.setdefault("CC_RATE_BACKEND", "memory")
+# docs/18 §4.6: артефакты сессий пишутся в tmp-каталог, а не в /var/lib.
+os.environ.setdefault("CC_ARTIFACTS_DIR", tempfile.mkdtemp(prefix="cc-artifacts-test-"))
 
 import asyncio
 
