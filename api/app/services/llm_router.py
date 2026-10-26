@@ -328,15 +328,21 @@ def rewrite_followup(history: list[dict], query: str) -> str | None:
         return None
 
 
-def _format_snippets(chunks: list[dict]) -> str:
+def _format_snippets(chunks: list[dict]) -> tuple[str, int]:
     """Найденные фрагменты как нумерованный список для промпта.
 
     Номера — позиции в chunks (1-based), те же, что потом проверяет сервер:
     ссылка [n] в ответе модели означает chunks[n - 1]. Пустой текст фрагмента
     строку не даёт, но нумерацию не сдвигает.
+
+    Возвращает (текст, наибольший номер сниппета): всё, что за ним (лимит
+    ANSWER_SNIPPETS или бюджет символов), модель не видела — ссылаться на это
+    нельзя, поэтому сервер валидирует [n] по этому окну, а не по len(chunks).
+    Второй элемент 0 — в промпт не попал ни один фрагмент.
     """
     lines: list[str] = []
     used = 0
+    window = 0
     for i, chunk in enumerate(chunks[:ANSWER_SNIPPETS], start=1):
         text = _clip(" ".join(str(chunk.get("text") or "").split()), ANSWER_SNIPPET_CHARS)
         if not text:
@@ -347,7 +353,17 @@ def _format_snippets(chunks: list[dict]) -> str:
             break
         lines.append(line)
         used += len(line) + 1
-    return "\n".join(lines)
+        window = i
+    return "\n".join(lines), window
+
+
+def answer_snippet_window(chunks: list[dict]) -> int:
+    """Наибольший номер сниппета, который реально видит модель в compose_answer.
+
+    Верхняя граница для ссылок [n]: сниппеты после ANSWER_SNIPPETS или за
+    бюджетом символов в промпт не попадают, и ссылка на них — выдумка модели.
+    """
+    return _format_snippets(chunks)[1]
 
 
 def _clean_answer(text: str) -> str | None:
@@ -370,11 +386,11 @@ def compose_answer(history: list[dict], query: str, chunks: list[dict]) -> str |
 
     None = LLM выключен/недоступен/вернул пусто → детерминированный ответ.
     Проверку ссылок [n] и сборку citations делает вызывающий (services.agent):
-    здесь только текст.
+    здесь только текст; границу номеров даёт answer_snippet_window(chunks).
     """
     if not _enabled() or not query.strip() or not chunks:
         return None
-    snippets = _format_snippets(chunks)
+    snippets, _window = _format_snippets(chunks)
     if not snippets:
         return None
     parts: list[str] = []

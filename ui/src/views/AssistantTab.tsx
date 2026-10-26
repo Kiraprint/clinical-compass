@@ -369,8 +369,9 @@ export default function AssistantTab() {
                         <strong>Источники:</strong>
                         <ul>
                           {m.citations.map((c, i) => (
+                            // Номер совпадает с [n] в тексте ответа (порядок citations).
                             <li key={i}>
-                              «{c.source_title}» · {c.topic}
+                              {i + 1}. «{c.source_title}» · {c.topic}
                             </li>
                           ))}
                         </ul>

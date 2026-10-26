@@ -161,7 +161,12 @@ def test_unknown_citation_falls_back_to_deterministic(monkeypatch):
 
 
 def test_citations_capped_and_deduped_by_guideline(monkeypatch):
-    """Ссылки валидируются: ≤3 источников и без дублей по guideline_id."""
+    """Ссылки валидируются: ≤3 источников, без дублей, маркеры = порядок citations.
+
+    [3] указывает на дубль gad7 → та же цитата под номером 2; [4] — четвёртый
+    сниппет, после дедупа он третий. Видимые номера обязаны совпадать с
+    порядком citations (его же показывает UI), иначе врач читает чужой источник.
+    """
     _enable(monkeypatch)
     chunks = [
         *CHUNKS,
@@ -185,6 +190,63 @@ def test_citations_capped_and_deduped_by_guideline(monkeypatch):
     ids = [c["guideline_id"] for c in answer["citations"]]
     assert ids == ["who-mhgap-phq9", "who-mhgap-gad7", "triage-green"]
     assert len(ids) == len(set(ids)) <= 3
+    assert answer["answer"] == "Пороги: [1][2][2][3]."
+
+
+def test_citation_outside_prompt_window_falls_back(monkeypatch):
+    """limit=20: в промпт уходят только первые 5 сниппетов → [6] — выдумка."""
+    _enable(monkeypatch)
+    chunks = [
+        *CHUNKS,
+        *[
+            RAGChunk(
+                text=f"Фрагмент {i}: критерий триажа.",
+                source_title=f"Источник {i}",
+                guideline_id=f"src-{i}",
+                topic="ТРИАЖ",
+                score=0.5 - i / 100,
+            )
+            for i in range(3, 8)
+        ],
+    ]
+    payload = [{"text": c.text, "source_title": c.source_title} for c in chunks]
+    assert llm_router.answer_snippet_window(payload) == llm_router.ANSWER_SNIPPETS
+    _fake_chat(monkeypatch, "Критерий описан в рекомендациях [6].")
+    answer = _answer(monkeypatch, chunks=chunks)
+    expected = build_rag_answer(QUERY, chunks)
+    assert answer["answer"] == expected.answer
+    assert [c["guideline_id"] for c in answer["citations"]] == [
+        c.guideline_id for c in expected.citations
+    ]
+
+
+def test_clinical_range_is_not_a_citation_and_visible_numbers_match_sources(monkeypatch):
+    """«[3–4 баллов]» — диапазон шкалы, а не ссылка; видимые номера = citations."""
+    _enable(monkeypatch)
+    chunks = [
+        *CHUNKS,
+        RAGChunk(
+            text="Шкала PHQ-9: 10–14 баллов — умеренная депрессия.",
+            source_title="Гайдлайн PHQ-9 (интерпретация)",
+            guideline_id="who-mhgap-phq9-scale",
+            topic="ШКАЛЫ",
+            score=0.5,
+        ),
+        RAGChunk(
+            text="Триаж YELLOW: наблюдение участковым врачом.",
+            source_title="Триаж",
+            guideline_id="triage-yellow",
+            topic="ТРИАЖ",
+            score=0.4,
+        ),
+    ]
+    _fake_chat(monkeypatch, "Умеренная депрессия — [3–4 баллов] по PHQ-9? Нет, 10–14 [3].")
+    answer = _answer(monkeypatch, chunks=chunks)
+    # [3] — третий сниппет (who-mhgap-phq9-scale), он же первый в citations.
+    assert [c["guideline_id"] for c in answer["citations"]] == ["who-mhgap-phq9-scale"]
+    assert answer["answer"] == (
+        "Умеренная депрессия — [3–4 баллов] по PHQ-9? Нет, 10–14 [1]."
+    )
 
 
 def test_empty_reply_falls_back(monkeypatch):
@@ -270,3 +332,25 @@ def test_compose_answer_returns_none_without_chunks_or_query(monkeypatch):
     _no_network(monkeypatch)
     assert llm_router.compose_answer([], QUERY, []) is None
     assert llm_router.compose_answer([], "   ", [{"text": "текст", "source_title": "БЗ"}]) is None
+
+
+def test_markers_beyond_citation_cap_are_dropped(monkeypatch):
+    """4-й и 5-й источники отброшены лимитом → их маркеры не висят без ссылки."""
+    _enable(monkeypatch)
+    chunks = [
+        *CHUNKS,
+        *[
+            RAGChunk(
+                text=f"Критерий {i}.",
+                source_title=f"Источник {i}",
+                guideline_id=f"src-{i}",
+                topic="ТРИАЖ",
+                score=0.5,
+            )
+            for i in range(3, 6)
+        ],
+    ]
+    _fake_chat(monkeypatch, "А [1] Б [2] В [3] Г [4] Д [5].")
+    answer = _answer(monkeypatch, chunks=chunks)
+    assert len(answer["citations"]) == 3
+    assert answer["answer"] == "А [1] Б [2] В [3] Г Д."

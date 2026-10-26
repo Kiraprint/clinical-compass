@@ -116,9 +116,11 @@ def _hash_rerank(
             break
     return hits
 
-
 # Ссылка модели на сниппет: [1], [1, 2], [1][3]. Скобки без цифр игнорируем.
 _CITATION_RE = re.compile(r"\[([^\[\]]{1,40})\]")
+# Ссылкой считается только скобка из цифр и разделителей: «[10–14 баллов]» —
+# клинический диапазон шкалы, а не источник.
+_CITE_GROUP_RE = re.compile(r"^[\d\s,;]+$")
 MAX_ANSWER_CITATIONS = 3  # как в build_rag_answer: больше трёх источников — шум
 
 
@@ -126,11 +128,38 @@ def _cited_indexes(text: str) -> list[int]:
     """Номера сниппетов, на которые сослался LLM, в порядке первого упоминания."""
     found: list[int] = []
     for group in _CITATION_RE.findall(text):
+        if not _CITE_GROUP_RE.match(group):
+            continue
         for token in re.findall(r"\d{1,3}", group):
             n = int(token)
             if n not in found:
                 found.append(n)
     return found
+
+
+def _renumber_citations(text: str, positions: dict[int, int]) -> str:
+    """Ссылки модели → номера в списке citations (порядок источников в UI).
+
+    positions — номер сниппета из промпта → 1-based позиция в citations. Маркер
+    сниппета, который в citations не попал (дедуп по guideline_id, лимит
+    MAX_ANSWER_CITATIONS), из текста убирается: видимый номер обязан указывать
+    на тот источник, который лежит в citations под этим номером.
+    """
+
+    def repl(match: re.Match[str]) -> str:
+        group = match.group(1)
+        if not _CITE_GROUP_RE.match(group):
+            return match.group(0)
+        mapped: list[int] = []
+        for token in re.findall(r"\d{1,3}", group):
+            new = positions.get(int(token))
+            if new is not None and new not in mapped:
+                mapped.append(new)
+        return f"[{', '.join(map(str, mapped))}]" if mapped else ""
+
+    text = _CITATION_RE.sub(repl, text)
+    text = re.sub(r"[ \t]+([.,;:!?)])", r"\1", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
 def _compose_answer(
@@ -139,35 +168,42 @@ def _compose_answer(
     """LLM-ответ по сниппетам с серверной проверкой ссылок (FR-17).
 
     None — LLM выключен/недоступен/вернул пусто ИЛИ ни одна ссылка [n] не
-    указывает на реальный фрагмент: тогда вызывающий берёт детерминированный
-    build_rag_answer. Текст ответа модели в citations не попадает — цитаты
-    собираются только из настоящих чанков (номер → chunks[n - 1]).
-    Карта пациента сюда не передаётся: модель не видит ПДн.
+    указывает на фрагмент, который модель реально видела: тогда вызывающий
+    берёт детерминированный build_rag_answer. Окно номеров — не len(chunks), а
+    answer_snippet_window: при limit=20 в промпт попадают только первые
+    ANSWER_SNIPPETS (и не больше, чем влезло в бюджет символов), ссылка за это
+    окно — выдумка модели. Текст ответа модели в citations не попадает —
+    цитаты собираются только из настоящих чанков (номер → chunks[n - 1]), а
+    видимые маркеры перенумеровываются в порядок citations (дедуп по
+    guideline_id и лимит сдвигают номера). Карта пациента сюда не передаётся:
+    модель не видит ПДн.
     """
-    text = llm_router.compose_answer(
-        history,
-        query,
-        [{"text": c.text, "source_title": c.source_title} for c in chunks],
-    )
+    payload = [{"text": c.text, "source_title": c.source_title} for c in chunks]
+    text = llm_router.compose_answer(history, query, payload)
     if not text:
         return None
+    window = llm_router.answer_snippet_window(payload)
     picked: list[RAGChunk] = []
-    seen: set[str] = set()
+    positions: dict[int, int] = {}  # номер сниппета → номер в citations
+    by_guideline: dict[str, int] = {}
     for n in sorted(_cited_indexes(text)):
-        if not 1 <= n <= len(chunks):
+        if not 1 <= n <= window:
             continue
         chunk = chunks[n - 1]
-        if chunk.guideline_id in seen:
+        known = by_guideline.get(chunk.guideline_id)
+        if known is not None:  # дубль гайдлайна — та же цитата
+            positions[n] = known
             continue
-        seen.add(chunk.guideline_id)
-        picked.append(chunk)
         if len(picked) >= MAX_ANSWER_CITATIONS:
-            break
+            continue
+        picked.append(chunk)
+        by_guideline[chunk.guideline_id] = len(picked)
+        positions[n] = len(picked)
     if not picked:
         logger.info("LLM-ответ без валидных ссылок на сниппеты — детерминированный ответ")
         return None
     return RAGAnswer(
-        answer=text,
+        answer=_renumber_citations(text, positions),
         citations=tuple(
             Citation(
                 source_title=c.source_title,
