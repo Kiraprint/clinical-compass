@@ -148,9 +148,43 @@ class Settings(BaseSettings):
     # не хранится открытым текстом — пусто → поле не выводится, не выдумываем).
     signing_doctor_position: str = "Врач-психиатр"
     signing_doctor_snils: str | None = None
-    # CC_EMIAS_SUBMIT_ENABLED: исходящая передача документа в ЕМИАС (PR P5).
-    # Как и CC_EMIAS_ENABLED, по умолчанию egress запрещён.
-    emias_submit_enabled: bool = False
+    # --- FR-41 (docs/18 §8): исходящая передача СЭМД в РЭМД/ЕГИСЗ ------------
+    # CC_REMD_ENABLED: egress наружу. По умолчанию выключен (как CC_EMIAS_ENABLED):
+    # клинический контур не должен молча отправлять документы в чужую ИС.
+    remd_enabled: bool = False
+    # CC_REMD_BASE_URL: REST-фасад РЭМД (в разработке — собственный мок remd-mock).
+    remd_base_url: str = "http://127.0.0.1:8091"
+    remd_client_id: str = "compass-lpu"  # CC_REMD_CLIENT_ID
+    remd_client_secret: str = "remd-secret"  # CC_REMD_CLIENT_SECRET
+    # CC_REMD_LPU_UID: идентификатор МО в ЕГИСЗ (в моке — фикстура).
+    remd_lpu_uid: str = "1.2.643.5.1.13.13.12.2.77.1.1"
+    # CC_REMD_CALLBACK_URL: адрес, на который РЭМД шлёт registerDocumentResult.
+    remd_callback_url: str = ""
+    # CC_REMD_CALLBACK_TOKEN: общий секрет callback-эндпоинта (X-Remd-Token).
+    remd_callback_token: str = ""
+    # CC_REMD_CALLBACK_MAX_KB: потолок тела callback'а (413 при превышении).
+    # Конверт registerDocumentResult — сотни байт; лимит защищает память, а не разбор.
+    remd_callback_max_kb: int = 256  # CC_REMD_CALLBACK_MAX_KB
+    # CC_REMD_ALLOW_INSECURE: http допустим только для локального мока.
+    remd_allow_insecure: bool = False
+    remd_timeout: float = 10.0  # CC_REMD_TIMEOUT
+    remd_max_attempts: int = 3  # CC_REMD_MAX_ATTEMPTS
+    remd_max_response_bytes: int = 4 * 1024 * 1024  # CC_REMD_MAX_RESPONSE_BYTES
+    # CC_REMD_RETRY_AFTER_CAP: потолок для Retry-After (шлюз может отдать 86400 с;
+    # ожидание идёт внутри submit, поэтому потолок обязателен).
+    remd_retry_after_cap: float = 60.0
+    # CC_REMD_SENDING_STALE_SEC: через сколько `sending` без callback'а считается
+    # потерянным и передача разрешается повторно.
+    remd_sending_stale_sec: int = 900
+    # Демонстрационные данные СЭМД: СНИЛС пациента и вид документа НСИ 1520.
+    # СНИЛС пациента в карточке не хранится (как и СНИЛС врача, docs/18 §7.2),
+    # поэтому для демо-контура он берётся из конфигурации; в живом контуре —
+    # из связки ЕМИАС/ФРМР.
+    remd_patient_snils: str = "112-233-445 95"  # CC_REMD_PATIENT_SNILS
+    remd_document_kind: int = 34  # CC_REMD_DOCUMENT_KIND: код вида СЭМД НСИ 1520
+    remd_org_name: str = "Демонстрационная медицинская организация «Компас»"
+    remd_department_oid: str = "1.2.643.5.1.13.13.12.2.77.1.1.1"  # CC_REMD_DEPARTMENT_OID
+    remd_department_name: str = "Психиатрическое отделение"  # CC_REMD_DEPARTMENT_NAME
     # CC_DEPERSONALIZE_NER: off | natasha | rubert | hybrid | remote (docs/12).
     # true/1 = natasha (обратная совместимость). rubert — redmadrobot-rnd/
     # rubert-base-pii-ner: Apache-2.0, FIO F1 0.933 (bench/ner); hybrid — rubert

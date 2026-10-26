@@ -129,6 +129,19 @@ services:
       CC_EMIAS_CLIENT_ID: "${CC_EMIAS_CLIENT_ID:-compass}"
       CC_EMIAS_CLIENT_SECRET: "${CC_EMIAS_CLIENT_SECRET:-compass-secret}"
       CC_EMIAS_ALLOW_INSECURE: "${CC_EMIAS_ALLOW_INSECURE:-false}"
+      # FR-41: передача СЭМД в РЭМД. Egress закрыт по умолчанию (docs/10 R17);
+      # remd-mock включается профилем emias (общий демо-УЦ — volume artifacts).
+      CC_REMD_ENABLED: "${CC_REMD_ENABLED:-false}"
+      CC_REMD_BASE_URL: "${CC_REMD_BASE_URL:-http://remd-mock:8091}"
+      CC_REMD_CLIENT_ID: "${CC_REMD_CLIENT_ID:-compass-lpu}"
+      CC_REMD_CLIENT_SECRET: "${CC_REMD_CLIENT_SECRET:-remd-secret}"
+      CC_REMD_LPU_UID: "${CC_REMD_LPU_UID:-1.2.643.5.1.13.13.12.2.77.1.1}"
+      CC_REMD_CALLBACK_URL: "${CC_REMD_CALLBACK_URL:-http://api:8000/api/v1/remd/callback}"
+      CC_REMD_CALLBACK_TOKEN: "${CC_REMD_CALLBACK_TOKEN:-remd-callback-token}"
+      CC_REMD_ALLOW_INSECURE: "${CC_REMD_ALLOW_INSECURE:-true}"
+    volumes:
+      # Демо-УЦ и артефакты делятся с remd-mock: мок проверяет подпись по тому же УЦ.
+      - artifacts:/var/lib/compass/artifacts
     # LLM-роутер раздела БЗ (docs/04 FR-17): хост с tools/llm.sh доступен из контейнера.
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -303,6 +316,30 @@ services:
       - "8090"
     restart: unless-stopped
 
+  # FR-41: мок РЭМД/ЕГИСЗ (api/app/remd/mock.py) — профиль emias, как и
+  # emias-mock. Подпись проверяется по демо-УЦ из общего volume artifacts:
+  # без него мок отвергнет любой СЭМД (CERTIFICATE_NOT_FOUND).
+  #   docker compose -f infra/docker-compose.yml --profile emias up -d remd-mock
+  remd-mock:
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+    command: ["/app/.venv/bin/uvicorn", "app.remd.mock:app", "--host", "0.0.0.0", "--port", "8091"]
+    profiles: ["emias"]
+    environment:
+      CC_ARTIFACTS_DIR: /var/lib/compass/artifacts
+      CC_REMD_MOCK_CLIENT_ID: "${CC_REMD_CLIENT_ID:-compass-lpu}"
+      CC_REMD_MOCK_CLIENT_SECRET: "${CC_REMD_CLIENT_SECRET:-remd-secret}"
+      CC_REMD_MOCK_LPU_UID: "${CC_REMD_LPU_UID:-1.2.643.5.1.13.13.12.2.77.1.1}"
+      CC_REMD_MOCK_CALLBACK_URL: "${CC_REMD_CALLBACK_URL:-http://api:8000/api/v1/remd/callback}"
+      CC_REMD_MOCK_CALLBACK_TOKEN: "${CC_REMD_CALLBACK_TOKEN:-remd-callback-token}"
+      CC_REMD_MOCK_TIMEOUT_S: "${CC_REMD_MOCK_TIMEOUT_S:-2}"
+    volumes:
+      - artifacts:/var/lib/compass/artifacts
+    expose:
+      - "8091"
+    restart: unless-stopped
+
   # ML-сайдкар (docs/08 §4): эмбеддинги / реранк / маскирование ПДн на GPU.
   # Профиль gpu: без него стек стартует как раньше (CI/e2e без видеокарты),
   # api при этом остаётся на CC_EMBEDDER=hash и CC_DEPERSONALIZE_NER=off.
@@ -390,6 +427,8 @@ volumes:
   pgdata:
   qdrant-data:
   ml-models:
+  # FR-41: шифрованные артефакты и демо-УЦ, общие для api и remd-mock.
+  artifacts:
 
 networks:
   # api<->ml без egress и без доступа к БД/очередям: там ходит сырой текст.
