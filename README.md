@@ -118,7 +118,7 @@ python3 -m venv .venv && .venv/bin/pip install -e "core" -e "api[dev]"
 # тестовая БД (dev-override публикует порт на 127.0.0.1; базовый compose — нет)
 docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up -d postgres qdrant
 cd api && alembic upgrade head                                # схема из миграций (не create_all)
-.venv/bin/pytest core api                                     # 187 + 915 тестов
+.venv/bin/pytest core api                                     # 187 + 1000 тестов
 cd ui && npm install && npm run dev                           # UI на :5173 (proxy → :8000)
 cd e2e && npx playwright install chromium && npx playwright test
 ```
@@ -385,13 +385,13 @@ GitHub Actions остаются резервным путём, основной 
 - [x] SDD
 - [x] TDD
 - [x] E1–E2: клинический движок (187 юнит-тестов)
-- [x] E3–E5: API (915 интеграционных тестов)
-- [x] E6: UI, симулятор, docker compose, e2e (53 Playwright)
+- [x] E3–E5: API (1000 интеграционных тестов)
+- [x] E6: UI, симулятор, docker compose, e2e (62 Playwright)
 - [x] Кейс-дефициты P1–P9: Авиандр в KB, маршрутизация, НЯ, приверженность, парсинг историй, врач↔пациент чат, КР Минздрава
 - [x] ИИ-ассистент врача: раздел БЗ выбирает LLM-роутер (тулколлинг search_<раздел>, fallback все разделы)
 - [x] Security audit F1–F12 + NEW-1..5: pgcrypto на всех free-text ПДн, уничтожение при отзыве, ротация refresh, httpOnly cookies, fail-fast секреты, AES-256 backup, threat model (ГОСТ 14971), gate привилегированной регистрации
 
-**Регрессия:** 187 core + 915 API + 53 e2e = 1155 тестов.
+**Регрессия:** 187 core + 1000 API + 62 e2e = 1249 тестов.
 
 **Первый администратор (прод):** публичная регистрация CLINICIAN/ADMIN запрещена вне демо-режима (NEW-1):
 `docker compose -f infra/docker-compose.yml run --rm --entrypoint /app/.venv/bin/python api -m app.bootstrap_user --email admin@clinic.ru --role ADMIN`
