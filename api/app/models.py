@@ -6,7 +6,7 @@ import json
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Boolean, CHAR, CheckConstraint, Date, DateTime, ForeignKey, Float, Identity, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, Boolean, CHAR, CheckConstraint, Date, DateTime, ForeignKey, Float, Identity, Index, Integer, LargeBinary, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -1065,6 +1065,57 @@ class SessionTranscript(Base):
     )
     mask_categories: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     depersonalized: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
+class ProtocolSignature(Base):
+    """FR-40: подпись протокола приёма (docs/18 §3.7, §7).
+
+    Две строки на протокол: `clinician` (врач, подписавший документ) и `mo`
+    (уполномоченное лицо МО — п. 11 приказа Минздрава 209н). Закрытые ключи в
+    БД не попадают никогда: только сам CMS-контейнер (шифрованный артефакт
+    `kind='signature'`) и публичные данные сертификата.
+
+    `cert_der` хранится рядом с подписью, чтобы проверка не зависела от
+    доступности демо-УЦ в момент verify и не подтягивала сертификат по сети.
+    """
+
+    __tablename__ = "protocol_signatures"
+    __table_args__ = (
+        CheckConstraint("role in ('clinician','mo')", name="protocol_signatures_role"),
+        UniqueConstraint("protocol_id", "role", name="protocol_signatures_protocol_role"),
+        Index("protocol_signatures_session", "session_id", "role"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    protocol_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("session_protocols.id"))
+    session_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("clinical_sessions.id"))
+    role: Mapped[str] = mapped_column(String(16))
+    # Врач существует как пользователь; у уполномоченного лица МО строки users нет.
+    signer_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )
+    fio: Mapped[str] = mapped_column(String(200))
+    position: Mapped[str] = mapped_column(String(200))
+    organization: Mapped[str] = mapped_column(String(200))
+    snils: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    cert_serial: Mapped[str] = mapped_column(String(64))
+    cert_issuer: Mapped[str] = mapped_column(String(400))
+    cert_not_before: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    cert_not_after: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    cert_thumbprint: Mapped[str] = mapped_column(CHAR(64))
+    cert_der: Mapped[bytes] = mapped_column(LargeBinary)
+    # Деташированная CMS-подпись — только в шифрованном артефакте (§3.6).
+    cms_artifact_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("document_artifacts.id"))
+    digest_algorithm: Mapped[str] = mapped_column(String(32), server_default=text("'GOST3411-2012-256'"))
+    signature_algorithm: Mapped[str] = mapped_column(
+        String(32), server_default=text("'GOST3410-2012-256'")
+    )
+    # Стрибог-256 подписанных байт СЭМД (hex) — сравнение при verify.
+    content_sha256: Mapped[str] = mapped_column(CHAR(64))
+    signed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )

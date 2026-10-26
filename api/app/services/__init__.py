@@ -1,1 +1,1 @@
-from . import adherence, adverse, agent, anamnesis, artifacts, audit, chat, checkin, clinician, chat_insights, contacts, diary, escalations, kb, medications, ml_client, patient_history, protocols, reminders, reranker, screening, sessions  # noqa: F401 — пакет экспонирует сервисы
+from . import adherence, adverse, agent, anamnesis, artifacts, audit, chat, checkin, clinician, chat_insights, contacts, diary, documents, escalations, kb, medications, ml_client, patient_history, protocols, reminders, reranker, screening, sessions, signing  # noqa: F401 — пакет экспонирует сервисы

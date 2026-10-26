@@ -191,8 +191,14 @@ async def get_session(
     user: User = Depends(require_clinician),
     db: AsyncSession = Depends(get_db),
 ):
-    """SessionDetail: сессия + протокол + артефакты (подпись/передача — PR P4/P5)."""
-    return await services.sessions.get_session(db, user.id, session_id)
+    """SessionDetail: сессия + протокол + артефакты + подпись (передача — PR P5)."""
+    payload = await services.sessions.get_session(db, user.id, session_id)
+    if payload.get("protocol"):
+        # §4.2: подпись — сводка по protocol_signatures; нет подписей → None.
+        payload["signature"] = await services.signing.summary(
+            db, uuid.UUID(payload["protocol"]["id"])
+        )
+    return payload
 
 
 @router.post("/clinician/sessions/{session_id}/finish")
@@ -268,3 +274,45 @@ async def approve_protocol(
 ):
     """Подтверждение врачом: 409 PROTOCOL_NOT_READY со списком пустых разделов."""
     return await services.protocols.approve(db, user.id, session_id, ip=_ip(request))
+
+
+# --- §4.5 подпись, документ, проверка (FR-40) --------------------------------
+
+
+@router.post("/clinician/sessions/{session_id}/protocol/sign")
+async def sign_protocol(
+    session_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(require_clinician),
+    db: AsyncSession = Depends(get_db),
+):
+    """УКЭП протокола (демо-УЦ): две подписи над байтами СЭМД, статус → signed."""
+    return await services.signing.sign(db, user.id, session_id, ip=_ip(request))
+
+
+@router.get("/clinician/sessions/{session_id}/protocol/pdf")
+async def protocol_pdf(
+    session_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(require_clinician),
+    db: AsyncSession = Depends(get_db),
+):
+    """Печатная форма подписанного протокола: 409 PROTOCOL_NOT_SIGNED до подписи."""
+    content, filename = await services.signing.pdf(
+        db, user.id, session_id, ip=_ip(request)
+    )
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/clinician/sessions/{session_id}/protocol/verify")
+async def verify_protocol(
+    session_id: uuid.UUID,
+    user: User = Depends(require_clinician),
+    db: AsyncSession = Depends(get_db),
+):
+    """Проверка подписей: valid | invalid | unknown_ca | expired | digest_mismatch."""
+    return await services.signing.verify(db, user.id, session_id)
