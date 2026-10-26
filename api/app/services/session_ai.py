@@ -1263,11 +1263,11 @@ def _same_lemma(needle: str, word: str) -> bool:
     («сертралин» ↔ «сертралина»), но не на другой корень.
     """
     common = 0
-    for left, right in zip(needle, word):
-        if left != right:
-            break
-        common += 1
-    return common >= 5 and common >= min(len(needle), len(word)) - 2
+    shortest = min(len(needle), len(word))
+    # Короткие МНН («литий», «лития») не набирают 5 букв общего корня при
+    # флексии — для них порог 4 буквы и расхождение ≤ 2.
+    root = 4 if shortest <= 6 else 5
+    return common >= root and common >= shortest - 2
 
 
 def _mentions(needle: str, haystack: str) -> bool:
@@ -1284,10 +1284,12 @@ def _mentions(needle: str, haystack: str) -> bool:
     if name in text:
         return True
     words = _WORD.findall(text)
-    return all(
-        any(_same_lemma(word, candidate) for candidate in words)
-        for word in _WORD.findall(name)
-    )
+    needles = _WORD.findall(name)
+    # Название без слов ≥ 4 букв («АСК», «Mg», «Li») сверить нельзя: пустой
+    # `all([])` подтвердил бы препарат любым чанком (обход §5.3, R30).
+    if not needles:
+        return False
+    return all(any(_same_lemma(word, candidate) for candidate in words) for word in needles)
 
 
 def _dose_pattern(dose: str) -> re.Pattern | None:
@@ -1302,9 +1304,10 @@ def _dose_pattern(dose: str) -> re.Pattern | None:
     parts = []
     for token in tokens:
         number, unit = re.match(r"(\d+(?:[.,]\d+)?)\s*(.*)", token).groups()
-        parts.append(
-            rf"(?<![\d.,]){re.escape(number).replace(',', '[,.]')}\s*{re.escape(unit)}"
-        )
+        # Разделитель дроби в обе стороны: ответ модели «0.5 мг» подтверждается
+        # чанком «0,5 мг» и наоборот (иначе ложный dosage_not_in_source).
+        pattern = re.escape(number).replace(r"\.", "[.,]").replace(",", "[.,]")
+        parts.append(rf"(?<![\d.,]){pattern}\s*{re.escape(unit)}")
     return re.compile("|".join(parts), re.IGNORECASE)
 
 
@@ -1366,10 +1369,13 @@ def _grounded_treatment(raw, sources: list[dict], needs: list[dict]) -> tuple[li
         return [], []
     items: list[dict] = []
     refs_by_item: list[list[int]] = []
-    for position, item in enumerate(raw):
-        section = f"treatment.{position}"
+    for item in raw:
+        # `sections.treatment` уплотняется: отброшенные элементы позицию не
+        # занимают. Поэтому причина отброшенного элемента вешается на раздел
+        # целиком, а причины по оставленной строке — на её сохранённый индекс
+        # (`stored` ниже), иначе флаг приезжает к чужому препарату.
         if not isinstance(item, dict):
-            needs.append({"section": section, "reason": "invalid_item"})
+            needs.append({"section": "treatment", "reason": "invalid_item"})
             continue
         drug = _text(item.get("drug"))
         dose = _text(item.get("dose"))
@@ -1378,24 +1384,25 @@ def _grounded_treatment(raw, sources: list[dict], needs: list[dict]) -> tuple[li
         if not drug or any(
             len(value) > protocols.LINE_CHARS for value in (drug, dose, schedule, duration)
         ):
-            needs.append({"section": section, "reason": "invalid_item"})
+            needs.append({"section": "treatment", "reason": "invalid_item"})
             continue
         indexes = _refs(item.get("sources"), sources)
         if not indexes:
-            needs.append({"section": section, "reason": "source_missing"})
+            needs.append({"section": "treatment", "reason": "source_missing"})
             continue
         if len(items) >= protocols.TREATMENT_MAX:
             needs.append({"section": "treatment", "reason": "too_many_items"})
             break
+        stored = f"treatment.{len(items)}"
         drug_chunks = [i for i in indexes if _mentions(drug, sources[i - 1]["text"])]
         if not drug_chunks:
-            needs.append({"section": section, "reason": "drug_not_in_source"})
+            needs.append({"section": stored, "reason": "drug_not_in_source"})
         else:
             dose_re = _dose_pattern(dose)
             if dose_re is not None and not any(
                 dose_re.search(sources[i - 1]["text"]) for i in drug_chunks
             ):
-                needs.append({"section": section, "reason": "dosage_not_in_source"})
+                needs.append({"section": stored, "reason": "dosage_not_in_source"})
         items.append(
             {
                 "drug": drug,
@@ -1464,13 +1471,13 @@ def _sanitize(
         sections["diagnosis"] = diagnosis
         for source in grounded:
             if source["id"] in diagnosis["sources"]:
-                source["used_by"].append("diagnosis")
+                _mark(source, "diagnosis")
 
     treatment, refs_by_item = _grounded_treatment(raw.get("treatment"), grounded, needs)
     sections["treatment"] = treatment
     for index, indexes in enumerate(refs_by_item):
         for source_index in indexes:
-            grounded[source_index - 1]["used_by"].append(f"treatment.{index}")
+            _mark(grounded[source_index - 1], f"treatment.{index}")
 
     # Ссылки `[S3]` в тексте разделов: врач видит, откуда фраза (docs/18 §5.4).
     # Ссылка на несуществующий источник — такая же непроверяемость, как у
@@ -1479,7 +1486,7 @@ def _sanitize(
         dangling = False
         for ref in _NARRATIVE_REF.findall(sections.get(name) or ""):
             if 1 <= int(ref) <= len(grounded):
-                grounded[int(ref) - 1]["used_by"].append(name)
+                _mark(grounded[int(ref) - 1], name)
             else:
                 dangling = True
         if dangling:
@@ -1488,7 +1495,7 @@ def _sanitize(
         dangling = False
         for ref in _NARRATIVE_REF.findall(value or ""):
             if 1 <= int(ref) <= len(grounded):
-                grounded[int(ref) - 1]["used_by"].append(f"mental_status.{field}")
+                _mark(grounded[int(ref) - 1], f"mental_status.{field}")
             else:
                 dangling = True
         if dangling:
@@ -1509,6 +1516,16 @@ def _sanitize(
     # Оценка суицидального риска моделью — всегда повод для проверки врачом (§5.3).
     needs.append({"section": "mental_status.suicidal_risk", "reason": "clinical_risk"})
     return sections, needs
+
+
+def _mark(source: dict, label: str) -> None:
+    """`used_by` — множество разделов-потребителей чанка, без дублей.
+
+    Модель может сослаться на `[S1]` несколько раз в одном разделе; в
+    подписанном документе это одна запись `used_by`, а не три одинаковых.
+    """
+    if label not in source["used_by"]:
+        source["used_by"].append(label)
 
 
 def _parse_json(text: str) -> dict:

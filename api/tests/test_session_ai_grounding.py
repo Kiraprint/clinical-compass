@@ -18,7 +18,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from app.config import settings
+from app.errors import Problem
 from app.services import protocols, session_ai
 from compass.agent import RAGChunk
 
@@ -312,8 +315,98 @@ def test_dangling_reference_in_narrative_is_flagged():
     assert not _needs(needs, section="complaints", reason="source_missing")
 
 
-# --- сквозной путь через API ------------------------------------------------
+def test_drug_without_words_is_never_confirmed():
+    """«АСК»/«Mg»/«Li» не дают слов ≥ 4 букв — пустой `all([])` подтверждал бы всё."""
+    sources = _sources(*CHUNKS)
+    for drug in ("АСК", "Mg", "Li"):
+        sections, needs = _sanitize(
+            {"treatment": [{"drug": drug, "dose": "50 мг", "sources": ["S1"]}]}, sources
+        )
+        assert sections["treatment"][0]["drug"] == drug  # врач может знать больше
+        assert _needs(needs, section="treatment.0", reason="drug_not_in_source"), drug
 
+
+def test_short_drug_inflection_is_confirmed():
+    """Короткие МНН склоняются: «литий» ↔ «литием» — тот же препарат."""
+    chunk = RAGChunk(
+        text="Литием поддерживающая терапия 300 мг/сут.",
+        source_title="ГРЛС: литий",
+        guideline_id="grls-lithium",
+        topic="ЛЕКАРСТВА",
+        chunk_id="77777777-7777-7777-7777-777777777777",
+    )
+    _, needs = _sanitize(
+        {"treatment": [{"drug": "литий", "dose": "300 мг", "sources": ["S1"]}]},
+        _sources(chunk),
+    )
+    assert not _needs(needs, section="treatment.0", reason="drug_not_in_source")
+    assert not _needs(needs, section="treatment.0", reason="dosage_not_in_source")
+
+
+def test_decimal_separator_matches_both_ways():
+    """«0.5 мг» из ответа модели подтверждается чанком «0,5 мг» и наоборот."""
+    for dose, text in (("0.5 мг", "Алпразолам 0,5 мг внутрь."), ("0,5 мг", "Алпразолам 0.5 мг внутрь.")):
+        chunk = RAGChunk(
+            text=text,
+            source_title="ГРЛС: алпразолам",
+            guideline_id="grls-alprazolam",
+            topic="ЛЕКАРСТВА",
+            chunk_id="88888888-8888-8888-8888-888888888888",
+        )
+        _, needs = _sanitize(
+            {"treatment": [{"drug": "алпразолам", "dose": dose, "sources": ["S1"]}]},
+            _sources(chunk),
+        )
+        assert not _needs(needs, section="treatment.0", reason="dosage_not_in_source"), dose
+
+
+def test_flags_follow_saved_rows_after_compaction():
+    """Отброшенный элемент не сдвигает флаги на чужую строку лечения."""
+    sections, needs = _sanitize(
+        {
+            "treatment": [
+                {"drug": "кветиапин", "dose": "25 мг", "sources": ["S9"]},  # отброшен
+                {"drug": "галоперидол", "dose": "1 мг", "sources": ["S1"]},  # сохранён
+            ]
+        },
+        _sources(*CHUNKS),
+    )
+    assert [row["drug"] for row in sections["treatment"]] == ["галоперидол"]
+    assert _needs(needs, section="treatment", reason="source_missing")
+    assert _needs(needs, section="treatment.0", reason="drug_not_in_source")
+    assert not _needs(needs, section="treatment.0", reason="source_missing")
+    assert not _needs(needs, section="treatment.1", reason="drug_not_in_source")
+
+
+def test_used_by_has_no_duplicates():
+    sections, _ = _sanitize(
+        {"complaints": "тревога [S1], бессонница [S1]", "recommendations": "КПТ [S1]"},
+        _sources(*CHUNKS),
+    )
+    used = next(item for item in sections["sources"] if item["id"] == CHUNKS[0].chunk_id)
+    assert used["used_by"] == ["complaints", "recommendations"]
+
+
+def test_validate_sections_rejects_source_outside_document():
+    """Ссылка на чанк, которого нет в `sources` документа, — 422."""
+    sections = {
+        "diagnosis": {"icd10": "F41.1", "sources": ["aaaaaaaa-0000-0000-0000-000000000000"]},
+        "sources": [
+            {
+                "id": "bbbbbbbb-0000-0000-0000-000000000000",
+                "section": "ЛЕКАРСТВА",
+                "title": "ГРЛС",
+                "url": "",
+                "quote": "…",
+                "used_by": ["diagnosis"],
+            }
+        ],
+    }
+    with pytest.raises(Problem) as caught:
+        protocols.validate_sections(sections)
+    assert caught.value.code == "PROTOCOL_SOURCE_UNKNOWN"
+
+# --- сквозной путь через API ------------------------------------------------
 
 def test_draft_through_api_stores_sources_and_hashes_them(client, monkeypatch, db_session):
     _enable(monkeypatch)

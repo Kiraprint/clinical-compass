@@ -184,6 +184,31 @@ def validate_sections(sections: dict) -> None:
                 )
 
 
+
+    # FR-43/§5.4: ссылка диагноза и лечения обязана указывать на запись из
+    # `sources` этого же документа. Иначе подписанный документ несёт
+    # обоснование, которое не поддерживает его содержимое (UI мог слить
+    # старый черновик с новой выдачей источников).
+    known = {item.get("id") for item in (sources or [])}
+    refs: list[tuple[str, object]] = []
+    diagnosis = sections.get("diagnosis")
+    if isinstance(diagnosis, dict) and diagnosis.get("sources") is not None:
+        refs.append(("diagnosis.sources", diagnosis.get("sources")))
+    for i, item in enumerate(treatment or []):
+        if isinstance(item, dict) and item.get("sources") is not None:
+            refs.append((f"treatment[{i}].sources", item.get("sources")))
+    for label, value in refs:
+        if not isinstance(value, list) or not all(isinstance(ref, str) for ref in value):
+            raise Problem(422, "VALIDATION_ERROR", f"{label}: ожидался массив строк")
+        missing = [ref for ref in value if ref not in known]
+        if missing:
+            raise Problem(
+                422,
+                "PROTOCOL_SOURCE_UNKNOWN",
+                f"{label}: источника {missing[0]} нет в sources",
+            )
+
+
 def _value(sections: dict, path: tuple[str, ...]):
     node = sections
     for key in path:
