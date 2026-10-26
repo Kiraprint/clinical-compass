@@ -302,9 +302,7 @@ async def pdf(
     protocol = await _signed_protocol(db, session.id)
     if protocol is None:
         raise Problem(409, "PROTOCOL_NOT_SIGNED", "Документ доступен после подписи")
-    rows = await _signatures(db, protocol.id)
-    if not rows:
-        raise Problem(409, "PROTOCOL_NOT_SIGNED", "Подписи протокола не найдены")
+    rows = await _signatures(db, protocol.id)  # _signed_protocol уже гарантирует непусто
 
     cached = await _latest_artifact(db, protocol.id, "protocol_pdf")
     if cached is not None:
@@ -415,11 +413,13 @@ async def _verify_one(
 
     try:
         certificate = x509.parse(row.cert_der)
-        authority = ca.authority()
-    except Exception:  # noqa: BLE001 — битый сертификат/недоступный УЦ → статус
+    except Exception:  # noqa: BLE001 — битый DER/SPKI → статус, не 500
         return {**base, "status": "invalid", "reason": "сертификат подписи не разбирается"}
+    try:
+        authority = ca.authority()
+    except Exception:  # noqa: BLE001 — кэш УЦ недоступен → статус, не 500
+        return {**base, "status": "invalid", "reason": "демо-УЦ недоступен"}
 
-    authority = ca.authority()
     if not cms.chain_ok(certificate, authority.der):
         return {**base, "status": "unknown_ca", "reason": "сертификат выдан неизвестным УЦ"}
     if certificate.expired():
