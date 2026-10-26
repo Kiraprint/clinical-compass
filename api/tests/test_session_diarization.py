@@ -75,6 +75,8 @@ def _defaults(monkeypatch):
     monkeypatch.setattr(settings, "prod_mode", False)
     monkeypatch.setattr(settings, "depersonalize_ner", "off")
     monkeypatch.setattr(settings, "session_audio_max_mb", 200)
+    # FR-44: автодрафт тестируется отдельно и здесь только мешал бы ролям.
+    monkeypatch.setattr(settings, "session_ai_autodraft", False)
 
 
 def _ctx(client, tag: str = "diar") -> dict:

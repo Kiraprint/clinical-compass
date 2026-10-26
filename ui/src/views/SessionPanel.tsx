@@ -9,6 +9,7 @@ import {
   ProtocolSections,
   ProtocolSource,
   ProtocolStatus,
+  SessionChatProposal,
   SessionDetail,
   SessionProtocol,
   TreatmentRow,
@@ -462,6 +463,33 @@ export default function SessionPanel({
     }
   };
 
+  /**
+   * §10 (FR-44): «Применить» для предложения агента — обычный PUT, но только
+   * одного раздела: агент протокол не меняет, это явное действие врача.
+   * Возвращает текст ошибки для ленты чата (null — успех).
+   */
+  const applyProposal = async (proposal: SessionChatProposal): Promise<string | null> => {
+    const next = withField(liveSections.current, proposal.section, proposal.after);
+    try {
+      const p = await api.putProtocol(
+        session.id,
+        next,
+        next.diagnosis.icd10.trim() || null,
+      );
+      liveProtocol.current = p;
+      const echo = withDefaults(base, p.sections);
+      liveSections.current = echo;
+      setProtocol(p);
+      setSections(echo);
+      setConflicts([]);
+      await refresh();
+      setNote(`Правка применена (версия ${p.version}).`);
+      return null;
+    } catch (e: unknown) {
+      return errText(e);
+    }
+  };
+
   const approve = async () => {
     setBusy(true);
     setErr("");
@@ -660,6 +688,7 @@ export default function SessionPanel({
         hasAudio={detail?.artifacts.some((artifact) => artifact.kind === "audio") ?? false}
         onRefresh={refresh}
         onDraft={applyDraft}
+        onApplyProposal={applyProposal}
       />
 
       <div className="card">

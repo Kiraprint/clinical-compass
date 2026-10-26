@@ -755,6 +755,14 @@ small { color: #8a94a8; }
 .transcript-time { font-variant-numeric: tabular-nums; color: #5a6478; font-size: 12px; min-width: 44px; }
 .transcript-text { white-space: pre-wrap; color: #2b3242; }
 
+/* FR-44 (docs/18 §10): диалог по приёму — лента реплик и блок предложения. */
+.chat-feed { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; max-height: 360px; overflow-y: auto; }
+.chat-msg { border: 1px solid #e6e9f1; border-radius: 10px; padding: 8px 10px; background: #fbfcfe; }
+.chat-msg.clinician { background: #f3f7ff; border-color: #d8e3f8; }
+.chat-msg p { margin: 4px 0; font-size: 13px; color: #2b3242; white-space: pre-wrap; }
+.chat-msg .proposal { margin-top: 6px; padding-top: 6px; border-top: 1px dashed #d4d8e3; }
+.chat-msg .proposal p { margin: 2px 0; }
+
 /* FR-40/41: документ приёма — шаги готовности и блоки подписантов. */
 .doc-steps { list-style: none; padding: 0; margin: 6px 0; font-size: 13px; color: #2b3242; }
 .doc-steps li { padding: 2px 0; }
@@ -812,3 +820,19 @@ small { color: #8a94a8; }
 @media (min-width: 701px) {
   .patient-nav { padding-left: 96px; }
 }
+
+/* FR-45/FR-46 (PatientUx): напоминания на главном экране пациента — строки с
+   переходом, кнопки не ниже 44px (тап на телефоне); баннер скрининга идёт ниже. */
+.patient-reminders li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 10px; }
+.patient-reminder-text { flex: 1 1 210px; min-width: 0; }
+.patient-reminder-kind {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: #eef1f6;
+  color: #5a6478;
+  font-size: 12px;
+}
+.patient-reminder-action { min-height: 44px; padding: 10px 14px; }
+.patient-banner { margin-top: 12px; }
