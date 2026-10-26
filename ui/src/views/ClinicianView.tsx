@@ -22,6 +22,7 @@ import {
 } from "../api";
 import { describeRegimeMismatch, formatTimesPerDay, parseIntakeFrequency, resolveTimesPerDay } from "../dosage";
 import TrendChart from "../TrendChart";
+import { useEscapeClose } from "../keys";
 import ChatsView from "./ChatsView";
 import LibraryView from "./LibraryView";
 import ScheduleView from "./ScheduleView";
@@ -114,11 +115,15 @@ function Collapsible({
   summary,
   children,
   defaultOpen = true,
+  id,
+  className,
 }: {
   storageKey: string;
   summary: ReactNode;
   children: ReactNode;
   defaultOpen?: boolean;
+  id?: string;
+  className?: string;
 }) {
   const [open, setOpen] = useState(() => {
     try {
@@ -130,6 +135,8 @@ function Collapsible({
   });
   return (
     <details
+      id={id}
+      className={className}
       open={open}
       onToggle={(e) => {
         const next = e.currentTarget.open;
@@ -168,6 +175,18 @@ const RISK_PATTERN_LABELS: Record<string, string> = {
   negative: "отрицает мысли о самоповреждении",
   unknown: "риск не оценивался",
 };
+
+// FR-47: оглавление длинной карточки пациента. id — якорь блока в карточке
+// (у свёрнутых блоков это сам <details>: перед прокруткой он раскрывается).
+const PATIENT_NAV: { id: string; label: string }[] = [
+  { id: "patient-risk", label: "Риск" },
+  { id: "patient-screening", label: "Скрининг" },
+  { id: "patient-checkin", label: "Чек-ины" },
+  { id: "clinician-medications", label: "Лекарства" },
+  { id: "patient-adverse", label: "НЯ" },
+  { id: "clinician-history", label: "История" },
+  { id: "patient-dynamics", label: "Динамика" },
+];
 
 // Общая очередь открытых эскалаций (docs/16 §3): сигнал виден даже без roster-врача.
 // Карточку открываем только для своего пациента (in_roster): иначе сервер отдаст 403.
@@ -864,6 +883,8 @@ export default function ClinicianView() {
       return false;
     }
   });
+  // FR-47: Escape закрывает мобильное меню кабинета.
+  useEscapeClose(navOpen, () => setNavOpen(false));
   // FR-29: выбранный пациент на экране «Чаты» (deep-link #chats=patient:<id>).
   const [chatPatient, setChatPatient] = useState<string | null>(null);
   const [filter, setFilter] = useState<(typeof TRIAGE_FILTERS)[number]>("");
@@ -1290,6 +1311,8 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
   onOpenLibrary: () => void; onOpenChats: (patientId: string) => void;
 }) {
   const [picked, setPicked] = useState<string[]>([]);
+  // FR-47: блок, к которому врач прыгнул по оглавлению (подсветка чипа).
+  const [activeBlock, setActiveBlock] = useState("");
   const [scaleSaved, setScaleSaved] = useState<number | null>(null);
   const [scaleError, setScaleError] = useState("");
   // in-flight: двойной клик по «Назначить»/«Сохранить оценку» не должен слать
@@ -1420,8 +1443,22 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
     }
   };
 
+  // FR-47: прыжок по оглавлению. Цель может быть свёрнута — сначала раскрываем
+  // ближайший <details> (нативное событие toggle обновит состояние Collapsible),
+  // потом прокручиваем: иначе врач прыгает в закрытую строку-заголовок. Прокрутку
+  // откладываем на кадр — после раскрытия меняется высота блоков выше цели.
   const jump = (id: string) => {
-    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    const el = document.getElementById(id);
+    if (!el) return;
+    setActiveBlock(id);
+    const details = el instanceof HTMLDetailsElement ? el : el.closest("details");
+    const scroll = () => el.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (details && !details.open) {
+      details.open = true;
+      requestAnimationFrame(scroll);
+    } else {
+      scroll();
+    }
   };
 
   if (error) {
@@ -1489,7 +1526,22 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
         </button>
       </div>
 
-      <div className="patient-risk">
+      {/* FR-47: липкое оглавление карточки — на узком экране строка чипов
+          прокручивается по горизонтали и не занимает вертикаль. */}
+      <nav className="patient-nav" aria-label="Разделы карточки пациента">
+        {PATIENT_NAV.map((item) => (
+          <button
+            key={item.id}
+            className={`chip${activeBlock === item.id ? " active" : ""}`}
+            aria-current={activeBlock === item.id ? "true" : undefined}
+            onClick={() => jump(item.id)}
+          >
+            {item.label}
+          </button>
+        ))}
+      </nav>
+
+      <div className="patient-risk" id="patient-risk">
         <div>
           <span className="muted small">Риск по последней оценке: </span>
           {triage ? (
@@ -1544,6 +1596,7 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
 
       <Collapsible
         storageKey="cc.clinician.screening-scales"
+        id="patient-screening"
         summary={
           <>
             Назначить скрининг
@@ -1645,7 +1698,11 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
         )}
       </Collapsible>
 
-      <Collapsible storageKey="cc.clinician.checkin" summary={checkinSummary}>
+      <Collapsible
+        storageKey="cc.clinician.checkin"
+        id="patient-checkin"
+        summary={checkinSummary}
+      >
         {report.checkin.recent.length === 0 ? (
           <p className="muted small">Пациент ещё не проходил чек-ин.</p>
         ) : (
@@ -1783,6 +1840,7 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
 
       <Collapsible
         storageKey="cc.clinician.adverse"
+        id="patient-adverse"
         summary={
           <>
             Нежелательные явления
@@ -1949,7 +2007,14 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
         <MedicationsBlock patientId={report.patient_id} />
       </div>
 
-      <div id="clinician-history">
+      {/* FR-47: объединённая история — редкий при чтении блок; свёрнута по
+          умолчанию, чип «История» в оглавлении раскрывает её перед прокруткой. */}
+      <Collapsible
+        storageKey="cc.clinician.history"
+        id="clinician-history"
+        summary="Объединённая история и импорт"
+        defaultOpen={false}
+      >
         <HistoryBlock patientId={report.patient_id} />
         <h4 className="subhead">Импорт истории болезни (черновик полей)</h4>
         <p style={{ color: "#5a6478", fontSize: 13 }}>
@@ -1972,11 +2037,12 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
             {histResult.scale_scores.length > 0 && <div><b>Баллы шкал:</b> {histResult.scale_scores.join("; ")}</div>}
           </div>
         )}
-      </div>
+      </Collapsible>
 
       <Collapsible
         storageKey="cc.clinician.dynamics"
         summary="Динамика (90 дней)"
+        id="patient-dynamics"
         defaultOpen={false}
       >
         <TrendChart timeline={{ runs: report.history, trend: report.trend }} />

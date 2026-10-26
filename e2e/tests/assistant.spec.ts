@@ -157,3 +157,14 @@ test("поток: ответ остаётся при сбое refetch и не д
   await expect(page.getByText(savedQuestion, { exact: true })).toHaveCount(1);
   await expect(page.locator(".bubble", { hasText: "Думаю…" })).toHaveCount(0);
 });
+
+test("FR-47: Ctrl+Enter в композере отправляет вопрос", async ({ page }) => {
+  await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
+  await openNewThread(page);
+
+  await expect(page.locator(".chat-pane .compose-hint")).toHaveText("Ctrl+Enter — отправить");
+  // Детерминированный ответ без LLM: отказ по красной линии.
+  await page.getByLabel("Вопрос").fill("Поставь диагноз депрессии");
+  await page.getByLabel("Вопрос").press("Control+Enter");
+  await expect(page.getByText("Я не могу поставить диагноз")).toBeVisible();
+});

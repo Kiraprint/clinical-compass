@@ -174,6 +174,7 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | FR-35 | E16 | `legal.spec.ts` (обе страницы открываются без входа, плашка «требует юридической проверки», ключевые разделы, мобильная ширина без скролла, возврат в приложение) + `npm run build` (`dist/favicon.svg`) |
 | FR-33 | E16 | `test_patient_ux.py` (каталог без q9, PHQ-8 и legacy q9, лимит автоответа, `/me/drugs`, `/checkins/history`, `fio`/`email` в контактах) + `patient-flows.spec.ts`, `daily-today.spec.ts`, `consent-revoke.spec.ts`, `clinician-chat.spec.ts` |
 | FR-34 | E16 | `test_patient_ux.py`, `test_adverse_events.py` (`test_patient_report_has_no_severity_until_clinician_verifies`), `test_screening.py` (неполный набор → 422) + `pitch.spec.ts` (PHQ-8 → RED, автоответ один раз в сутки), `multi-scale-screening.spec.ts` |
+| FR-47 | E17 | `npm run build` + e2e `clinician-links.spec.ts` (липкое оглавление карточки: чипы «Риск…Динамика», чип раскрывает свёрнутый блок и прокручивает к нему, `aria-current`), `assistant.spec.ts` (`Ctrl+Enter` в композере — ответ появляется, подсказка «Ctrl+Enter — отправить»), `clinician-admin.spec.ts`/`chats.spec.ts` (регрессия карточки и композеров) |
 
 ## 7. Границы инкремента
 

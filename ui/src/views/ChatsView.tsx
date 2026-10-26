@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, ApiError, ChatInsight, PatientChat, PatientChatMessage } from "../api";
 import AssistantTab from "./AssistantTab";
+import { isSendShortcut } from "../keys";
 
 const SENDER_LABELS: Record<string, string> = {
   CLINICIAN: "Врач",
@@ -389,7 +390,8 @@ function PatientChats({
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") void send();
+                    // FR-47: Enter и Ctrl/Cmd+Enter отправляют сообщение пациенту.
+                    if (e.key === "Enter" || isSendShortcut(e)) void send();
                   }}
                 />
                 <button
@@ -402,6 +404,7 @@ function PatientChats({
                   →
                 </button>
               </div>
+              <p className="compose-hint">Ctrl+Enter — отправить</p>
             </>
           )}
           {error && <p className="error">{error}</p>}
