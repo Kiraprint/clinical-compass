@@ -131,6 +131,22 @@ jobs:
             sleep 1
           done
           test "$state" = "exited/0"
+      # remd-mock (профиль emias) не публикует порт на хост: ждём /health
+      # из api — тем же путём, которым пойдёт передача СЭМД.
+      - name: Wait for REMD mock
+        run: |
+          ok=""
+          for i in $(seq 1 120); do
+            if docker compose -f infra/docker-compose.yml exec -T api \
+                 /app/.venv/bin/python -c \
+                 'import urllib.request; urllib.request.urlopen("http://remd-mock:8091/health", timeout=2)' \
+                 >/dev/null 2>&1; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          test -n "$ok"
 
       - name: Setup Node + Playwright
         uses: actions/setup-node@v4
