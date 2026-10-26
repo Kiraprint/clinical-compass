@@ -17,10 +17,12 @@ test.describe("Экран чатов врача", () => {
     await page.getByLabel("Вопрос").fill("Какой порог тяжести у шкалы PHQ-9?");
     await page.getByRole("button", { name: "Спросить" }).click();
 
+    // Ответ теперь может собираться LLM: CC_ASSISTANT_LLM_ANSWER_TIMEOUT=25 с плюс
+    // запас на поиск и сеть. Детерминированный fallback укладывается быстрее.
     // В CI без LLM ответ может быть NO_KB_DATA — тогда ассистент честно говорит об этом.
     const answer = page.locator(".bubble", { hasText: "Ассистент" }).last();
-    await expect(answer).toBeVisible({ timeout: 20_000 });
-    await expect(answer).toContainText(/По базе знаний|NO_KB_DATA|не удалось/i);
+    await expect(answer).toBeVisible({ timeout: 45_000 });
+    await expect(answer).toContainText(/баз[еы] знаний|NO_KB_DATA|не удалось/i);
   });
 
   test("Чаты → Пациенты: переписка видна, врач отвечает", async ({ page, request }) => {
