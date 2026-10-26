@@ -51,8 +51,13 @@ test.describe("Врачебная оценка (HDRS-17)", () => {
     await page.getByLabel("Суицидальные мысли").selectOption("2");
     await page.getByRole("button", { name: "Сохранить оценку" }).click();
 
-    // Итог сразу в форме, а карточка перезагружается — появляется алёрт риска.
-    await expect(page.getByText(/· RED/).first()).toBeVisible({ timeout: 15000 });
+    // Вердикт в свёрнутой карточке («4 · …») — это `assessResult`, и он
+    // сбрасывается первым же обновлением отчёта (useEffect по `report`),
+    // поэтому утверждаться на нём нельзя: гонка даёт ложное падение.
+    // Проверяем устойчивое — бейдж и алёрт из `report.last_assessment`.
+    await expect(page.locator(".patient-risk .badge.RED")).toHaveText("RED — высокий", {
+      timeout: 15000,
+    });
     await expect(page.getByText("Высокий риск: требуется разбор.")).toBeVisible({ timeout: 15000 });
 
     // Пациенту такая шкала недоступна: каталог её не содержит.
