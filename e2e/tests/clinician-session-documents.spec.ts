@@ -240,3 +240,31 @@ test("черновик ИИ не перезаписывает текст, вве
   await expect(page.getByText(/не перезаписаны/)).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("draft-race.png"), fullPage: true });
 });
+
+test("старый API без полей диаризации не роняет карточку ИИ", async ({ page, request }, testInfo) => {
+  const { docReg, patReg } = await setupClinicianPair(request, "slegacy");
+  // Бандл новее API (раскатка контейнеров по одному): в ответе нет ни `diarized`,
+  // ни `speaker_roles` — регресс P1 ревью #95, раньше карточка падала целиком.
+  await page.route("**/api/v1/clinician/sessions/*/transcript", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        segments: [{ start: 0, end: 7, speaker: "A", text: "Здравствуйте, что вас беспокоит?" }],
+        model: "whisper-legacy",
+        duration_sec: 7,
+        mask_categories: {},
+        depersonalized: true,
+      }),
+    }),
+  );
+  await openWalkIn(page, docReg, patReg.id);
+
+  await page.getByText("ИИ-ассистент").click();
+  // Карточка жива: расшифровка видна, метка кластера на месте, плашка честная.
+  await expect(page.getByText("Здравствуйте, что вас беспокоит?")).toBeVisible();
+  await expect(page.getByText("Говорящий A")).toBeVisible();
+  await expect(page.getByText("Говорящие не разделены")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Сформировать черновик протокола" })).toBeEnabled();
+  await page.screenshot({ path: testInfo.outputPath("legacy-transcript.png"), fullPage: true });
+});

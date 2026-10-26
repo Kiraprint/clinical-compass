@@ -86,7 +86,7 @@ ASR_LANGUAGES = frozenset(
 _ASR_STUB_BYTES_PER_S = 32_000
 _ASR_STUB_SEGMENT_S = 5.0
 
-# --- Диаризация (FR-42, docs/18 §4.5) --------------------------------------
+# --- Диаризация (FR-42, docs/18 §4.3) --------------------------------------
 # sherpa-onnx — обычное pip-колесо (CPU, свой onnxruntime внутри), веса —
 # ONNX-файлы из GitHub releases k2-fsa, без HF-гейта:
 #   pyannote/segmentation-3.0 (MIT) → границы реплик,

@@ -334,12 +334,15 @@ export interface SessionTranscript {
   duration_sec: number | null;
   mask_categories: Record<string, number>;
   depersonalized: boolean;
-  /** false — сайдкар не разделил говорящих (модель недоступна/выключена). */
-  diarized: boolean;
+  /**
+   * false — сайдкар не разделил говорящих (модель недоступна/выключена).
+   * Поля необязательны: API на шаг старше бандла их не присылает.
+   */
+  diarized?: boolean;
   /** Метка кластера → роль; пусто, когда роли не назначались. */
-  speaker_roles: Record<string, SpeakerRole>;
+  speaker_roles?: Record<string, SpeakerRole>;
   /** true — роли проставлены автоматически (первый заговоривший = врач). */
-  speaker_roles_assumed: boolean;
+  speaker_roles_assumed?: boolean;
 }
 export interface AudioUploadResult {
   artifact_id: string;
@@ -812,7 +815,7 @@ export const api = {
     }),
   getTranscript: (sessionId: string) =>
     req<SessionTranscript>(`/api/v1/clinician/sessions/${sessionId}/transcript`),
-  /** §4.5: роли участников (`{"A":"clinician","B":"patient"}`); 422 на дубли. */
+  /** §4.3: роли участников (`{"A":"clinician","B":"patient"}`); 422 на дубли. */
   setSpeakerRoles: (sessionId: string, roles: Record<string, SpeakerRole>) =>
     req<SessionTranscript>(
       `/api/v1/clinician/sessions/${sessionId}/transcript/speakers`,
