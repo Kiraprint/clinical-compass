@@ -486,7 +486,7 @@ def test_unknown_request_id_callback_is_404_and_keeps_delivery(client, remd):
         "detail": "Запрос с таким request_id не найден",
         "instance": "/api/v1/remd/callback",
     }
-    # 404 не пишет в базу: строка доставки не изменилась ни на байт.
+    # 404 не пишет в базу: ни одно поле сводки доставки не изменилось.
     assert _delivery(client, context, session).json() == before
 
     # At-least-once: повтор того же callback'а с известным request_id регистрирует документ.
@@ -563,6 +563,51 @@ def test_request_id_wait_does_not_hold_connection(client, remd, monkeypatch):
 
     assert payload["status"] == "sending"
     assert payload["request_id"] == "wait-request-id"
+
+
+def test_request_id_wait_deadline_returns_null_request_id(client, remd, monkeypatch):
+    """Ожидание ограничено: за отведённое время `request_id` не появился → 202, `null` (§8.3)."""
+    import asyncio
+    import threading
+    import time as _time
+
+    from app import db as db_module
+    from app.remd import service
+    from app.remd.client import RemdClient
+
+    session, context = _signed(client, "rd-wait-deadline")
+    clinician_id = uuid.UUID(context["clinician_id"])
+    session_id = uuid.UUID(session["id"])
+    started, release = threading.Event(), threading.Event()
+
+    def slow(self, envelope):
+        started.set()
+        release.wait(10)  # лидер не успевает сохранить `request_id` до дедлайна
+        return "late-request-id"
+
+    monkeypatch.setattr(RemdClient, "register_document", slow)
+    monkeypatch.setattr(service, "_REQUEST_ID_WAIT_SEC", 0.2)
+
+    async def scenario():
+        async with db_module.AsyncSessionLocal() as first, db_module.AsyncSessionLocal() as second:
+            leader = asyncio.create_task(service.submit(first, clinician_id, session_id))
+            deadline = _time.monotonic() + 10
+            while not started.is_set() and _time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            assert started.is_set(), "первая отправка не дошла до сети"
+
+            began = _time.monotonic()
+            payload = (await service.submit(second, clinician_id, session_id))[1]
+            waited = _time.monotonic() - began
+
+            release.set()
+            await leader
+            return payload, waited
+
+    payload, waited = asyncio.run(scenario())
+    assert waited >= 0.2 and waited < 5, f"дедлайн ожидания не сработал: {waited:.2f} с"
+    assert payload["status"] == "sending"
+    assert payload["request_id"] is None
 
 
 def test_retry_clears_previous_result(client, remd, db_session, monkeypatch):

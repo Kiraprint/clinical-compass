@@ -185,13 +185,15 @@ async def _wait_request_id(db: AsyncSession, row: EmiasDelivery) -> None:
     `_REQUEST_ID_WAIT_SEC`) не держит соединение из пула и не блокирует соседние
     запросы. По выходу транзакция открыта свежим `refresh` — её закрывает вызывающий.
     """
+    if row.request_id is not None or row.status != "sending":
+        return  # лидер уже дописал `request_id` — ждать нечего
     deadline = asyncio.get_running_loop().time() + _REQUEST_ID_WAIT_SEC
     while asyncio.get_running_loop().time() < deadline:
         await db.commit()  # ожидание — вне транзакции: соединение возвращается в пул
         await asyncio.sleep(_REQUEST_ID_POLL_SEC)
-        await db.refresh(row)
+        await db.refresh(row)  # свежее чтение; транзакция закроется перед следующим sleep
         if row.request_id is not None or row.status != "sending":
-            break
+            return
 
 
 async def _lock_delivery(db: AsyncSession, delivery_id) -> EmiasDelivery:
@@ -277,8 +279,8 @@ async def submit(
         row.submitted_at = now
         row.last_error_code = None
         row.last_error_message = None
-        # Результат прошлой попытки не переигрывается: `Delivery`/callback читают
-        # `result`, и старая ошибка/ответ не должны выглядеть как ответ новой попытки.
+        # Исход прошлой попытки не переигрывается: `result` хранит ответ на конкретную
+        # отправку, и старая ошибка не должна выглядеть ответом новой попытки.
         row.result = None
 
     cda, signature, signature_der = await _prepared(db, session, protocol)
