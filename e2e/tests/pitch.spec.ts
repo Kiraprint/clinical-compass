@@ -14,7 +14,7 @@ import {
 const BASE = process.env.CC_E2E_URL ?? "http://127.0.0.1:8090";
 const j = async (r: APIResponse) => r.json();
 
-/** Свежий пациент с назначенной врачом шкалой (баннер «Скрининг, назначенный врачом»). */
+/** Свежий пациент с назначенной врачом шкалой (баннер «Врач назначил скрининг»). */
 async function preparedPatient(request: APIRequestContext, scales: string[] = ["PHQ-9"]) {
   const docReg = await j(
     await request.post(`${BASE}/api/v1/auth/register`, {

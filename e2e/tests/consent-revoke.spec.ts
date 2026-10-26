@@ -28,7 +28,7 @@ test.describe("Отзыв согласия на обработку ПДн", () =
     await expect(
       page.getByRole("heading", { name: "Согласие на обработку персональных данных (152-ФЗ)" })
     ).toBeVisible();
-    await expect(page.getByText("Скрининг, назначенный врачом")).toBeHidden();
+    await expect(page.getByText(/Врач назначил скрининг/)).toBeHidden();
 
     // API: активное согласие 404, скрининг/дневник — 403 CONSENT_REQUIRED.
     expect((await page.request.get(`${BASE}/api/v1/consent`)).status()).toBe(404);

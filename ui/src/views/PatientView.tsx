@@ -40,11 +40,17 @@ const MENU: { id: Tab; label: string }[] = [
   { id: "drugs", label: "Справочник" },
 ];
 
+// FR-45: напоминание на главном экране ведёт не только в раздел, но и к блоку —
+// чек-ину или отметке приёма, чтобы не искать их глазами.
+type TodayFocus = "checkin" | "intake";
+type OpenTab = (tab: Tab, focus?: TodayFocus) => void;
+
 export default function PatientView({ onLogout }: { onLogout?: () => void }) {
   const [consent, setConsent] = useState<Consent | null>(null);
   const [consentChecked, setConsentChecked] = useState(false);
   const [tab, setTab] = useState<Tab>("today");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [todayFocus, setTodayFocus] = useState<{ target: TodayFocus; at: number } | null>(null);
 
   const loadConsent = useCallback(async () => {
     try {
@@ -86,8 +92,9 @@ export default function PatientView({ onLogout }: { onLogout?: () => void }) {
     );
   }
 
-  const go = (id: Tab) => {
+  const go: OpenTab = (id, focus) => {
     setTab(id);
+    if (focus) setTodayFocus({ target: focus, at: Date.now() });
     setMenuOpen(false);
   };
 
@@ -127,7 +134,7 @@ export default function PatientView({ onLogout }: { onLogout?: () => void }) {
           <div className="alert-info row">
             <span style={{ fontSize: 13 }}>Согласие активно (v{consent.version}, от {consent.signed_at.slice(0, 10)})</span>
           </div>
-          <TodayTab onOpen={go} />
+          <TodayTab onOpen={go} focus={todayFocus} />
         </>
       )}
       {tab === "screening" && <ScreeningTab />}
@@ -301,37 +308,52 @@ function ScreeningTab() {
   );
 }
 
+// Подписи отметок в истории и в записях дня: те же слова, что на «Сегодня»,
+// но без счёта таблеток — одна запись всегда один приём.
 const ADH_LABELS: Record<string, string> = {
-  taken: "Принял",
-  partial: "Частично",
-  missed: "Не принял",
-  not_scheduled: "Не назначено сегодня",
+  taken: "Принял(а) всё",
+  partial: "Принял(а) меньше",
+  missed: "Не принимал(а)",
+  not_scheduled: "Врач не назначал",
 };
 type AdherenceStatus = "taken" | "partial" | "missed" | "not_scheduled";
 const ADH_STATUSES: AdherenceStatus[] = ["taken", "partial", "missed", "not_scheduled"];
 
+// FR-46: на «Сегодня» пациент отвечает про таблетки, а не про «дозу по назначению».
+// N — режим приёма (times_per_day); без режима считаем одну таблетку.
+const intakeLabels = (timesPerDay: number): Record<AdherenceStatus, string> => ({
+  taken:
+    timesPerDay > 0
+      ? `Принял(а) всё: ${timesPerDay} ${timesPerDay === 1 ? "таблетку" : timesPerDay <= 4 ? "таблетки" : "таблеток"}`
+      : "Принял(а) всё",
+  partial: "Принял(а) меньше",
+  missed: "Не принимал(а)",
+  not_scheduled: "Врач не назначал на сегодня",
+});
+
 // FR-27: уточнение «частично» — пациент выбирает конкретную долю, а не 0,5 вслепую.
+// FR-46: подписи — про таблетки и приёмы, значения partial_kind не меняются.
 const PARTIAL_GROUPS: { title: string; options: { kind: PartialKind; label: string }[] }[] = [
   {
     title: "Часть таблетки",
     options: [
-      { kind: "quarter", label: "1/4 таблетки" },
-      { kind: "half", label: "1/2 таблетки" },
-      { kind: "three_quarters", label: "3/4 таблетки" },
+      { kind: "quarter", label: "Четверть таблетки" },
+      { kind: "half", label: "Половину таблетки" },
+      { kind: "three_quarters", label: "Три четверти таблетки" },
     ],
   },
   {
-    title: "Часть доз",
+    title: "Из нескольких приёмов",
     options: [
-      { kind: "one_of_two", label: "1 из 2 доз" },
-      { kind: "two_of_three", label: "2 из 3 доз" },
+      { kind: "one_of_two", label: "Одну из двух" },
+      { kind: "two_of_three", label: "Две из трёх" },
     ],
   },
   {
     title: "Другое",
     options: [
-      { kind: "less_than_prescribed", label: "Принял меньше, чем назначено" },
-      { kind: "self_changed", label: "Изменил дозу сам" },
+      { kind: "less_than_prescribed", label: "Меньше, чем назначено" },
+      { kind: "self_changed", label: "Изменил(а) сам(а)" },
     ],
   },
 ];
@@ -351,7 +373,7 @@ function PartialPicker({
 }: { value: PartialKind | null; onChange: (kind: PartialKind) => void }) {
   return (
     <fieldset style={{ border: "1px solid #d5dae4", borderRadius: 8, padding: 10, margin: "8px 0" }}>
-      <legend style={{ fontSize: 14 }}>Сколько принято</legend>
+      <legend style={{ fontSize: 14 }}>Сколько именно приняли</legend>
       {PARTIAL_GROUPS.map((group) => (
         <div
           key={group.title}
@@ -586,7 +608,13 @@ function CheckinCard() {
   );
 }
 
-function TodayTab({ onOpen }: { onOpen: (tab: Tab) => void }) {
+function TodayTab({
+  onOpen,
+  focus,
+}: {
+  onOpen: OpenTab;
+  focus: { target: TodayFocus; at: number } | null;
+}) {
   const [content, setContent] = useState("");
   const [mood, setMood] = useState<number | null>(null);
   const [sleep, setSleep] = useState(7);
@@ -615,6 +643,20 @@ function TodayTab({ onOpen }: { onOpen: (tab: Tab) => void }) {
     load().catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)));
   }, []);
 
+  // FR-45: переход из напоминания — прокручиваем к блоку и ставим фокус на
+  // первый ответ, чтобы пациенту не пришлось искать кнопку.
+  useEffect(() => {
+    if (!focus) return;
+    const block = document.getElementById(`today-${focus.target}`);
+    if (!block) return;
+    block.scrollIntoView({ block: "start" });
+    // У блока приёма первый элемент — ссылка в историю, поэтому у ответа свой id.
+    const answer = document.getElementById(`today-${focus.target}-answer`);
+    (answer ?? block.querySelector<HTMLElement>("button, input, select, textarea"))?.focus({
+      preventScroll: true,
+    });
+  }, [focus]);
+
   // Приёмов в день может быть несколько (FR-27): каждый отмечается отдельной
   // записью прямо здесь, без перехода в историю. Считаем только отметки
   // выбранного назначения; «не назначено сегодня» закрывает день целиком и
@@ -629,10 +671,12 @@ function TodayTab({ onOpen }: { onOpen: (tab: Tab) => void }) {
   const intakesMarked = todayForSelected.filter((r) => r.status !== "not_scheduled").length;
   const intakesLeft = Math.max(0, intakesExpected - intakesMarked);
   const intakesComplete = dayNotScheduled || intakesLeft === 0;
+  // FR-46: без назначения таблеток не считаем — просто «принял(а) всё».
+  const intakeOptions = intakeLabels(adhMeds.length > 0 ? intakesExpected : 0);
 
   const save = async () => {
     if (status === "partial" && !partialKind) {
-      setErr("Укажите, сколько принято: часть таблетки, часть доз или другое.");
+      setErr("Уточните, сколько таблеток вы приняли.");
       return;
     }
     setErr("");
@@ -688,8 +732,10 @@ function TodayTab({ onOpen }: { onOpen: (tab: Tab) => void }) {
         дневник и приём лекарств в одной форме.
       </p>
 
-      <h3>Чек-ин</h3>
-      <CheckinCard />
+      <div id="today-checkin">
+        <h3>Чек-ин</h3>
+        <CheckinCard />
+      </div>
 
       <h3>Дневник</h3>
       <label htmlFor="today-diary">Как прошёл день?</label>
@@ -726,82 +772,91 @@ function TodayTab({ onOpen }: { onOpen: (tab: Tab) => void }) {
         </div>
       )}
 
-      <div className="row" style={{ alignItems: "baseline" }}>
-        <h3 style={{ marginRight: 8 }}>Приём лекарств</h3>
-        <button className="ghost" onClick={() => onOpen("adherence")}>
-          История приёма
-        </button>
-      </div>
-      {adhMeds.length > 0 && (
-        <select value={adhMedId} onChange={(e) => setAdhMedId(e.target.value)}>
-          {adhMeds.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.title}
-              {m.times_per_day != null ? ` (${doseWord(m.times_per_day)})` : " (режим не задан)"}
-            </option>
-          ))}
-        </select>
-      )}
-      {intakesComplete ? (
-        <>
-          <p style={{ color: "#2e7d32", fontWeight: 600 }}>
-            {dayNotScheduled
-              ? "Сегодня не назначено — приёмы отмечать не нужно"
-              : `За сегодня отмечено ${intakesMarked} из ${intakesExpected} ` +
-                intakePlural(intakesExpected, true)}
-          </p>
-          {todayForSelected.map((r) => (
-            <p key={r.id} style={{ color: "#5a6478", fontSize: 13 }}>
-              {new Date(r.created_at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })} ·{" "}
-              <b>{ADH_LABELS[r.status] ?? r.status}</b>
-              {r.status === "partial" && r.partial_kind ? ` — ${partialKindLabel(r.partial_kind)}` : ""}
-              {r.medication ? ` (${r.medication})` : ""}
-              {r.note ? ` · ${r.note}` : ""}
-            </p>
-          ))}
-          <p style={{ color: "#5a6478", fontSize: 13 }}>
-            Ошиблись с отметкой? Исправить можно в истории приёма.
-          </p>
-        </>
-      ) : (
-        <>
-          {intakesMarked > 0 && (
-            <p style={{ color: "#2e7d32", fontWeight: 600 }}>
-              Отмечено {intakesMarked} из {intakesExpected} {intakePlural(intakesExpected, true)} за сегодня ·
-              осталось отметить ещё {intakesLeft} {intakePlural(intakesLeft)}
-            </p>
-          )}
-          <div
-            role="group"
-            aria-label="Отметка приёма"
-            style={{ display: "flex", gap: 8, margin: "8px 0", flexWrap: "wrap" }}
-          >
-            {ADH_STATUSES.map((s) => (
-              <button
-                key={s}
-                className={status === s ? "active" : "ghost"}
-                aria-pressed={status === s}
-                style={ADH_BUTTON_STYLE}
-                onClick={() => {
-                  setStatus(s);
-                  if (s !== "partial") setPartialKind(null);
-                }}
-              >
-                {ADH_LABELS[s]}
-              </button>
+      <div id="today-intake">
+        <div className="row" style={{ alignItems: "baseline" }}>
+          <h3 style={{ marginRight: 8 }}>Приём лекарств</h3>
+          <button className="ghost" onClick={() => onOpen("adherence")}>
+            История приёма
+          </button>
+        </div>
+        {adhMeds.length > 0 && (
+          <select value={adhMedId} onChange={(e) => setAdhMedId(e.target.value)}>
+            {adhMeds.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.title}
+                {m.times_per_day != null ? ` (${doseWord(m.times_per_day)})` : " (режим не задан)"}
+              </option>
             ))}
-          </div>
-          {status === "partial" && <PartialPicker value={partialKind} onChange={setPartialKind} />}
-          {adhMeds.length === 0 && (
-            <input
-              placeholder="Препарат (напр. Авиандр) — необязательно"
-              value={medication}
-              onChange={(e) => setMedication(e.target.value)}
-            />
-          )}
-          <input placeholder="Заметка (необязательно)" value={adhNote} onChange={(e) => setAdhNote(e.target.value)} />
-        </>
-      )}
+          </select>
+        )}
+        {intakesComplete ? (
+          <>
+            <p style={{ color: "#2e7d32", fontWeight: 600 }}>
+              {dayNotScheduled
+                ? "Врач не назначал приём на сегодня — отмечать нечего."
+                : `Сегодня всё отмечено: ${intakesMarked} из ${intakesExpected} ` +
+                  intakePlural(intakesExpected, true)}
+            </p>
+            {todayForSelected.map((r) => (
+              <p key={r.id} style={{ color: "#5a6478", fontSize: 13 }}>
+                {new Date(r.created_at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })} ·{" "}
+                <b>{ADH_LABELS[r.status] ?? r.status}</b>
+                {r.status === "partial" && r.partial_kind ? ` — ${partialKindLabel(r.partial_kind)}` : ""}
+                {r.medication ? ` (${r.medication})` : ""}
+                {r.note ? ` · ${r.note}` : ""}
+              </p>
+            ))}
+            <p style={{ color: "#5a6478", fontSize: 13 }}>
+              Ошиблись с отметкой? Исправить можно в истории приёма.
+            </p>
+          </>
+        ) : (
+          <>
+            {intakesMarked > 0 && (
+              <p style={{ color: "#2e7d32", fontWeight: 600 }}>
+                Отмечено {intakesMarked} из {intakesExpected} {intakePlural(intakesExpected, true)} за сегодня ·
+                осталось отметить ещё {intakesLeft} {intakePlural(intakesLeft)}
+              </p>
+            )}
+            <p style={{ fontWeight: 600, margin: "8px 0 4px" }}>Сколько таблеток вы приняли?</p>
+            <div
+              role="group"
+              aria-label="Отметка приёма"
+              style={{ display: "flex", gap: 8, margin: "8px 0", flexWrap: "wrap" }}
+            >
+              {ADH_STATUSES.map((s) => (
+                <button
+                  key={s}
+                  id={s === "taken" ? "today-intake-answer" : undefined}
+                  className={status === s ? "active" : "ghost"}
+                  aria-pressed={status === s}
+                  style={ADH_BUTTON_STYLE}
+                  onClick={() => {
+                    setStatus(s);
+                    if (s !== "partial") setPartialKind(null);
+                  }}
+                >
+                  {intakeOptions[s]}
+                </button>
+              ))}
+            </div>
+            {status === "partial" && <PartialPicker value={partialKind} onChange={setPartialKind} />}
+            {status === "not_scheduled" && (
+              <p style={{ color: "#5a6478", fontSize: 13 }}>
+                Так вы закрываете день: врач приём не назначал, поэтому он не идёт в процент приёма.
+              </p>
+            )}
+            {adhMeds.length === 0 && (
+              <input
+                placeholder="Препарат (напр. Авиандр) — необязательно"
+                value={medication}
+                onChange={(e) => setMedication(e.target.value)}
+              />
+            )}
+            <input placeholder="Заметка (необязательно)" value={adhNote} onChange={(e) => setAdhNote(e.target.value)} />
+          </>
+        )}
+      </div>
 
       <div style={{ marginTop: 14, display: "flex", gap: 10, alignItems: "center" }}>
         <button onClick={save} disabled={busy}>
@@ -884,7 +939,7 @@ function AdherenceTab() {
   const mark = async () => {
     if (!status) return;
     if (status === "partial" && !partialKind) {
-      setErr("Укажите, сколько принято: часть таблетки, часть доз или другое.");
+      setErr("Уточните, сколько таблеток вы приняли.");
       return;
     }
     setErr("");
@@ -1484,8 +1539,8 @@ function maskPhone(phone: string | null): string {
   return `+${digits[0]}•••${rest.slice(0, 3)}-${rest.slice(3, 5)}-${rest.slice(5)}`;
 }
 
-// Главный экран (FR-33 A): приветствие, дата и время, напоминания и баннер
-// назначенного врачом скрининга. Ниже — чек-ин, дневник и приём лекарств.
+// Главный экран (FR-33 A, FR-45): приветствие, дата и время, напоминания и
+// баннер назначенного врачом скрининга. Ниже — чек-ин, дневник и приём лекарств.
 type PrescribedScale = {
   code: string;
   title: string;
@@ -1494,7 +1549,15 @@ type PrescribedScale = {
   completed_at: string | null;
 };
 
-function HomeHead({ onOpen }: { onOpen: (tab: Tab) => void }) {
+// FR-45: напоминание — не текст, а переход: одно нажатие ведёт на нужный экран
+// (и к нужному блоку на «Сегодня»). Уведомление без действия остаётся текстом.
+type HomeReminder = {
+  key: string;
+  text: string;
+  action?: { label: string; aria: string; tab: Tab; focus?: TodayFocus };
+};
+
+function HomeHead({ onOpen }: { onOpen: OpenTab }) {
   const [contacts, setContacts] = useState<PatientContacts | null>(null);
   const [scales, setScales] = useState<PrescribedScale[]>([]);
   const [checkinDone, setCheckinDone] = useState<boolean | null>(null);
@@ -1526,13 +1589,47 @@ function HomeHead({ onOpen }: { onOpen: (tab: Tab) => void }) {
   }, []);
 
   const now = new Date();
-  const reminders: string[] = [];
+  const reminders: HomeReminder[] = [];
   // Только непройденные назначения: completed_at заполнен → скрининг уже пройден.
   const pendingScales = scales.filter((s) => !s.completed_at);
-  if (checkinDone === false) reminders.push("Чек-ин на сегодня ещё не выполнен.");
-  if (medsMarked === false) reminders.push("Приём лекарств на сегодня не отмечен.");
-  if (pendingScales.length > 0) reminders.push(`Назначен скрининг: ${pendingScales.map((s) => s.title).join(", ")}.`);
-  unread.forEach((n) => reminders.push(n.title));
+  const pendingTitles = pendingScales.map((s) => s.title).join(", ");
+  if (checkinDone === false) {
+    reminders.push({
+      key: "checkin",
+      text: "Чек-ин на сегодня ещё не выполнен.",
+      action: {
+        label: "Отметить чек-ин",
+        aria: "Отметить чек-ин на экране «Сегодня»",
+        tab: "today",
+        focus: "checkin",
+      },
+    });
+  }
+  if (medsMarked === false) {
+    reminders.push({
+      key: "intake",
+      text: "Приём лекарств на сегодня не отмечен.",
+      action: {
+        label: "Отметить приём",
+        aria: "Отметить приём лекарств на экране «Сегодня»",
+        tab: "today",
+        focus: "intake",
+      },
+    });
+  }
+  if (pendingScales.length > 0) {
+    reminders.push({
+      key: "screening",
+      text: `Назначен скрининг: ${pendingTitles}.`,
+      action: {
+        label: "Перейти к скринингу",
+        aria: `Перейти к скринингу: ${pendingTitles}`,
+        tab: "screening",
+      },
+    });
+  }
+  // Уведомления — только информация: экрана, куда по ним вести, нет.
+  unread.forEach((n) => reminders.push({ key: `notice-${n.id}`, text: n.title }));
 
   return (
     <section className="card patient-home">
@@ -1541,22 +1638,38 @@ function HomeHead({ onOpen }: { onOpen: (tab: Tab) => void }) {
         {now.toLocaleDateString("ru-RU", { weekday: "long", day: "numeric", month: "long" })} ·{" "}
         {now.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}
       </p>
-      {pendingScales.length > 0 && (
-        <div className="patient-banner">
-          <b>Скрининг, назначенный врачом</b>
-          <p>{pendingScales.map((s) => s.title).join(", ")}</p>
-          <button onClick={() => onOpen("screening")}>Перейти к скринингу</button>
-        </div>
-      )}
+      {/* FR-45: напоминания ежедневные, скрининг — разовый, поэтому напоминания
+          выше баннера: частый повод оказался первым. */}
       <h3>Напоминания</h3>
       {reminders.length === 0 ? (
         <p style={{ color: "#5a6478", fontSize: 14 }}>На сегодня всё отмечено.</p>
       ) : (
         <ul className="patient-reminders">
-          {reminders.map((text) => (
-            <li key={text}>{text}</li>
+          {reminders.map((reminder) => (
+            <li key={reminder.key}>
+              <span className="patient-reminder-text">
+                {!reminder.action && <span className="patient-reminder-kind">Уведомление</span>}
+                {reminder.text}
+              </span>
+              {reminder.action && (
+                <button
+                  className="patient-reminder-action"
+                  aria-label={reminder.action.aria}
+                  onClick={() => onOpen(reminder.action!.tab, reminder.action!.focus)}
+                >
+                  {reminder.action.label}
+                </button>
+              )}
+            </li>
           ))}
         </ul>
+      )}
+      {pendingScales.length > 0 && (
+        <div className="patient-banner">
+          <b>Врач назначил скрининг: {pendingTitles}</b>
+          <p>Анкета разовая — заполнить можно в любой момент, когда удобно.</p>
+          <button onClick={() => onOpen("screening")}>Пройти скрининг</button>
+        </div>
       )}
     </section>
   );
