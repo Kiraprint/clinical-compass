@@ -954,6 +954,9 @@ class ClinicalSession(Base):
         Boolean, server_default=text("false")
     )  # отдельное согласие на запись (docs/18 §1.3)
     ai_status: Mapped[str] = mapped_column(String(16), server_default=text("'off'"))
+    # Код последнего сбоя ИИ-конвейера (§4.3): расшифровка упала — в detail видны
+    # `ai_status='failed'` и код (AUDIO_MISSING/ML_UNAVAILABLE/…), без текста.
+    ai_error: Mapped[str | None] = mapped_column(String(48), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )

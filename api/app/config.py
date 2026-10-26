@@ -123,6 +123,10 @@ class Settings(BaseSettings):
     session_ai_enabled: bool = False  # CC_SESSION_AI_ENABLED
     # CC_SESSION_AUDIO_MAX_MB: потолок аудио на сессию (413, PR P3).
     session_audio_max_mb: int = Field(default=200, ge=1)
+    # CC_SESSION_AI_TIMEOUT: сек на один шаг ИИ-конвейера — вызов сайдкара
+    # `/v1/transcribe` (аудио приёма бывает на час) и черновик протокола в LLM.
+    # Отдельно от CC_ML_TIMEOUT (5 с: маскирование ПДн ждёт короткий таймаут).
+    session_ai_timeout: float = Field(default=600.0, gt=0)
     # CC_ARTIFACTS_DIR: каталог шифрованных артефактов (AES-256-GCM, docs/18 §4.6;
     # в compose — volume, в тестах — tmp-каталог).
     artifacts_dir: str = "/var/lib/compass/artifacts"

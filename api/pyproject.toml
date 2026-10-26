@@ -31,6 +31,8 @@ dependencies = [
     "gostcrypto>=1.2.5",
     "asn1crypto>=1.5.1",
     "weasyprint>=62",
+    # docs/18 §4.3: multipart-загрузка аудио сессии (разбор частей в сервисе).
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]

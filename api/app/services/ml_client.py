@@ -9,6 +9,9 @@ GPU-сервис `ml` (compose) держит модели, которые нел
 - ``POST /v1/rerank`` {query, documents, top_k}
   → {scores} (порядок = порядок documents, больше — лучше)
 - ``POST /v1/mask`` {text, names} → {text, spans, model}
+- ``POST /v1/transcribe`` multipart {file, language}
+  → {model, device, duration_s, language, segments: [{start, end, speaker, text}],
+  speakers, degraded}
 - ``GET /health`` → {status, device, models}
 
 Функции синхронные: вызывающий уводит их в рабочий поток
@@ -27,6 +30,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 from app.config import settings
 
@@ -93,19 +97,26 @@ def _endpoint(path: str) -> str:
         raise MlUnavailable("CC_ML_URL не задан — ML-сайдкар не используется")
     return f"{base}{path}"
 
-def _post(path: str, payload: dict) -> dict:
-    """POST JSON с одним повтором на сетевой сбой/5xx."""
+def _send(
+    path: str,
+    body: bytes,
+    headers: dict[str, str],
+    *,
+    timeout: float | None = None,
+    retries: int = 1,
+) -> dict:
+    """POST тела с `retries` повторами на сетевой сбой/5xx (по умолчанию один)."""
     _breaker_guard(path)
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
+    headers = dict(headers)
     if settings.ml_token:
         headers["X-CC-ML-Token"] = settings.ml_token
     url = _endpoint(path)
+    budget = settings.ml_timeout if timeout is None else timeout
     last: Exception | None = None
-    for attempt in (0, 1):
+    for attempt in range(retries + 1):
         request = urllib.request.Request(url, data=body, headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(request, timeout=settings.ml_timeout) as resp:
+            with urllib.request.urlopen(request, timeout=budget) as resp:
                 raw = resp.read(_MAX_BODY)
             data = json.loads(raw or b"{}")
             if not isinstance(data, dict):
@@ -121,11 +132,56 @@ def _post(path: str, payload: dict) -> dict:
                 raise last from None  # 4xx — ошибка запроса, повтор не поможет
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
             last = MlUnavailable(f"сайдкар {path}: {type(exc).__name__}")
-        if attempt == 0:
+        if attempt < retries:
             time.sleep(_RETRY_DELAY)
     assert last is not None
     _breaker_fail(path)
     raise last
+
+
+def _post(path: str, payload: dict, *, timeout: float | None = None) -> dict:
+    """POST JSON-объекта."""
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    return _send(path, body, {"Content-Type": "application/json"}, timeout=timeout)
+
+
+def transcribe(
+    data: bytes,
+    *,
+    filename: str = "audio.bin",
+    mime: str = "application/octet-stream",
+    language: str = "ru",
+) -> dict:
+    """Расшифровка аудио сессии (docs/18 §4.3, PR P3): multipart в сайдкар.
+
+    Таймаут — `CC_SESSION_AI_TIMEOUT` (часовой приём расшифровывается минутами),
+    повтора нет: после таймаута повторный прогон ASR только удвоит ожидание.
+    Текст в исключения не попадает — только путь и HTTP-код.
+    """
+    boundary = uuid.uuid4().hex
+    name = (filename or "audio.bin").replace('"', "") or "audio.bin"
+    body = b"".join(
+        [
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="file"; filename="{name}"\r\n'
+                f"Content-Type: {mime}\r\n\r\n"
+            ).encode("utf-8"),
+            bytes(data),
+            (
+                f"\r\n--{boundary}\r\n"
+                'Content-Disposition: form-data; name="language"\r\n\r\n'
+                f"{language}\r\n--{boundary}--\r\n"
+            ).encode("utf-8"),
+        ]
+    )
+    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    result = _send(
+        "/v1/transcribe", body, headers, timeout=settings.session_ai_timeout, retries=0
+    )
+    if not isinstance(result.get("segments"), list):
+        raise MlUnavailable("сайдкар /v1/transcribe: ожидался список segments")
+    return result
 
 def ping() -> dict:
     """GET /health: статус моделей и устройство. Бросает MlUnavailable."""

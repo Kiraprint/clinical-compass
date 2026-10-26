@@ -209,6 +209,11 @@ async def _active(db: AsyncSession, session_id) -> SessionProtocol | None:
     )
 
 
+async def active(db: AsyncSession, session_id) -> SessionProtocol | None:
+    """Активная версия протокола (публичный вход для ИИ-блока §4.3)."""
+    return await _active(db, session_id)
+
+
 async def _next_version(db: AsyncSession, session_id) -> int:
     """Следующий номер версии — максимум по сессии, а не последняя активная."""
     current = await db.scalar(
@@ -338,6 +343,67 @@ async def put(
     row.updated_at = _now()  # явно: server-side onupdate иначе требует ленивой подгрузки
     await db.flush()
     payload = _payload(row)  # до commit: после него атрибуты истекли (async lazy)
+    await db.commit()
+    return payload
+
+
+async def save_llm_draft(
+    db: AsyncSession,
+    clinician_id,
+    session_id,
+    sections: dict,
+    *,
+    model: str | None = None,
+    prompt_version: str | None = None,
+    needs_review: list[dict] | None = None,
+    ip: str | None = None,
+) -> dict:
+    """Черновик ИИ (§4.3): версия `source='llm'`, сам никогда не подтверждается.
+
+    Активный draft правится на месте (как PUT §4.4) — повторный черновик не
+    плодит версии, а заменяет предыдущий. Подтверждённая/подписанная/переданная
+    запись не перезаписывается: 409 PROTOCOL_LOCKED (ИИ не трогает документ
+    после врача, §1.1). `needs_review` — подсказки врачу, не блокировка.
+    """
+    session = await require_session(db, clinician_id, session_id)
+    await require_patient_access(db, clinician_id, session.patient_id)
+    active = await _active(db, session.id)
+    if active is not None and active.status != "draft":
+        raise Problem(409, "PROTOCOL_LOCKED", "Протокол подтверждён — черновик недоступен")
+
+    validate_sections(sections)
+    if active is None:
+        row = SessionProtocol(
+            session_id=session.id,
+            version=await _next_version(db, session.id),
+            status="draft",
+            source="llm",
+            sections_cipher=encode_sections(sections),
+            created_by=clinician_id,
+        )
+        db.add(row)
+        await db.flush()
+    else:
+        row = active
+        row.sections_cipher = encode_sections(sections)
+        row.source = "llm"
+        row.content_sha256 = None  # approve пересчитает хэш новых байтов
+
+    row.model = (model or "")[:64] or None
+    row.prompt_version = (prompt_version or "")[:16] or None
+    row.needs_review = list(needs_review or [])
+    row.updated_at = _now()
+    # Аудит — только ids (docs/18 §2); разделы и текст расшифровки не пишутся.
+    await audit.record(
+        db,
+        clinician_id,
+        "SESSION_PROTOCOL_DRAFT",
+        "session_protocol",
+        f"{session.id}:v{row.version}",
+        ip=ip,
+    )
+    await db.flush()
+    payload = _payload(row)
     await db.commit()
     return payload
 
