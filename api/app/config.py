@@ -123,6 +123,10 @@ class Settings(BaseSettings):
     session_ai_enabled: bool = False  # CC_SESSION_AI_ENABLED
     # CC_SESSION_AUDIO_MAX_MB: потолок аудио на сессию (413, PR P3).
     session_audio_max_mb: int = Field(default=200, ge=1)
+    # CC_SESSION_AI_TIMEOUT: сек на один шаг ИИ-конвейера — вызов сайдкара
+    # `/v1/transcribe` (аудио приёма бывает на час) и черновик протокола в LLM.
+    # Отдельно от CC_ML_TIMEOUT (5 с: маскирование ПДн ждёт короткий таймаут).
+    session_ai_timeout: float = Field(default=600.0, gt=0)
     # CC_ARTIFACTS_DIR: каталог шифрованных артефактов (AES-256-GCM, docs/18 §4.6;
     # в compose — volume, в тестах — tmp-каталог).
     artifacts_dir: str = "/var/lib/compass/artifacts"
@@ -311,14 +315,21 @@ class Settings(BaseSettings):
             # LLM-egress, regex-пути недостаточно (свободные ФИО не в ростре
             # утекали). Прод обязан иметь ML-backend; недоступность модели на
             # старте/в запросе даст 503 DEPERSONALIZATION_UNAVAILABLE.
-            if self.assistant_llm_url.strip() or self.chat_insights_enabled:
+            if (
+                self.assistant_llm_url.strip()
+                or self.chat_insights_enabled
+                # §4.3: аудио сессии уходит в ML-сайдкар и расшифровка хранится,
+                # поэтому ИИ-блок сессии — такой же PHI-egress, как чат.
+                or self.session_ai_enabled
+            ):
                 # Два допустимых прод-контура (docs/12): GPU-sidecar по HTTP
                 # (remote + CC_ML_URL, рекомендуется) или локальный extra
                 # (rubert/natasha/hybrid, torch внутри api-образа).
                 backend = str(self.depersonalize_ner).strip().lower()
                 if backend in ("", "off", "false", "0", "none", "no"):
                     raise ValueError(
-                        "CC_PROD_MODE с LLM-egress требует ML-деперсонализацию: "
+                        "CC_PROD_MODE с egress в LLM/ML (чат, инсайты, ИИ-блок "
+                        "сессии) требует ML-деперсонализацию: "
                         "CC_DEPERSONALIZE_NER=remote + CC_ML_URL (GPU-sidecar, "
                         "рекомендуется) либо hybrid/rubert/natasha + extra "
                         "api[ner-rubert]"

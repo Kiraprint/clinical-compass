@@ -319,6 +319,7 @@ async def _session_dict(db: AsyncSession, s: ClinicalSession, fio: str | None = 
         "status": s.status,
         "audio_consent": s.audio_consent,
         "ai_status": s.ai_status,
+        "ai_error": s.ai_error,
         "protocol": await _protocol_brief(db, s.id),
     }
 

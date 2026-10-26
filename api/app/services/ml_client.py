@@ -9,6 +9,9 @@ GPU-сервис `ml` (compose) держит модели, которые нел
 - ``POST /v1/rerank`` {query, documents, top_k}
   → {scores} (порядок = порядок documents, больше — лучше)
 - ``POST /v1/mask`` {text, names} → {text, spans, model}
+- ``POST /v1/transcribe`` multipart {file, language}
+  → {model, device, duration_s, language, segments: [{start, end, speaker, text}],
+  speakers, degraded}
 - ``GET /health`` → {status, device, models}
 
 Функции синхронные: вызывающий уводит их в рабочий поток
@@ -27,6 +30,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 from app.config import settings
 
@@ -93,19 +97,35 @@ def _endpoint(path: str) -> str:
         raise MlUnavailable("CC_ML_URL не задан — ML-сайдкар не используется")
     return f"{base}{path}"
 
-def _post(path: str, payload: dict) -> dict:
-    """POST JSON с одним повтором на сетевой сбой/5xx."""
+def _send(
+    path: str,
+    body,
+    headers: dict[str, str],
+    *,
+    timeout: float | None = None,
+    retries: int = 1,
+    content_length: int | None = None,
+) -> dict:
+    """POST тела с `retries` повторами на сетевой сбой/5xx (по умолчанию один).
+
+    `body` — либо байты, либо файлоподобный объект (`read()`), который urllib
+    передаёт потоком; для второго обязателен `content_length`.
+    """
     _breaker_guard(path)
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
+    headers = dict(headers)
     if settings.ml_token:
         headers["X-CC-ML-Token"] = settings.ml_token
     url = _endpoint(path)
+    budget = settings.ml_timeout if timeout is None else timeout
     last: Exception | None = None
-    for attempt in (0, 1):
+    for attempt in range(retries + 1):
+        if content_length is not None:
+            body.seek(0)  # повтор после сбоя: тело читается заново
         request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        if content_length is not None:
+            request.add_unredirected_header("Content-Length", str(content_length))
         try:
-            with urllib.request.urlopen(request, timeout=settings.ml_timeout) as resp:
+            with urllib.request.urlopen(request, timeout=budget) as resp:
                 raw = resp.read(_MAX_BODY)
             data = json.loads(raw or b"{}")
             if not isinstance(data, dict):
@@ -121,11 +141,123 @@ def _post(path: str, payload: dict) -> dict:
                 raise last from None  # 4xx — ошибка запроса, повтор не поможет
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
             last = MlUnavailable(f"сайдкар {path}: {type(exc).__name__}")
-        if attempt == 0:
+        if attempt < retries:
             time.sleep(_RETRY_DELAY)
     assert last is not None
     _breaker_fail(path)
     raise last
+
+
+def _post(path: str, payload: dict, *, timeout: float | None = None) -> dict:
+    """POST JSON-объекта."""
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    return _send(path, body, {"Content-Type": "application/json"}, timeout=timeout)
+
+
+class _FileMultipartBody:
+    """Тело multipart из файла: пролог + файл + эпилог, без копии в память.
+
+    Аудио приёма — до сотен мегабайт: собирать тело в `bytes` (и держать его
+    рядом с исходным файлом) нельзя, поэтому urllib читает объект порциями.
+    """
+
+    def __init__(self, prologue: bytes, path, epilogue: bytes) -> None:
+        self._prologue = prologue
+        self._path = path
+        self._epilogue = epilogue
+        self._fh = None
+        self._stage = 0
+        self._offset = 0
+
+    def __len__(self) -> int:
+        return len(self._prologue) + self._path.stat().st_size + len(self._epilogue)
+
+    def seek(self, offset: int) -> None:
+        """Начать сначала (urllib может повторить запрос после сбоя)."""
+        if self._fh is not None:
+            self._fh.close()
+        self._fh = None
+        self._stage = 0
+        self._offset = 0
+
+    def read(self, size: int = -1) -> bytes:
+        if self._fh is None:
+            self._fh = self._path.open("rb")
+        if size is None or size < 0:
+            size = len(self)
+        out = bytearray()
+        while len(out) < size:
+            if self._stage == 0:
+                piece = self._prologue[self._offset : self._offset + (size - len(out))]
+                self._offset += len(piece)
+                if self._offset >= len(self._prologue):
+                    self._stage = 1
+                    self._offset = 0
+            elif self._stage == 1:
+                piece = self._fh.read(size - len(out))
+                if not piece:
+                    self._stage = 2
+                    self._offset = 0
+                    continue
+            else:
+                piece = self._epilogue[self._offset : self._offset + (size - len(out))]
+                self._offset += len(piece)
+            if piece:
+                out.extend(piece)
+            elif self._stage == 2 and self._offset >= len(self._epilogue):
+                break
+        return bytes(out)
+
+    def close(self) -> None:
+        if self._fh is not None:
+            self._fh.close()
+            self._fh = None
+
+
+def transcribe_file(
+    path,
+    *,
+    filename: str = "audio.bin",
+    mime: str = "application/octet-stream",
+    language: str = "ru",
+) -> dict:
+    """Расшифровка аудио сессии (docs/18 §4.3, PR P3): multipart в сайдкар.
+
+    Файл передаётся потоком (тело не собирается в память): на входе — уже
+    расшифрованный временный файл 0600, который удаляет вызывающий.
+
+    Таймаут — `CC_SESSION_AI_TIMEOUT` (часовой приём расшифровывается минутами),
+    повтора нет: после таймаута повторный прогон ASR только удвоит ожидание.
+    Текст в исключения не попадает — только путь и HTTP-код.
+    """
+    boundary = uuid.uuid4().hex
+    name = (filename or "audio.bin").replace('"', "") or "audio.bin"
+    prologue = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{name}"\r\n'
+        f"Content-Type: {mime}\r\n\r\n"
+    ).encode("utf-8")
+    epilogue = (
+        f"\r\n--{boundary}\r\n"
+        'Content-Disposition: form-data; name="language"\r\n\r\n'
+        f"{language}\r\n--{boundary}--\r\n"
+    ).encode("utf-8")
+    body = _FileMultipartBody(prologue, path, epilogue)
+    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    try:
+        result = _send(
+            "/v1/transcribe",
+            body,
+            headers,
+            timeout=settings.session_ai_timeout,
+            retries=0,
+            content_length=len(body),
+        )
+    finally:
+        body.close()
+    if not isinstance(result.get("segments"), list):
+        raise MlUnavailable("сайдкар /v1/transcribe: ожидался список segments")
+    return result
 
 def ping() -> dict:
     """GET /health: статус моделей и устройство. Бросает MlUnavailable."""

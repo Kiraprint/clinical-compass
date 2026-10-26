@@ -56,6 +56,17 @@ class DepersonalizationUnavailable(Problem):
         )
 
 
+# Backend'ы, которые уже отказывали в этом процессе: с этого момента маскирование
+# идёт только regex/deny-list. Потребители (расшифровка сессии, docs/18 §4.3)
+# обязаны показывать это честно (`depersonalized=false`), а не константу.
+_degraded: set[str] = set()
+
+
+def degraded() -> bool:
+    """True, если ML-детекция уже деградировала до regex/deny-list."""
+    return bool(_degraded)
+
+
 def _backend_unavailable(backend: str, exc: BaseException) -> None:
     """Единая политика сбоя ML-backend'а: prod — 503, иначе regex-деградация."""
     if settings.prod_mode:
@@ -64,6 +75,7 @@ def _backend_unavailable(backend: str, exc: BaseException) -> None:
             backend, type(exc).__name__, exc,
         )
         raise DepersonalizationUnavailable() from exc
+    _degraded.add(backend)
     logger.warning(
         "depersonalize_ner=%s недоступен (%s: %s) — деградация до regex/deny-list",
         backend, type(exc).__name__, exc,
