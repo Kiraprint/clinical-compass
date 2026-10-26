@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import secrets
 import threading
 import time
@@ -11,11 +12,12 @@ import uuid
 
 from datetime import datetime, timedelta, timezone
 import anyio
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import db as db_module
 from app import security
 from app.config import settings
 from app.db import get_db
@@ -31,8 +33,11 @@ ALLOWED_ROLES = ("PATIENT", "CLINICIAN", "ADMIN")
 # FR-48: TTL, бюджет попыток и пауза повторной отправки — общий контракт
 # сброса пароля и входа по коду (docs/03 §15, docs/04 §3.1).
 CODE_TTL = timedelta(minutes=10)
+
 CODE_MAX_ATTEMPTS = 5
 CODE_RESEND_SECONDS = 60.0
+
+logger = logging.getLogger(__name__)
 
 # Пауза в памяти процесса (как у rate limiter): одинаковое поведение для
 # существующего и несуществующего адреса — перебором нельзя узнать, есть ли
@@ -298,13 +303,30 @@ async def login_otp(body: LoginOtpBody, request: Request, response: Response,
     _set_auth_cookies(response, access, refresh)
     return {"access_token": access, "refresh_token": refresh, "role": user.role}
 
+async def _send_reset_code(user_id: uuid.UUID, email: str, code: str, client: str | None) -> None:
+    """Доставка письма сброса ПОСЛЕ ответа: сбой не меняет статус и тайминг."""
+    try:
+        await mailer.send_code(email, "Сброс пароля", code)
+    except mailer.MailUnavailable:
+        logger.warning("FR-48: письмо сброса пароля не отправлено (SMTP недоступен)")
+        if db_module.AsyncSessionLocal is None:  # БД ещё не инициализирована
+            return
+        async with db_module.AsyncSessionLocal() as session:
+            await audit.record(session, None, "PASSWORD_RESET_DELIVERY_FAILED",
+                               "user", str(user_id), client)
+            await session.commit()
+
+
 @router.post("/password/reset-request", status_code=202)
 async def password_reset_request(body: EmailBody, request: Request,
+                                 background: BackgroundTasks,
                                  db: AsyncSession = Depends(get_db)):
-    """FR-48: письмо с кодом сброса. Для любого адреса — 202 `{sent:true}`:
-    наличие аккаунта не выдаётся ни телом, ни статусом. Недоступный канал
-    проверяется до выборки пользователя, поэтому 503 MAIL_UNAVAILABLE тоже
-    одинаков для всех; письмо уходит до коммита кода (не ушло — кода нет)."""
+    """FR-48: письмо с кодом сброса. Ответ 202 `{sent:true}` — для любого адреса
+    и при любом исходе доставки: ни наличие аккаунта, ни состояние почты наружу
+    не выдаются. 503 MAIL_UNAVAILABLE — только ненастроенный канал, и проверка
+    идёт до выборки пользователя (одинакова для всех). Письмо уходит после
+    ответа, поэтому SMTP не влияет на латентность; сбой доставки виден лишь в
+    логах и аудите `PASSWORD_RESET_DELIVERY_FAILED`."""
     email = body.email.strip().lower()
     client = _client(request)
     allowed, retry_after = await acheck_rate((client, email))
@@ -321,15 +343,12 @@ async def password_reset_request(body: EmailBody, request: Request,
         return {"sent": True}
     code, _ = await _issue_code(db, user.id, "reset")
     await audit.record(db, None, "PASSWORD_RESET_REQUEST", "user", str(user.id), client)
-    try:
-        extra = await _deliver_code(email, "Сброс пароля", code)
-    except Problem:
-        # Письмо не ушло → кода в БД нет, пауза не израсходована.
-        await db.rollback()
-        _cooldown_clear(key)
-        raise
     await db.commit()
-    return {"sent": True, **extra}
+    if not mailer.configured():
+        # демо/тест (CC_ALLOW_DEMO_SECRETS): SMTP нет — код отдаём в ответе
+        return {"sent": True, "demo_code": code}
+    background.add_task(_send_reset_code, user.id, email, code, client)
+    return {"sent": True}
 
 @router.post("/password/reset", status_code=204)
 async def password_reset(body: PasswordResetBody, request: Request,

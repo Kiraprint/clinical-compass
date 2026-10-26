@@ -216,20 +216,23 @@ def test_prod_mode_without_smtp_fails_closed(client, engine, monkeypatch):
         assert conn.scalar(text("select count(*) from auth_codes")) == 0
 
 
-def test_smtp_failure_rolls_back_code_and_cooldown(client, engine, monkeypatch):
+def test_smtp_failure_keeps_202_for_existing_and_unknown(client, engine, monkeypatch):
     register(client, "smtpdown@test.ru", OLD_PASSWORD)
     monkeypatch.setattr(settings, "smtp_host", "127.0.0.1")
     monkeypatch.setattr(settings, "smtp_port", 1)  # заведомо закрытый порт
     monkeypatch.setattr(settings, "smtp_from", "noreply@test.ru")
     monkeypatch.setattr(settings, "smtp_tls", False)
-    for _ in range(2):
-        # Неотправленное письмо не оставляет код в БД и не съедает паузу:
-        # повтор сразу же снова 503, а не 429 CODE_COOLDOWN.
-        resp = _reset_request(client, "smtpdown@test.ru")
-        assert resp.status_code == 503, resp.text
-        assert resp.json()["code"] == "MAIL_UNAVAILABLE"
+    for address in ("smtpdown@test.ru", "ghost-smtp@test.ru"):
+        # Сбой доставки не меняет ответ: 202 и никакого demo_code — иначе
+        # 503/тело выдавали бы существующие адреса при упавшем релее.
+        resp = _reset_request(client, address)
+        assert resp.status_code == 202, (address, resp.text)
+        assert resp.json() == {"sent": True}
     with engine.begin() as conn:
-        assert conn.scalar(text("select count(*) from auth_codes")) == 0
-        assert conn.scalar(
-            text("select count(*) from audit_log where action = 'PASSWORD_RESET_REQUEST'")
-        ) == 0
+        # Код существующего адреса сохранён (доставка уже после ответа),
+        # а сбой виден только в аудите — без e-mail и кода.
+        assert conn.scalar(text("select count(*) from auth_codes")) == 1
+        assert conn.scalar(text("select count(*) from audit_log "
+                               "where action = 'PASSWORD_RESET_DELIVERY_FAILED'")) == 1
+        assert conn.scalar(text("select count(*) from audit_log "
+                               "where action = 'PASSWORD_RESET_REQUEST'")) == 1
