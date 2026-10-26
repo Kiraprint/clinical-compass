@@ -13,6 +13,8 @@ export default function NotificationsBell() {
 
   const load = async () => {
     try {
+      // Колокольчик — опрос «что нового»: кэш GET здесь отдал бы вчерашнее.
+      api.invalidate("/api/v1/me/notifications");
       const data = await api.getNotifications();
       setItems(data.items);
       setUnread(data.unread);

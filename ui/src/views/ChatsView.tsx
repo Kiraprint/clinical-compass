@@ -292,6 +292,8 @@ function PatientChats({
                 aria-label="Обновить переписки"
                 title="Обновить"
                 onClick={() => {
+                  // Явное обновление — мимо кэша GET (список и диалог).
+                  api.invalidate("/api/v1/clinician/chats");
                   onRefresh();
                   if (selected) void loadMessages(selected);
                 }}
@@ -335,7 +337,10 @@ function PatientChats({
                   className="icon-btn ghost"
                   aria-label="Обновить диалог"
                   title="Обновить"
-                  onClick={() => void loadMessages(selected)}
+                  onClick={() => {
+                    api.invalidate("/api/v1/clinician/chats");
+                    void loadMessages(selected);
+                  }}
                 >
                   ↻
                 </button>

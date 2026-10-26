@@ -1175,6 +1175,8 @@ export default function ClinicianView() {
   // Повтор после ошибки: перезапрашиваем всё, что могло не загрузиться, — карточку,
   // реестр, списки и напоминания. Действия внутри карточки сюда не пишут.
   const retryLoads = () => {
+    // Явное «Обновить»/повтор после ошибки — мимо кэша GET.
+    api.invalidate();
     setReportVersion((v) => v + 1);
     setListsVersion((v) => v + 1);
     setReminderVersion((v) => v + 1);

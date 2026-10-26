@@ -121,6 +121,9 @@ async function throwApiError(resp: Response): Promise<never> {
 // должны его мутировать (setState всегда заменяет объект целиком).
 const CACHE_TTL_MS = 30_000;
 const getCache = new Map<string, { at: number; value: unknown }>();
+// Поколение кэша: любой сброс его увеличивает. GET, начатый до сброса, несёт
+// данные «до действия» и не должен попасть в кэш, даже если ответил позже.
+let cacheEpoch = 0;
 const getInflight = new Map<string, Promise<unknown>>();
 
 // Фрагмент пути, похожий на идентификатор: UUID или число.
@@ -134,7 +137,16 @@ function mutatedPrefix(path: string): string {
   return keep.length > 0 ? `/${keep.join("/")}` : "/";
 }
 
+/** Согласие гейтит ВСЕ данные пациента: после отзыва сервер их уничтожает,
+ *  поэтому закэшированный GET любого экрана стал бы клинической ложью. Такие
+ *  мутации сбрасывают кэш целиком, а не только свою коллекцию. */
+function clearsWholeCache(path: string): boolean {
+  const bare = path.split("?")[0].replace(/\/+$/, "");
+  return bare === "/api/v1/consent" || bare.startsWith("/api/v1/consent/");
+}
+
 function invalidateCache(prefix?: string) {
+  cacheEpoch += 1;
   if (!prefix) {
     getCache.clear();
     return;
@@ -159,9 +171,9 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
   const method = (init.method ?? "GET").toUpperCase();
   if (method !== "GET") {
     const result = await send<T>(path, init);
-    // Любая мутация сбрасывает кэш затронутой коллекции — следующий читатель
-    // увидит свежие данные, а не ответ «до действия».
-    invalidateCache(mutatedPrefix(path));
+    // Любая мутация сбрасывает кэш затронутой коллекции (или весь — для
+    // гейт-переходов вроде согласия): следующий читатель увидит свежие данные.
+    invalidateCache(clearsWholeCache(path) ? undefined : mutatedPrefix(path));
     return result;
   }
   const key = `GET ${path}`;
@@ -169,9 +181,12 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value as T;
   const pending = getInflight.get(key);
   if (pending) return pending as Promise<T>;
+  // Кэшируется ТОЛЬКО успешный ответ: send() бросает ApiError на любой !ok
+  // (401/403/404/5xx), поэтому такие ответы до getCache.set не доходят.
+  const epoch = cacheEpoch;
   const request = send<T>(path, init)
     .then((value) => {
-      getCache.set(key, { at: Date.now(), value });
+      if (cacheEpoch === epoch) getCache.set(key, { at: Date.now(), value });
       return value;
     })
     .finally(() => getInflight.delete(key));

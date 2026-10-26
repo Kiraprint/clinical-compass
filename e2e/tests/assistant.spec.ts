@@ -60,10 +60,10 @@ test.describe("ИИ-ассистент врача", () => {
   });
 });
 
-test("поток: ответ остаётся при сбое refetch и не дублируется после обновления", async ({ page }) => {
-  // P1 ре-ревью #98: done уже сохранён на сервере. Если refetch сразу после
-  // потока упал, ход должен остаться на экране ровно один раз, в том числе
-  // после повторной загрузки треда.
+test("поток: ответ остаётся при сбое загрузки треда и не дублируется после обновления", async ({ page }) => {
+  // done уже сохранён на сервере, и ход попадает в тред из самого события.
+  // Поведение: сохранённый ответ виден ровно один раз, не пропадает и не
+  // задваивается, даже если загрузка треда с сервера падает.
   const savedAnswer = "E2E поток: сохранённый ответ [1]";
   const savedQuestion = "PHQ-9: проверка потока";
   let threadId = "";
@@ -142,14 +142,24 @@ test("поток: ответ остаётся при сбое refetch и не д
   await page.getByLabel("Вопрос").fill(savedQuestion);
   await page.getByRole("button", { name: "Спросить" }).click();
 
-  // refetch упал: ответ из done уже в треде, ошибка показана, «Думаю…» нет.
-  await expect(page.getByText(savedAnswer, { exact: true })).toBeVisible();
+  // Ответ из события done уже в треде: один раз, без ошибки, без «Думаю…».
+  await expect(page.getByText(savedAnswer, { exact: true })).toHaveCount(1);
   await expect(page.locator(".bubble", { hasText: "Думаю…" })).toHaveCount(0);
-  await expect(page.locator(".error")).toBeVisible();
+  await expect(page.locator(".error")).toHaveCount(0);
 
-  // Повторная загрузка треда: сервер вернул тот же ход, дубля быть не должно.
+  // Явное обновление — единственный путь, где тред теперь перечитывается с
+  // сервера. Сервер падает: ответ остаётся на экране, врач видит ошибку.
+  await page.getByLabel("Обновить диалоги").click();
+  await expect(page.locator(".error")).toBeVisible();
+  await expect(page.getByText(savedAnswer, { exact: true })).toHaveCount(1);
+
+  // Сервер снова отвечает тем же ходом (те же message_ids): дубля быть не
+  // должно — ни от копии из потока, ни от повторной загрузки.
   const refreshed = page.waitForResponse(
-    (r) => r.request().method() === "GET" && new URL(r.url()).pathname.endsWith(`/${threadId}`),
+    (r) =>
+      r.request().method() === "GET" &&
+      new URL(r.url()).pathname.endsWith(`/${threadId}`) &&
+      r.status() === 200,
   );
   await page.getByLabel("Обновить диалоги").click();
   await refreshed;

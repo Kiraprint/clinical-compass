@@ -77,6 +77,8 @@ export default function AssistantTab({ patients }: { patients: PatientCard[] }) 
   const reloadAll = async () => {
     setBusy(true);
     setError("");
+    // Явное «Обновить» — запрос за свежим состоянием, мимо кэша GET.
+    api.invalidate();
     try {
       const list = await refreshThreads();
       if (activeId && list.some((t) => t.id === activeId)) await selectThread(activeId);
