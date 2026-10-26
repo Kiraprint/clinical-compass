@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -38,7 +39,9 @@ from . import gost, x509
 CA_YEARS = 10  # УЦ обязан быть валиден заведомо дольше листа
 CA_COMMON_NAME = "Compass Demo CA"
 CA_ORGANIZATION = "Клинический компас (демонстрационный УЦ)"
-CLOCK_SKEW = timedelta(days=1)  # подпись может ставиться при отстающих часах
+CLOCK_SKEW = timedelta(days=1)
+# Осиротевший temp пары старше 5 минут удаляется при инициализации каталога.
+STALE_TMP_SEC = 300
 
 
 @dataclass(frozen=True)
@@ -86,8 +89,21 @@ def _root() -> Path:
 
 
 def _mkdir(path: Path) -> Path:
+    """Создать каталог 0700 и вычистить осиротевшие временные файлы пар.
+
+    `_write_pair` не может убрать свой temp при SIGKILL между записью и
+    `os.link`, а в нём лежит закрытый ключ (0600). Свежие пропускаем: их может
+    писать другой процесс прямо сейчас.
+    """
     path.mkdir(parents=True, exist_ok=True)
     os.chmod(path, 0o700)
+    cutoff = time.time() - STALE_TMP_SEC
+    for entry in path.glob(".*.tmp"):
+        try:
+            if entry.stat().st_mtime < cutoff:
+                entry.unlink(missing_ok=True)
+        except OSError:
+            pass
     return path
 
 
