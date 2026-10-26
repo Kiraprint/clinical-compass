@@ -115,21 +115,37 @@ test("оглавление карточки: на 390px чипы скролля�
   await expect.poll(async () => (await nav.boundingBox())?.y ?? -1).toBe(0);
 });
 
-test("оглавление карточки: на 768px липкая кнопка «Меню» не накрывает чипы", async ({ page }) => {
-  await page.setViewportSize({ width: 768, height: 900 });
+test("оглавление карточки: липкая кнопка «Меню» не накрывает чипы на 768/1001/1280px", async ({
+  page,
+}) => {
   await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
   await openSection(page, "Пациенты");
   await page.locator('a[href^="#patient="]').first().click();
   await expect(page.getByText("← Назад к списку")).toBeVisible();
+  // openSection открывает меню кабинета: на узкой ширине это оверлей поверх
+  // карточки. Закрываем, иначе меряем попадание в оверлей, а не в чипы.
+  if (
+    (await page.getByRole("button", { name: "Меню", exact: true }).getAttribute("aria-expanded")) ===
+    "true"
+  ) {
+    await page.getByRole("button", { name: "Скрыть меню" }).click();
+  }
 
   const nav = page.getByRole("navigation", { name: "Разделы карточки пациента" });
-  await page.evaluate(() => window.scrollTo(0, 600));
-  const chip = nav.getByRole("button", { name: "Риск", exact: true });
-  const box = (await chip.boundingBox())!;
-  // Кнопка «☰ Меню» липнет у верха: точка в центре первого чипа должна быть самим чипом.
-  const hit = await page.evaluate(
-    ({ x, y }) => (document.elementFromPoint(x, y)?.textContent ?? "").trim(),
-    { x: box.x + box.width / 2, y: box.y + box.height / 2 },
-  );
-  expect(hit).toBe("Риск");
+  for (const width of [768, 1001, 1280]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.evaluate(() => window.scrollTo(0, 600));
+    const chip = nav.getByRole("button", { name: "Риск", exact: true });
+    // Кнопка «☰ Меню» липнет слева: точка в центре первого чипа — сам чип, а не кнопка.
+    await expect
+      .poll(async () => {
+        const box = await chip.boundingBox();
+        if (!box) return "нет чипа";
+        return page.evaluate(
+          ({ x, y }) => (document.elementFromPoint(x, y)?.textContent ?? "").trim(),
+          { x: box.x + box.width / 2, y: box.y + box.height / 2 },
+        );
+      })
+      .toBe("Риск");
+  }
 });
