@@ -2,11 +2,12 @@
 
 Проверяется: 409 до подписи, кириллический текст в PDF (извлекается pypdf),
 блоки подписи обоих подписантов, кэширование артефакта (одинаковые байты на двух
-GET) и аудит `SESSION_PROTOCOL_PDF`.
+GET) и аудит `SESSION_PROTOCOL_PDF`; рендер идёт в потоке anyio, не в event loop.
 """
 
 from __future__ import annotations
 
+import threading
 from io import BytesIO
 
 from pypdf import PdfReader
@@ -121,3 +122,29 @@ def test_cached_pdf_read_is_audited(client, db_session):
     ).all()
     assert len(rows) == 2
     assert {row[0] for row in rows} == {f"{session['id']}:v1"}
+
+
+def test_render_pdf_runs_off_the_event_loop(client, monkeypatch):
+    """WeasyPrint синхронный и CPU-тяжёлый: рендер уходит в поток anyio.
+
+    Иначе GET PDF замораживает event loop процесса на время рендера и все
+    остальные запросы этого воркера ждут (docs/03 §12).
+    """
+    from app.services import documents
+
+    render_threads: list[str] = []
+    real = documents.render_pdf
+
+    def spy(**kwargs):
+        render_threads.append(threading.current_thread().name)
+        return real(**kwargs)
+
+    monkeypatch.setattr(documents, "render_pdf", spy)
+
+    context = ps.ctx(client, "pdf-thread")
+    session = ps.approved(client, context)
+    _signed(client, context, session)
+
+    assert _pdf(client, context, session).status_code == 200
+    assert render_threads, "render_pdf не вызывался"
+    assert render_threads[0].startswith("AnyIO worker"), render_threads[0]
