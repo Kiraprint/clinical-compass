@@ -259,18 +259,38 @@ python -m app.enrichment serve
 а GitHub используется как место, куда кладётся готовый APK.
 
 ```bash
-./tools/ci.sh            # ядро (cov ≥95%) + API (Postgres) + ml/tests + docker build
-./tools/ci.sh --e2e      # + изолированный стек и полный Playwright-прогон
+./tools/ci.sh            # ядро (cov ≥95%) + API + ml/tests + docker build
+./tools/ci.sh --e2e      # + полный Playwright-прогон
 ./tools/ci.sh --skip-docker
 ```
 
-Изоляция прогона: гейт поднимает **свой** docker-контур — compose-проект
-`cci-infra` с Postgres на `127.0.0.1:55432` и Qdrant на `127.0.0.1:56333`, БД
-`compass_ci`, коллекция `kb_ci` (`CC_CI_PG_PORT` / `CC_CI_QDRANT_PORT` /
-`CC_CI_DB_NAME` / `CC_CI_COLLECTION`). Рабочий Postgres `:5432` (база
-`compass`) и Qdrant `:6333` (`kb`, `kb_600`) не используются никогда:
-фикстура api-тестов дропает схему целевой базы. e2e-стек — проект `cci` на
-порту `8096`, после прогона удаляется вместе с томами.
+Интеграционные прогоны (api-тесты и e2e) идут в **постоянном стенде**
+`tools/dev-stage.sh` — compose-проект `cc-dev-stage` с Postgres, Qdrant, redis,
+api, ui, reminders-worker и kb-enrichment:
+
+```bash
+./tools/dev-stage.sh up          # поднять/обновить стенд
+./tools/dev-stage.sh test        # api-тесты + e2e в стенде
+./tools/dev-stage.sh test --api  # только api-тесты
+./tools/dev-stage.sh status      # что запущено, точки в КБ, отпечатки
+./tools/dev-stage.sh down        # остановить, данные сохранить
+./tools/dev-stage.sh reset       # снести вместе с данными
+```
+
+Стенд слушает только loopback: Postgres `127.0.0.1:55432`, Qdrant
+`127.0.0.1:56333`, UI `127.0.0.1:8097` (`CC_STAGE_PG_PORT` /
+`CC_STAGE_QDRANT_PORT` / `CC_STAGE_UI_PORT`), туннеля на него нет. Рабочий
+Postgres `:5432` (база `compass`) и Qdrant `:6333` (`kb`, `kb_600`) недостижимы:
+у стенда свои контейнеры и тома, а api-тесты работают в отдельной БД
+`compass_test` с коллекцией `kb_test`, тогда как стек стенда живёт в
+`compass`/`kb_stage`.
+
+Стенд постоянный намеренно: Postgres, демо-данные и индекс КБ переживают
+прогоны, поэтому индекс не пересчитывается каждый раз. Пересборка образов и
+переиндексация выполняются только при изменении входов — отпечатки лежат в
+`.stage/`: `images.sha` (код api/core/ui/ml/infra), `kb.sha` (источники корпуса,
+эмбеддер, геометрия чанков). `./tools/dev-stage.sh seed` переиндексирует
+принудительно.
 
 Релиз (тесты → образы → APK → тег → GitHub Release с APK):
 

@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 # Локальный CI (замена GitHub Actions: биллинг GH исчерпан, гоняем у себя).
-# Проверяет ровно те же ворота, что .github/workflows/ci.yml:
+# Ворота те же, что в .github/workflows/ci.yml:
 #   ядро (coverage ≥ 95%) → API против реального Postgres → ML-сайдкар (stub)
-#   → сборка docker-образов api/ui → опционально e2e (Playwright, полный стек).
+#   → валидация compose и сборка образов → опционально e2e (Playwright).
+#
+# Интеграционные прогоны (api-тесты и e2e) идут в ПОСТОЯННОМ стенде
+# tools/dev-stage.sh (compose-проект cc-dev-stage: Postgres, Qdrant, redis, api, ui),
+# а не в одноразовом стеке: контейнеры, демо-данные и индекс КБ живут между
+# прогонами, поэтому БД и КБ не пересоздаются и не переиндексируются каждый раз.
+# Стенд слушает только 127.0.0.1, туннеля на него нет, рабочая БД (compass на
+# :5432) и рабочая коллекция (kb) не используются.
 #
 # Использование (из любой директории):
 #   tools/ci.sh                  # всё, кроме e2e
-#   tools/ci.sh --e2e            # + полный e2e-проход
-#   tools/ci.sh --skip-docker    # без docker build
-#
-# Изоляция: гейт поднимает СВОЙ контур (compose-проект cci-infra: Postgres на
-# 127.0.0.1:55432, Qdrant на 127.0.0.1:56333) с базой compass_ci и коллекцией
-# kb_ci. Рабочий Postgres :5432 (база compass) и Qdrant :6333 (kb/kb_600) не
-# используются: фикстура тестов дропает схему целевой базы, поэтому чужая БД
-# здесь означала бы потерю данных. Порты/имена — CC_CI_PG_PORT,
-# CC_CI_QDRANT_PORT, CC_CI_DB_NAME, CC_CI_COLLECTION.
+#   tools/ci.sh --e2e            # + полный e2e-проход в стенде
+#   tools/ci.sh --skip-docker    # без шага compose config/build
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,23 +24,19 @@ PY="${CC_PY:-$ROOT/.venv/bin/python}"
 # В worktree своего .venv нет — берём venv основного чекаута, но код под тестом
 # обязан быть из этого дерева: PYTHONPATH перекрывает editable-установку app/compass.
 if [ ! -x "$PY" ]; then
-  MAIN_WT="$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
-  [ -n "$MAIN_WT" ] && [ -x "$MAIN_WT/.venv/bin/python" ] && PY="$MAIN_WT/.venv/bin/python"
+  # sed читает поток целиком: awk с `exit` роняет git по SIGPIPE, под pipefail
+  # подстановка возвращает 141, и `set -e` молча обрывает гейт.
+  MAIN_WT="$(git worktree list --porcelain | sed -n '1s/^worktree //p')"
+  if [ -n "$MAIN_WT" ] && [ -x "$MAIN_WT/.venv/bin/python" ]; then
+    PY="$MAIN_WT/.venv/bin/python"
+  fi
 fi
 export PYTHONPATH="$ROOT/api:$ROOT/core${PYTHONPATH:+:$PYTHONPATH}"
-COMPOSE="docker compose -f infra/docker-compose.yml"
-# Свой контур для тестов: отдельный compose-проект и свои порты. Прод-кластер
-# (infra-postgres/infra-qdrant на 5432/6333 с базами compass и коллекцией kb)
-# гейт не трогает вообще — фикстура api/tests/conftest.py дропает схему.
-CI_INFRA_PROJECT="cci-infra"
-CI_PG_PORT="${CC_CI_PG_PORT:-55432}"
-CI_QDRANT_PORT="${CC_CI_QDRANT_PORT:-56333}"
-TEST_DB_NAME="${CC_CI_DB_NAME:-compass_ci}"
-TEST_DB="postgresql+psycopg://compass:compass@127.0.0.1:${CI_PG_PORT}/${TEST_DB_NAME}"
-CI_COLLECTION="${CC_CI_COLLECTION:-kb_ci}"
-E2E_PROJECT="cci"
-E2E_PORT="${CC_CI_E2E_PORT:-8096}"
-E2E_OVERRIDE=""
+STAGE="$ROOT/tools/dev-stage.sh"
+# Свой проект и для config/build: `docker compose build` без `-p` пишет в
+# теги РАБОЧЕГО проекта (infra-api:latest), и следующий `up -d` на проде
+# поднял бы код ветки. Тома одноразового проекта здесь не создаются.
+COMPOSE="docker compose -f infra/docker-compose.yml -p cc-ci-build"
 
 WITH_E2E=0
 WITH_DOCKER=1
@@ -49,7 +45,7 @@ for arg in "$@"; do
     --e2e) WITH_E2E=1 ;;
     --skip-e2e) WITH_E2E=0 ;;
     --skip-docker) WITH_DOCKER=0 ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
     *) echo "неизвестный аргумент: $arg" >&2; exit 2 ;;
   esac
 done
@@ -58,94 +54,23 @@ log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31mОТКАЗ:\033[0m %s\n' "$*" >&2; exit 1; }
 
 [ -x "$PY" ] || fail "нет $PY — собери окружение: uv sync --all-packages"
+[ -x "$STAGE" ] || fail "нет $STAGE — стенд интеграционных тестов"
 
-# Защита от прогона против «настоящей» БД: фикстура api/tests/conftest.py дропает
-# схему целевой базы. Разрешена только БД контура гейта на порту гейта.
-case "$TEST_DB" in
-  "postgresql+psycopg://compass:compass@127.0.0.1:${CI_PG_PORT}/compass_ci"*) ;;
-  *) fail "тестовая БД '$TEST_DB' не из контура гейта (ожидается 127.0.0.1:${CI_PG_PORT}/compass_ci*)" ;;
-esac
-case "$CI_COLLECTION" in
-  kb_ci*) ;;
-  *) fail "коллекция '$CI_COLLECTION' не из контура гейта (ожидается kb_ci*)" ;;
-esac
-# Порты/имена выше «самоссылочные» при переопределении CC_CI_*: рабочие
-# Postgres/Qdrant запрещены буквально.
-[ "$CI_PG_PORT" != 5432 ] || fail "порт 5432 — рабочий Postgres, гейту нужен свой (CC_CI_PG_PORT)"
-[ "$CI_QDRANT_PORT" != 6333 ] || fail "порт 6333 — рабочий Qdrant, гейту нужен свой (CC_CI_QDRANT_PORT)"
-[ "$TEST_DB_NAME" != compass ] || fail "база compass — рабочая (CC_CI_DB_NAME)"
-[ "$CI_COLLECTION" != kb ] || fail "коллекция kb — рабочая (CC_CI_COLLECTION)"
+# Предохранители от рабочего контура живут в dev-stage.sh (порты 5432/6333,
+# имена compass/kb запрещены буквально), здесь дублируем только то, что
+# проверяется до запуска контейнеров.
+[ "${CC_STAGE_PG_PORT:-55432}" != 5432 ] || fail "порт 5432 — рабочий Postgres"
+[ "${CC_STAGE_QDRANT_PORT:-56333}" != 6333 ] || fail "порт 6333 — рабочий Qdrant"
 
-# Унаследованные CC_* меняют поведение тестов (cookie-secure ломает ожидания
-# 401, эмбеддер/коллекция подменяют индекс) — чистим и задаём свои.
-unset CC_COOKIE_SECURE CC_EMBEDDER CC_RERANKER CC_ML_URL CC_ML_TOKEN \
-      CC_DEPERSONALIZE_NER CC_ASSISTANT_LLM_URL CC_CHAT_INSIGHTS_ENABLED \
-      CC_ALLOW_DEMO_SECRETS CC_QDRANT_COLLECTION CC_QDRANT_URL
-export CC_ALLOW_DEMO_SECRETS=true
-export CC_QDRANT_COLLECTION="$CI_COLLECTION"
-
-# --- 1. Postgres + Qdrant (свой контур) --------------------------------------
-# Отдельный compose-проект и свои порты: рабочий Postgres :5432 (база compass)
-# и Qdrant :6333 (коллекции kb/kb_600) гейт не трогает вообще.
-port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
-if port_open "$CI_PG_PORT" && port_open "$CI_QDRANT_PORT"; then
-  log "контур гейта уже поднят (Postgres :$CI_PG_PORT, Qdrant :$CI_QDRANT_PORT)"
-else
-  log "поднимаю контур гейта (проект $CI_INFRA_PROJECT)…"
-  CI_INFRA_DIR="$(mktemp -d)"
-  cat > "$CI_INFRA_DIR/ci-infra.yml" <<YAML
-services:
-  postgres:
-    ports: !override ["127.0.0.1:${CI_PG_PORT}:5432"]
-  qdrant:
-    ports: !override ["127.0.0.1:${CI_QDRANT_PORT}:6333"]
-YAML
-  docker compose -f infra/docker-compose.yml -f "$CI_INFRA_DIR/ci-infra.yml" \
-    -p "$CI_INFRA_PROJECT" up -d postgres qdrant >/dev/null
-  rm -rf "$CI_INFRA_DIR"
-  for _ in $(seq 1 60); do port_open "$CI_PG_PORT" && port_open "$CI_QDRANT_PORT" && break; sleep 1; done
-  port_open "$CI_PG_PORT" || fail "Postgres не поднялся на 127.0.0.1:$CI_PG_PORT"
-  port_open "$CI_QDRANT_PORT" || fail "Qdrant не поднялся на 127.0.0.1:$CI_QDRANT_PORT"
-fi
-# Открытый порт ≠ готовый Qdrant: ждём /healthz (контейнер стартует ~3 с).
-for _ in $(seq 1 60); do
-  curl -sf "http://127.0.0.1:${CI_QDRANT_PORT}/healthz" >/dev/null 2>&1 && break
-  sleep 1
-done
-curl -sf "http://127.0.0.1:${CI_QDRANT_PORT}/healthz" >/dev/null \
-  || fail "Qdrant не отвечает на 127.0.0.1:${CI_QDRANT_PORT}"
-export CC_QDRANT_URL="http://127.0.0.1:${CI_QDRANT_PORT}"
-
-# Postgres принимает соединения не в ту же секунду, что открывает порт.
-for _ in $(seq 1 60); do
-  $PY -c "import psycopg; psycopg.connect('postgresql://compass:compass@127.0.0.1:${CI_PG_PORT}/compass', connect_timeout=2)" \
-    2>/dev/null && break
-  sleep 1
-done
-
-log "БД для тестов: $TEST_DB_NAME (127.0.0.1:$CI_PG_PORT)"
-$PY - "$TEST_DB_NAME" "$CI_PG_PORT" <<'PY'
-import sys, psycopg
-name, port = sys.argv[1], sys.argv[2]
-admin = f"postgresql://compass:compass@127.0.0.1:{port}/compass"
-with psycopg.connect(admin, autocommit=True) as conn:
-    exists = conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,)).fetchone()
-    if not exists:
-        conn.execute(f'CREATE DATABASE "{name}"')
-        print(f"  создана БД {name}")
-    else:
-        print(f"  БД {name} уже есть")
-PY
-
-# --- 2. Ядро -----------------------------------------------------------------
+# --- 1. Ядро -----------------------------------------------------------------
 log "[1/5] Ядро (core/tests, coverage ≥ 95%)…"
 $PY -m pytest core/tests --cov=compass --cov-fail-under=95 -q
 
-# --- 3. API ------------------------------------------------------------------
-log "[2/5] API (api/tests против реального Postgres, коллекция $CI_COLLECTION)…"
-CC_TEST_DATABASE_URL="$TEST_DB" $PY -m pytest api/tests -q
+# --- 2. API ------------------------------------------------------------------
+log "[2/5] API (api/tests в стенде: Postgres и Qdrant стенда)…"
+"$STAGE" test --api
 
-# --- 4. ML-сайдкар (stub, без GPU и без torch) --------------------------------
+# --- 3. ML-сайдкар (stub, без GPU и без torch) --------------------------------
 log "[3/5] ML-сайдкар (ml/tests, CC_ML_STUB)…"
 if [ -d ml/tests ]; then
   ( cd ml && CC_ML_STUB=1 PYTHONPATH="$ROOT/ml:$ROOT/core" $PY -m pytest tests -q ) \
@@ -154,7 +79,7 @@ else
   log "ml/tests нет — пропуск"
 fi
 
-# --- 5. Сборка образов + валидация compose -----------------------------------
+# --- 4. Валидация compose и сборка образов ------------------------------------
 if [ "$WITH_DOCKER" = 1 ]; then
   log "[4/5] Docker: compose config (все профили) + сборка api/ui…"
   for p in "" "--profile seed" "--profile gpu" "--profile emias"; do
@@ -165,62 +90,10 @@ else
   log "[4/5] Docker: пропущено (--skip-docker)"
 fi
 
-# --- 6. e2e ------------------------------------------------------------------
+# --- 5. e2e в стенде ---------------------------------------------------------
 if [ "$WITH_E2E" = 1 ]; then
-  log "[5/5] e2e: изолированный стек (проект $E2E_PROJECT, порт $E2E_PORT)…"
-  E2E_OVERRIDE="$(mktemp -d)/override.yml"
-  cat > "$E2E_OVERRIDE" <<YAML
-services:
-  ui:
-    ports: !override ["127.0.0.1:${E2E_PORT}:80"]
-YAML
-  cleanup() {
-    if [ "${CI_E2E_FAILED:-0}" = 1 ]; then
-      # Красный e2e без логов api не диагностируется (стек сейчас снесём).
-      docker compose -f infra/docker-compose.yml -f "$E2E_OVERRIDE" -p "$E2E_PROJECT" \
-        logs --no-color --tail=300 api > /tmp/cc-ci-e2e-api.log 2>&1 || true
-      log "логи api упавшего e2e: /tmp/cc-ci-e2e-api.log"
-    fi
-    CC_ALLOW_DEMO_SECRETS=true CC_COOKIE_SECURE=false \
-      docker compose -f infra/docker-compose.yml -f "$E2E_OVERRIDE" -p "$E2E_PROJECT" \
-      --profile seed down -v >/dev/null 2>&1 || true
-    rm -rf "$(dirname "$E2E_OVERRIDE")"
-  }
-  trap cleanup EXIT
-  # Пока блок e2e не дошёл до успеха — любой выход по ошибке льёт логи api.
-  CI_E2E_FAILED=1
-  # Стек e2e не должен тянуть прод-настройки из infra/.env: свой эмбеддер,
-  # своя коллекция, без ML-сайдкара (иначе api ждёт http://ml:8080 по 30 с)
-  # и без внешней LLM (ответы ассистента — retrieval-only, как в GH CI).
-  CC_EMBEDDER=hash CC_QDRANT_COLLECTION="kb_${E2E_PROJECT}" CC_ML_URL= \
-  CC_DEPERSONALIZE_NER=off CC_RERANKER=off CC_ASSISTANT_LLM_URL= \
-  CC_CHAT_INSIGHTS_ENABLED=false \
-  CC_ALLOW_DEMO_SECRETS=true CC_COOKIE_SECURE=false \
-    docker compose -f infra/docker-compose.yml -f "$E2E_OVERRIDE" \
-      -p "$E2E_PROJECT" --profile seed up -d --build
-  for _ in $(seq 1 120); do
-    curl -sf "http://127.0.0.1:${E2E_PORT}/" >/dev/null 2>&1 && break
-    sleep 2
-  done
-  curl -sf "http://127.0.0.1:${E2E_PORT}/" >/dev/null || fail "UI не поднялся на :$E2E_PORT"
-  # kb-seed — one-shot: UI поднимается раньше, чем коллекция создана, и ассистент
-  # в первые секунды получил бы пустую базу. Ждём завершения индексатора.
-  kb_state=""
-  for _ in $(seq 1 120); do
-    kb_id="$($COMPOSE -p "$E2E_PROJECT" --profile seed ps -aq kb-seed 2>/dev/null || true)"
-    if [ -n "$kb_id" ]; then
-      kb_state="$(docker inspect -f '{{.State.Status}}/{{.State.ExitCode}}' "$kb_id" 2>/dev/null || true)"
-    fi
-    [ "$kb_state" = "exited/0" ] && break
-    sleep 1
-  done
-  [ "$kb_state" = "exited/0" ] || fail "kb-seed не завершился успешно: ${kb_state:-нет контейнера}"
-  if [ ! -d e2e/node_modules ]; then
-    ( cd e2e && npm ci )
-  fi
-  ( cd e2e && CC_E2E_URL="http://127.0.0.1:${E2E_PORT}" npx playwright test ) \
-    || fail "e2e упали"
-  CI_E2E_FAILED=0
+  log "[5/5] e2e: Playwright против стенда (http://127.0.0.1:${CC_STAGE_UI_PORT:-8097})…"
+  "$STAGE" test --e2e
 else
   log "[5/5] e2e: пропущено (добавьте --e2e)"
 fi
