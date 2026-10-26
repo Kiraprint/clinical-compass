@@ -40,6 +40,8 @@ const GRID_DAYS = 42;
 /** §4.1: окно запроса ≤ 62 дней, страница ≤ 200 строк — берём кусками и листаем offset. */
 const CHUNK_DAYS = 31;
 const PAGE_LIMIT = 200;
+/** §4: окно выборки сервера — не шире 62 дней. */
+const WINDOW_DAYS = 62;
 
 const TIME_FMT = new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" });
 const MONTH_FMT = new Intl.DateTimeFormat("ru-RU", { month: "long", year: "numeric" });
@@ -132,10 +134,11 @@ export default function ScheduleView() {
         to,
       ),
       fetchWindow((f, t, o) => api.clinicianSessions(f, t, { offset: o }), gridFrom, to),
-      // Незавершённые приёмы: приём без записи живёт только здесь (у записи нет appointment_id).
+      // Незавершённые приёмы: приём без записи живёт только здесь (у записи нет
+      // appointment_id). Окно шире сетки — приём мог начаться в прошлом месяце.
       fetchWindow(
         (f, t, o) => api.clinicianSessions(f, t, { status: "active", offset: o }),
-        gridFrom,
+        addDays(to, -(WINDOW_DAYS - 1)),
         to,
       ),
     ])
