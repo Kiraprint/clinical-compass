@@ -84,7 +84,9 @@ done
 unset CC_COOKIE_SECURE CC_EMBEDDER CC_RERANKER CC_ML_URL CC_ML_TOKEN CC_ML_TIMEOUT \
       CC_DEPERSONALIZE_NER CC_ASSISTANT_LLM_URL CC_CHAT_INSIGHTS_ENABLED \
       CC_ALLOW_DEMO_SECRETS CC_QDRANT_COLLECTION CC_QDRANT_URL CC_KB_CHUNK_CHARS \
-      CC_KB_CHUNK_OVERLAP CC_ENRICH_CHUNK_CHARS CC_ENRICH_CHUNK_OVERLAP
+      CC_KB_CHUNK_OVERLAP CC_ENRICH_CHUNK_CHARS CC_ENRICH_CHUNK_OVERLAP \
+      CC_EMIAS_ENABLED CC_EMIAS_ALLOW_INSECURE CC_REMD_ENABLED CC_REMD_ALLOW_INSECURE \
+      CC_EMIAS_BASE_URL CC_REMD_BASE_URL CC_REMD_CALLBACK_URL
 export CC_EMBEDDER=hash
 export CC_QDRANT_COLLECTION="$STACK_COLLECTION"
 export CC_KB_CHUNK_CHARS=1800 CC_KB_CHUNK_OVERLAP=120
@@ -93,6 +95,15 @@ export CC_ML_URL= CC_ML_TOKEN= CC_ML_TIMEOUT=5
 export CC_DEPERSONALIZE_NER=off CC_RERANKER=off
 export CC_ASSISTANT_LLM_URL= CC_CHAT_INSIGHTS_ENABLED=false
 export CC_ALLOW_DEMO_SECRETS=true CC_COOKIE_SECURE=false
+# Внешние интеграции в стенде включены и указывают на моки профиля emias:
+# без них e2e-спеки протокола приёма (docs/18, FR-39…FR-41) проверяют только
+# выключенное состояние. Адреса (CC_EMIAS_BASE_URL/CC_REMD_*) НЕ переопределяем —
+# берутся дефолты compose (`http://emias-mock:8090`, `http://remd-mock:8091`),
+# поэтому унаследованный адрес наружу подставить нельзя.
+# Эти флаги видит и pytest, поэтому api-тесты запускаются с `env -u` (см. cmd_test):
+# их кейсы проверяют выключенное состояние интеграций.
+export CC_EMIAS_ENABLED=true CC_EMIAS_ALLOW_INSECURE=true
+export CC_REMD_ENABLED=true CC_REMD_ALLOW_INSECURE=true
 
 compose() { docker compose -f "$ROOT/infra/docker-compose.yml" -f "$OVERRIDE" -p "$STAGE_PROJECT" "$@"; }
 
@@ -224,6 +235,11 @@ cmd_up() {
     return 0
   fi
 
+  # Моки внешних интеграций (ЕМИАС + РЭМД) профиля emias: api смотрит на них
+  # по внутренним адресам, порты на хост не публикуются. Нужны только стеку —
+  # для api-тестов (--data) не поднимаются.
+  compose --profile emias up -d emias-mock remd-mock >/dev/null
+
   local want have
   want="$(images_fp)"
   have="$(cat "$IMAGES_MARK" 2>/dev/null || true)"
@@ -286,10 +302,15 @@ cmd_test() {
   if [ "$do_e2e" = 1 ]; then cmd_up; else cmd_up --data; fi
 
   if [ "$do_api" = 1 ]; then
-    log "api-тесты в стенде: БД $TEST_DB_NAME, коллекция $TEST_COLLECTION"
     # CC_COOKIE_SECURE стенда (false для e2e по http) не должен влиять на pytest:
     # с не-Secure cookie TestClient переиспользует сессию и ломает проверки 401.
-    ( cd "$ROOT" && env -u CC_COOKIE_SECURE \
+    # Флаги моков (EMIAS/REMD) тоже снимаем: api-тесты проверяют ВЫКЛЮЧЕННОЕ
+    # состояние интеграций, иначе падают кейсы test_auth/test_emias_api.
+    ( cd "$ROOT" && \
+      env -u CC_COOKIE_SECURE \
+          -u CC_EMIAS_ENABLED -u CC_EMIAS_ALLOW_INSECURE -u CC_EMIAS_BASE_URL \
+          -u CC_REMD_ENABLED -u CC_REMD_ALLOW_INSECURE -u CC_REMD_BASE_URL \
+          -u CC_REMD_CALLBACK_URL \
       PYTHONPATH="$ROOT/api:$ROOT/core${PYTHONPATH:+:$PYTHONPATH}" \
       CC_TEST_DATABASE_URL="postgresql+psycopg://compass:compass@127.0.0.1:${PG_PORT}/${TEST_DB_NAME}" \
       CC_QDRANT_URL="http://127.0.0.1:${QDRANT_PORT}" \
@@ -305,17 +326,22 @@ cmd_test() {
     # auth-rate-limit.spec падает не по делу. redis стенда — только лимитер.
     compose exec -T redis redis-cli FLUSHDB >/dev/null 2>&1 || \
       log "предупреждение: не удалось сбросить redis стенда"
-    [ -d "$ROOT/e2e/node_modules" ] || ( cd "$ROOT/e2e" && npm ci )
+    [ -d "$ROOT/e2e/node_modules" ] || ( cd "$ROOT/e2e" && npm ci ) 9>&-
     # Логи api пишем потоком весь прогон: `logs --tail=N` после падения
     # показывает только хвост и теряет запрос, который и сломал спек.
+    # 9>&- обязателен: фоновый `compose logs -f` унаследовал бы fd блокировки
+    # и держал .stage/lock после выхода скрипта.
     local api_log="/tmp/cc-dev-stage-api.log"
+    local logs_pid=""
     : > "$api_log"
-    compose logs --no-color -f api >> "$api_log" 2>&1 &
-    local logs_pid=$!
+    compose logs --no-color -f api >> "$api_log" 2>&1 9>&- &
+    logs_pid=$!
+    trap '[ -n "${logs_pid:-}" ] && kill "$logs_pid" 2>/dev/null; exit 130' INT TERM
     local e2e_rc=0
-    ( cd "$ROOT/e2e" && CC_E2E_URL="http://127.0.0.1:${UI_PORT}" npx playwright test "${extra[@]}" ) || e2e_rc=$?
+    ( cd "$ROOT/e2e" && CC_E2E_URL="http://127.0.0.1:${UI_PORT}" npx playwright test "${extra[@]}" ) 9>&- || e2e_rc=$?
     kill "$logs_pid" 2>/dev/null || true
     wait "$logs_pid" 2>/dev/null || true
+    trap - INT TERM
     if [ "$e2e_rc" != 0 ]; then
       fail "e2e упали (rc=$e2e_rc); логи api: $api_log"
     fi
@@ -335,17 +361,35 @@ cmd_status() {
 
 cmd_down() {
   [ -f "$OVERRIDE" ] || return 0
-  compose --profile seed down
+  # --profile emias/seed: без них `down` оставляет контейнеры моков и
+  # one-shot сервисов, и `compose up` потом считает проект живым.
+  compose --profile seed --profile emias down
   log "стенд остановлен, тома сохранены (reset — чтобы снести данные)"
 }
 
 cmd_reset() {
-  [ -f "$OVERRIDE" ] && compose --profile seed down -v || true
+  # `--profile "*"` — снести и моки, и gpu-контур, если он поднимался.
+  [ -f "$OVERRIDE" ] && compose --profile "*" down -v || true
   rm -rf "$STATE_DIR"
   log "стенд снесён вместе с данными"
 }
 
 cmd="${1:-}"; shift || true
+
+case "$cmd" in
+  up|seed|test|down|reset)
+    # Один стенд — один мутирующий прогон. Два параллельных `test` (или `up`
+    # во время `test`) роняют друг другу compose: postgres пересоздаётся
+    # посреди чужого pytest («the database system is shutting down»), схема
+    # compass_test портится. `status`/`help` блокировку не берут и не висят.
+    mkdir -p "$STATE_DIR"
+    exec 9>"$STATE_DIR/lock"
+    if ! flock -n 9; then
+      fail "стенд занят другим прогоном (lock: $STATE_DIR/lock); дождитесь его окончания"
+    fi
+    ;;
+esac
+
 case "$cmd" in
   up) cmd_up "$@" ;;
   seed) cmd_seed ;;

@@ -99,12 +99,17 @@ jobs:
       - name: Start full stack
         # --profile seed: сид и индексатор КБ — one-shot сервисы в отдельном
         # профиле, обычный `up` их больше не перезапускает (docs/03 §13).
-        run: docker compose -f infra/docker-compose.yml --profile seed up -d --build
+        # --profile emias: моки ЕМИАС и РЭМД — без них спеки протокола приёма
+        # (docs/18, FR-39…FR-41) проверяют только выключенное состояние.
+        run: docker compose -f infra/docker-compose.yml --profile seed --profile emias up -d --build
         env:
           # CI крутит только demo-данные и не имеет infra/.env — разрешаем
           # демо-секреты явно, иначе api падает на fail-fast (NEW-5/F3).
           CC_ALLOW_DEMO_SECRETS: "true"
           CC_COOKIE_SECURE: "false"
+          CC_EMIAS_ENABLED: "true"
+          CC_EMIAS_ALLOW_INSECURE: "true"
+          CC_REMD_ENABLED: "true"
       - name: Wait for UI
         run: |
           for i in $(seq 1 60); do
