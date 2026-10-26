@@ -509,3 +509,24 @@ def test_patch_audio_consent_null_rejected(client):
     assert resp.status_code == 422, resp.text
     after = client.get(f"{BASE}/sessions/{session['id']}", headers=ctx["doctor"]).json()
     assert after["audio_consent"] is True
+
+
+def test_audio_consent_is_strict_bool(client):
+    """`"yes"`/`1`/`null`/пустое тело не должны молча превращаться в согласие или отказ."""
+    ctx = _setup(client)
+    session = client.post(
+        f"{BASE}/sessions", json={"patient_id": ctx["patient_id"]}, headers=ctx["doctor"]
+    ).json()
+    for body in ({"audio_consent": "yes"}, {"audio_consent": 1}, {"audio_consent": None}, {}):
+        resp = client.patch(
+            f"{BASE}/sessions/{session['id']}", json=body, headers=ctx["doctor"]
+        )
+        assert resp.status_code == 422, (body, resp.text)
+    created = client.post(
+        f"{BASE}/sessions",
+        json={"patient_id": ctx["patient_id"], "audio_consent": "on"},
+        headers=ctx["doctor"],
+    )
+    assert created.status_code == 422, created.text
+    after = client.get(f"{BASE}/sessions/{session['id']}", headers=ctx["doctor"]).json()
+    assert after["audio_consent"] is False

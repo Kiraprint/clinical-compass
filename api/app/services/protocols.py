@@ -21,7 +21,7 @@ import json
 import re
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -234,10 +234,23 @@ async def _create_draft(db: AsyncSession, session_id, sections: dict, code, clin
         db.add(row)
         try:
             await db.flush()
-            return row
         except IntegrityError:
             # UNIQUE(session_id, version): параллельный PUT забрал номер — берём следующий.
             await db.rollback()
+            continue
+        # §3.4: активна максимум одна версия. Победившая в гонке/подписанная версия
+        # уходит в `superseded` (в истории остаётся, в `_active` — уже нет).
+        await db.execute(
+            update(SessionProtocol)
+            .where(
+                SessionProtocol.session_id == session_id,
+                SessionProtocol.id != row.id,
+                SessionProtocol.status.in_(PROTOCOL_ACTIVE),
+            )
+            .values(status="superseded", updated_at=_now())
+        )
+        await db.flush()
+        return row
     raise Problem(409, "PROTOCOL_LOCKED", "Протокол изменяется параллельно — повторите")
 
 
@@ -304,7 +317,6 @@ async def put(
     elif active.status == "signed":
         # Подпись не переносится на новые байты: новая версия + повторная подпись.
         row = await _create_draft(db, sid, sections, code, clinician_id)
-        active.status = "superseded"
     else:  # draft
         active.sections_cipher = encode_sections(sections)
         # Присваиваем всегда: код, удалённый из разделов, не должен остаться в строке.

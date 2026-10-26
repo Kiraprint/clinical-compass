@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import services
@@ -127,12 +127,12 @@ class SessionBody(BaseModel):
     patient_id: uuid.UUID
     channel: Channel = "in_person"
     appointment_id: uuid.UUID | None = None
-    audio_consent: bool = False
+    audio_consent: StrictBool = False
 
 
 class SessionPatch(BaseModel):
-    # Строго bool: `null` не должен молча означать «согласие отозвано» (422).
-    audio_consent: bool
+    # Строго bool: ни `null`, ни "yes" не должны молча означать согласие/отказ (422).
+    audio_consent: StrictBool
 
 
 class FinishBody(BaseModel):

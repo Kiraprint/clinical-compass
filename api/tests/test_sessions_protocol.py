@@ -354,3 +354,60 @@ def test_diagnosis_code_cleared_with_sections(client, db_session):
     # Без диагноза подтверждение невозможно — обязательный раздел §5.2.
     approve = client.post(f"{url}/approve", json={}, headers=ctx["doctor"])
     assert approve.status_code == 409 and "diagnosis.icd10" in approve.json()["detail"]
+
+
+def test_version_race_leaves_single_active(client, db_session, monkeypatch):
+    """Гонка двух PUT: проигравший не оставляет вторую активную версию (docs/18 §3.4)."""
+    from app.services import protocols as pr
+
+    ctx = _ctx(client)
+    session = _session(client, ctx)
+    url = f"{BASE}/sessions/{session['id']}/protocol"
+    db_session.execute(
+        text(
+            "INSERT INTO session_protocols (id, session_id, version, status, source, "
+            "sections_cipher, created_by) VALUES (gen_random_uuid(), CAST(:s AS uuid), 1, "
+            "'draft', 'manual', pgp_sym_encrypt('{}', :k), CAST(:c AS uuid))"
+        ).bindparams(
+            s=session["id"],
+            k=settings.data_key,
+            c=db_session.execute(
+                text("SELECT id FROM users WHERE email = 'pr-doc1@test.ru'")
+            ).scalar_one(),
+        )
+    )
+    db_session.commit()
+
+    real_active, real_next = pr._active, pr._next_version
+    calls = {"active": 0, "next": 0}
+
+    async def stale_active(db, session_id):
+        calls["active"] += 1
+        return None if calls["active"] == 1 else await real_active(db, session_id)
+
+    async def colliding_next(db, session_id):
+        calls["next"] += 1
+        # Первая попытка попадает в уже занятый номер — как при параллельном PUT.
+        return 1 if calls["next"] == 1 else await real_next(db, session_id)
+
+    monkeypatch.setattr(pr, "_active", stale_active)
+    monkeypatch.setattr(pr, "_next_version", colliding_next)
+
+    resp = client.put(url, json={"sections": FULL}, headers=ctx["doctor"])
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["version"] == 2
+
+    rows = db_session.execute(
+        text(
+            "SELECT version, status FROM session_protocols "
+            "WHERE session_id = CAST(:s AS uuid) ORDER BY version"
+        ).bindparams(s=session["id"])
+    ).all()
+    assert [(v, s) for v, s in rows] == [(1, "superseded"), (2, "draft")]
+    active = db_session.execute(
+        text(
+            "SELECT count(*) FROM session_protocols WHERE session_id = CAST(:s AS uuid) "
+            "AND status IN ('draft', 'approved', 'signed', 'submitted')"
+        ).bindparams(s=session["id"])
+    ).scalar_one()
+    assert active == 1
