@@ -153,7 +153,8 @@ def test_source_outside_retrieval_drops_element():
     assert "diagnosis" not in sections
     assert sections["treatment"] == []
     assert _needs(needs, section="diagnosis", reason="source_missing")
-    assert _needs(needs, section="treatment.0", reason="source_missing")
+    # Отброшенной строки в документе нет, поэтому причина — на раздел целиком.
+    assert _needs(needs, section="treatment", reason="source_missing")
     # Источники без обоснованных элементов остаются пустыми по used_by.
     assert all(source["used_by"] == [] for source in sections["sources"])
 

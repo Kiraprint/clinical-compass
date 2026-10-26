@@ -325,6 +325,9 @@ export default function SessionPanel({
   // Ключи строк лечения: `key={i}` после удаления из середины переиспользует DOM строки.
   const [rowKeys, setRowKeys] = useState<string[]>([]);
   const rowSeq = useRef(0);
+  // Нумерация перенесённых источников: id в ответе модели сквозные только внутри
+  // одного черновика, поэтому каждому черновику — свой префикс (§5.4).
+  const draftSeq = useRef(0);
   // §4.2: свежая деталь сессии — источник ai_status, подписи и доставки.
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [review, setReview] = useState<Record<string, string[]>>({});
@@ -526,27 +529,55 @@ export default function SessionPanel({
     const current = liveSections.current;
     let merged = current;
     const disputed: DraftConflict[] = [];
+    const applied: string[] = [];
     for (const key of draftKeys(draft.sections)) {
       const proposed = fieldValue(draft.sections, key);
       if (!proposed.trim()) continue;
       const mine = fieldValue(current, key);
-      if (!mine.trim()) merged = withField(merged, key, proposed);
-      else if (mine !== proposed) disputed.push({ key, next: proposed });
+      if (!mine.trim()) {
+        merged = withField(merged, key, proposed);
+        applied.push(key);
+      } else if (mine !== proposed) disputed.push({ key, next: proposed });
     }
     // FR-43: лечение и его обоснования переносим только целиком и только если
     // врач ещё не вёл лечение сам — иначе его назначения важнее черновика.
     const proposedRows = draft.sections.treatment ?? [];
     const treatmentKept = proposedRows.length > 0 && merged.treatment.length > 0;
-    if (proposedRows.length > 0 && merged.treatment.length === 0) {
-      merged = { ...merged, treatment: proposedRows.map((row) => ({ ...row })) };
-    }
-    if (draft.sections.sources && draft.sections.sources.length > 0) {
-      merged = { ...merged, sources: draft.sections.sources };
-    }
-    if (draft.sections.diagnosis?.sources && draft.sections.diagnosis.sources.length > 0) {
+    const rowsApplied = proposedRows.length > 0 && merged.treatment.length === 0;
+    // §5.4: id источников нумеруются внутри одного ответа модели (S1…Sn), и новый
+    // «S1» — это другой чанк. Источники, взятые из черновика, переносим в
+    // собственное пространство имён и переписываем ссылки диагноза и лечения:
+    // иначе подписанный документ сошлётся на чужое обоснование, а PUT отклонит
+    // такую ссылку как PROTOCOL_SOURCE_UNKNOWN.
+    const proposedSources = draft.sections.sources ?? [];
+    const diagnosisApplied = applied.some((key) => key.startsWith("diagnosis."));
+    const draftDiagnosisSources = draft.sections.diagnosis?.sources ?? [];
+    let relabel = (ids: string[] | undefined) => ids ?? [];
+    if ((rowsApplied || diagnosisApplied) && proposedSources.length > 0) {
+      const prefix = `d${++draftSeq.current}-`;
+      const mapping = new Map(proposedSources.map((s) => [s.id, s.id ? prefix + s.id : s.id]));
+      relabel = (ids) => (ids ?? []).map((id) => mapping.get(id) ?? id);
+      const known = new Set((merged.sources ?? []).map((s) => s.id));
       merged = {
         ...merged,
-        diagnosis: { ...merged.diagnosis, sources: draft.sections.diagnosis.sources },
+        sources: [
+          ...(merged.sources ?? []),
+          ...proposedSources
+            .map((s) => ({ ...s, id: mapping.get(s.id) ?? s.id }))
+            .filter((s) => !known.has(s.id)),
+        ],
+      };
+      if (draftDiagnosisSources.length > 0) {
+        merged = {
+          ...merged,
+          diagnosis: { ...merged.diagnosis, sources: relabel(draftDiagnosisSources) },
+        };
+      }
+    }
+    if (rowsApplied) {
+      merged = {
+        ...merged,
+        treatment: proposedRows.map((row) => ({ ...row, sources: relabel(row.sources) })),
       };
     }
     liveSections.current = merged;

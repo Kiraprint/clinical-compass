@@ -490,8 +490,9 @@ def test_draft_builds_llm_only_draft_with_red_lines(client, monkeypatch, db_sess
     needs = draft["needs_review"]
     assert {"section": "mental_status.suicidal_risk", "reason": "clinical_risk"} in needs
     # KB недоступна в этом тесте: элементы без источника отброшены, лечение не обосновано.
+    # Отброшенные строки позиций не занимают — причина на разделе целиком.
     assert {"section": "diagnosis", "reason": "source_missing"} in needs
-    assert {"section": "treatment.0", "reason": "source_missing"} in needs
+    assert {"section": "treatment", "reason": "source_missing"} in needs
     assert {"section": "treatment", "reason": "sources_unavailable"} in needs
     assert not [n for n in needs if n["reason"] == "unexpected_section"]
     assert {"section": "recommendations", "reason": "dosage_in_draft"} in needs

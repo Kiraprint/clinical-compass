@@ -1263,6 +1263,10 @@ def _same_lemma(needle: str, word: str) -> bool:
     («сертралин» ↔ «сертралина»), но не на другой корень.
     """
     common = 0
+    for left, right in zip(needle, word):
+        if left != right:
+            break
+        common += 1
     shortest = min(len(needle), len(word))
     # Короткие МНН («литий», «лития») не набирают 5 букв общего корня при
     # флексии — для них порог 4 буквы и расхождение ≤ 2.
@@ -1306,8 +1310,8 @@ def _dose_pattern(dose: str) -> re.Pattern | None:
         number, unit = re.match(r"(\d+(?:[.,]\d+)?)\s*(.*)", token).groups()
         # Разделитель дроби в обе стороны: ответ модели «0.5 мг» подтверждается
         # чанком «0,5 мг» и наоборот (иначе ложный dosage_not_in_source).
-        pattern = re.escape(number).replace(r"\.", "[.,]").replace(",", "[.,]")
-        parts.append(rf"(?<![\d.,]){pattern}\s*{re.escape(unit)}")
+        number = re.escape(number.replace(",", ".")).replace(r"\.", "[.,]")
+        parts.append(rf"(?<![\d.,]){number}\s*{re.escape(unit)}")
     return re.compile("|".join(parts), re.IGNORECASE)
 
 
