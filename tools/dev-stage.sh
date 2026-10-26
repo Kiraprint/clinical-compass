@@ -256,7 +256,10 @@ cmd_up() {
   have="$(cat "$IMAGES_MARK" 2>/dev/null || true)"
   if [ "$want" != "$have" ] || [ -z "$(compose images -q api 2>/dev/null)" ]; then
     log "код изменился (или образов нет) — собираю образы (кеш слоёв docker сохраняется)…"
-    compose --profile seed build
+    # emias в профиле сборки: remd-mock тоже собирается из api/Dockerfile —
+    # без него правился бы только api, а мок оставался на старом коде, хотя
+    # отпечаток images_fp уже записан как актуальный.
+    compose --profile seed --profile emias build
     compose --profile emias up -d --force-recreate api ui reminders-worker kb-enrichment remd-mock >/dev/null
     echo "$want" > "$IMAGES_MARK"
   else
