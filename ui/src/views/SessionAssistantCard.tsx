@@ -3,6 +3,9 @@ import {
   api,
   ApiError,
   ClinicalSession,
+  SessionChatCitation,
+  SessionChatMessage,
+  SessionChatProposal,
   SessionDetail,
   SessionProtocol,
   SessionTranscript,
@@ -46,6 +49,13 @@ const AI_ERRORS: Record<string, string> = {
   SPEAKER_ROLE_DUPLICATE: "Врач и пациент должны быть разными участниками",
   SPEAKER_ROLE_INVALID: "Недопустимая роль участника",
   SPEAKER_UNKNOWN: "Такой метки нет в расшифровке — обновите страницу",
+  // FR-44 (§10): диалог по сессии.
+  MESSAGE_TOO_LONG: "Сообщение слишком длинное — сократите вопрос",
+  MESSAGE_EMPTY: "Введите вопрос",
+  CHAT_LIMIT_REACHED: "Лимит реплик по этому приёму исчерпан",
+  SESSION_NOT_FOUND: "Сессия не найдена — обновите расписание",
+  NO_ROSTER: "Пациент не закреплён за вами — данные недоступны",
+  CONSENT_REQUIRED: "Нет активного согласия пациента — данные недоступны",
 };
 
 /** Ошибка ИИ по-русски: код не протекает в интерфейс (§6). */
@@ -197,12 +207,203 @@ function TranscriptView({
   );
 }
 
+/** §10 (FR-44): подписи разделов для `proposal.section` — один словарь с панелью. */
+const SECTION_LABELS: Record<string, string> = {
+  complaints: "Жалобы",
+  anamnesis_morbi: "Анамнез",
+  somatic_status: "Соматический статус",
+  recommendations: "Рекомендации",
+  "diagnosis.rationale": "Обоснование диагноза",
+  "mental_status.appearance_behavior": "Внешний вид и поведение",
+  "mental_status.consciousness_orientation": "Сознание и ориентировка",
+  "mental_status.perception": "Восприятие",
+  "mental_status.thinking_speech": "Мышление и речь",
+  "mental_status.emotions_volition": "Эмоции и воля",
+  "mental_status.criticism": "Критика",
+  "mental_status.suicidal_risk": "Суицидальный риск",
+};
+
+function ChatSources({ citations }: { citations: SessionChatCitation[] }) {
+  if (citations.length === 0) return null;
+  return (
+    <div className="chips">
+      {citations.map((citation, i) => (
+        <span className="source-chip" key={`${citation.guideline_id}-${i}`} title={citation.topic}>
+          [{i + 1}] {citation.source_title || citation.guideline_id}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * §10: «Спросить ИИ» — диалог по текущему приёму.
+ *
+ * Агент ничего не меняет сам: правка раздела приходит как `proposal`, а
+ * применяет её врач кнопкой — панель делает обычный `PUT …/protocol`. Кнопка
+ * неактивна, когда протокол уже подтверждён: правка подтверждённого документа —
+ * отдельное решение врача, а не побочный эффект чата.
+ */
+function SessionChat({
+  sessionId,
+  locked,
+  onApplyProposal,
+}: {
+  sessionId: string;
+  locked: boolean;
+  onApplyProposal: (proposal: SessionChatProposal) => Promise<string | null>;
+}) {
+  const [items, setItems] = useState<SessionChatMessage[]>([]);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [note, setNote] = useState("");
+  const [applied, setApplied] = useState<string[]>([]);
+  const alive = useRef(true);
+
+  useEffect(() => {
+    alive.current = true;
+    api
+      .sessionChatHistory(sessionId)
+      .then((data) => {
+        if (alive.current) setItems(data.items);
+      })
+      .catch(() => {
+        // История — вспомогательная лента: без неё чат работает.
+      });
+    return () => {
+      alive.current = false;
+    };
+  }, [sessionId]);
+
+  const send = async () => {
+    const message = text.trim();
+    if (!message || busy) return;
+    setBusy(true);
+    setErr("");
+    setNote("");
+    try {
+      const reply = await api.sessionChat(sessionId, message);
+      if (!alive.current) return;
+      setItems((prev) => [
+        ...prev,
+        {
+          id: `local-${prev.length}-${Date.now()}`,
+          role: "clinician",
+          content: message,
+          citations: [],
+          proposal: null,
+          created_at: null,
+        },
+        reply,
+      ]);
+      setText("");
+    } catch (e: unknown) {
+      if (alive.current) setErr(aiErrorText(e, "Не удалось получить ответ"));
+    } finally {
+      if (alive.current) setBusy(false);
+    }
+  };
+
+  const apply = async (item: SessionChatMessage, proposal: SessionChatProposal) => {
+    setErr("");
+    const failure = await onApplyProposal(proposal);
+    if (failure) {
+      setErr(failure);
+      return;
+    }
+    setNote(`Правка применена: ${SECTION_LABELS[proposal.section] ?? proposal.section}`);
+    setApplied((prev) => [...prev, item.id]);
+  };
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      <p className="small muted">
+        Спросить ИИ по этому приёму: ответ собирается по базе знаний с цитатами. Раздел протокола
+        сам не меняется — правку применяете вы.
+      </p>
+      <div className="row">
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              void send();
+            }
+          }}
+          placeholder="Например: что уточнить в разделе рекомендаций?"
+          maxLength={2000}
+          disabled={busy}
+          aria-label="Вопрос ИИ по приёму"
+        />
+        <button type="button" onClick={() => void send()} disabled={busy || text.trim() === ""}>
+          {busy ? "Думает…" : "Спросить"}
+        </button>
+      </div>
+      {err && (
+        <p className="error" role="alert">
+          {err}
+        </p>
+      )}
+      {note && !err && <p className="small muted">{note}</p>}
+      {items.length > 0 && (
+        <div className="chat-feed" aria-live="polite">
+          {items.map((item) => (
+            <div className={`chat-msg ${item.role}`} key={item.id}>
+              <span className="small muted">{item.role === "clinician" ? "Вы" : "ИИ"}</span>
+              <p>{item.content}</p>
+              <ChatSources citations={item.citations} />
+              {item.proposal && (
+                <div className="proposal">
+                  <p className="small">
+                    Предложение:{" "}
+                    {SECTION_LABELS[item.proposal.section] ?? item.proposal.section}
+                  </p>
+                  {item.proposal.before && (
+                    <p className="small muted">Было: {item.proposal.before}</p>
+                  )}
+                  <p className="small">Станет: {item.proposal.after}</p>
+                  {item.proposal.reason && (
+                    <p className="small muted">{item.proposal.reason}</p>
+                  )}
+                  <div className="chips">
+                    {item.proposal.sources.map((source, i) => (
+                      <span className="source-chip" key={`${source.guideline_id}-${i}`}>
+                        [{source.ref}] {source.source_title || source.guideline_id}
+                      </span>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    className="ghost"
+                    disabled={locked || applied.includes(item.id)}
+                    onClick={() => void apply(item, item.proposal as SessionChatProposal)}
+                  >
+                    {applied.includes(item.id)
+                      ? "Применено"
+                      : locked
+                        ? "Протокол подтверждён"
+                        : "Применить в раздел"}
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 export default function SessionAssistantCard({
   session,
   protocolLocked,
   hasAudio,
   onRefresh,
   onDraft,
+  onApplyProposal,
 }: {
   session: ClinicalSession;
   /** Протокол подтверждён/подписан — черновик ИИ запрещён (409 PROTOCOL_LOCKED). */
@@ -213,6 +414,8 @@ export default function SessionAssistantCard({
   onRefresh: () => Promise<SessionDetail | null>;
   /** Черновик отдан панели: слияние и бейджи проверки — её ответственность. */
   onDraft: (draft: SessionProtocol) => void;
+  /** §10: применить `proposal` — панель делает обычный PUT и обновляет редактор. */
+  onApplyProposal: (proposal: SessionChatProposal) => Promise<string | null>;
 }) {
   // null — доступность ещё проверяется: карточка без ответа сервера не рисуется.
   const [available, setAvailable] = useState<boolean | null>(null);
@@ -721,7 +924,20 @@ export default function SessionAssistantCard({
         {!transcript && !protocolLocked && (
           <span className="small muted">Черновик строится по готовой расшифровке.</span>
         )}
+        {/* FR-44 §10: конвейер делает черновик сам сразу после расшифровки. */}
+        {transcript && !protocolLocked && (
+          <span className="small muted">
+            Черновик создаётся автоматически после расшифровки — кнопка нужна, только если он не
+            появился.
+          </span>
+        )}
       </div>
+
+      <SessionChat
+        sessionId={session.id}
+        locked={protocolLocked}
+        onApplyProposal={onApplyProposal}
+      />
 
       {err && (
         <p className="error" role="alert">

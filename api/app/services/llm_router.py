@@ -152,6 +152,34 @@ def chat_completion(
     )
 
 
+def chat_with_tools(
+    messages: list[dict],
+    tools: list[dict] | None = None,
+    *,
+    temperature: float = 0.0,
+    timeout: float | None = None,
+) -> dict:
+    """Один раунд tool-loop диалога по сессии (FR-44, docs/18 §10).
+
+    Отличие от `chat_completion`: набор тулз и `tool_choice: auto`. `tools=None`
+    — финальный проход без тулз, когда раунды вызовов исчерпаны: модель обязана
+    вернуть текст, а не ещё один вызов. `enable_thinking: false` — reasoning-
+    модели иначе тратят бюджет на CoT вместо ответа (как в route_topics).
+    Ошибки транспорта не ловим: их обрабатывает вызывающий (детерминированный
+    отказ вместо падения ручки).
+    """
+    payload: dict = {
+        "model": settings.assistant_llm_model,
+        "messages": messages,
+        "temperature": temperature,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+    return _request(payload, timeout=timeout)
+
+
 MAX_TOPICS = 2  # больше двух разделов на один вопрос — это уже «поиск по всем»
 
 

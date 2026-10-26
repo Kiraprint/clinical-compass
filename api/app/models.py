@@ -1087,6 +1087,36 @@ class SessionTranscript(Base):
     )
 
 
+class SessionChatMessage(Base):
+    """FR-44 (docs/18 §10): реплики диалога врача по сессии.
+
+    Текст реплики — свободный текст с ПДн (врач может назвать пациента), поэтому
+    хранится только шифротекстом (pgcrypto, EncryptedText, как у протокола), а в
+    аудите живут лишь id сессии. В LLM уходит уже замаскированный текст:
+    маскирование делается на каждом вызове, а не при записи, — иначе врач не
+    увидел бы свою реплику в истории.
+
+    `content_cipher` у реплики ассистента — JSON `{answer, citations, proposal}`:
+    цитаты и предложенная правка не отдельные ПДн-поля, а часть того же
+    шифрованного сообщения (отдельных jsonb-колонок нет намеренно).
+    """
+
+    __tablename__ = "session_chat_messages"
+    __table_args__ = (
+        CheckConstraint("role in ('clinician','assistant')", name="session_chat_role"),
+        Index("session_chat_messages_session_created", "session_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    session_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("clinical_sessions.id"))
+    clinician_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    role: Mapped[str] = mapped_column(String(16))
+    content_cipher: Mapped[str] = mapped_column(EncryptedText())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
 class ProtocolSignature(Base):
     """FR-40: подпись протокола приёма (docs/18 §3.7, §7).
 

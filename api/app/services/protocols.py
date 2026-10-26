@@ -404,11 +404,11 @@ async def save_llm_draft(
     clinician_id,
     session_id,
     sections: dict,
-    *,
     model: str | None = None,
     prompt_version: str | None = None,
     needs_review: list[dict] | None = None,
     ip: str | None = None,
+    action: str = "SESSION_PROTOCOL_DRAFT",
 ) -> dict:
     """Черновик ИИ (§4.3): версия `source='llm'`, сам никогда не подтверждается.
 
@@ -416,6 +416,12 @@ async def save_llm_draft(
     плодит версии, а заменяет предыдущий. Подтверждённая/подписанная/переданная
     запись не перезаписывается: 409 PROTOCOL_LOCKED (ИИ не трогает документ
     после врача, §1.1). `needs_review` — подсказки врачу, не блокировка.
+
+    `action` (FR-44): какой код писать в журнал. `audit.record` не принимает
+    metadata, поэтому единственный честный способ отличить ручной черновик от
+    автодрафта конвейера и от вызова тулом диалога — код действия:
+    `SESSION_PROTOCOL_DRAFT` (кнопка/POST), `SESSION_PROTOCOL_AUTODRAFT`
+    (после расшифровки), `SESSION_PROTOCOL_CHAT_DRAFT` (тул агента).
     """
     session = await require_session(db, clinician_id, session_id)
     await require_patient_access(db, clinician_id, session.patient_id)
@@ -449,7 +455,7 @@ async def save_llm_draft(
     await audit.record(
         db,
         clinician_id,
-        "SESSION_PROTOCOL_DRAFT",
+        action,
         "session_protocol",
         f"{session.id}:v{row.version}",
         ip=ip,

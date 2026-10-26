@@ -15,7 +15,7 @@ ML-сайдкаре (`/v1/transcribe`) → деперсонализация ка
 - ИИ формирует **черновик**: `source='llm'`, `needs_review`, никакого approve;
 - аудит — только ids (§2), в логах — ids и коды, никогда текст.
 
-Расшифровка живёт в фоновой задаче процесса (не Celery, §10): `POST …/transcribe`
+Расшифровка живёт в фоновой задаче процесса (не Celery, §11): `POST …/transcribe`
 отвечает 202, задача обновляет `ai_status` (`transcribing → transcribed|failed`).
 Повторный запуск на той же сессии — 409 `AI_BUSY` (in-flight реестр процесса).
 """
@@ -976,6 +976,66 @@ async def _pipeline(session_id: uuid.UUID) -> None:
                     lambda: artifacts.remove(SimpleNamespace(path=path, id=previous_id))
                 )
 
+    # FR-44: конвейер доводит приём до черновика сам. Сбой автодрафта уже
+    # поглощён внутри: расшифровка к этому моменту закоммичена.
+    if settings.session_ai_autodraft:
+        await _autodraft(session_id)
+
+
+async def _autodraft(session_id: uuid.UUID) -> None:
+    """FR-44: черновик протокола сразу после расшифровки (docs/18 §10).
+
+    Тот же `draft()`, что у ручной кнопки, но без HTTP: аудит отличается кодом
+    `SESSION_PROTOCOL_AUTODRAFT`. Сбой автодрафта — НЕ сбой расшифровки:
+    `ai_status` остаётся `transcribed`, код уходит в `ai_error`, врач может
+    вызвать черновик вручную (`POST …/protocol/draft`). Подтверждённый протокол
+    автодрафт не трогает вовсе: 409 PROTOCOL_LOCKED здесь — штатная ситуация
+    (врач уже подтвердил документ до окончания расшифровки).
+    """
+    factory = db_module.AsyncSessionLocal
+    if factory is None:
+        return
+    try:
+        async with factory() as db:
+            session = await db.get(ClinicalSession, session_id)
+            if session is None:
+                return
+            active = await protocols.active(db, session.id)
+            if active is not None and active.status != "draft":
+                log.info("Автодрафт сессии %s пропущен: протокол уже подтверждён", session_id)
+                return
+            await draft(
+                db,
+                session.clinician_id,
+                session.id,
+                action="SESSION_PROTOCOL_AUTODRAFT",
+            )
+        log.info("Автодрафт сессии %s: черновик создан", session_id)
+    except Problem as exc:
+        log.warning("Автодрафт сессии %s: %s", session_id, exc.code)
+        await _mark_ai_error(session_id, exc.code)
+    except asyncio.CancelledError:
+        raise
+    except BaseException:  # noqa: BLE001 — фон: сбой автодрафта не должен теряться
+        log.exception("Автодрафт сессии %s: неожиданный сбой", session_id)
+        await _mark_ai_error(session_id, "AUTODRAFT_FAILED")
+
+
+async def _mark_ai_error(session_id: uuid.UUID, code: str) -> None:
+    """`ai_error` без смены статуса: расшифровка состоялась, черновика нет."""
+    factory = db_module.AsyncSessionLocal
+    if factory is None:
+        return
+    try:
+        async with factory() as db:
+            session = await db.get(ClinicalSession, session_id)
+            if session is None or session.ai_status != "transcribed":
+                return
+            session.ai_error = code[:48]
+            await db.commit()
+    except BaseException:  # noqa: BLE001 — диагностика не должна ронять фон
+        log.exception("Автодрафт сессии %s: не удалось записать код сбоя", session_id)
+
 
 def _ext_for(mime: str) -> str:
     for ext, known in MIME_BY_EXT.items():
@@ -1567,8 +1627,15 @@ async def draft(
     session_id: uuid.UUID,
     *,
     ip: str | None = None,
+    action: str = "SESSION_PROTOCOL_DRAFT",
 ) -> dict:
-    """POST …/protocol/draft: черновик `source='llm'` по деперсонализированной расшифровке."""
+    """Черновик `source='llm'` по деперсонализированной расшифровке.
+
+    Один код на три входа (FR-44): ручной `POST …/protocol/draft` (по умолчанию
+    `SESSION_PROTOCOL_DRAFT`), автодрафт после расшифровки
+    (`SESSION_PROTOCOL_AUTODRAFT`) и тул агента (`SESSION_PROTOCOL_CHAT_DRAFT`).
+    Отличаются только кодом аудита: `audit.record` не принимает metadata.
+    """
     _ensure_enabled()
     session = await require_session(db, clinician_id, session_id)
     await require_patient_access(db, clinician_id, session.patient_id)
@@ -1642,4 +1709,5 @@ async def draft(
         prompt_version=PROMPT_VERSION,
         needs_review=needs,
         ip=ip,
+        action=action,
     )

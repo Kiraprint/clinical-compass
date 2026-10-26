@@ -122,6 +122,8 @@ def _defaults(monkeypatch):
     monkeypatch.setattr(settings, "prod_mode", False)
     monkeypatch.setattr(settings, "depersonalize_ner", "off")
     monkeypatch.setattr(settings, "session_audio_max_mb", 200)
+    # FR-44: автодрафт — отдельная фича со своими тестами (test_session_agent.py).
+    monkeypatch.setattr(settings, "session_ai_autodraft", False)
 
 
 def _enable(monkeypatch) -> None:
