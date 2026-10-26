@@ -1,4 +1,6 @@
 // Типизированный HTTP-клиент. Контракты — docs/04 §3.
+import { createParser } from "eventsource-parser";
+
 // Пустой BASE = same-origin (веб, nginx-прокси). Для нативной сборки (Capacitor)
 // хост задаётся на этапе сборки через VITE_API_BASE (см. mobile/ и release-android).
 const BASE: string = import.meta.env.VITE_API_BASE ?? "";
@@ -485,6 +487,60 @@ export const api = {
         patientIds ? { content, patient_ids: patientIds } : { content },
       ),
     }),
+  /** SSE-ответ ассистента: токены по мере генерации, затем полный контракт. */
+  assistantStreamMessage: async (
+    id: string,
+    content: string,
+    handlers: {
+      onToken: (text: string) => void;
+      onDone: (answer: AssistantThreadAnswer) => void;
+    },
+    patientIds?: string[],
+  ): Promise<void> => {
+    const resp = await rawReq(`/api/v1/assistant/threads/${id}/messages/stream`, {
+      method: "POST",
+      headers: { Accept: "text/event-stream" },
+      body: JSON.stringify(
+        patientIds ? { content, patient_ids: patientIds } : { content },
+      ),
+    });
+    if (!resp.ok) await throwApiError(resp);
+    if (!resp.body) throw new ApiError(500, "STREAM_UNAVAILABLE", "Нет потока ответа");
+    let failure: ApiError | null = null;
+    let finished = false;
+    const parser = createParser({
+      onEvent(event) {
+        if (event.event === "token") {
+          handlers.onToken((JSON.parse(event.data) as { t: string }).t);
+        } else if (event.event === "done") {
+          finished = true;
+          handlers.onDone(JSON.parse(event.data) as AssistantThreadAnswer);
+        } else if (event.event === "error") {
+          const body = JSON.parse(event.data) as { code?: string; detail?: string; status?: number };
+          failure = new ApiError(
+            body.status ?? 500,
+            body.code ?? "ASSISTANT_STREAM_FAILED",
+            body.detail ?? "Не удалось получить ответ",
+          );
+        }
+      },
+    });
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    // done — последнее событие: не ждём закрытия TCP (nginx может держать
+    // upstream keep-alive) и сразу освобождаем кнопку ввода.
+    while (!failure && !finished) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parser.feed(decoder.decode(value, { stream: true }));
+    }
+    if (failure) {
+      void reader.cancel().catch(() => undefined);
+      throw failure;
+    }
+    if (!finished) throw new ApiError(500, "STREAM_INCOMPLETE", "Поток ответа оборвался");
+    void reader.cancel().catch(() => undefined);
+  },
   adminAudit: () => req<{ items: AuditEvent[] }>("/api/v1/admin/audit"),
   // --- Обогащение КБ (docs/15): ревью источников администратором ---
   adminKbHealth: () => req<KbHealth>("/api/v1/admin/kb/health"),

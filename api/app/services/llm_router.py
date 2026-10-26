@@ -30,6 +30,10 @@ import logging
 import re
 import urllib.error
 import urllib.request
+from typing import AsyncIterator
+
+import anyio
+import httpx
 
 from app.config import settings
 
@@ -375,6 +379,40 @@ def _clean_answer(text: str) -> str | None:
     return _clip(text, ANSWER_MAX_CHARS) or None
 
 
+def _answer_body(history: list[dict], query: str, chunks: list[dict]) -> dict | None:
+    """Тело /chat/completions для ответа по сниппетам (общее с потоком)."""
+    if not _enabled() or not query.strip() or not chunks:
+        return None
+    snippets, _window = _format_snippets(chunks)
+    if not snippets:
+        return None
+    parts: list[str] = []
+    formatted = _format_history(history or [])
+    if formatted:
+        parts.append(f"История диалога:\n{formatted}")
+    parts.append(f"Вопрос врача: {_clip(query, REWRITE_QUERY_CHARS)}")
+    parts.append(f"Сниппеты базы знаний:\n{snippets}")
+    return {
+        "model": settings.assistant_llm_model,
+        "messages": [
+            {"role": "system", "content": _ANSWER_SYSTEM_PROMPT},
+            {"role": "user", "content": "\n\n".join(parts)},
+        ],
+        # 0.2 — связная формулировка, но без «творчества»: факты и
+        # ссылки берутся из сниппетов, повторяемость важна для тестов.
+        "temperature": 0.2,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+
+def _llm_headers() -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    api_key = settings.assistant_llm_api_key.strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
 def compose_answer(history: list[dict], query: str, chunks: list[dict]) -> str | None:
     """Ответ ассистента по найденным фрагментам и истории диалога (FR-17).
 
@@ -388,33 +426,12 @@ def compose_answer(history: list[dict], query: str, chunks: list[dict]) -> str |
     Проверку ссылок [n] и сборку citations делает вызывающий (services.agent):
     здесь только текст; границу номеров даёт answer_snippet_window(chunks).
     """
-    if not _enabled() or not query.strip() or not chunks:
+    body = _answer_body(history, query, chunks)
+    if body is None:
         return None
-    snippets, _window = _format_snippets(chunks)
-    if not snippets:
-        return None
-    parts: list[str] = []
-    formatted = _format_history(history or [])
-    if formatted:
-        parts.append(f"История диалога:\n{formatted}")
-    parts.append(f"Вопрос врача: {_clip(query, REWRITE_QUERY_CHARS)}")
-    parts.append(f"Сниппеты базы знаний:\n{snippets}")
     try:
-        body = _request(
-            {
-                "model": settings.assistant_llm_model,
-                "messages": [
-                    {"role": "system", "content": _ANSWER_SYSTEM_PROMPT},
-                    {"role": "user", "content": "\n\n".join(parts)},
-                ],
-                # 0.2 — связная формулировка, но без «творчества»: факты и
-                # ссылки берутся из сниппетов, повторяемость важна для тестов.
-                "temperature": 0.2,
-                "chat_template_kwargs": {"enable_thinking": False},
-            },
-            timeout=settings.assistant_llm_answer_timeout,
-        )
-        answer = _clean_answer(body["choices"][0]["message"].get("content") or "")
+        response = _request(body, timeout=settings.assistant_llm_answer_timeout)
+        answer = _clean_answer(response["choices"][0]["message"].get("content") or "")
         if answer is None:
             logger.warning("assistant LLM вернул пустой ответ — детерминированный ответ")
         return answer
@@ -425,3 +442,45 @@ def compose_answer(history: list[dict], query: str, chunks: list[dict]) -> str |
             exc,
         )
         return None
+
+
+async def compose_answer_stream(
+    history: list[dict], query: str, chunks: list[dict]
+) -> AsyncIterator[str]:
+    """Токены ответа по сниппетам из OpenAI-совместимого `stream: true`.
+
+    Отдаёт только `delta.content`; пустые служебные чанки пропускает. Ошибка
+    транспорта или невалидный SSE пробрасываются вызывающему: `services.agent`
+    тогда отдаёт детерминированный build_rag_answer целиком.
+    """
+    body = _answer_body(history, query, chunks)
+    if body is None:
+        return
+    body["stream"] = True
+    url = settings.assistant_llm_url.rstrip("/") + "/chat/completions"
+    # httpx read-timeout сбрасывается на каждом чанке, а шлюз может слать
+    # keepalive без контента. Дедлайн — на весь поток, как у batch-ответа.
+    with anyio.move_on_after(settings.assistant_llm_answer_timeout) as scope:
+        async with httpx.AsyncClient(timeout=settings.assistant_llm_answer_timeout) as client:
+            async with client.stream("POST", url, json=body, headers=_llm_headers()) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    payload = json.loads(data)
+                    # Финальный usage-чанк приходит с choices: [] — не ошибка.
+                    choices = payload.get("choices") or []
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    piece = (choice.get("delta") or {}).get("content")
+                    if piece:
+                        yield piece
+                    # Не ждём TCP-закрытия/шлюзового [DONE]: модель уже закончила.
+                    if choice.get("finish_reason"):
+                        break
+    if scope.cancelled_caught:
+        raise TimeoutError("LLM stream timed out")

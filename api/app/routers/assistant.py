@@ -3,10 +3,13 @@
 # Контракт: docs/04 §3.1 (расширение), docs/07, docs/08; тесты — docs/06 §3.
 from __future__ import annotations
 
+import json
+import logging
 import uuid
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +23,11 @@ from app.models import User
 from app.services import assistant_chat
 
 router = APIRouter(tags=["assistant"])
+logger = logging.getLogger(__name__)
+
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 class AskBody(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
@@ -147,6 +155,51 @@ async def post_message(
         body.content,
         patient_ids=body.patient_ids,
         ip=_ip(request),
+    )
+
+@router.post("/assistant/threads/{thread_id}/messages/stream")
+async def post_message_stream(
+    thread_id: uuid.UUID,
+    body: ThreadMessageBody,
+    request: Request,
+    user: User = Depends(require_clinician),
+    db: AsyncSession = Depends(get_db),
+):
+    """Тот же ответ ассистента, но токенами SSE: meta → token* → done.
+
+    Ошибка домена после начала потока уже не меняет HTTP-статус (он 200),
+    поэтому приходит событием `error` с RFC 7807 code/detail.
+    """
+
+    async def events():
+        try:
+            async for item in assistant_chat.post_message_stream(
+                db,
+                user.id,
+                thread_id,
+                body.content,
+                patient_ids=body.patient_ids,
+                ip=_ip(request),
+            ):
+                yield _sse(item["event"], item["data"])
+        except Problem as exc:
+            yield _sse("error", {"code": exc.code, "detail": exc.detail, "status": exc.status})
+        except Exception:
+            logger.exception("assistant stream failed")
+            yield _sse(
+                "error",
+                {"code": "ASSISTANT_STREAM_FAILED", "detail": "Не удалось получить ответ", "status": 500},
+            )
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            # GZipMiddleware иначе копит SSE до 1 КБ и убивает поток.
+            "Content-Encoding": "identity",
+        },
     )
 
 # --- КБ: персональные исключения источников (docs/15 §6) -------------------

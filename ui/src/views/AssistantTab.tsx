@@ -18,6 +18,10 @@ export default function AssistantTab() {
   const [detail, setDetail] = useState<AssistantThreadDetail | null>(null);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [streaming, setStreaming] = useState(false);
+  const [streamText, setStreamText] = useState("");
+  const [pendingUser, setPendingUser] = useState("");
+  const [streamThreadId, setStreamThreadId] = useState<string | null>(null);
   const [switching, setSwitching] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -180,27 +184,44 @@ export default function AssistantTab() {
     if (!detail || !input.trim() || switching) return;
     const targetId = detail.id;
     const seq = ++selectSeq.current;
+    const text = input.trim();
     setBusy(true);
+    setStreaming(true);
     setError("");
     setNotice("");
-    const text = input.trim();
+    setInput("");
+    setPendingUser(text);
+    setStreamThreadId(targetId);
+    setStreamText("");
     try {
-      const result = await api.assistantPostMessage(targetId, text);
-      setInput("");
-      if (result.skipped_patient_ids.length > 0) {
-        setNotice(
-          `Пропущены пациенты без доступа: ${result.skipped_patient_ids
-            .map((id) => patientLabels[id] ?? id)
-            .join(", ")}`,
-        );
-      }
+      await api.assistantStreamMessage(
+        targetId,
+        text,
+        {
+          onToken: (t) => setStreamText((cur) => cur + t),
+          onDone: (answer) => {
+            if (answer.skipped_patient_ids.length > 0) {
+              setNotice(
+                `Пропущены пациенты без доступа: ${answer.skipped_patient_ids
+                  .map((id) => patientLabels[id] ?? id)
+                  .join(", ")}`,
+              );
+            }
+          },
+        },
+      );
       const fresh = await api.assistantThread(targetId);
       if (selectSeq.current === seq) setDetail(fresh); // врач не переключил тред
       await refreshThreads();
     } catch (e: unknown) {
+      setInput(text); // не терять вопрос при обрыве: можно повторить
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
+      setStreaming(false);
+      setPendingUser("");
+      setStreamThreadId(null);
+      setStreamText("");
     }
   };
 
@@ -384,6 +405,22 @@ export default function AssistantTab() {
                     )}
                   </div>
                 ))}
+                {pendingUser && streamThreadId === detail.id && (
+                  <div className="bubble mine">
+                    <span className="who">Врач</span>
+                    <div className="bubble-text">{pendingUser}</div>
+                  </div>
+                )}
+                {streaming && streamThreadId === detail.id && (
+                  <div className="bubble">
+                    <span className="who">Ассистент</span>
+                    {streamText ? (
+                      <pre className="assistant-answer">{streamText}</pre>
+                    ) : (
+                      <div className="bubble-text muted">Думаю…</div>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="chat-compose">
