@@ -81,6 +81,32 @@ test.describe("Экран чатов врача", () => {
     await expect(page.locator(".bubble", { hasText: reply })).toBeVisible();
   });
 
+  test("Чаты → сегмент «Пациенты» из ассистента открывает переписки, а не реестр", async ({
+    page,
+  }) => {
+    await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
+
+    await openSection(page, "Ассистент");
+    await expect(page.getByRole("heading", { name: "Ассистент врача" })).toBeVisible();
+
+    // Режимы сегмента (assistant|patients) и разделы кабинета (assistant|chats|patients)
+    // не совпадают: «Пациенты» здесь — переписки, а не картотека «Мои пациенты».
+    await page.getByRole("tab", { name: "Пациенты" }).click();
+    await expect(page.getByRole("tab", { name: "Пациенты" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await expect(page.getByRole("heading", { name: "Переписка с пациентами" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /Мои пациенты/ })).toHaveCount(0);
+
+    await page.getByRole("tab", { name: "Ассистент" }).click();
+    await expect(page.getByRole("tab", { name: "Ассистент" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await expect(page.getByRole("heading", { name: "Ассистент врача" })).toBeVisible();
+  });
+
   test("старые разделы врача доступны: Пациенты и Библиотека", async ({ page }) => {
     await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
     await openSection(page, "Пациенты");

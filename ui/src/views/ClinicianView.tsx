@@ -1116,13 +1116,17 @@ export default function ClinicianView() {
     </>
   );
 
+  // Сегмент внутри «Чатов» переключает разделы кабинета. У ChatsView режимы
+  // assistant|patients, а у врача «patients» — это реестр пациентов, поэтому
+  // переписка живёт в разделе «chats»: маппим явно, иначе «Пациенты» из
+  // ассистента открывали картотеку вместо списка переписок.
   const content = (() => {
     if (section === "assistant") {
       return (
         <ChatsView
           mode="assistant"
           onSelectPatient={(id) => setChatPatient(id)}
-          onModeChange={(m) => setSection(m)}
+          onModeChange={(m) => setSection(m === "patients" ? "chats" : "assistant")}
         />
       );
     }
@@ -1135,7 +1139,7 @@ export default function ClinicianView() {
             setChatPatient(id);
             if (id) window.location.hash = `chats=patient:${id}`;
           }}
-          onModeChange={(m) => setSection(m)}
+          onModeChange={(m) => setSection(m === "patients" ? "chats" : "assistant")}
         />
       );
     }
