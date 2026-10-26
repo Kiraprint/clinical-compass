@@ -85,7 +85,8 @@ unset CC_COOKIE_SECURE CC_EMBEDDER CC_RERANKER CC_ML_URL CC_ML_TOKEN CC_ML_TIMEO
       CC_DEPERSONALIZE_NER CC_ASSISTANT_LLM_URL CC_CHAT_INSIGHTS_ENABLED \
       CC_ALLOW_DEMO_SECRETS CC_QDRANT_COLLECTION CC_QDRANT_URL CC_KB_CHUNK_CHARS \
       CC_KB_CHUNK_OVERLAP CC_ENRICH_CHUNK_CHARS CC_ENRICH_CHUNK_OVERLAP \
-      CC_EMIAS_ENABLED CC_EMIAS_ALLOW_INSECURE CC_REMD_ENABLED CC_REMD_ALLOW_INSECURE
+      CC_EMIAS_ENABLED CC_EMIAS_ALLOW_INSECURE CC_REMD_ENABLED CC_REMD_ALLOW_INSECURE \
+      CC_EMIAS_BASE_URL CC_REMD_BASE_URL CC_REMD_CALLBACK_URL
 export CC_EMBEDDER=hash
 export CC_QDRANT_COLLECTION="$STACK_COLLECTION"
 export CC_KB_CHUNK_CHARS=1800 CC_KB_CHUNK_OVERLAP=120
@@ -96,7 +97,11 @@ export CC_ASSISTANT_LLM_URL= CC_CHAT_INSIGHTS_ENABLED=false
 export CC_ALLOW_DEMO_SECRETS=true CC_COOKIE_SECURE=false
 # Внешние интеграции в стенде включены и указывают на моки профиля emias:
 # без них e2e-спеки протокола приёма (docs/18, FR-39…FR-41) проверяют только
-# выключенное состояние. Моки — внутренняя сеть, egress наружу не открывается.
+# выключенное состояние. Адреса (CC_EMIAS_BASE_URL/CC_REMD_*) НЕ переопределяем —
+# берутся дефолты compose (`http://emias-mock:8090`, `http://remd-mock:8091`),
+# поэтому унаследованный адрес наружу подставить нельзя.
+# Эти флаги видит и pytest, поэтому api-тесты запускаются с `env -u` (см. cmd_test):
+# их кейсы проверяют выключенное состояние интеграций.
 export CC_EMIAS_ENABLED=true CC_EMIAS_ALLOW_INSECURE=true
 export CC_REMD_ENABLED=true CC_REMD_ALLOW_INSECURE=true
 
@@ -220,9 +225,6 @@ cmd_up() {
   log "стенд $STAGE_PROJECT: Postgres :$PG_PORT, Qdrant :$QDRANT_PORT, UI :$UI_PORT (только 127.0.0.1)"
 
   compose up -d postgres qdrant redis >/dev/null
-  # Моки внешних интеграций (ЕМИАС + РЭМД) профиля emias: api смотрит на них
-  # по внутренним адресам, порты на хост не публикуются.
-  compose --profile emias up -d emias-mock remd-mock >/dev/null
   wait_pg
   wait_qdrant
   ensure_test_db
@@ -232,6 +234,11 @@ cmd_up() {
     log "данные стенда готовы (--data: без api/ui)"
     return 0
   fi
+
+  # Моки внешних интеграций (ЕМИАС + РЭМД) профиля emias: api смотрит на них
+  # по внутренним адресам, порты на хост не публикуются. Нужны только стеку —
+  # для api-тестов (--data) не поднимаются.
+  compose --profile emias up -d emias-mock remd-mock >/dev/null
 
   local want have
   want="$(images_fp)"
@@ -295,10 +302,15 @@ cmd_test() {
   if [ "$do_e2e" = 1 ]; then cmd_up; else cmd_up --data; fi
 
   if [ "$do_api" = 1 ]; then
-    log "api-тесты в стенде: БД $TEST_DB_NAME, коллекция $TEST_COLLECTION"
     # CC_COOKIE_SECURE стенда (false для e2e по http) не должен влиять на pytest:
     # с не-Secure cookie TestClient переиспользует сессию и ломает проверки 401.
-    ( cd "$ROOT" && env -u CC_COOKIE_SECURE \
+    # Флаги моков (EMIAS/REMD) тоже снимаем: api-тесты проверяют ВЫКЛЮЧЕННОЕ
+    # состояние интеграций, иначе падают кейсы test_auth/test_emias_api.
+    ( cd "$ROOT" && \
+      env -u CC_COOKIE_SECURE \
+          -u CC_EMIAS_ENABLED -u CC_EMIAS_ALLOW_INSECURE -u CC_EMIAS_BASE_URL \
+          -u CC_REMD_ENABLED -u CC_REMD_ALLOW_INSECURE -u CC_REMD_BASE_URL \
+          -u CC_REMD_CALLBACK_URL \
       PYTHONPATH="$ROOT/api:$ROOT/core${PYTHONPATH:+:$PYTHONPATH}" \
       CC_TEST_DATABASE_URL="postgresql+psycopg://compass:compass@127.0.0.1:${PG_PORT}/${TEST_DB_NAME}" \
       CC_QDRANT_URL="http://127.0.0.1:${QDRANT_PORT}" \
@@ -355,6 +367,16 @@ cmd_reset() {
 }
 
 cmd="${1:-}"; shift || true
+
+# Один стенд — один прогон. Два параллельных `test` (или `up` во время `test`)
+# роняют друг другу compose (контейнер postgres пересоздаётся посреди прогона:
+# «the database system is shutting down») и портят схему compass_test.
+mkdir -p "$STATE_DIR"
+exec 9>"$STATE_DIR/lock"
+if ! flock -n 9; then
+  fail "стенд занят другим прогоном (lock: $STATE_DIR/lock); дождитесь его окончания"
+fi
+
 case "$cmd" in
   up) cmd_up "$@" ;;
   seed) cmd_seed ;;
