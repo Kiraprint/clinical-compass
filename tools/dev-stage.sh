@@ -84,9 +84,26 @@ done
 unset CC_COOKIE_SECURE CC_EMBEDDER CC_RERANKER CC_ML_URL CC_ML_TOKEN CC_ML_TIMEOUT \
       CC_DEPERSONALIZE_NER CC_ASSISTANT_LLM_URL CC_CHAT_INSIGHTS_ENABLED \
       CC_ALLOW_DEMO_SECRETS CC_QDRANT_COLLECTION CC_QDRANT_URL CC_KB_CHUNK_CHARS \
-      CC_KB_CHUNK_OVERLAP CC_ENRICH_CHUNK_CHARS CC_ENRICH_CHUNK_OVERLAP \
-      CC_EMIAS_ENABLED CC_EMIAS_ALLOW_INSECURE CC_REMD_ENABLED CC_REMD_ALLOW_INSECURE \
-      CC_EMIAS_BASE_URL CC_REMD_BASE_URL CC_REMD_CALLBACK_URL
+      CC_KB_CHUNK_OVERLAP CC_ENRICH_CHUNK_CHARS CC_ENRICH_CHUNK_OVERLAP
+# FR-25/FR-41: адреса внешних интеграций тоже не наследуем — экспорт
+# CC_REMD_BASE_URL/CC_EMIAS_BASE_URL с боевого стенда увёл бы egress мимо
+# моков профиля emias, а гейт остался бы зелёным. unset перекрывает
+# compose-дефолты (http://emias-mock:8090, http://remd-mock:8091) и
+# демо-секреты; флаги ENABLED/ALLOW_INSECURE выставляем сами ниже.
+unset CC_REMD_ENABLED CC_REMD_BASE_URL CC_REMD_CLIENT_ID CC_REMD_CLIENT_SECRET \
+      CC_REMD_LPU_UID CC_REMD_CALLBACK_URL CC_REMD_CALLBACK_TOKEN \
+      CC_REMD_CALLBACK_MAX_KB CC_REMD_ALLOW_INSECURE CC_REMD_TIMEOUT \
+      CC_REMD_MAX_ATTEMPTS CC_REMD_MAX_RESPONSE_BYTES CC_REMD_RETRY_AFTER_CAP \
+      CC_REMD_SENDING_STALE_SEC CC_REMD_PATIENT_SNILS CC_REMD_DOCUMENT_KIND \
+      CC_REMD_ORG_NAME CC_REMD_DEPARTMENT_OID CC_REMD_DEPARTMENT_NAME
+# Параметры самого мока (compose передаёт их в remd-mock): чужие значения дали
+# бы 401 на сверке client_id/secret — тоже не наследуем.
+unset CC_REMD_MOCK_CLIENT_ID CC_REMD_MOCK_CLIENT_SECRET CC_REMD_MOCK_LPU_UID \
+      CC_REMD_MOCK_CALLBACK_URL CC_REMD_MOCK_CALLBACK_TOKEN CC_REMD_MOCK_TIMEOUT_S
+unset CC_EMIAS_ENABLED CC_EMIAS_BASE_URL CC_EMIAS_CLIENT_ID \
+      CC_EMIAS_CLIENT_SECRET CC_EMIAS_ALLOW_INSECURE CC_EMIAS_TIMEOUT \
+      CC_EMIAS_MAX_ATTEMPTS CC_EMIAS_MAX_RESPONSE_BYTES CC_EMIAS_SNILS_PEPPER
+unset CC_EMIAS_MOCK_LATENCY_MS CC_EMIAS_MOCK_RATE_LIMIT CC_EMIAS_MOCK_TIMEOUT_S
 export CC_EMBEDDER=hash
 export CC_QDRANT_COLLECTION="$STACK_COLLECTION"
 export CC_KB_CHUNK_CHARS=1800 CC_KB_CHUNK_OVERLAP=120
@@ -213,9 +230,12 @@ wait_remd() {
   # Порт remd-mock не публикуется на хост: спрашиваем /health из api — тем же
   # путём, которым пойдёт передача СЭМД.
   for _ in $(seq 1 60); do
-    compose exec -T api /app/.venv/bin/python -c \
+    if compose exec -T api /app/.venv/bin/python -c \
       'import urllib.request; urllib.request.urlopen("http://remd-mock:8091/health", timeout=2)' \
-      >/dev/null 2>&1 && return 0
+      >/dev/null 2>&1; then
+      log "remd-mock отвечает на /health — egress РЭМД доступен"
+      return 0
+    fi
     sleep 2
   done
   fail "remd-mock не отвечает на /health (профиль emias)"
