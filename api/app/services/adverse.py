@@ -31,23 +31,31 @@ PATIENT_STATUS_LABELS = {
 ACTION_TAKEN = ("none", "monitoring", "dose_reduced", "stopped", "referred")
 
 
-async def _medication_title(db: AsyncSession, medication_id: uuid.UUID | None) -> str | None:
-    if medication_id is None:
-        return None
-    med = await db.get(PatientMedication, medication_id)
-    return med.title if med is not None else None
+async def _medication_titles(
+    db: AsyncSession, medication_ids: set[uuid.UUID | None]
+) -> dict[uuid.UUID, str]:
+    """Названия назначений по ids — одним запросом на весь список событий."""
+    ids = {i for i in medication_ids if i is not None}
+    if not ids:
+        return {}
+    rows = (await db.execute(
+        select(PatientMedication.id, PatientMedication.title).where(PatientMedication.id.in_(ids))
+    )).all()
+    return dict(rows)
 
 
-async def _drug_ref(db: AsyncSession, drug_id: str | None) -> dict | None:
-    if drug_id is None:
-        return None
-    drug = (await db.scalars(select(Drug).where(Drug.drug_id == drug_id))).one_or_none()
-    if drug is None:
-        return None
-    return {"drug_id": drug.drug_id, "trade_name": drug.trade_name, "adverse_events": drug.adverse_events}
+async def _drug_refs(db: AsyncSession, drug_ids: set[str | None]) -> dict[str, dict]:
+    """Фрагменты справочника ГРЛС по ids — одним запросом на весь список событий."""
+    ids = {i for i in drug_ids if i}
+    if not ids:
+        return {}
+    drugs = (await db.scalars(select(Drug).where(Drug.drug_id.in_(ids)))).all()
+    return {
+        d.drug_id: {"drug_id": d.drug_id, "trade_name": d.trade_name, "adverse_events": d.adverse_events}
+        for d in drugs
+    }
 
-
-async def _patient_dict(db: AsyncSession, e: AdverseEvent) -> dict:
+def _patient_dict(e: AdverseEvent, med_titles: dict[uuid.UUID, str]) -> dict:
     """Событие глазами пациента: без врачебных заметок и справочных текстов."""
     return {
         "id": str(e.id),
@@ -57,15 +65,20 @@ async def _patient_dict(db: AsyncSession, e: AdverseEvent) -> dict:
         "status": e.status,
         "status_label": PATIENT_STATUS_LABELS[e.status],
         "medication_id": str(e.medication_id) if e.medication_id else None,
-        "medication_title": await _medication_title(db, e.medication_id),
+        "medication_title": med_titles.get(e.medication_id) if e.medication_id else None,
         "verified_at": e.verified_at.isoformat() if e.verified_at else None,
         "created_at": e.created_at.isoformat(),
     }
 
 
-async def event_dict(db: AsyncSession, e: AdverseEvent, patient_fio: str | None = None) -> dict:
+def _event_dict(
+    e: AdverseEvent,
+    patient_fio: str | None,
+    med_titles: dict[uuid.UUID, str],
+    drug_refs: dict[str, dict],
+) -> dict:
     """Событие для врача: проверка, связь с назначением и справочником ГРЛС."""
-    drug = await _drug_ref(db, e.drug_id)
+    drug = drug_refs.get(e.drug_id) if e.drug_id else None
     return {
         "id": str(e.id),
         "patient_id": str(e.patient_id),
@@ -78,7 +91,7 @@ async def event_dict(db: AsyncSession, e: AdverseEvent, patient_fio: str | None 
         "suspected_drug": e.suspected_drug,
         "action_taken": e.action_taken,
         "medication_id": str(e.medication_id) if e.medication_id else None,
-        "medication_title": await _medication_title(db, e.medication_id),
+        "medication_title": med_titles.get(e.medication_id) if e.medication_id else None,
         "drug_id": e.drug_id,
         "drug_trade_name": drug["trade_name"] if drug else None,
         "reference": drug,
@@ -87,6 +100,21 @@ async def event_dict(db: AsyncSession, e: AdverseEvent, patient_fio: str | None 
         "verified_at": e.verified_at.isoformat() if e.verified_at else None,
         "created_at": e.created_at.isoformat(),
     }
+
+
+async def event_dicts(
+    db: AsyncSession, events: list[AdverseEvent], fios: dict[uuid.UUID, str | None] | None = None
+) -> list[dict]:
+    """События для врача: 2 запроса (назначения + ГРЛС) на весь список, не на строку."""
+    med_titles = await _medication_titles(db, {e.medication_id for e in events})
+    drug_refs = await _drug_refs(db, {e.drug_id for e in events})
+    return [_event_dict(e, (fios or {}).get(e.patient_id), med_titles, drug_refs) for e in events]
+
+
+async def patient_event_dicts(db: AsyncSession, events: list[AdverseEvent]) -> list[dict]:
+    """События глазами пациента: 1 запрос названий назначений на весь список."""
+    med_titles = await _medication_titles(db, {e.medication_id for e in events})
+    return [_patient_dict(e, med_titles) for e in events]
 
 
 async def _validate_medication(
@@ -140,20 +168,23 @@ async def report_patient_event(
     # Текст без ПДн: ни имени, ни описания события.
     await push.notify_adverse_event_clinicians(db, patient.id)
     await db.commit()
-    return await _patient_dict(db, ev)
+    return (await patient_event_dicts(db, [ev]))[0]
 
 
-async def list_patient_events(db: AsyncSession, patient_id: uuid.UUID) -> list[dict]:
+async def list_patient_events(db: AsyncSession, patient_id: uuid.UUID, limit: int = 100) -> list[dict]:
     rows = (await db.scalars(
         select(AdverseEvent)
         .where(AdverseEvent.patient_id == patient_id)
         .order_by(AdverseEvent.created_at.desc(), AdverseEvent.id.desc())
+        .limit(limit)
     )).all()
-    return [await _patient_dict(db, e) for e in rows]
+    return await patient_event_dicts(db, list(rows))
 
 
-async def list_queue(db: AsyncSession, clinician_id: uuid.UUID, status: str | None = None) -> list[dict]:
-    """Очередь НЯ по пациентам ростера врача, новые сверху."""
+async def list_queue(
+    db: AsyncSession, clinician_id: uuid.UUID, status: str | None = None, limit: int = 100
+) -> list[dict]:
+    """Очередь НЯ по пациентам ростера врача, новые сверху (не больше `limit`)."""
     if status is not None and status not in STATUSES:
         raise Problem(422, "VALIDATION", f"Неизвестный статус: {status}")
     q = (
@@ -162,10 +193,13 @@ async def list_queue(db: AsyncSession, clinician_id: uuid.UUID, status: str | No
         .join(User, User.id == AdverseEvent.patient_id)
         .where(ClinicianRoster.clinician_id == clinician_id)
         .order_by(AdverseEvent.created_at.desc(), AdverseEvent.id.desc())
+        .limit(limit)
     )
     if status is not None:
         q = q.where(AdverseEvent.status == status)
-    return [await event_dict(db, e, fio) for e, fio in (await db.execute(q)).all()]
+    rows = (await db.execute(q)).all()
+    events = [e for e, _ in rows]
+    return await event_dicts(db, events, {e.patient_id: fio for e, fio in rows})
 
 
 async def _get_for_clinician(
@@ -213,7 +247,7 @@ async def verify_event(
     patient = await db.get(User, patient_id)
     if ev.status != "pending":
         if ev.status == status:
-            return await event_dict(db, ev, patient.fio if patient else None)
+            return (await event_dicts(db, [ev], {ev.patient_id: patient.fio if patient else None}))[0]
         raise Problem(409, "ADVERSE_ALREADY_VERIFIED", "Нежелательное явление уже проверено")
     # Подтверждение — клиническое решение, оно обязано нести оценку тяжести:
     # у пациента severity всегда NULL, и «подтверждено без тяжести» оставило бы
@@ -239,4 +273,4 @@ async def verify_event(
         ev.verification_note = verification_note
     await audit_record(db, clinician_id, "ADVERSE_VERIFY", "adverse_event", str(ev.id), ip=ip)
     await db.commit()
-    return await event_dict(db, ev, patient.fio if patient else None)
+    return (await event_dicts(db, [ev], {ev.patient_id: patient.fio if patient else None}))[0]

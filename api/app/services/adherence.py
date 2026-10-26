@@ -168,11 +168,13 @@ async def compute(db: AsyncSession, patient_id, days: int = 14) -> dict:
     missed = sum(1 for r in rows if r.status == "missed")
     not_scheduled = sum(1 for r in rows if r.status == "not_scheduled")
 
-    active_meds = (await db.scalars(
-        select(PatientMedication)
-        .where(PatientMedication.patient_id == patient_id, PatientMedication.status == "active")
-        .order_by(PatientMedication.created_at.desc())
-    )).all()
+    # Активные назначения — из уже загруженного списка (без второго запроса),
+    # порядок прежний: свежие сверху.
+    active_meds = sorted(
+        (m for m in meds if m.status == "active"),
+        key=lambda m: m.created_at,
+        reverse=True,
+    )
 
     return {
         "days": days,

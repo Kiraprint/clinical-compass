@@ -6,7 +6,7 @@ import json
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Boolean, CHAR, CheckConstraint, Date, DateTime, ForeignKey, Float, Identity, Index, Integer, LargeBinary, String, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, Boolean, CHAR, CheckConstraint, Date, DateTime, ForeignKey, Float, Identity, Index, Integer, LargeBinary, String, Text, UniqueConstraint, desc, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -297,7 +297,7 @@ class Notification(Base):
     __tablename__ = "notifications"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
     kind: Mapped[str] = mapped_column(String)  # RED_ESCALATION | REMINDER | ADVERSE_EVENT
     title: Mapped[str] = mapped_column(String)
     body: Mapped[str] = mapped_column(String)
@@ -316,6 +316,8 @@ class Notification(Base):
         # ADVERSE_EVENT — FR-28: серьёзное НЯ, о котором сообщил пациент.
         CheckConstraint("kind in ('RED_ESCALATION','REMINDER','ADVERSE_EVENT')", name="notifications_kind"),
         Index("notifications_user_read", "user_id", "read_at"),
+        # Лента уведомлений: user_id + свежие сверху (id — тай-брейк без Sort).
+        Index("ix_notifications_user_created", "user_id", desc("created_at"), desc("id")),
     )
 
 class DeviceToken(Base):
@@ -780,10 +782,12 @@ class PatientMedication(Base):
             unique=True,
             postgresql_where=text("emias_id is not null"),
         ),
+        # Список назначений пациента с фильтром по статусу.
+        Index("ix_patient_medications_patient_status", "patient_id", "status"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
     clinician_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     title: Mapped[str] = mapped_column(EncryptedText())
     dosage: Mapped[str | None] = mapped_column(EncryptedText(), nullable=True)

@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
-from sqlalchemy.dialects.postgresql import distinct_on
+from sqlalchemy import func, or_, select
+from sqlalchemy.dialects.postgresql import aggregate_order_by, distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from compass import checkin as engine
@@ -53,18 +53,11 @@ async def require_patient_consent(db: AsyncSession, patient_id) -> None:
     """Публичный consent-гейт для клиницистских разделов карты (FR-23 назначения,
     история пациента). Без активного согласия спецкатегория ПДн недоступна."""
     active = await db.scalar(
-        select(Consent.id).where(Consent.user_id == patient_id, Consent.revoked_at.is_(None))
+        select(Consent.id).where(Consent.user_id == patient_id, Consent.revoked_at.is_(None)).limit(1)
     )
     if active is None:
         raise Problem(403, "CONSENT_REQUIRED", "Нет активного согласия пациента — данные недоступны (152-ФЗ)")
 
-
-async def _prescribed_scales_of(db: AsyncSession, patient_id) -> list[str]:
-    """Коды назначенных пациенту шкал (упорядочены по времени назначения)."""
-    rows = (await db.scalars(
-        select(Prescription).where(Prescription.patient_id == patient_id).order_by(Prescription.created_at)
-    )).all()
-    return [r.scale_code for r in rows]
 
 async def prescribe_scales(db: AsyncSession, clinician_id, patient_id, scale_codes: list[str], ip: str | None = None) -> dict:
     """Врач назначает пациенту множество шкал скрининга (item 1, multi-scale).
@@ -209,14 +202,8 @@ async def list_patients(db: AsyncSession, clinician_id, triage: str | None = Non
     return [card for _, card in entries]
 
 
-async def patient_timeline(db: AsyncSession, patient_id, days: int) -> dict:
-    since = datetime.now(timezone.utc) - timedelta(days=days)
-    rows = (await db.execute(
-        select(Assessment, Run.questionnaire_code)
-        .join(Run, Run.id == Assessment.run_id)
-        .where(Assessment.patient_id == patient_id, Assessment.computed_at >= since)
-        .order_by(Assessment.computed_at.asc())
-    )).all()
+def _timeline_payload(rows: list[tuple[Assessment, str]]) -> dict:
+    """Ряд тренда по оценкам (rows — по возрастанию времени): график + trend."""
     def _max_total(code: str) -> int:
         # Верх шкалы для графика пациента: сумма максимумов пунктов. Считается на
         # сервере, чтобы UI не угадывал порог по коду шкалы (HDRS-17 → 52).
@@ -251,7 +238,24 @@ async def patient_timeline(db: AsyncSession, patient_id, days: int) -> dict:
     }
 
 
-async def _suicidal_omission(db: AsyncSession, patient_id) -> tuple[list[str], str | None]:
+async def patient_timeline(db: AsyncSession, patient_id, days: int) -> dict:
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    rows = (await db.execute(
+        select(Assessment, Run.questionnaire_code)
+        .join(Run, Run.id == Assessment.run_id)
+        .where(Assessment.patient_id == patient_id, Assessment.computed_at >= since)
+        .order_by(Assessment.computed_at.asc())
+    )).all()
+    return _timeline_payload(list(rows))
+
+
+_SUICIDAL_CODES = [code for code, scale in ALL_SCALES.items() if scale.suicidal_item]
+
+# Сколько оценок показываем в «истории» карточки (график тренда — 90 дней).
+CARD_HISTORY_LIMIT = 10
+
+
+def _omitted_suicidal(rows: list[tuple[Assessment, str]]) -> tuple[list[str], str | None]:
     """Пункты о суициде, не заданные в последней оценке шкалы, где они есть.
 
     Пункт о суициде есть не в каждой шкале (q9 PHQ-9, h3 HDRS-17). Брать флаг
@@ -259,55 +263,117 @@ async def _suicidal_omission(db: AsyncSession, patient_id) -> tuple[list[str], s
     пункта нет) предупреждение «пункт 9 не задавался» пропадало бы, хотя PHQ-9
     спрашивали без q9. Поэтому смотрим последнюю оценку шкалы с suicidal_item.
 
-    Возвращает (item_keys, scale_code); scale_code — None, если пропусков нет.
+    rows — оценки по убыванию времени. Возвращает (item_keys, scale_code);
+    scale_code — None, если пропусков нет.
     """
-    suicidal_codes = [code for code, scale in ALL_SCALES.items() if scale.suicidal_item]
-    if not suicidal_codes:
-        return [], None
-    row = (await db.execute(
-        select(Assessment.risk_flags, Run.questionnaire_code)
-        .join(Run, Run.id == Assessment.run_id)
-        .where(Assessment.patient_id == patient_id, Run.questionnaire_code.in_(suicidal_codes))
-        .order_by(Assessment.computed_at.desc(), Assessment.id.desc())
-        .limit(1)
-    )).first()
-    items = [
-        flag.get("item_key")
-        for flag in ((row.risk_flags or []) if row else [])
-        if flag.get("kind") == "NOT_ASSESSED" and flag.get("item_key")
-    ]
-    if not items:
-        return [], None
-    return items, row.questionnaire_code
+    for a, code in rows:
+        if code not in _SUICIDAL_CODES:
+            continue
+        items = [
+            flag.get("item_key")
+            for flag in (a.risk_flags or [])
+            if flag.get("kind") == "NOT_ASSESSED" and flag.get("item_key")
+        ]
+        return (items, code) if items else ([], None)
+    return [], None
 
-async def _patient_card(db: AsyncSession, patient_id) -> dict:
+
+async def _card_assessments(db: AsyncSession, patient_id) -> tuple:
+    """Последняя оценка, история и ряд тренда за 90 дней — одним запросом.
+
+    Раньше это были три отдельных запроса, причём «последняя» выбиралась без
+    LIMIT (вся история пациента). Здесь берём объединение: 90-дневное окно
+    (тренд), CARD_HISTORY_LIMIT последних (история и «последняя») и последнюю
+    оценку шкалы с суицидальным пунктом (FR-34).
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=90)
+    recent_ids = (
+        select(Assessment.id)
+        .where(Assessment.patient_id == patient_id)
+        .order_by(Assessment.computed_at.desc(), Assessment.id.desc())
+        .limit(CARD_HISTORY_LIMIT)
+    )
+    wanted = [Assessment.computed_at >= since, Assessment.id.in_(recent_ids)]
+    if _SUICIDAL_CODES:
+        last_suicidal_id = (
+            select(Assessment.id)
+            .join(Run, Run.id == Assessment.run_id)
+            .where(Assessment.patient_id == patient_id, Run.questionnaire_code.in_(_SUICIDAL_CODES))
+            .order_by(Assessment.computed_at.desc(), Assessment.id.desc())
+            .limit(1)
+        )
+        wanted.append(Assessment.id.in_(last_suicidal_id))
+    rows = list((await db.execute(
+        select(Assessment, Run.questionnaire_code)
+        .join(Run, Run.id == Assessment.run_id)
+        .where(Assessment.patient_id == patient_id, or_(*wanted))
+        .order_by(Assessment.computed_at.desc(), Assessment.id.desc())
+    )).all())
+    last = rows[0][0] if rows else None
+    history = [a for a, _ in rows[:CARD_HISTORY_LIMIT]]
+    trend_rows = list(reversed([(a, code) for a, code in rows if a.computed_at >= since]))
+    return last, history, _timeline_payload(trend_rows), _omitted_suicidal(rows)
+
+
+async def _adverse_dicts(db: AsyncSession, events) -> list[dict]:
+    """НЯ врачу одним батчем: назначения и ГРЛС — по запросу на список, не на строку."""
+    from .adverse import event_dicts  # лениво: adverse импортирует этот модуль
+
+    return await event_dicts(db, list(events))
+
+
+async def _adverse_events_of(db: AsyncSession, patient_id, limit: int = 20) -> list[dict]:
+    rows = (await db.scalars(
+        select(AdverseEvent)
+        .where(AdverseEvent.patient_id == patient_id)
+        .order_by(AdverseEvent.onset_date.desc(), AdverseEvent.created_at.desc())
+        .limit(limit)
+    )).all()
+    return await _adverse_dicts(db, rows)
+
+
+async def _patient_card(db: AsyncSession, patient_id, clinician_id=None) -> dict:
     """Сборка карты пациента (только данные; roster/consent/audit — у вызывающих).
 
     Повторно используется report() и patient_context() ассистента (docs/07 §7).
+    `clinician_id` добавляет roster-гейт прямо в первый запрос (403 NO_ROSTER).
     """
-    patient = await db.get(User, patient_id)
-    if patient is None or patient.role != "PATIENT":
-        raise Problem(404, "NOT_FOUND", "Пациент не найден")
-
-    last = await db.scalar(
-        select(Assessment).where(Assessment.patient_id == patient_id).order_by(Assessment.computed_at.desc())
+    # Пациент, roster-гейт, активное согласие и назначенные шкалы — один запрос.
+    scales = (
+        select(func.array_agg(aggregate_order_by(Prescription.scale_code, Prescription.created_at)))
+        .where(Prescription.patient_id == patient_id)
+        .scalar_subquery()
     )
-    omitted_items, omitted_scale = await _suicidal_omission(db, patient_id)
-    history = (await db.scalars(
-        select(Assessment)
-        .where(Assessment.patient_id == patient_id)
-        .order_by(Assessment.computed_at.desc())
-        .limit(10)
-    )).all()
+    q = (
+        select(User, Consent.id, scales)
+        .select_from(User)
+        .outerjoin(Consent, (Consent.user_id == User.id) & Consent.revoked_at.is_(None))
+        .where(User.id == patient_id)
+    )
+    if clinician_id is not None:
+        q = q.join(ClinicianRoster, ClinicianRoster.patient_id == User.id).where(
+            ClinicianRoster.clinician_id == clinician_id
+        )
+    row = (await db.execute(q)).first()
+    if row is None and clinician_id is not None:
+        # Roster-гейт сохраняет свой 403 и его приоритет над 404.
+        await _require_roster(db, clinician_id, patient_id)
+    if row is None or row[0].role != "PATIENT":
+        raise Problem(404, "NOT_FOUND", "Пациент не найден")
+    patient, consent_id, prescribed = row
+    has_consent = consent_id is not None
+
+    last, history, timeline, (omitted_items, omitted_scale) = await _card_assessments(db, patient_id)
     diary = (await db.scalars(
         select(DiaryEntry).where(DiaryEntry.patient_id == patient_id).order_by(DiaryEntry.created_at.desc()).limit(20)
     )).all()
+    # Открытых эскалаций на пациента — единицы, поэтому предел не ставим:
+    # карточка кормит триаж, молча скрытая эскалация = пропущенный риск.
     escalations = (await db.scalars(
         select(Escalation)
         .where(Escalation.patient_id == patient_id, Escalation.resolved_at.is_(None))
         .order_by(Escalation.notified_clinician_at.desc().nulls_last())
     )).all()
-    timeline = await patient_timeline(db, patient_id, 90)
     checkins = (await db.scalars(
         select(CheckinSession)
         .where(CheckinSession.patient_id == patient_id)
@@ -332,17 +398,11 @@ async def _patient_card(db: AsyncSession, patient_id) -> dict:
             "category": r_obj.category, "label": r_obj.label,
             "target": r_obj.target, "reason": r_obj.reason,
         }
-
-    # FR-22: контакты отдаются только при активном согласии пациента (152-ФЗ);
-    # roster-гейт проверяют вызывающие (report/patient_context).
-    has_consent = await db.scalar(
-        select(Consent.id).where(Consent.user_id == patient_id, Consent.revoked_at.is_(None))
-    ) is not None
     return {
         "patient_id": str(patient_id),
         "email": patient.email,
         "fio": patient.fio,
-        "prescribed_scales": await _prescribed_scales_of(db, patient_id),
+        "prescribed_scales": list(prescribed or []),
         "last_assessment": (
             {
                 "assessment_id": str(last.id),
@@ -366,14 +426,7 @@ async def _patient_card(db: AsyncSession, patient_id) -> dict:
         "trend": timeline["trend"],
         "routing": routing,
         "adherence": adherence,
-        "adverse_events": [
-            await _adverse_event_dict(db, e) for e in (await db.scalars(
-                select(AdverseEvent)
-                .where(AdverseEvent.patient_id == patient_id)
-                .order_by(AdverseEvent.onset_date.desc(), AdverseEvent.created_at.desc())
-                .limit(20)
-            )).all()
-        ],
+        "adverse_events": await _adverse_events_of(db, patient_id),
         "diary": [
             {
                 "id": str(e.id), "content": e.content, "mood": e.mood,
@@ -430,8 +483,7 @@ async def _anamnesis_payload(db: AsyncSession, patient_id) -> dict:
 
 async def report(db: AsyncSession, clinician_id, patient_id, ip: str | None = None) -> dict:
     """Полная карта пациента для панели врача (FR-8). Roster + READ_REPORT audit."""
-    await _require_roster(db, clinician_id, patient_id)
-    card = await _patient_card(db, patient_id)
+    card = await _patient_card(db, patient_id, clinician_id)
     await audit_record(db, clinician_id, "READ_REPORT", "patient", str(patient_id), ip=ip)
     await db.commit()
     return card
@@ -446,7 +498,7 @@ async def patient_context(db: AsyncSession, clinician_id, patient_id, ip: str | 
     """
     await _require_roster(db, clinician_id, patient_id)
     active = await db.scalar(
-        select(Consent).where(Consent.user_id == patient_id, Consent.revoked_at.is_(None))
+        select(Consent).where(Consent.user_id == patient_id, Consent.revoked_at.is_(None)).limit(1)
     )
     if active is None:
         raise Problem(403, "CONSENT_REQUIRED", "Нет активного согласия пациента — карта недоступна (152-ФЗ)")
@@ -482,7 +534,7 @@ async def create_adverse_event(
     await db.flush()
     await audit_record(db, clinician_id, "ADVERSE_EVENT", "patient", str(patient_id), ip=ip)
     await db.commit()
-    return await _adverse_event_dict(db, ev)
+    return (await _adverse_dicts(db, [ev]))[0]
 
 
 async def list_adverse_events(db: AsyncSession, clinician_id, patient_id) -> list[dict]:
@@ -493,15 +545,7 @@ async def list_adverse_events(db: AsyncSession, clinician_id, patient_id) -> lis
         .where(AdverseEvent.patient_id == patient_id)
         .order_by(AdverseEvent.onset_date.desc(), AdverseEvent.created_at.desc())
     )).all()
-    return [await _adverse_event_dict(db, e) for e in rows]
-
-
-async def _adverse_event_dict(db: AsyncSession, e: AdverseEvent) -> dict:
-    """Единый формат НЯ для врача (см. services/adverse.event_dict)."""
-    from .adverse import event_dict
-
-    return await event_dict(db, e)
-
+    return await _adverse_dicts(db, rows)
 
 
 
@@ -547,13 +591,14 @@ async def create_visit(
     return _visit_dict(v)
 
 
-async def list_visits(db: AsyncSession, clinician_id, patient_id) -> list[dict]:
-    """История приёмов пациента (задача кейса 6). Roster-гейт."""
+async def list_visits(db: AsyncSession, clinician_id, patient_id, limit: int = 100) -> list[dict]:
+    """История приёмов пациента (задача кейса 6). Roster-гейт, свежие сверху."""
     await _require_roster(db, clinician_id, patient_id)
     rows = (await db.scalars(
         select(Visit)
         .where(Visit.patient_id == patient_id)
         .order_by(Visit.visited_at.desc(), Visit.created_at.desc())
+        .limit(limit)
     )).all()
     return [_visit_dict(v) for v in rows]
 
@@ -747,7 +792,7 @@ async def emias_summary(db: AsyncSession, clinician_id, patient_id, ip: str | No
 
     await _require_roster(db, clinician_id, patient_id)
     active = await db.scalar(
-        select(Consent).where(Consent.user_id == patient_id, Consent.revoked_at.is_(None))
+        select(Consent).where(Consent.user_id == patient_id, Consent.revoked_at.is_(None)).limit(1)
     )
     if active is None:
         raise Problem(403, "CONSENT_REQUIRED", "Нет активного согласия пациента — карта недоступна (152-ФЗ)")
