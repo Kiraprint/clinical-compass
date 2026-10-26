@@ -385,6 +385,11 @@ export default function SessionAssistantCard({
       } else if (detail.ai_status === "failed") {
         setAiError(detail.ai_error ?? "TRANSCRIBE_FAILED");
         setErr(`Расшифровка не удалась: ${AI_ERRORS[detail.ai_error ?? ""] ?? "сервер сообщил об ошибке"}`);
+      } else if (detail.ai_status === "transcribing") {
+        // После дедлайна опрос остановлен: ручное обновление снова его включает.
+        setAiError(detail.ai_error ?? null);
+        toast("Расшифровка идёт — опрос продолжен.");
+        startPoll();
       } else {
         toast(`Состояние ИИ: ${AI_STATUS_LABELS[detail.ai_status] ?? detail.ai_status}.`);
       }
