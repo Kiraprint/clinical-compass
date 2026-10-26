@@ -185,6 +185,9 @@ export default function AssistantTab() {
     const targetId = detail.id;
     const seq = ++selectSeq.current;
     const text = input.trim();
+    // done уже сохранил ответ на сервере: при последующем сбое refetch не
+    // возвращаем вопрос в поле и не показываем два пузыря одновременно.
+    const outcome = { done: false };
     setBusy(true);
     setStreaming(true);
     setError("");
@@ -200,6 +203,11 @@ export default function AssistantTab() {
         {
           onToken: (t) => setStreamText((cur) => cur + t),
           onDone: (answer) => {
+            outcome.done = true;
+            setStreaming(false);
+            setPendingUser("");
+            setStreamThreadId(null);
+            setStreamText("");
             if (answer.skipped_patient_ids.length > 0) {
               setNotice(
                 `Пропущены пациенты без доступа: ${answer.skipped_patient_ids
@@ -214,7 +222,7 @@ export default function AssistantTab() {
       if (selectSeq.current === seq) setDetail(fresh); // врач не переключил тред
       await refreshThreads();
     } catch (e: unknown) {
-      setInput(text); // не терять вопрос при обрыве: можно повторить
+      if (!outcome.done) setInput(text); // не терять вопрос при обрыве
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);

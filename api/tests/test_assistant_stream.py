@@ -126,3 +126,33 @@ def test_stream_foreign_thread_is_error_event(client):
     assert events == [
         {"event": "error", "data": {"code": "THREAD_NOT_FOUND", "detail": "Диалог не найден", "status": 404}}
     ]
+
+def test_agent_stream_cleans_markdown_before_done(monkeypatch):
+    """Поток и batch дают одинаковый чистый текст: ``` убираются до done."""
+    from compass.agent import RAGChunk
+    from app.services.agent import AgentFactory
+
+    chunk = RAGChunk(
+        text="PHQ-9: 10–14 умеренная.",
+        source_title="Гайдлайн",
+        guideline_id="g1",
+        topic="ШКАЛЫ",
+        score=0.9,
+    )
+    factory = AgentFactory(client=None)
+    monkeypatch.setattr(factory, "_state", lambda *a, **kw: {"query": "PHQ-9?", "history": []})
+    monkeypatch.setattr(factory, "_retrieve", lambda state: {"chunks": [chunk]})
+
+    async def fake_parts(history, query, chunks):
+        yield "```markdown\n"
+        yield "По базе знаний [1].\n"
+        yield "```"
+
+    monkeypatch.setattr(llm_router, "compose_answer_stream", fake_parts)
+
+    async def collect():
+        return [item async for item in factory.stream("PHQ-9?")]
+
+    events = asyncio.run(collect())
+    assert events[-1]["answer"]["answer"] == "По базе знаний [1]."
+    assert events[-1]["answer"]["citations"][0]["guideline_id"] == "g1"

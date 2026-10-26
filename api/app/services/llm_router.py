@@ -370,7 +370,7 @@ def answer_snippet_window(chunks: list[dict]) -> int:
     return _format_snippets(chunks)[1]
 
 
-def _clean_answer(text: str) -> str | None:
+def clean_answer(text: str) -> str | None:
     """Ответ модели → текст без markdown-обёртки. None = пусто/мусор."""
     text = text.strip()
     if text.startswith("```"):
@@ -431,7 +431,7 @@ def compose_answer(history: list[dict], query: str, chunks: list[dict]) -> str |
         return None
     try:
         response = _request(body, timeout=settings.assistant_llm_answer_timeout)
-        answer = _clean_answer(response["choices"][0]["message"].get("content") or "")
+        answer = clean_answer(response["choices"][0]["message"].get("content") or "")
         if answer is None:
             logger.warning("assistant LLM вернул пустой ответ — детерминированный ответ")
         return answer

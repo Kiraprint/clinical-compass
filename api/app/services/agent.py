@@ -498,7 +498,7 @@ class AgentFactory:
                 ):
                     parts.append(piece)
                     yield {"delta": piece}
-                result = _finalize_llm_answer("".join(parts), chunks)
+                result = _finalize_llm_answer(llm_router.clean_answer("".join(parts)), chunks)
             except Exception as exc:  # транспорт/SSE/парсер — не ломаем ответ
                 logger.warning(
                     "assistant LLM-поток прервался (%s: %s) — детерминированный ответ",
