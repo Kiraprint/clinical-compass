@@ -9,6 +9,8 @@ import {
   PatientCard,
 } from "../api";
 
+import { isSendShortcut } from "../keys";
+
 // FR-32: чипы пациентов в контексте диалога. Класс .chip задаёт и цвет текста —
 // раньше inline-фон перекрывал белую inherited-надпись от глобального button.
 
@@ -182,7 +184,8 @@ export default function AssistantTab() {
   };
 
   const send = async () => {
-    if (!detail || !input.trim() || switching) return;
+    // busy: Ctrl+Enter не должен слать второй запрос, пока идёт ответ на первый.
+    if (!detail || !input.trim() || switching || busy) return;
     const targetId = detail.id;
     const seq = ++selectSeq.current;
     const text = input.trim();
@@ -477,6 +480,12 @@ export default function AssistantTab() {
                   onChange={(e) => setInput(e.target.value)}
                   placeholder="Например: какова динамика пациента из контекста и что говорит шкала PHQ-9?"
                   disabled={switching}
+                  onKeyDown={(e) => {
+                    // FR-47: Ctrl/Cmd+Enter — отправить, не уводя руки с клавиатуры.
+                    if (!isSendShortcut(e)) return;
+                    e.preventDefault();
+                    void send();
+                  }}
                 />
                 <button
                   className="icon-btn"
@@ -488,6 +497,7 @@ export default function AssistantTab() {
                   {busy ? "…" : "→"}
                 </button>
               </div>
+              <p className="compose-hint">Ctrl+Enter — отправить</p>
             </>
           )}
 

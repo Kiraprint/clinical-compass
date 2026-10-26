@@ -157,3 +157,22 @@ test("поток: ответ остаётся при сбое refetch и не д
   await expect(page.getByText(savedQuestion, { exact: true })).toHaveCount(1);
   await expect(page.locator(".bubble", { hasText: "Думаю…" })).toHaveCount(0);
 });
+
+test("FR-47: Ctrl+Enter в композере отправляет вопрос", async ({ page }) => {
+  await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
+  await openNewThread(page);
+
+  await expect(page.locator(".chat-pane .compose-hint")).toHaveText("Ctrl+Enter — отправить");
+  const question = "Поставь диагноз депрессии";
+  await page.getByLabel("Вопрос").fill(question);
+  // Кнопка активна ⇔ тред загружен и текст уже в состоянии React.
+  await expect(page.getByRole("button", { name: "Спросить" })).toBeEnabled();
+  await page.getByLabel("Вопрос").press("Control+Enter");
+
+  // Кнопку не нажимали: пузырь вопроса — доказательство отправки по хоткею.
+  await expect(page.locator(".bubble.mine", { hasText: question })).toBeVisible();
+  await expect(page.getByLabel("Вопрос")).toHaveValue("");
+  // Ответ ассистента появляется (текст зависит от LLM/KB, проверяем наличие).
+  const answer = page.locator(".bubble", { hasText: "Ассистент" }).last();
+  await expect.poll(async () => (await answer.innerText()).trim().length).toBeGreaterThan(10);
+});

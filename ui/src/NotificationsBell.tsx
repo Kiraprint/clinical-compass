@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Capacitor } from "@capacitor/core";
 import { api, NotificationItem } from "./api";
+import { useEscapeClose } from "./keys";
 
 export default function NotificationsBell() {
   const [items, setItems] = useState<NotificationItem[]>([]);
@@ -48,6 +49,8 @@ export default function NotificationsBell() {
     document.addEventListener("mousedown", onClick);
     return () => document.removeEventListener("mousedown", onClick);
   }, [open]);
+  // FR-47: Escape закрывает открытую панель уведомлений.
+  useEscapeClose(open, () => setOpen(false));
 
   const markAll = async () => {
     try {

@@ -775,11 +775,58 @@ small { color: #8a94a8; }
   .cal-item { font-size: 9px; }
 }
 
+/* FR-47 (ClinicianUx): липкое оглавление карточки пациента и подсказка композера. */
+.patient-nav {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding: 8px 0;
+  background: #fff;
+}
+.patient-nav .chip:focus-visible { outline: 2px solid #2f6fed; outline-offset: 2px; }
+
+/* Якоря блоков: липкая строка чипов не должна накрывать заголовок блока. */
+#patient-risk,
+#patient-screening,
+#patient-checkin,
+#patient-adverse,
+#patient-dynamics,
+#clinician-medications,
+#clinician-history,
+#clinician-visits { scroll-margin-top: 64px; }
+
+.compose-hint { margin: 2px 0 0; font-size: 12px; color: #5a6478; }
+
+@media (max-width: 700px) {
+  /* Узкий экран: чипы в одну строку с горизонтальной прокруткой — высота одна. */
+  .patient-nav {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding: 6px 0;
+    scrollbar-width: none;
+  }
+  .patient-nav::-webkit-scrollbar { display: none; }
+  .patient-nav .chip { flex: 0 0 auto; white-space: nowrap; padding: 8px 12px; }
+  .compose-hint { display: none; }
+}
+
+/* FR-47 (ClinicianUx): кнопка «☰ Меню» липнет слева (16px от края main) и при
+   прокрутке карточки перекрывала бы первый чип — на десктопных ширинах строка
+   чипов держит под неё отступ (701–1000px карточка ещё и во всю ширину). */
+@media (min-width: 701px) {
+  .patient-nav { padding-left: 96px; }
+}
+
 /* FR-48 (AuthNative): формы входа — Enter отправляет, ссылка-кнопка и подсказки. */
 .auth-form { display: flex; flex-direction: column; gap: 10px; }
 .auth-form .row { flex-wrap: wrap; align-items: center; }
 .auth-link { background: none; border: 0; padding: 0; color: #2f6fed; font: inherit; font-size: 13px; cursor: pointer; text-decoration: underline; }
 .auth-hint { color: #5a6478; font-size: 13px; margin: 0; }
+
 /* FR-45/FR-46 (PatientUx): напоминания на главном экране пациента — строки с
    переходом, кнопки не ниже 44px (тап на телефоне); баннер скрининга идёт ниже. */
 .patient-reminders li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 10px; }

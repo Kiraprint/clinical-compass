@@ -232,7 +232,8 @@ function PatientChats({
   const activeName = active?.fio ?? "Пациент";
 
   const send = async () => {
-    if (!selected || !input.trim()) return;
+    // busy: Enter/Ctrl+Enter не должны дублировать сообщение, пока первое в пути.
+    if (!selected || !input.trim() || busy) return;
     setBusy(true);
     setError("");
     try {
@@ -389,6 +390,7 @@ function PatientChats({
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => {
+                    // FR-47: Enter (в т.ч. Ctrl/Cmd+Enter — та же клавиша) отправляет.
                     if (e.key === "Enter") void send();
                   }}
                 />
@@ -402,6 +404,7 @@ function PatientChats({
                   →
                 </button>
               </div>
+              <p className="compose-hint">Ctrl+Enter — отправить</p>
             </>
           )}
           {error && <p className="error">{error}</p>}
