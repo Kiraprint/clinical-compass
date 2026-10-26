@@ -1,7 +1,14 @@
 // Единый ежедневный экран «Сегодня»: пошаговый адаптивный чек-ин (docs/16), дневник
 // с 5-точечной шкалой настроения и отметка о приёме лекарств.
 import { expect, test, type Page } from "@playwright/test";
-import { freshPatientEmail, registerPatient } from "./helpers";
+import {
+  DEMO_PASSWORD,
+  DEMO_TOTP,
+  freshPatientEmail,
+  login,
+  registerPatient,
+  totp,
+} from "./helpers";
 
 // Ядро чек-ина v2.0.0: MO1, TR1, SL1, IN1, EN1, FU1 (docs/16 §1). HR4 в ядро не входит
 // и задаётся отдельным шагом безопасности только когда сработал safety-гейт.
@@ -101,7 +108,10 @@ test("«Сегодня»: первый шаг — 7 пунктов ядра; н�
   await expect(excellent).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByText(content)).toBeVisible();
   await expect(page.locator(".msg", { hasText: content }).getByText("😄 Отлично")).toBeVisible();
-  await expect(page.getByText(/За сегодня отмечено: Принял/)).toBeVisible();
+  // Режим не задан → одна отметка в день; в блоке «за сегодня» видно и счётчик,
+  // и что именно отмечено.
+  await expect(page.getByText("За сегодня отмечено 1 из 1 приёма")).toBeVisible();
+  await expect(page.getByText(/Принял \(Авиандр\)/)).toBeVisible();
   await expect(page.getByText("Чек-ин за сегодня выполнен")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Далее" })).toBeVisible();
 
@@ -109,6 +119,80 @@ test("«Сегодня»: первый шаг — 7 пунктов ядра; н�
   await expect(page.getByRole("button", { name: "Далее" })).toBeVisible();
   await expect(page.getByText(content)).toBeVisible();
   await expect(page.getByRole("button", { name: "Начать чек-ин" })).toHaveCount(0);
+});
+
+/**
+ * FR-27: приёмов в день может быть несколько — второй отмечается там же, на
+ * «Сегодня», отдельной записью. Назначение «2 раза в день» выдаёт врач:
+ * демо-пациент p3 закреплён за doc@compass.demo сидом.
+ */
+test("2 приёма в день: обе отметки за сегодня сохраняются отдельными записями", async ({
+  page,
+  request,
+}) => {
+  const loginApi = async (email: string, otp?: string) => {
+    const r = await request.post("/api/v1/auth/login", {
+      data: { email, password: DEMO_PASSWORD, otp },
+    });
+    expect(r.status()).toBe(200);
+    return { Authorization: `Bearer ${(await r.json()).access_token as string}` };
+  };
+
+  const title = `E2E-дважды-${Date.now()}`;
+  const doc = await loginApi("doc@compass.demo", totp(DEMO_TOTP));
+  const roster = await (await request.get("/api/v1/clinician/patients", { headers: doc })).json();
+  const patientId: string | undefined = roster.items.find(
+    (p: { email: string }) => p.email === "p3@compass.demo",
+  )?.patient_id;
+  expect(patientId).toBeTruthy();
+
+  // Прошлые прогоны оставляют назначения — убираем их, чтобы демо-карта не пухла.
+  const medsUrl = `/api/v1/clinician/patients/${patientId}/medications`;
+  const existing = await (await request.get(medsUrl, { headers: doc })).json();
+  for (const med of existing.items.filter((m: { title: string }) => m.title.startsWith("E2E-дважды-"))) {
+    await request.delete(`${medsUrl}/${med.id}`, { headers: doc });
+  }
+
+  const created = await request.post(medsUrl, {
+    headers: doc,
+    data: {
+      title,
+      dosage: "1 таблетка",
+      // Окно приверженности считается по московским датам — назначаем с сегодня.
+      started_on: new Intl.DateTimeFormat("sv-SE", { timeZone: "Europe/Moscow" }).format(new Date()),
+      times_per_day: 2,
+    },
+  });
+  expect(created.status()).toBe(201);
+  const medId: string = (await created.json()).id;
+
+  await login(page, "p3@compass.demo", DEMO_PASSWORD);
+  await expect(page.getByRole("heading", { name: "Сегодня" })).toBeVisible();
+  await page.locator("select").selectOption({ label: `${title} (2 раза в день)` });
+
+  // Первый приём: форма остаётся на экране — второй приём ещё не отмечен.
+  await page.getByRole("button", { name: "Принял", exact: true }).click();
+  await page.getByRole("button", { name: "Сохранить за сегодня" }).click();
+  await expect(page.getByText("Сохранено: приём лекарств")).toBeVisible();
+  await expect(page.getByText("Отмечено 1 из 2 приёмов за сегодня")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Принял", exact: true })).toBeVisible();
+
+  // Второй приём — новая запись; первая не перезаписывается.
+  await page.getByRole("button", { name: "Принял", exact: true }).click();
+  await page.getByRole("button", { name: "Сохранить за сегодня" }).click();
+  await expect(page.getByText("За сегодня отмечено 2 из 2 приёмов")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Принял", exact: true })).toHaveCount(0);
+  // История приёма остаётся доступной: просмотр и исправление не блокируются.
+  await expect(page.getByRole("button", { name: "История приёма" })).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByText("За сегодня отмечено 2 из 2 приёмов")).toBeVisible();
+
+  // В БД — две отдельные отметки по этому назначению.
+  const patient = await loginApi("p3@compass.demo");
+  const summary = await (await request.get("/api/v1/me/adherence", { headers: patient })).json();
+  const marks = summary.items.filter((r: { medication_id: string | null }) => r.medication_id === medId);
+  expect(marks.map((r: { status: string }) => r.status)).toEqual(["taken", "taken"]);
 });
 
 test("полный чек-ин: шаги до «Чек-ин за сегодня выполнен», состояние переживает перезагрузку", async ({
