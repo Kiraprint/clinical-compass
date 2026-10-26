@@ -39,11 +39,7 @@ def reset_database(db_name: str | None = None) -> None:
     from psycopg import sql
 
     psycopg = _psycopg()
-    dsn = (
-        f"host={common.PG_HOST} port={common.PG_PORT} user={common.PG_USER} "
-        f"password={common.PG_PASSWORD} dbname=postgres"
-    )
-    with psycopg.connect(dsn, autocommit=True) as conn:
+    with psycopg.connect(common.pg_dsn("postgres"), autocommit=True) as conn:
         # Identifier, а не f-строка: имя приходит из CLI/env, allowlist проверяет
         # только префикс, а simple query protocol выполнит и второй оператор.
         conn.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
