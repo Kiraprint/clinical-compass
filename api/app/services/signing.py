@@ -19,9 +19,11 @@
 
 from __future__ import annotations
 
+import functools
 from datetime import datetime, timezone
 from typing import Any
 
+import anyio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -321,24 +323,29 @@ async def pdf(
 
     patient = await db.get(User, session.patient_id)
     clinician = await db.get(User, session.clinician_id)
-    content = documents.render_pdf(
-        document_id=str(protocol.id),
-        version=protocol.version,
-        title=DOCUMENT_TITLE,
-        organization=settings.signing_mo_org,
-        effective_at=session.ended_at or session.started_at,
-        patient=documents.Patient(
-            id=str(session.patient_id),
-            fio=patient.fio if patient else None,
-            birth_date=patient.birth_date if patient else None,
-        ),
-        clinician=documents.Clinician(
-            id=str(session.clinician_id),
-            fio=ca.clinician_identity(clinician.fio if clinician else None).fio,
-            position=settings.signing_doctor_position,
-        ),
-        sections=protocols.decode_sections(protocol),
-        stamps=[_stamp(row) for row in rows],
+    # WeasyPrint — CPU-тяжёлый (0.8 c первый рендер, 0.08 c тёплый) и
+    # синхронный: рендер в event loop замораживает все запросы процесса.
+    content = await anyio.to_thread.run_sync(
+        functools.partial(
+            documents.render_pdf,
+            document_id=str(protocol.id),
+            version=protocol.version,
+            title=DOCUMENT_TITLE,
+            organization=settings.signing_mo_org,
+            effective_at=session.ended_at or session.started_at,
+            patient=documents.Patient(
+                id=str(session.patient_id),
+                fio=patient.fio if patient else None,
+                birth_date=patient.birth_date if patient else None,
+            ),
+            clinician=documents.Clinician(
+                id=str(session.clinician_id),
+                fio=ca.clinician_identity(clinician.fio if clinician else None).fio,
+                position=settings.signing_doctor_position,
+            ),
+            sections=protocols.decode_sections(protocol),
+            stamps=[_stamp(row) for row in rows],
+        )
     )
     if len(content) > MAX_PDF_BYTES:
         raise Problem(413, "DOCUMENT_TOO_LARGE", "PDF протокола превысил потолок §4.6")

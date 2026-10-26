@@ -357,6 +357,7 @@
 | `test_naive_datetime_rejected` | `starts_at`/`from` без пояса | `POST /appointments`, `GET /appointments` | 422 `VALIDATION_ERROR` вместо `TypeError` |
 | `test_diagnosis_code_conflict_rejected` | `sections.diagnosis.icd10=F41.1` | PUT с `diagnosis_code=F41.0` | 422 `PROTOCOL_ICD10_CONFLICT` |
 | `test_diagnosis_code_follows_sections_icd10` | PUT без `diagnosis_code` | PUT, затем `approve` | код берётся из разделов и закрепляется в `session_protocols` |
+| `test_render_pdf_runs_off_the_event_loop` | подписанный протокол | GET `…/protocol/pdf` при подменённом `documents.render_pdf` | рендер в «AnyIO worker»-потоке, не в event loop (docs/03 §12) |
 
 ### 3.2 Async-рантайм, пулы и кеш корпуса
 
