@@ -388,3 +388,59 @@ def test_leaf_certificate_parses_with_independent_parser(tmp_path):
     assert names[0].value[:2] == b"\x0c\x0b", names[0].value
     assert names[0].value[2:] == b"12345678901"
     assert signing_x509.parse(signer.der).snils == "12345678901"
+
+
+def test_trailing_bytes_in_cms_is_malformed(client, db_session):
+    """Мусор после `SignedData` не принимается: контейнер уходит в РЭМД (P5)."""
+    context = ps.ctx(client, "sg-trailing")
+    session = ps.approved(client, context)
+    signed = _sign(client, context, session)
+    assert signed.status_code == 200, signed.text
+    protocol_id = signed.json()["id"]
+
+    rows = ps.signature_rows(db_session, protocol_id)
+    der = artifacts.get_bytes(cms_artifact(db_session, rows["mo"]))
+    ps.replace_signature(
+        db_session,
+        rows["mo"],
+        cert_der=rows["mo"].cert_der,
+        cms_der=der + b"\x00",
+        protocol_id=protocol_id,
+        session_id=session["id"],
+    )
+
+    payload = _verify(client, context, session).json()
+    assert payload["status"] == "invalid", payload
+    reasons = {item["role"]: item["reason"] for item in payload["signatures"]}
+    assert "cms_malformed" in reasons["mo"]
+
+
+def test_foreign_content_type_is_rejected(tmp_path):
+    """Подписанные атрибуты с `content-type ≠ id-data` не проходят проверку.
+
+    Контейнер пересобран корректной подписью того же ключа, поэтому ловится
+    именно проверка типа содержимого (§7.1 обещает id-data), а не подпись.
+    """
+    from asn1crypto import cms as asn1cms
+    from asn1crypto import core
+
+    authority = ca.authority(tmp_path / "ca")
+    signer = authority.issue("clinician", ca.Identity("Петров Пётр", "Врач", "МО"), 30)
+    content = b"<ClinicalDocument/>"
+    der = cms.sign(content, signer)
+    assert cms.verify_cms(content, der)[0] is True
+
+    info = asn1cms.ContentInfo.load(der)
+    signer_info = info["content"]["signer_infos"][0]
+    attributes = signer_info["signed_attrs"]
+    for attribute in attributes:
+        if attribute["type"].native == "content_type":
+            attribute["values"] = [asn1cms.ContentType("1.2.840.113549.1.9.16.1.4")]
+    signature = gost.sign(signer.private_key, gost.digest(attributes.untag().dump()))
+    signer_info["signature"] = core.OctetString(gost.to_x509_signature(signature))
+
+    ok, _info, reason = cms.verify_cms(content, info.dump())
+    assert ok is False
+    assert reason == cms.REASON_CONTENT_TYPE, reason
+    assert cms.verify_cms(content, der + b"\x00")[2] == cms.REASON_FORMAT
+

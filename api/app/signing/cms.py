@@ -30,6 +30,7 @@ REASON_FORMAT = "cms_malformed"
 REASON_CERT_MISSING = "certificate_missing"
 REASON_ALGORITHM = "algorithm_unsupported"
 REASON_EMBEDDED = "content_embedded"
+REASON_CONTENT_TYPE = "content_type_invalid"
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,9 @@ def verify_cms(
         if signed_data["encap_content_info"]["content"].native is not None:
             # В контейнере лежит сам документ: это не detached-подпись РЭМД.
             return False, None, REASON_EMBEDDED
+        if signed_data["encap_content_info"]["content_type"].native != "data":
+            # Контракт §7.1: подписывается СЭМД как id-data.
+            return False, None, REASON_CONTENT_TYPE
         if signer_info["digest_algorithm"]["algorithm"].dotted != gost.OID_GOST3411_2012_256:
             return False, None, REASON_ALGORITHM
         if (
@@ -154,6 +158,11 @@ def verify_cms(
         digests = _attribute(attributes, "message_digest")
         if digests is None:
             return False, None, REASON_FORMAT
+        content_type = _attribute(attributes, "content_type")
+        if content_type is None or content_type.native != "data":
+            # §7.1 обещает id-data: иначе подписанный «как TSTInfo» контейнер
+            # проходил бы как наша подпись документа.
+            return False, None, REASON_CONTENT_TYPE
         message_digest = bytes(digests.native)
         signing_time = _attribute(attributes, "signing_time")
         signed_at = (
