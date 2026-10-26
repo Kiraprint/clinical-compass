@@ -612,3 +612,48 @@ def test_clinician_own_fio_masked_without_ner(client, db_session, monkeypatch):
     sent = str(llm)
     assert "Смирнова" not in sent and "Петровна" not in sent
 
+
+
+def test_thread_message_passes_history_to_agent(client, monkeypatch):
+    """FR-17: история треда уходит в агент — контекст для LLM-ответа."""
+    from app.services import assistant_chat
+
+    ch, url = _new_thread(client, "th-history@test.ru")
+    spy = _SpyAgent()
+    monkeypatch.setattr(assistant_chat, "shared_factory", lambda: spy)
+
+    client.post(url, json={"content": "Какой порог тяжести у шкалы PHQ-9?"}, headers=ch)
+    assert spy.calls[-1][1]["history"] == [], "первый вопрос без истории"
+
+    client.post(url, json={"content": "А у GAD-7?"}, headers=ch)
+    history = spy.calls[-1][1]["history"]
+    assert [m["role"] for m in history] == ["CLINICIAN", "ASSISTANT"]
+    assert history[0]["content"] == "Какой порог тяжести у шкалы PHQ-9?"
+
+
+def test_thread_answer_composed_by_llm_from_snippets(client, monkeypatch, kb_collection):
+    """LLM пишет ответ по найденным фрагментам; цитаты — из настоящих чанков."""
+    reply = "По PHQ-9 умеренная депрессия начинается с 10 баллов [1]."
+    llm = _fake_llm(monkeypatch, reply)
+    ch, _ = _setup(client, "th-llm-answer@test.ru")
+    tid = client.post("/api/v1/assistant/threads", json={}, headers=ch).json()["id"]
+    url = f"/api/v1/assistant/threads/{tid}/messages"
+
+    body = client.post(
+        url, json={"content": "Какой порог тяжести у шкалы PHQ-9?"}, headers=ch
+    ).json()
+
+    assert body["answer"] == reply
+    assert body["grounded"] is True and body["refused"] is False
+    cited = [c["guideline_id"] for c in body["citations"]]
+    assert cited, "цитаты строятся из найденных сниппетов"
+    assert cited == [cited[0]], "ссылка [1] → ровно один фрагмент"
+    assert all(c["topic"] != "ПАЦИЕНТ" for c in body["citations"]), "тред без пациентов"
+    answer_prompts = [
+        b["messages"][-1]["content"]
+        for b in llm
+        if "Сниппеты базы знаний" in b["messages"][-1]["content"]
+    ]
+    assert answer_prompts, "ответ генерировался LLM, а не детерминированно"
+    assert "Вопрос врача: Какой порог тяжести у шкалы PHQ-9?" in answer_prompts[0]
+    assert "[1]" in answer_prompts[0]
