@@ -448,3 +448,64 @@ def test_naive_datetime_rejected(client):
         headers=ctx["doctor"],
     )
     assert window.status_code == 422, window.text
+
+
+def test_sessions_window_validated(client):
+    """То же окно, что и в календаре: без пояса и с `to<from` — 422, а не пустой список."""
+    ctx = _setup(client)
+    naive = client.get(
+        f"{BASE}/sessions",
+        params={"from": "2026-11-01T00:00:00", "to": "2026-11-02T00:00:00+00:00"},
+        headers=ctx["doctor"],
+    )
+    assert naive.status_code == 422, naive.text
+    inverted = client.get(
+        f"{BASE}/sessions",
+        params={"from": _slot(hours=24), "to": _slot()},
+        headers=ctx["doctor"],
+    )
+    assert inverted.status_code == 422, inverted.text
+
+
+def test_lists_hide_non_consented_patients(client):
+    """Отзыв согласия убирает пациента из списков врача (152-ФЗ, docs/18 §2)."""
+    ctx = _setup(client)
+    appt = _appointment(client, ctx, starts_at=_slot(hours=30))
+    session = client.post(
+        f"{BASE}/sessions", json={"patient_id": ctx["patient_id"]}, headers=ctx["doctor"]
+    ).json()
+    params = {"from": _slot(), "to": _slot(hours=24 * 7)}
+
+    visible = client.get(f"{BASE}/appointments", params=params, headers=ctx["doctor"])
+    assert [item["id"] for item in visible.json()["items"]] == [appt["id"]]
+    assert client.get(f"{BASE}/sessions", params=params, headers=ctx["doctor"]).json()["items"]
+
+    revoke = client.post("/api/v1/consent/revoke", json={}, headers=ctx["patient"])
+    assert revoke.status_code in (200, 204), revoke.text
+
+    assert client.get(f"{BASE}/appointments", params=params, headers=ctx["doctor"]).json() == {
+        "items": []
+    }
+    assert client.get(f"{BASE}/sessions", params=params, headers=ctx["doctor"]).json() == {
+        "items": []
+    }
+    # Прямой доступ к самой сессии по-прежнему закрыт гейтом согласия.
+    assert client.get(f"{BASE}/sessions/{session['id']}", headers=ctx["doctor"]).status_code == 403
+
+
+def test_patch_audio_consent_null_rejected(client):
+    """`null` не должен читаться как «согласие отозвано» — только явный false."""
+    ctx = _setup(client)
+    session = client.post(
+        f"{BASE}/sessions",
+        json={"patient_id": ctx["patient_id"], "audio_consent": True},
+        headers=ctx["doctor"],
+    ).json()
+    resp = client.patch(
+        f"{BASE}/sessions/{session['id']}",
+        json={"audio_consent": None},
+        headers=ctx["doctor"],
+    )
+    assert resp.status_code == 422, resp.text
+    after = client.get(f"{BASE}/sessions/{session['id']}", headers=ctx["doctor"]).json()
+    assert after["audio_consent"] is True

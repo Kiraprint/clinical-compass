@@ -131,7 +131,8 @@ class SessionBody(BaseModel):
 
 
 class SessionPatch(BaseModel):
-    audio_consent: bool | None = None
+    # Строго bool: `null` не должен молча означать «согласие отозвано» (422).
+    audio_consent: bool
 
 
 class FinishBody(BaseModel):

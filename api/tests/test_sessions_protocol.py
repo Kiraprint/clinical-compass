@@ -12,6 +12,8 @@ import json
 
 from sqlalchemy import text
 
+from app.config import settings
+
 BASE = "/api/v1/clinician"
 
 FULL = {
@@ -303,3 +305,52 @@ def test_diagnosis_code_follows_sections_icd10(client, db_session):
         ).bindparams(s=session["id"])
     ).scalar_one()
     assert stored == "F41.1"
+
+
+def test_rejected_history_gets_next_version(client, db_session):
+    """История из `rejected` — не повод начинать нумерацию заново (UNIQUE session_id,version)."""
+    ctx = _ctx(client)
+    session = _session(client, ctx)
+    url = f"{BASE}/sessions/{session['id']}/protocol"
+    db_session.execute(
+        text(
+            "INSERT INTO session_protocols (id, session_id, version, status, source, "
+            "sections_cipher, created_by) VALUES (gen_random_uuid(), CAST(:s AS uuid), 1, "
+            "'rejected', 'manual', pgp_sym_encrypt('{}', :k), CAST(:c AS uuid))"
+        ).bindparams(
+            s=session["id"],
+            k=settings.data_key,
+            c=db_session.execute(
+                text("SELECT id FROM users WHERE email = 'pr-doc1@test.ru'")
+            ).scalar_one(),
+        )
+    )
+    db_session.commit()
+
+    created = client.put(url, json={"sections": FULL}, headers=ctx["doctor"])
+    assert created.status_code == 200, created.text
+    assert created.json()["version"] == 2
+
+
+def test_diagnosis_code_cleared_with_sections(client, db_session):
+    """Код, удалённый из `sections.diagnosis.icd10`, не должен залипать в строке (§3.4)."""
+    ctx = _ctx(client)
+    session = _session(client, ctx)
+    url = f"{BASE}/sessions/{session['id']}/protocol"
+    first = client.put(url, json={"sections": FULL}, headers=ctx["doctor"])
+    assert first.status_code == 200 and first.json()["diagnosis_code"] == "F41.1"
+
+    stripped = {k: v for k, v in FULL.items() if k != "diagnosis"}
+    second = client.put(url, json={"sections": stripped}, headers=ctx["doctor"])
+    assert second.status_code == 200, second.text
+    assert second.json()["diagnosis_code"] is None
+
+    stored = db_session.execute(
+        text(
+            "SELECT diagnosis_code FROM session_protocols WHERE session_id = CAST(:s AS uuid)"
+        ).bindparams(s=session["id"])
+    ).scalar_one()
+    assert stored is None
+    # Без диагноза подтверждение невозможно — обязательный раздел §5.2.
+    approve = client.post(f"{url}/approve", json={}, headers=ctx["doctor"])
+    assert approve.status_code == 409 and "diagnosis.icd10" in approve.json()["detail"]

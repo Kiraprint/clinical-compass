@@ -26,7 +26,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import Problem
-from app.models import Appointment, ClinicalSession, DocumentArtifact, SessionProtocol, User, Visit
+from app.models import (
+    Appointment,
+    ClinicalSession,
+    Consent,
+    DocumentArtifact,
+    SessionProtocol,
+    User,
+    Visit,
+)
 
 from . import audit
 from .clinician import require_patient_consent, require_roster
@@ -45,6 +53,15 @@ CONFIRMED = ("approved", "signed", "submitted")
 def _page_limit(limit: int) -> int:
     """Потолок пагинации §4: клиент может попросить меньше 200, но не больше."""
     return PAGE_LIMIT if limit <= 0 or limit > PAGE_LIMIT else limit
+
+
+def _consent_exists(patient_column):
+    """EXISTS «у пациента активное согласие» — фильтр списков в SQL (docs/18 §2)."""
+    return (
+        select(Consent.id)
+        .where(Consent.user_id == patient_column, Consent.revoked_at.is_(None))
+        .exists()
+    )
 
 
 def _now() -> datetime:
@@ -171,6 +188,7 @@ async def list_appointments(
     )
     if patient_id is not None:
         stmt = stmt.where(Appointment.patient_id == patient_id)
+    stmt = stmt.where(_consent_exists(Appointment.patient_id))
     stmt = stmt.order_by(Appointment.starts_at).limit(_page_limit(limit)).offset(max(offset, 0))
     rows = (await db.scalars(stmt)).all()
     fio = await _patients_fio(db, [r.patient_id for r in rows])
@@ -415,6 +433,8 @@ async def list_sessions(
     limit: int = PAGE_LIMIT,
     offset: int = 0,
 ) -> dict:
+    """Сессии врача за окно; `status` — active | finished."""
+    _window(from_, to)
     if status is not None and status not in ("active", "finished"):
         raise Problem(422, "VALIDATION_ERROR", "Статус: active | finished")
     if patient_id is not None:
@@ -428,6 +448,7 @@ async def list_sessions(
         stmt = stmt.where(ClinicalSession.patient_id == patient_id)
     if status is not None:
         stmt = stmt.where(ClinicalSession.status == status)
+    stmt = stmt.where(_consent_exists(ClinicalSession.patient_id))
     stmt = stmt.order_by(ClinicalSession.started_at).limit(_page_limit(limit))
     stmt = stmt.offset(max(offset, 0))
     rows = (await db.scalars(stmt)).all()

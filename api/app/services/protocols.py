@@ -22,6 +22,7 @@ import re
 from datetime import datetime, timezone
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import Problem
@@ -218,6 +219,28 @@ async def _next_version(db: AsyncSession, session_id) -> int:
     return (current or 0) + 1
 
 
+async def _create_draft(db: AsyncSession, session_id, sections: dict, code, clinician_id):
+    """Новая версия draft: номер — `max+1`, гонку двух PUT разбираем повтором."""
+    for _ in range(2):
+        row = SessionProtocol(
+            session_id=session_id,
+            version=await _next_version(db, session_id),
+            status="draft",
+            source="manual",
+            sections_cipher=encode_sections(sections),
+            diagnosis_code=code,
+            created_by=clinician_id,
+        )
+        db.add(row)
+        try:
+            await db.flush()
+            return row
+        except IntegrityError:
+            # UNIQUE(session_id, version): параллельный PUT забрал номер — берём следующий.
+            await db.rollback()
+    raise Problem(409, "PROTOCOL_LOCKED", "Протокол изменяется параллельно — повторите")
+
+
 def _check_code(code: str | None) -> str | None:
     if code is None:
         return None
@@ -265,44 +288,27 @@ async def put(
     """Сохранить разделы врача: draft — на месте, signed — новая версия, иначе 409."""
     session = await require_session(db, clinician_id, session_id)
     await require_patient_access(db, clinician_id, session.patient_id)
+    # `sid` вместо `session.id`: после rollback внутри гонки версий атрибуты истекли.
+    sid = session.id
     validate_sections(sections)
     code = _resolve_code(_check_code(diagnosis_code), sections)
 
-    active = await _active(db, session.id)
+    active = await _active(db, sid)
     if active is None:
-        row = SessionProtocol(
-            session_id=session.id,
-            version=1,
-            status="draft",
-            source="manual",
-            sections_cipher=encode_sections(sections),
-            diagnosis_code=code,
-            created_by=clinician_id,
-        )
-        db.add(row)
-        await db.flush()
+        # Номера идемпотентны: после `rejected`/`superseded` история есть, а активной нет.
+        row = await _create_draft(db, sid, sections, code, clinician_id)
     elif active.status == "approved":
         raise Problem(409, "PROTOCOL_LOCKED", "Протокол подтверждён — правка запрещена")
     elif active.status == "submitted":
         raise Problem(409, "PROTOCOL_LOCKED", "Протокол передан в ЕМИАС — правка запрещена")
     elif active.status == "signed":
         # Подпись не переносится на новые байты: новая версия + повторная подпись.
-        row = SessionProtocol(
-            session_id=session.id,
-            version=await _next_version(db, session.id),
-            status="draft",
-            source="manual",
-            sections_cipher=encode_sections(sections),
-            diagnosis_code=code,
-            created_by=clinician_id,
-        )
+        row = await _create_draft(db, sid, sections, code, clinician_id)
         active.status = "superseded"
-        db.add(row)
-        await db.flush()
     else:  # draft
         active.sections_cipher = encode_sections(sections)
-        if code is not None:
-            active.diagnosis_code = code
+        # Присваиваем всегда: код, удалённый из разделов, не должен остаться в строке.
+        active.diagnosis_code = code
         active.content_sha256 = None  # approve пересчитает хэш новых байтов
         row = active
 
@@ -313,7 +319,7 @@ async def put(
         clinician_id,
         "SESSION_PROTOCOL_EDIT",
         "session_protocol",
-        f"{session.id}:v{row.version}",
+        f"{sid}:v{row.version}",
         ip=ip,
     )
     row.updated_at = _now()  # явно: server-side onupdate иначе требует ленивой подгрузки
