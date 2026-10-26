@@ -215,6 +215,11 @@ export default function SessionAssistantCard({
     };
   }, [session.id]);
 
+  // Сервер — источник `ai_status`; пока идёт опрос, статус двигает сам опрос.
+  useEffect(() => {
+    if (!polling) setAiStatus(session.ai_status);
+  }, [session.ai_status, polling]);
+
   const toast = (ok: string) => {
     setNote(ok);
     setErr("");
@@ -278,8 +283,12 @@ export default function SessionAssistantCard({
       if (!alive.current) return;
       setUploaded(result.artifact_id);
       setAudio(null);
-      setAiStatus("none");
-      await onRefresh();
+      // Свежая запись сбрасывает прошлую расшифровку: статус берём у сервера.
+      const detail = await onRefresh().catch(() => null);
+      if (detail) {
+        setAiStatus(detail.ai_status);
+        setTranscript(null);
+      }
       toast(`Запись загружена (${fmtSize(result.size_bytes)}).`);
     } catch (e: unknown) {
       setErr(aiErrorText(e, "Не удалось загрузить запись"));
@@ -336,14 +345,20 @@ export default function SessionAssistantCard({
     setBusy("transcribe");
     setErr("");
     setNote("");
-    setAiStatus("transcribing");
     try {
       await api.transcribe(session.id);
-      await onRefresh();
+      const detail = await onRefresh().catch(() => null);
+      setAiStatus(detail?.ai_status ?? "transcribing");
       startPoll();
     } catch (e: unknown) {
+      // Запуск не состоялся (409 AI_BUSY/SESSION_FINISHED, 503 …): статус — от сервера,
+      // иначе кнопка навсегда останется «Расшифровка идёт…».
       setErr(aiErrorText(e, "Не удалось запустить расшифровку"));
-      await onRefresh().catch(() => null);
+      const detail = await onRefresh().catch(() => null);
+      if (detail) {
+        setAiStatus(detail.ai_status);
+        setAiError(detail.ai_error ?? null);
+      }
     } finally {
       setBusy("");
     }
@@ -494,13 +509,13 @@ export default function SessionAssistantCard({
         >
           {busy === "transcribe" ? "Запуск…" : transcribeLabel}
         </button>
-        {(aiStatus === "transcribing" || polling) && <span className="small muted">опрос каждые 2 с…</span>}
+        {polling && <span className="small muted">опрос каждые 2 с…</span>}
         {aiStatus === "transcribed" && !transcript && (
           <button type="button" className="ghost" onClick={() => void refreshState()} disabled={busy !== ""}>
             Показать расшифровку
           </button>
         )}
-        {aiError && (
+        {(aiError || err) && (
           <button type="button" className="ghost" onClick={() => void refreshState()} disabled={busy !== ""}>
             Обновить состояние
           </button>

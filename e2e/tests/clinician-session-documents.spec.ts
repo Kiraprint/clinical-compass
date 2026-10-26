@@ -57,6 +57,10 @@ test("протокол подписывается, проверяется, пе�
   await expect(signButton).toBeEnabled();
   await signButton.click();
 
+  // Успех подписи не должен прятаться за ошибкой: ответ — протокол + сводка подписей.
+  await expect(page.getByText(/^Протокол подписан: /)).toBeVisible();
+  await expect(page.locator(".error")).toHaveCount(0);
+
   // Две подписи (§7): врач и МО, у каждой — реквизиты сертификата.
   const blocks = page.locator(".signature-block");
   await expect(blocks).toHaveCount(2);

@@ -810,7 +810,8 @@ export const api = {
     }),
   /** §7: две подписи (врач + МО) по подтверждённой версии; 409 до approve. */
   signProtocol: (sessionId: string) =>
-    req<{ protocol: SessionProtocol; signatures: ProtocolSignature[] }>(
+    // Ответ — протокол (§4.4) + сводка подписей `signature` (§4.2), а не голый массив.
+    req<SessionProtocol & { signature: SignatureSummary }>(
       `/api/v1/clinician/sessions/${sessionId}/protocol/sign`,
       { method: "POST", body: JSON.stringify({}) },
     ),

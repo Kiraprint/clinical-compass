@@ -61,6 +61,9 @@ const DELIVERY_ERRORS: Record<string, string> = {
   EMIAS_DISABLED: "Передача в ЕМИАС выключена администратором",
   EMIAS_UNAVAILABLE: "РЭМД недоступен — повторите отправку",
   PROTOCOL_NOT_SIGNED: "Сначала подпишите протокол",
+  PROTOCOL_NOT_APPROVED: "Подписать можно только подтверждённый протокол",
+  PROTOCOL_ALREADY_SIGNED: "Протокол уже подписан",
+  SIGNER_UNAVAILABLE: "Демо-УЦ недоступен — обратитесь к администратору",
   CALLBACK_TIMEOUT: "РЭМД не подтвердил регистрацию за отведённое время — повторите отправку",
 };
 
@@ -172,11 +175,10 @@ export default function SessionDocumentCard({
       const result = await api.signProtocol(sessionId);
       await onRefresh();
       setVerified(null);
-      toast(
-        `Протокол подписан: ${ROLE_LABELS[result.signatures[0]?.role ?? ""] ?? "подписант"} + ${
-          ROLE_LABELS[result.signatures[1]?.role ?? ""] ?? "МО"
-        }.`,
-      );
+      const roles = result.signature.signatures
+        .map((item) => ROLE_LABELS[item.role] ?? item.role)
+        .join(" + ");
+      toast(`Протокол подписан: ${roles}.`);
     } catch (e: unknown) {
       setErr(documentError(e, "Не удалось подписать протокол"));
     } finally {
@@ -339,7 +341,11 @@ export default function SessionDocumentCard({
       </ul>
 
       <div className="row" style={{ marginTop: 10 }}>
-        <button type="button" onClick={() => void sign()} disabled={!protocol || signed || busy !== ""}>
+        <button
+          type="button"
+          onClick={() => void sign()}
+          disabled={protocol?.status !== "approved" || signed || busy !== ""}
+        >
           {busy === "sign" ? "Подписание…" : "Подписать"}
         </button>
         <button type="button" onClick={() => void verify()} disabled={!signed || busy !== ""}>
@@ -415,8 +421,7 @@ export default function SessionDocumentCard({
           </p>
           {current.last_error_code && (
             <p className="error">
-              {DELIVERY_ERRORS[current.last_error_code] ?? current.last_error_message ?? "ошибка РЭМД"}{" "}
-              <span className="small muted">({current.last_error_code})</span>
+              {DELIVERY_ERRORS[current.last_error_code] ?? current.last_error_message ?? "ошибка РЭМД"}
             </p>
           )}
           {current.status === "failed" && (
