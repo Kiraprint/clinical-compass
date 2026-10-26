@@ -55,7 +55,10 @@ export default function NotificationsBell() {
   const markAll = async () => {
     try {
       await api.readNotifications();
-      await load();
+      // Отметка «прочитано» — локальный факт: переписываем список из состояния,
+      // без повторного GET уведомлений.
+      setItems((cur) => cur.map((item) => ({ ...item, read: true })));
+      setUnread(0);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -64,7 +67,9 @@ export default function NotificationsBell() {
   const markOne = async (id: string) => {
     try {
       await api.readNotifications([id]);
-      await load();
+      setItems((cur) => cur.map((item) => (item.id === id ? { ...item, read: true } : item)));
+      const wasUnread = items.some((item) => item.id === id && !item.read);
+      if (wasUnread) setUnread((cur) => Math.max(0, cur - 1));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }

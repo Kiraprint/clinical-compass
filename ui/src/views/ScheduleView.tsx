@@ -99,7 +99,14 @@ function patientLabel(fio: string | null, patientId: string, roster: PatientCard
   return fio ?? roster.find((p) => p.patient_id === patientId)?.email ?? patientId.slice(0, 8);
 }
 
-export default function ScheduleView() {
+export default function ScheduleView({
+  roster,
+  rosterError,
+}: {
+  /** Ростер врача без фильтра триажа — грузит кабинет, а не экран расписания. */
+  roster: PatientCard[];
+  rosterError: string;
+}) {
   // «Сегодня» фиксируем на монтировании: полночь посреди приёма не должна прыгать.
   const [today] = useState(() => {
     const now = new Date();
@@ -110,8 +117,6 @@ export default function ScheduleView() {
   const [items, setItems] = useState<Appointment[]>([]);
   const [sessions, setSessions] = useState<ClinicalSession[]>([]);
   const [active, setActive] = useState<ClinicalSession[]>([]);
-  const [patients, setPatients] = useState<PatientCard[]>([]);
-  const [rosterError, setRosterError] = useState("");
   const [version, setVersion] = useState(0);
   const [loadError, setLoadError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -160,24 +165,6 @@ export default function ScheduleView() {
     };
   }, [gridFrom, version]);
 
-  // Пациенты для записи — весь roster врача, без фильтра риска вкладки «Пациенты».
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .clinicianPatients()
-      .then((r) => {
-        if (cancelled) return;
-        setPatients(r.items);
-        setRosterError("");
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setRosterError(errText(e));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   const byDay = useMemo(() => {
     const map = new Map<string, Appointment[]>();
     for (const a of items) {
@@ -216,8 +203,8 @@ export default function ScheduleView() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (!patientId && patients.length > 0) setPatientId(patients[0].patient_id);
-  }, [patients, patientId]);
+    if (!patientId && roster.length > 0) setPatientId(roster[0].patient_id);
+  }, [roster, patientId]);
 
   const create = async () => {
     if (!patientId) {
@@ -344,7 +331,7 @@ export default function ScheduleView() {
     return (
       <SessionPanel
         session={session}
-        patientLabel={patientLabel(session.patient_fio, session.patient_id, patients)}
+        patientLabel={patientLabel(session.patient_fio, session.patient_id, roster)}
         onClose={() => {
           setSession(null);
           setVersion((v) => v + 1);
@@ -412,7 +399,7 @@ export default function ScheduleView() {
                 {list.slice(0, 2).map((a) => (
                   <span key={a.id} className={`cal-item ${a.status}`}>
                     {TIME_FMT.format(new Date(a.starts_at))}{" "}
-                    {patientLabel(a.patient_fio, a.patient_id, patients)}
+                    {patientLabel(a.patient_fio, a.patient_id, roster)}
                   </span>
                 ))}
                 {list.length > 2 && <span className="cal-more">ещё {list.length - 2}</span>}
@@ -437,7 +424,7 @@ export default function ScheduleView() {
             <tbody>
               {walkIns.map((s) => (
                 <tr key={s.id} data-session={s.id}>
-                  <td>{patientLabel(s.patient_fio, s.patient_id, patients)}</td>
+                  <td>{patientLabel(s.patient_fio, s.patient_id, roster)}</td>
                   <td>{TIME_FMT.format(new Date(s.started_at))}</td>
                   <td>
                     <button type="button" className="ghost" onClick={() => setSession(s)}>
@@ -479,7 +466,7 @@ export default function ScheduleView() {
                 return [
                   <tr key={a.id} data-appointment={a.id}>
                     <td>{TIME_FMT.format(new Date(a.starts_at))}</td>
-                    <td>{patientLabel(a.patient_fio, a.patient_id, patients)}</td>
+                    <td>{patientLabel(a.patient_fio, a.patient_id, roster)}</td>
                     <td>
                       {CHANNEL_LABELS[a.channel]}
                       {a.location ? <span className="small muted"> · {a.location}</span> : null}
@@ -613,7 +600,7 @@ export default function ScheduleView() {
               aria-label="Пациент для записи"
               onChange={(e) => setPatientId(e.target.value)}
             >
-              {patients.map((c) => (
+              {roster.map((c) => (
                 <option key={c.patient_id} value={c.patient_id}>
                   {c.fio ?? c.email}
                 </option>
@@ -668,7 +655,7 @@ export default function ScheduleView() {
         )}
         {formSaved && !formErr && <p className="small muted">Запись создана.</p>}
         <div className="row">
-          <button type="button" onClick={create} disabled={busy || !patients.length}>
+          <button type="button" onClick={create} disabled={busy || !roster.length}>
             {busy ? "Сохраняем…" : "Записать"}
           </button>
           <button type="button" className="ghost" onClick={() => setWalkIn((v) => !v)}>
@@ -681,7 +668,7 @@ export default function ScheduleView() {
               Пациент без записи
               <select value={walkPatient} onChange={(e) => setWalkPatient(e.target.value)}>
                 <option value="">— выберите —</option>
-                {patients.map((c) => (
+                {roster.map((c) => (
                   <option key={c.patient_id} value={c.patient_id}>
                     {c.fio ?? c.email}
                   </option>

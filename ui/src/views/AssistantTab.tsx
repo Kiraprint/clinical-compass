@@ -14,7 +14,7 @@ import { isSendShortcut } from "../keys";
 // FR-32: чипы пациентов в контексте диалога. Класс .chip задаёт и цвет текста —
 // раньше inline-фон перекрывал белую inherited-надпись от глобального button.
 
-export default function AssistantTab() {
+export default function AssistantTab({ patients }: { patients: PatientCard[] }) {
   // FR-21: сессии ассистента — треды с persistent-контекстом и пациентами.
   const [threads, setThreads] = useState<AssistantThread[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -30,7 +30,6 @@ export default function AssistantTab() {
   const [notice, setNotice] = useState("");
   const [renaming, setRenaming] = useState("");
   const [points, setPoints] = useState<number | null>(null);
-  const [patients, setPatients] = useState<PatientCard[]>([]);
   const [sources, setSources] = useState<KbWork[]>([]);
   const [excludedIds, setExcludedIds] = useState<string[]>([]);
   const [sourcesLoaded, setSourcesLoaded] = useState(false);
@@ -51,7 +50,6 @@ export default function AssistantTab() {
 
   useEffect(() => {
     api.assistantStatus().then((s) => setPoints(s.points)).catch(() => setPoints(null));
-    api.clinicianPatients().then((r) => setPatients(r.items)).catch(() => setPatients([]));
     api
       .assistantThreads()
       .then((r) => {
@@ -137,7 +135,8 @@ export default function AssistantTab() {
       setDetail((cur) =>
         cur && cur.id === detail.id ? { ...cur, ...updated } : cur,
       );
-      await refreshThreads();
+      // Обновлённый тред уже пришёл из API — список патчим, без GET.
+      setThreads((cur) => cur.map((t) => (t.id === updated.id ? { ...t, ...updated } : t)));
       setRenaming("");
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
@@ -154,7 +153,8 @@ export default function AssistantTab() {
       await api.assistantDeleteThread(detail.id);
       setDetail(null);
       setActiveId(null);
-      const rest = await refreshThreads();
+      const rest = threads.filter((t) => t.id !== detail.id);
+      setThreads(rest);
       if (rest.length > 0) await selectThread(rest[0].id);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
@@ -175,7 +175,7 @@ export default function AssistantTab() {
     try {
       const updated = await api.assistantUpdateThread(detail.id, { patient_ids: ids });
       setDetail((cur) => (cur && cur.id === detail.id ? { ...cur, ...updated } : cur));
-      await refreshThreads();
+      setThreads((cur) => cur.map((t) => (t.id === updated.id ? { ...t, ...updated } : t)));
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -243,6 +243,18 @@ export default function AssistantTab() {
                 updated_at: ts,
               };
             });
+            // Список диалогов — из того же ответа: новый счётчик и время.
+            setThreads((cur) =>
+              cur.map((t) =>
+                t.id === targetId
+                  ? {
+                      ...t,
+                      message_count: t.message_count + answer.message_ids.length,
+                      updated_at: ts,
+                    }
+                  : t,
+              ),
+            );
             setStreaming(false);
             setPendingUser("");
             setStreamThreadId(null);
@@ -257,10 +269,6 @@ export default function AssistantTab() {
           },
         },
       );
-      const fresh = await api.assistantThread(targetId);
-      // По id, а не только по seq: врач мог уйти в другой тред и вернуться.
-      setDetail((cur) => (cur?.id === targetId ? fresh : cur));
-      await refreshThreads();
     } catch (e: unknown) {
       if (!outcome.done) setInput(text); // не терять вопрос при обрыве
       setError(e instanceof Error ? e.message : String(e));
