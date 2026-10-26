@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError, ChatInsight, PatientChat, PatientChatMessage } from "../api";
 import AssistantTab from "./AssistantTab";
-import { isSendShortcut } from "../keys";
 
 const SENDER_LABELS: Record<string, string> = {
   CLINICIAN: "Врач",
@@ -233,7 +232,8 @@ function PatientChats({
   const activeName = active?.fio ?? "Пациент";
 
   const send = async () => {
-    if (!selected || !input.trim()) return;
+    // busy: Enter/Ctrl+Enter не должны дублировать сообщение, пока первое в пути.
+    if (!selected || !input.trim() || busy) return;
     setBusy(true);
     setError("");
     try {
@@ -390,8 +390,8 @@ function PatientChats({
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => {
-                    // FR-47: Enter и Ctrl/Cmd+Enter отправляют сообщение пациенту.
-                    if (e.key === "Enter" || isSendShortcut(e)) void send();
+                    // FR-47: Enter (в т.ч. Ctrl/Cmd+Enter — та же клавиша) отправляет.
+                    if (e.key === "Enter") void send();
                   }}
                 />
                 <button

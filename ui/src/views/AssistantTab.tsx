@@ -184,7 +184,8 @@ export default function AssistantTab() {
   };
 
   const send = async () => {
-    if (!detail || !input.trim() || switching) return;
+    // busy: Ctrl+Enter не должен слать второй запрос, пока идёт ответ на первый.
+    if (!detail || !input.trim() || switching || busy) return;
     const targetId = detail.id;
     const seq = ++selectSeq.current;
     const text = input.trim();

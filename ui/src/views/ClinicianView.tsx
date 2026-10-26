@@ -116,14 +116,12 @@ function Collapsible({
   children,
   defaultOpen = true,
   id,
-  className,
 }: {
   storageKey: string;
   summary: ReactNode;
   children: ReactNode;
   defaultOpen?: boolean;
   id?: string;
-  className?: string;
 }) {
   const [open, setOpen] = useState(() => {
     try {
@@ -136,7 +134,6 @@ function Collapsible({
   return (
     <details
       id={id}
-      className={className}
       open={open}
       onToggle={(e) => {
         const next = e.currentTarget.open;

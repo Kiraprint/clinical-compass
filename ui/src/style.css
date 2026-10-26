@@ -805,3 +805,18 @@ small { color: #8a94a8; }
   .patient-nav .chip { flex: 0 0 auto; white-space: nowrap; padding: 8px 12px; }
   .compose-hint { display: none; }
 }
+
+/* FR-47 (ClinicianUx): 701–1000px — кнопка «☰ Меню» липнет у верха, а карточка
+   занимает всю ширину: строка чипов прижимается ниже кнопки, иначе первый чип
+   уезжает под неё. Якоря получают тот же запас (52px + высота строки чипов). */
+@media (min-width: 701px) and (max-width: 1000px) {
+  .patient-nav { top: 52px; }
+  #patient-risk,
+  #patient-screening,
+  #patient-checkin,
+  #patient-adverse,
+  #patient-dynamics,
+  #clinician-medications,
+  #clinician-history,
+  #clinician-visits { scroll-margin-top: 108px; }
+}
