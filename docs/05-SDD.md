@@ -178,6 +178,7 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | FR-45 | E17 | `npm run build` (типы) + e2e `patient-home-priority.spec.ts` (напоминания выше баннера, кнопки ≥44px на 390×844, переходы «Отметить чек-ин»/«Отметить приём»/«Перейти к скринингу»); регрессия `patient-flows.spec.ts`, `consent-revoke.spec.ts`, `rbac-idor.spec.ts` (локаль баннера) |
 | FR-46 | E17 | e2e `patient-home-priority.spec.ts` (вопрос «Сколько таблеток вы приняли?», отметки taken/partial/missed проверены через `/me/adherence`, `partial_kind = half`) + `daily-today.spec.ts` (1 и 2 приёма в день, «Сегодня всё отмечено: N из M») |
 | FR-47 | E17 | `npm run build` + e2e `clinician-links.spec.ts` (липкое оглавление карточки: чипы «Риск…Динамика», чип раскрывает свёрнутый блок и прокручивает к нему, `aria-current`), `assistant.spec.ts` (`Ctrl+Enter` в композере — ответ появляется, подсказка «Ctrl+Enter — отправить»), `clinician-admin.spec.ts`/`chats.spec.ts` (регрессия карточки и композеров) |
+| FR-48 | E17 | `test_auth_email.py` (202 без перечисления, cooldown, e2e сброс по `demo_code`, 422 на неверный/истёкший/использованный код и 5 промахов, удаление refresh-токенов, хеш кода, вход по коду при `CC_EMAIL_OTP=true`, байт-в-байт прежний вход при false, 503 без SMTP в проде) + `npm run build` (формы входа, Enter, автофокус, шаги OTP и сброса) |
 
 ## 7. Границы инкремента
 

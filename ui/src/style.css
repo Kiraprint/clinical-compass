@@ -821,6 +821,12 @@ small { color: #8a94a8; }
   .patient-nav { padding-left: 96px; }
 }
 
+/* FR-48 (AuthNative): формы входа — Enter отправляет, ссылка-кнопка и подсказки. */
+.auth-form { display: flex; flex-direction: column; gap: 10px; }
+.auth-form .row { flex-wrap: wrap; align-items: center; }
+.auth-link { background: none; border: 0; padding: 0; color: #2f6fed; font: inherit; font-size: 13px; cursor: pointer; text-decoration: underline; }
+.auth-hint { color: #5a6478; font-size: 13px; margin: 0; }
+
 /* FR-45/FR-46 (PatientUx): напоминания на главном экране пациента — строки с
    переходом, кнопки не ниже 44px (тап на телефоне); баннер скрининга идёт ниже. */
 .patient-reminders li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 10px; }
