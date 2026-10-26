@@ -119,8 +119,9 @@ test("полный чек-ин: шаги до «Чек-ин за сегодня 
 
   await expect(page.getByText("Чек-ин за сегодня выполнен")).toBeVisible();
   // Гейт не сработал → safety=unassessed: день закрыт без вопроса о риске, и текст
-  // честно говорит «риск не оценивался», а не «риска нет».
-  await expect(page.getByText(/Вопросы о риске сегодня не задавались/)).toBeVisible();
+  // спокойно говорит, что дополнительная оценка не потребовалась, а не «риска нет».
+  await expect(page.getByText("Дополнительная оценка сегодня не потребовалась")).toBeVisible();
+  await expect(page.getByText("Ваши ответы сохранены.")).toBeVisible();
   await expect(page.getByText(/Закреплённого врача у вас нет/)).toHaveCount(0);
   await expect(page.getByText(/видит врач/)).toHaveCount(0);
   await expect(page.locator(".qa")).toHaveCount(0);
