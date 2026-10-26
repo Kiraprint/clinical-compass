@@ -1012,6 +1012,11 @@ async def _autodraft(session_id: uuid.UUID) -> None:
             )
         log.info("Автодрафт сессии %s: черновик создан", session_id)
     except Problem as exc:
+        if exc.code == "PROTOCOL_LOCKED":
+            # Врач подтвердил протокол, пока шла расшифровка: это не сбой
+            # автодрафта, а штатный пропуск (проверку above мог обойти параллельный approve).
+            log.info("Автодрафт сессии %s пропущен: %s", session_id, exc.code)
+            return
         log.warning("Автодрафт сессии %s: %s", session_id, exc.code)
         await _mark_ai_error(session_id, exc.code)
     except asyncio.CancelledError:
