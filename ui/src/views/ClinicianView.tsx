@@ -20,6 +20,7 @@ import {
   Report,
   Visit,
 } from "../api";
+import { describeRegimeMismatch, formatTimesPerDay, parseIntakeFrequency, resolveTimesPerDay } from "../dosage";
 import TrendChart from "../TrendChart";
 import ChatsView from "./ChatsView";
 import LibraryView from "./LibraryView";
@@ -2531,13 +2532,20 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
     setPickedDrug(d);
     setSuggestOpen(false);
     setSuggestIdx(-1);
+    // Черновое значение select, пока дозировка ещё не подставлена: как только
+    // в тексте появится кратность, select скроется и режим возьмётся из текста.
+    setTimesPerDay(resolveTimesPerDay(d));
   };
 
-  // Источник канонической дозировки: dosage, при его отсутствии — special_notes или форма.
+  // Источник канонической дозировки: dosage, при его отсутствии — special_notes
+  // или форма. Подсказка — полный текст: кратность в нём задаёт режим приёма,
+  // поэтому её не вырезаем и отдельно не спрашиваем (см. dosageTimes ниже).
   const dosageHint = pickedDrug
     ? pickedDrug.dosage.trim() || pickedDrug.special_notes.trim() || pickedDrug.form.trim()
     : "";
   const dosageApplied = dosageHint !== "" && dosage.trim() === dosageHint;
+  // Кратность, уже записанная врачом в дозировку («Внутрь по 20 мг 2 раза/сут»).
+  const dosageTimes = parseIntakeFrequency(dosage);
 
   const onDrugKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Escape") {
@@ -2583,7 +2591,8 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
         title: title.trim(),
         dosage: dosage.trim() || undefined,
         started_on: startedOn || undefined,
-        times_per_day: timesPerDay,
+        // Кратность из дозировки важнее select: селект скрыт, когда она есть.
+        times_per_day: dosageTimes ?? timesPerDay,
         notes: notes.trim() || undefined,
       });
       setTitle("");
@@ -2640,7 +2649,16 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
               <tr><th>Препарат</th><th>Дозировка</th><th>Режим</th><th>С</th><th>По</th><th>Статус</th><th>Заметка</th><th></th></tr>
             </thead>
             <tbody>
-              {items.map((m) => (
+              {items.map((m) => {
+                // В колонке — сохранённый режим: по нему считается
+                // приверженность (FR-27). Расхождение с кратностью в тексте
+                // дозировки показываем и оставляем правку, чтобы врач свёл
+                // сохранённое к дозировке (в т.ч. для назначений до фикса).
+                const derived = parseIntakeFrequency(m.dosage ?? "");
+                const mismatch = describeRegimeMismatch(m.times_per_day, derived);
+                const canEditRegime =
+                  m.editable && m.source === "clinician" && (derived == null || mismatch != null);
+                return (
                 <tr key={m.id}>
                   <td>
                     {m.title}{" "}
@@ -2653,7 +2671,7 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
                   </td>
                   <td>{m.dosage ?? "—"}</td>
                   <td style={{ whiteSpace: "nowrap" }}>
-                    {editId === m.id ? (
+                    {editId === m.id && canEditRegime ? (
                       <>
                         <select
                           aria-label="Раз в день"
@@ -2666,10 +2684,22 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
                           Сохранить
                         </button>
                       </>
-                    ) : m.times_per_day != null ? (
-                      `${m.times_per_day} р/день`
                     ) : (
-                      <span style={{ color: "#5a6478", fontSize: 12 }}>не задан</span>
+                      <>
+                        {m.times_per_day != null ? (
+                          <span>{m.times_per_day} р/день</span>
+                        ) : (
+                          <span style={{ color: "#5a6478", fontSize: 12 }}>не задан</span>
+                        )}
+                        {mismatch && (
+                          <span
+                            title="Кратность в тексте дозировки расходится с сохранённым режимом — поправьте режим"
+                            style={{ color: "#b45309", fontSize: 12, marginLeft: 4 }}
+                          >
+                            · {mismatch}
+                          </span>
+                        )}
+                      </>
                     )}
                   </td>
                   <td>{m.started_on ?? "—"}</td>
@@ -2684,11 +2714,16 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
                             Остановить
                           </button>
                         )}
-                        {m.editable && editId !== m.id && m.source === "clinician" && (
+                        {canEditRegime && editId !== m.id && (
                           <button
                             className="link"
                             style={{ fontSize: 12, marginLeft: 8 }}
-                            onClick={() => { setEditId(m.id); setEditTimes(m.times_per_day ?? 1); }}
+                            title={mismatch ? "Привести сохранённый режим к кратности из дозировки" : undefined}
+                            onClick={() => {
+                              setEditId(m.id);
+                              // При расхождении предлагаем кратность из дозировки.
+                              setEditTimes(derived ?? m.times_per_day ?? 1);
+                            }}
                           >Режим</button>
                         )}
                         <button
@@ -2702,7 +2737,8 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
                     )}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -2777,12 +2813,19 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
           )}
         </div>
         <input type="date" aria-label="Дата начала" value={startedOn} onChange={(e) => setStartedOn(e.target.value)} />
-        <label style={{ fontSize: 13, color: "#3d4657" }}>
-          Раз в день:{" "}
-          <select aria-label="Раз в день" value={timesPerDay} onChange={(e) => setTimesPerDay(Number(e.target.value))}>
-            {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n}</option>)}
-          </select>
-        </label>
+        {dosageTimes != null ? (
+          // Кратность уже в дозировке — второй раз её не спрашиваем.
+          <span style={{ fontSize: 13, color: "#3d4657" }}>
+            Из дозировки: {formatTimesPerDay(dosageTimes)}
+          </span>
+        ) : (
+          <label style={{ fontSize: 13, color: "#3d4657" }}>
+            Раз в день:{" "}
+            <select aria-label="Раз в день" value={timesPerDay} onChange={(e) => setTimesPerDay(Number(e.target.value))}>
+              {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </label>
+        )}
         <input placeholder="Заметка" value={notes} onChange={(e) => setNotes(e.target.value)} style={{ maxWidth: 240 }} />
         <button onClick={add} disabled={busy || !title.trim()}>Назначить</button>
       </div>

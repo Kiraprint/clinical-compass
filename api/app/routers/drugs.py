@@ -16,6 +16,7 @@ from app.deps import get_db, require_consent, require_roles
 from app.errors import Problem
 from app.models import Drug, PatientMedication, User
 from app.services.audit import record as audit_record
+from app.services.drug_dosage import parse_times_per_day
 
 router = APIRouter(tags=["drugs"])
 
@@ -36,6 +37,9 @@ def _drug_dict(d: Drug) -> dict:
         "pharmacology": d.pharmacology,
         "indications": d.indications,
         "dosage": d.dosage,
+        # Частота приёма из текста инструкции: форма назначения подставляет её
+        # в «сколько раз в день», вместо того чтобы оставлять select = 1.
+        "times_per_day": parse_times_per_day(d.dosage),
         "contraindications": d.contraindications,
         "adverse_events": d.adverse_events,
         "special_notes": d.special_notes,

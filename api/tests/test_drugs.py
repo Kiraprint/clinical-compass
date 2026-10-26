@@ -1,4 +1,6 @@
 """Тесты справочника препаратов (таблица drugs, источник — ГРЛС). Не ПДн."""
+import pytest
+
 from .conftest import auth_header, clinician_ctx, login, register
 
 # Ожидаемый состав справочника (api/app/data/drugs.json): препараты первой линии
@@ -39,6 +41,15 @@ def test_drugs_list_returns_whole_library(client):
     assert esc["inn"] == "эсциталопрам" and esc["inn_en"] == "escitalopram"
     assert esc["reg_certificate"] == "ЛП-№(006068)-(РГ-RU)"
     assert esc["reg_date"] == "2024-06-28"
+
+    # FR-27: кратность приёма разбирается из текста инструкции, сам текст не
+    # переписывается — форму назначения врач заполняет дословной дозировкой.
+    assert av["times_per_day"] == 2
+    assert av["dosage"].startswith("Внутрь по 20 мг 2 раза/сут")
+    assert zoloft["times_per_day"] == 1
+    assert "1 раз/сут" in zoloft["dosage"]
+    assert esc["times_per_day"] == 1
+    assert "1 раз/сут" in esc["dosage"]
 
 
 def test_drugs_filter_by_query(client):
@@ -106,3 +117,32 @@ def test_seed_drugs_is_idempotent(db_session):
 
     assert set(second) == DRUG_IDS
     assert second == first, "повторный сид должен обновлять строки, а не пересоздавать"
+
+
+@pytest.mark.parametrize(
+    ("dosage", "expected"),
+    [
+        ("2 раза/сут", 2),
+        ("1 раз/сут", 1),
+        ("по 20 мг 2 раза/сут", 2),
+        ("3 раза в сутки", 3),
+        ("1 раз в день", 1),
+        # Диапазон → нижняя граница: знаменатель приверженности не должен
+        # требовать больше приёмов, чем назначено минимум (см. docstring хелпера).
+        ("1-2 раза в день", 1),
+        ("2 р./сут", 2),
+        # Доза в сутки — не частота: слова «раз» нет.
+        ("50 мг/сут", None),
+        ("максимум 200 мг/сут", None),
+        # Разные частоты в одном тексте — неоднозначно, не угадываем.
+        ("1 раз/сут или 2 раза/сут", None),
+        # Вне диапазона формы (1..6) не подставляем, чтобы не исказить инструкцию.
+        ("8 раз/сут", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_parse_times_per_day(dosage, expected):
+    from app.services.drug_dosage import parse_times_per_day
+
+    assert parse_times_per_day(dosage) == expected

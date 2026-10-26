@@ -72,6 +72,16 @@ jobs:
           CC_TEST_DATABASE_URL: postgresql+psycopg://compass:compass@127.0.0.1:5432/compass_test
           CC_QDRANT_URL: http://127.0.0.1:6333
 
+      # Чистые хелперы UI (подсказка дозировки) — node:test без зависимостей,
+      # node 22.18+ выполняет .ts сам; npm install не нужен.
+      - name: Setup Node 22 (UI helper tests)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: UI helper tests (node --test)
+        run: node --experimental-strip-types --test ui/test/dosage.test.ts
+
       - name: Build docker images (api + ui)
         run: docker compose -f infra/docker-compose.yml build api ui
 
