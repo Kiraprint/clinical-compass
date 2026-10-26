@@ -324,6 +324,13 @@ services:
       CC_ML_RERANK_MODEL: "${CC_ML_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}"
       CC_ML_NER_MODEL: "${CC_ML_NER_MODEL:-redmadrobot-rnd/rubert-base-pii-ner}"
       CC_ML_ALLOW_ANONYMOUS: "${CC_ML_ALLOW_ANONYMOUS:-0}"
+      # Транскрипция по умолчанию выключена: включение — CC_ML_ASR=1 в .env
+      # (веса large-v3-turbo качает ml-warmup, сайдкар открывает их офлайн).
+      CC_ML_ASR: "${CC_ML_ASR:-0}"
+      CC_ML_ASR_MODEL: "${CC_ML_ASR_MODEL:-dropbox-dash/faster-whisper-large-v3-turbo}"
+      CC_ML_ASR_DEVICE: "${CC_ML_ASR_DEVICE:-cuda}"
+      CC_ML_ASR_COMPUTE: "${CC_ML_ASR_COMPUTE:-int8_float16}"
+      CC_ML_ASR_MAX_MB: "${CC_ML_ASR_MAX_MB:-200}"
       HF_HOME: /models
       HF_HUB_DISABLE_TELEMETRY: "1"
       HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-1}"
@@ -368,6 +375,9 @@ services:
       CC_ML_PROFILES: "${CC_ML_PROFILES:-}"
       CC_ML_RERANK_MODEL: "${CC_ML_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}"
       CC_ML_NER_MODEL: "${CC_ML_NER_MODEL:-redmadrobot-rnd/rubert-base-pii-ner}"
+      # Веса ASR качаются тем же прогревом (сайдкар работает офлайн).
+      CC_ML_ASR: "${CC_ML_ASR:-0}"
+      CC_ML_ASR_MODEL: "${CC_ML_ASR_MODEL:-dropbox-dash/faster-whisper-large-v3-turbo}"
     volumes:
       - ml-models:/models
 

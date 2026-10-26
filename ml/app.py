@@ -7,11 +7,18 @@ CC_ML_ALLOW_ANONYMOUS=1):
 - ``POST /v1/embeddings`` {texts, kind, profile} -> {profile, dense_size, vectors}
 - ``POST /v1/rerank`` {query, documents, top_k} -> {scores}
 - ``POST /v1/mask`` {text, names} -> {text, spans, model, degraded}
+- ``POST /v1/transcribe`` multipart {file, language=ru, diarize=false} ->
+  {model, device, duration_s, rtf, language, segments, speakers, degraded}
 - ``GET  /health`` -> {status, device, models, error: bool}
 
 ``model`` в ответе маскирования — ``hybrid`` только когда NER реально
 отработал; ``regex`` + ``degraded=true`` означают, что api обязан трактовать
 ответ как отказ backend'а (docs/12).
+
+``/v1/transcribe`` выключен по умолчанию (CC_ML_ASR=0) и отвечает 503
+``asr_disabled``; пока веса ASR грузятся — 503 ``model_loading``. Диаризация
+не реализована, поэтому ``diarize=true`` — всегда ``degraded=true`` со
+``speaker: null`` (см. ml/README.md).
 
 Ошибки всегда структурированы: ``{"detail": {"code": ..., "message": ...}}``.
 Пока модели грузятся — 503 ``model_loading`` (с Retry-After); упавшая
@@ -28,20 +35,25 @@ import secrets
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import Depends, FastAPI, File, Form, Header, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 import models
 from models import (
+    ASR_DEFAULT_LANGUAGE,
+    ASR_MEDIA_TYPES,
     MAX_CHARS,
     MAX_DOCUMENTS,
     MAX_NAMES,
     MAX_TEXTS,
+    ASRDisabled,
+    ASRUnavailable,
     ModelNotReady,
     Registry,
     UnknownProfile,
+    asr_max_mb,
     public_model_name,
 )
 
@@ -56,6 +68,8 @@ _BODY_LIMITS = {
     "/v1/rerank": 24 * 1024 * 1024,
     "/v1/mask": 1 * 1024 * 1024,
 }
+# ASR-лимит считается от CC_ML_ASR_MAX_MB уже в create_app: эндпоинт читает
+# файл целиком и режет по точному размеру (см. transcribe ниже).
 
 class ApiError(Exception):
     """Ошибка с машинным кодом и человекочитаемым сообщением."""
@@ -210,15 +224,20 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
             raise ModelNotReady()
         return registry
 
+    # Лимит тела для транскрипции: аудио + ~1 КБ мультипарт-обвязки.
+    limits = dict(_BODY_LIMITS)
+    limits["/v1/transcribe"] = asr_max_mb() * 1024 * 1024 + 64 * 1024
+
     @app.middleware("http")
     async def _limit_body(request: Request, call_next):  # noqa: ANN001 — сигнатура Starlette
         """Отсечь гигантское тело по Content-Length до парсинга JSON.
 
         Лимиты в разы ниже максимального валидного тела под MAX_* из
-        models.py (64/256 текстов по 20 000 символов); token-проверка
-        остаётся первой зависимостью эндпоинта.
+        models.py (64/256 текстов по 20 000 символов), у транскрипции —
+        CC_ML_ASR_MAX_MB плюс мультипарт-обвязка; token-проверка остаётся
+        первой зависимостью эндпоинта.
         """
-        limit = _BODY_LIMITS.get(request.url.path)
+        limit = limits.get(request.url.path)
         if limit is not None and request.method == "POST":
             raw = request.headers.get("content-length")
             if raw is None:
@@ -264,6 +283,56 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
     @app.post("/v1/mask", dependencies=[Depends(require_token), Depends(require_ready)])
     def mask(body: MaskRequest) -> dict:
         return registry.mask(body.text, body.names)
+
+
+    @app.post("/v1/transcribe", dependencies=[Depends(require_token), Depends(require_ready)])
+    def transcribe(
+        file: UploadFile = File(..., description="аудио сессии: webm/ogg/wav/mpeg/mp4/m4a"),
+        language: str = Form(default=ASR_DEFAULT_LANGUAGE),
+        diarize: bool = Form(default=False),
+    ) -> dict:
+        """Русская расшифровка аудио сессии (docs/18 §4.3, research-asr.md).
+
+        Аудио читается целиком: потолок — CC_ML_ASR_MAX_MB (200 МБ ≈ 3 часа
+        opus), размер проверяется и по Content-Length, и по факту. Диаризация
+        не реализована (веса pyannote gated): ``diarize=true`` возвращает
+        ``degraded=true``, спикеры — null и пустой список.
+        """
+        if not registry.asr_enabled:
+            raise ApiError(
+                503,
+                "asr_disabled",
+                "транскрипция выключена: CC_ML_ASR=0 (включите CC_ML_ASR=1)",
+            )
+        media_type = (file.content_type or "").split(";")[0].strip().lower()
+        if media_type not in ASR_MEDIA_TYPES:
+            raise ApiError(
+                415,
+                "unsupported_media",
+                f"тип {media_type or 'unknown'!r} не поддерживается: "
+                "нужен audio/webm|ogg|wav|mpeg|mp4|m4a",
+            )
+        if not language.strip().lower().isalpha() or not 2 <= len(language.strip()) <= 3:
+            raise ApiError(
+                400, "invalid_request", "language: ожидался код языка (ru, en, ...)"
+            )
+        limit = asr_max_mb() * 1024 * 1024
+        file.file.seek(0, os.SEEK_END)
+        size = file.file.tell()
+        file.file.seek(0)
+        if size > limit:
+            raise ApiError(413, "payload_too_large", f"аудио больше {limit} байт")
+        data = file.file.read()
+        if not data:
+            raise ApiError(400, "invalid_request", "пустой файл")
+        try:
+            return registry.transcribe(data, language.strip().lower(), diarize=diarize)
+        except ASRDisabled as exc:
+            raise ApiError(503, "asr_disabled", str(exc) or "транскрипция выключена") from exc
+        except ASRUnavailable as exc:
+            raise ApiError(
+                503, "model_unavailable", "веса ASR не загрузились, подробности — в логах"
+            ) from exc
 
     @app.get("/v1/profiles", dependencies=[Depends(require_token)])
     def profiles() -> dict:

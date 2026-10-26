@@ -5,8 +5,9 @@
 huggingface_hub: torch не импортируется, модели не загружаются в память.
 
 Скачиваются все профили эмбеддингов из CC_ML_PROFILES (встроенные + override),
-реранкер CC_ML_RERANK_MODEL и NER-модель CC_ML_NER_MODEL — ровно те, что
-сайдкар потом откроет с HF_HUB_OFFLINE=1 / TRANSFORMERS_OFFLINE=1.
+реранкер CC_ML_RERANK_MODEL и NER-модель CC_ML_NER_MODEL, а при CC_ML_ASR=1 —
+ещё веса ASR CC_ML_ASR_MODEL: ровно те, что сайдкар потом откроет с
+HF_HUB_OFFLINE=1 / TRANSFORMERS_OFFLINE=1.
 """
 
 from __future__ import annotations
@@ -22,8 +23,10 @@ from huggingface_hub import snapshot_download  # noqa: E402 — после сб�
 
 from models import (  # noqa: E402
     DEFAULT_PROFILE,
+    _ASR_MODEL,
     _NER_MODEL,
     _RERANK_MODEL,
+    _env_bool,
     load_profiles,
 )
 
@@ -40,6 +43,10 @@ def model_ids() -> list[str]:
     ids += [profile.model_id for profile in profiles.values()]
     ids.append(os.environ.get("CC_ML_RERANK_MODEL", "").strip() or _RERANK_MODEL)
     ids.append(os.environ.get("CC_ML_NER_MODEL", "").strip() or _NER_MODEL)
+    # Веса ASR качаем только при включённой транскрипции: 1.6 ГБ в томе
+    # ml-models не нужны стеку, который её не использует.
+    if _env_bool("CC_ML_ASR"):
+        ids.append(os.environ.get("CC_ML_ASR_MODEL", "").strip() or _ASR_MODEL)
     seen: set[str] = set()
     return [model_id for model_id in ids if not (model_id in seen or seen.add(model_id))]
 

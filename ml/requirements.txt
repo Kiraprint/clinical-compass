@@ -9,3 +9,17 @@ huggingface-hub==1.33.0
 numpy==2.5.4
 fastapi==0.162.0
 uvicorn[standard]==0.54.0
+# ASR (POST /v1/transcribe): CTranslate2-бэкенд Whisper, PyAV-декодирование и
+# silero VAD внутри библиотеки — внешний ffmpeg в образе не нужен.
+# Проверено на GPU (RTX 5090 Laptop, драйвер 615.78), разрешённые версии:
+#   faster-whisper 1.2.1, ctranslate2 4.8.4, av 18.1.0, onnxruntime 1.31.0
+# av<19 обязателен: PyAV 19 убрал аргумент `metadata_errors`, и
+# faster_whisper.audio.decode_audio падает на нём TypeError'ом (10/2026).
+# onnxruntime тянет сам faster-whisper (silero VAD); libcublas/libcudnn для
+# CTranslate2 берутся из nvidia-колёс torch (см. LD_LIBRARY_PATH в Dockerfile).
+faster-whisper==1.2.*
+ctranslate2==4.8.4
+av==18.*
+onnxruntime==1.31.0
+# Мультипарт-разбор тела /v1/transcribe (FastAPI Form/File без него не работает).
+python-multipart==0.0.32
