@@ -1,5 +1,14 @@
 FROM python:3.12-slim
 WORKDIR /app
+# FR-40 (docs/18 §7): PDF протокола собирает WeasyPrint (HTML/CSS) — ему нужны
+# Pango/HarfBuzz/Fontconfig. Кириллица: DejaVu + Liberation (оба с полным
+# русским набором); других шрифтов в slim-образе нет, поэтому они обязательны,
+# иначе в PDF вместо текста будут пустые глифы.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 libfontconfig1 \
+        fonts-dejavu-core fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
 # F8 (ГОСТ 56939): воспроизводимая сборка через uv.lock (полное разрешение
 # зависимостей, не snapshot pip freeze). Слой зависимостей кешируется отдельно.
 COPY --from=ghcr.io/astral-sh/uv:0.11.19 /uv /usr/local/bin/uv

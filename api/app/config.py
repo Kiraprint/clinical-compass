@@ -129,6 +129,25 @@ class Settings(BaseSettings):
     # CC_SIGNER_BACKEND: mock-ca — тестовый УЦ (PR P4). Ключ подписи — только в
     # демо-конфигурации и никогда не логируется.
     signer_backend: str = "mock-ca"
+    # --- FR-40 (docs/18 §7): демо-PKI и подпись протокола ---------------------
+    # CC_SIGNING_CERT_DAYS: срок жизни листового сертификата подписанта.
+    # Отрицательное значение выпускает заведомо просроченный сертификат —
+    # этим проверяется ветка `expired` в verify (демо/тесты, не прод).
+    signing_cert_days: int = 365
+    # CC_SIGNING_CA_CERT / CC_SIGNING_CA_KEY: PEM-файлы «внешнего» демо-УЦ.
+    # Пусто → УЦ генерируется один раз и живёт в CC_ARTIFACTS_DIR/_ca/ (0600).
+    signing_ca_cert: str | None = None
+    signing_ca_key: str | None = None
+    # Уполномоченное лицо МО — вторая подпись документа (п. 11 приказа 209н).
+    # Данные демонстрационные: в проде их даёт кадровая выгрузка МО.
+    signing_mo_fio: str = "Демидова Ольга Петровна"
+    signing_mo_position: str = "Заместитель главного врача по медицинской части"
+    signing_mo_org: str = "Демонстрационная медицинская организация «Компас»"
+    signing_mo_snils: str | None = None
+    # Должность врача-подписанта и его СНИЛС (СНИЛС пациента/врача в карточке
+    # не хранится открытым текстом — пусто → поле не выводится, не выдумываем).
+    signing_doctor_position: str = "Врач-психиатр"
+    signing_doctor_snils: str | None = None
     # CC_EMIAS_SUBMIT_ENABLED: исходящая передача документа в ЕМИАС (PR P5).
     # Как и CC_EMIAS_ENABLED, по умолчанию egress запрещён.
     emias_submit_enabled: bool = False

@@ -25,6 +25,12 @@ dependencies = [
     "greenlet>=3",
     # docs/18 §4.6: AES-256-GCM + HKDF для шифрованных артефактов сессий.
     "cryptography>=42",
+    # docs/18 §7 (FR-40): ГОСТ Р 34.10-2012 / 34.11-2012 (Стрибог), detached CMS
+    # SignedData на asn1crypto и печатная форма протокола HTML/CSS → PDF
+    # (WeasyPrint; кириллица берётся из fontconfig).
+    "gostcrypto>=1.2.5",
+    "asn1crypto>=1.5.1",
+    "weasyprint>=62",
 ]
 
 [project.optional-dependencies]
