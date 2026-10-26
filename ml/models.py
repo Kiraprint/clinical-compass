@@ -46,8 +46,15 @@ MAX_NAMES = 256
 _ASR_MODEL = "dropbox-dash/faster-whisper-large-v3-turbo"
 ASR_DEFAULT_LANGUAGE = "ru"
 ASR_MAX_MB = 200
+# Верхний предел CC_ML_ASR_MAX_MB: больше 200 МБ ≈ 3 ч opus не нужно, а
+# 3-часовой файл всё равно декодируется в ~700 МБ float32 в памяти.
+ASR_MAX_MB_CAP = 4096
 # Типы, которые реально присылают браузерный MediaRecorder и диктофоны
 # (webm/ogg-opus, wav, m4a). Принимаем только их: остальное — 415.
+# ``video/*`` — те же контейнеры: у MediaRecorder с видеодорожкой и у любого
+# прокси, определяющего тип по расширению (mimetypes: session.webm ->
+# video/webm), звук лежит в WebM/MP4. Декодирование всё равно по содержимому,
+# а нам нужна только аудиодорожка.
 ASR_MEDIA_TYPES = frozenset(
     {
         "audio/webm",
@@ -60,6 +67,8 @@ ASR_MEDIA_TYPES = frozenset(
         "audio/mp4",
         "audio/m4a",
         "audio/x-m4a",
+        "video/webm",
+        "video/mp4",
     }
 )
 # Коды, которые понимает Whisper (faster_whisper.tokenizer._LANGUAGE_CODES).
@@ -201,17 +210,32 @@ def _env_bool(name: str, default: bool = False) -> bool:
         return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
+
+class ASRBusy(RuntimeError):
+    """Все слоты распознавания заняты: 503 busy + Retry-After."""
+
+
 def asr_max_mb() -> int:
-    """Потолок аудио в МБ: CC_ML_ASR_MAX_MB (по умолчанию ASR_MAX_MB)."""
+    """Потолок аудио в МБ: CC_ML_ASR_MAX_MB (по умолчанию ASR_MAX_MB).
+
+    Кривое значение не роняет сайдкар: опечатка в env не должна утаскивать
+    за собой эмбеддинги и маскирование (рестарт-луп контейнера). Возвращаем
+    дефолт с предупреждением, сверху ограничиваем ASR_MAX_MB_CAP.
+    """
     raw = os.environ.get("CC_ML_ASR_MAX_MB", "").strip()
     if not raw:
         return ASR_MAX_MB
     try:
         value = int(raw)
-    except ValueError as exc:
-        raise RuntimeError(f"CC_ML_ASR_MAX_MB: ожидалось целое число ({raw!r})") from exc
+    except ValueError:
+        log.warning("CC_ML_ASR_MAX_MB=%r: ожидалось целое число, беру %d", raw, ASR_MAX_MB)
+        return ASR_MAX_MB
     if value <= 0:
-        raise RuntimeError("CC_ML_ASR_MAX_MB: должно быть больше нуля")
+        log.warning("CC_ML_ASR_MAX_MB=%d: должно быть больше нуля, беру %d", value, ASR_MAX_MB)
+        return ASR_MAX_MB
+    if value > ASR_MAX_MB_CAP:
+        log.warning("CC_ML_ASR_MAX_MB=%d больше потолка %d", value, ASR_MAX_MB_CAP)
+        return ASR_MAX_MB_CAP
     return value
 
 def asr_language(raw: str) -> str:
@@ -345,7 +369,9 @@ class StubTranscriber:
         # Наружу — "stub", а не имя настроенной модели: ответ фиктивный.
         self.model_id = "stub"
 
-    def transcribe(self, data: bytes, language: str) -> dict:
+    def transcribe(self, source: Any, language: str) -> dict:
+        # Stub'у нужен только размер: у него нет декодера, читаем файл целиком.
+        data = source if isinstance(source, bytes) else source.read()
         duration = round(max(len(data) / _ASR_STUB_BYTES_PER_S, 0.5), 3)
         segments: list[dict[str, Any]] = []
         start = 0.0
@@ -566,10 +592,14 @@ class WhisperTranscriber:
         self._model = WhisperModel(model_id, device=device, compute_type=compute_type)
         self._lock = threading.Lock()
 
-    def transcribe(self, data: bytes, language: str) -> dict:
+    def transcribe(self, source: Any, language: str) -> dict:
+        # Отдаём загрузку прямо в PyAV: файл не копируется в bytes, av читает
+        # его покадрово (в память попадает только декодированное аудио).
+        if hasattr(source, "seek"):
+            source.seek(0)
         with self._lock:
             segments, info = self._model.transcribe(
-                io.BytesIO(data),
+                source,
                 language=language,
                 beam_size=5,
                 vad_filter=True,
@@ -665,6 +695,18 @@ class Registry:
         # Отдельный замок: ASR грузится лениво (десятки секунд для весов),
         # и /health не должен ждать загрузку, чтобы ответить status=ready.
         self._asr_lock = threading.Lock()
+        # Слоты распознавания: каждая параллельная попытка — ещё один
+        # декодированный в память файл (3 ч ≈ 700 МБ float32).
+        try:
+            slots = int(os.environ.get("CC_ML_ASR_CONCURRENCY", "1"))
+        except ValueError:
+            log.warning("CC_ML_ASR_CONCURRENCY=%r: ожидалось число, беру 1",
+                        os.environ.get("CC_ML_ASR_CONCURRENCY"))
+            slots = 1
+        # Больше 4 параллельных распознаваний бессмысленны: каждое держит
+        # декодированный файл в памяти, а CTranslate2 всё равно сериализует.
+        self.asr_concurrency = min(max(1, slots), 4)
+        self._asr_slots = threading.BoundedSemaphore(self.asr_concurrency)
 
     # -- статус ------------------------------------------------------------
 
@@ -855,16 +897,22 @@ class Registry:
         # "loading" — тоже сюда: 503 model_loading с Retry-After, без ожидания.
         raise ModelNotReady()
 
-    def transcribe(self, data: bytes, language: str, *, diarize: bool = False) -> dict:
+    def transcribe(self, source: Any, language: str, *, diarize: bool = False) -> dict:
         self._require_ready()
         code = asr_language(language)
         backend = self.asr()
+        # Не ждём слот: api ждёт ответа не дольше CC_ML_TIMEOUT, а «в очереди
+        # на 10 минут» — худший ответ, чем честный 503 busy с Retry-After.
+        if not self._asr_slots.acquire(blocking=False):
+            raise ASRBusy()
         started = time.perf_counter()
         try:
-            raw = backend.transcribe(data, code)
+            raw = backend.transcribe(source, code)
         except Exception as exc:  # noqa: BLE001 — сбой бэкенда не должен быть 500
             log.exception("ASR не смог обработать аудио")
             raise ASRFailed() from exc
+        finally:
+            self._asr_slots.release()
         elapsed = time.perf_counter() - started
         duration = float(raw.get("duration_s") or 0.0)
         segments = [

@@ -6,6 +6,7 @@ backend (faster-whisper) в CI не грузится — для него нуж�
 
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
@@ -276,3 +277,120 @@ def test_transcribe_503_does_not_wait_for_loading(monkeypatch):
     assert _detail(response)["code"] == "model_loading"
     # Замок занят «загрузкой» — запрос обязан ответить, не дожидаясь её.
     assert elapsed < 1.0, elapsed
+
+# --- контейнеры video/* ---------------------------------------------------
+@pytest.mark.parametrize("media", ["video/webm", "video/mp4"])
+def test_transcribe_video_container_accepted(monkeypatch, media):
+    """MediaRecorder с видеодорожкой и прокси по расширению дают video/webm."""
+    app, _ = _app(monkeypatch)
+    with TestClient(app) as client:
+        response = _post(client, content_type=media)
+    assert response.status_code == 200, response.text
+
+
+def test_transcribe_video_unsupported(monkeypatch):
+    app, _ = _app(monkeypatch)
+    with TestClient(app) as client:
+        response = _post(client, content_type="video/quicktime")
+    assert response.status_code == 415
+    assert _detail(response)["code"] == "unsupported_media"
+
+
+# --- конверт для ошибок Starlette/python-multipart ------------------------
+def test_multipart_without_boundary_uses_envelope(monkeypatch):
+    """Starlette отвечает 400 сам: тело обязано быть конвертом, не строкой."""
+    app, _ = _app(monkeypatch)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/transcribe",
+            content=b"\x00" * 32,
+            headers={"Content-Type": "multipart/form-data"},
+        )
+    assert response.status_code == 400, response.text
+    assert _detail(response)["code"] == "invalid_request"
+
+
+def test_multipart_oversized_part_uses_envelope(monkeypatch):
+    """Не-файловая часть > 1 МиБ: python-multipart рубит запрос 400'ой."""
+    app, _ = _app(monkeypatch)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/transcribe",
+            files={"file": ("session.webm", _audio(1.0), "audio/webm")},
+            data={"language": "ru" * 1_000_000},
+        )
+    assert response.status_code == 400, response.text
+    assert _detail(response)["code"] == "invalid_request"
+
+
+# --- кривой CC_ML_ASR_MAX_MB не роняет сайдкар ---------------------------
+def test_bad_max_mb_does_not_break_disabled_asr(monkeypatch):
+    monkeypatch.setenv("CC_ML_ASR_MAX_MB", "abc")
+    app, _ = _app(monkeypatch, asr=False)
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+
+
+def test_bad_max_mb_with_enabled_asr_answers_envelope(monkeypatch):
+    monkeypatch.setenv("CC_ML_ASR_MAX_MB", "abc")
+    app, _ = _app(monkeypatch)  # create_app не должен упасть
+    with TestClient(app) as client:
+        response = _post(client)
+    assert response.status_code == 200, response.text
+
+
+# --- занятые слоты распознавания ------------------------------------------
+def test_busy_when_all_slots_taken(monkeypatch):
+    monkeypatch.setenv("CC_ML_ASR_CONCURRENCY", "1")
+    app, registry = _app(monkeypatch)
+    assert registry._asr_slots.acquire(blocking=False)  # noqa: SLF001 — эмулируем занятость
+    try:
+        with TestClient(app) as client:
+            response = _post(client)
+    finally:
+        registry._asr_slots.release()  # noqa: SLF001
+    assert response.status_code == 503, response.text
+    assert _detail(response)["code"] == "busy"
+    assert response.headers.get("Retry-After") == "5"
+
+
+def test_concurrency_env_is_clamped(monkeypatch):
+    monkeypatch.setenv("CC_ML_ASR_CONCURRENCY", "мусор")
+    registry = Registry(stub=True)
+    assert registry.asr_concurrency == 1
+    monkeypatch.setenv("CC_ML_ASR_CONCURRENCY", "100")
+    assert Registry(stub=True).asr_concurrency == 4
+
+
+def test_second_concurrent_transcribe_gets_busy(monkeypatch):
+    """Слот один: второй параллельный запрос получает 503 busy, а не ждёт."""
+    monkeypatch.setenv("CC_ML_ASR_CONCURRENCY", "1")
+    app, registry = _app(monkeypatch)
+    started = threading.Event()
+    release = threading.Event()
+
+    class _Slow:
+        model_id = "stub"
+        device = "stub"
+
+        def transcribe(self, source, language):
+            started.set()
+            release.wait(10)
+            return {"duration_s": 1.0, "language": language, "segments": []}
+
+    registry._asr = _Slow()  # noqa: SLF001 — медленный двойник бэкенда
+    first: dict = {}
+    with TestClient(app) as client:
+        def _run() -> None:
+            first["response"] = _post(client)
+
+        worker = threading.Thread(target=_run)
+        worker.start()
+        assert started.wait(10), "первый запрос не дошёл до бэкенда"
+        second = _post(client)
+        release.set()
+        worker.join(10)
+    assert second.status_code == 503, second.text
+    assert _detail(second)["code"] == "busy"
+    assert second.headers.get("Retry-After") == "5"
+    assert first["response"].status_code == 200, first["response"].text

@@ -69,6 +69,7 @@ FFmpeg-библиотеки, отдельный `ffmpeg` в образ став�
 | `CC_ML_ASR_DEVICE` | значение `CC_ML_DEVICE` | `cuda` \| `cpu` — ASR можно увести на CPU отдельно |
 | `CC_ML_ASR_COMPUTE` | `int8_float16` на CUDA, `int8` на CPU | тип вычислений CTranslate2 |
 | `CC_ML_ASR_MAX_MB` | `200` | потолок аудио в МБ (413 `payload_too_large`) |
+| `CC_ML_ASR_CONCURRENCY` | `1` (макс. 4) | сколько распознаваний одновременно; остальные получают 503 `busy` + `Retry-After: 5` |
 | `HF_HOME` | `/models` | кеш весов (том `ml-models`) |
 | `HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE` | `1` в compose | запрет сетевых обращений к HF |
 
@@ -105,8 +106,11 @@ mask — 1 МиБ, embeddings — 6 МиБ, rerank — 24 МиБ, transcribe —
 Запрос — multipart: `file` (обязателен), `language` (по умолчанию `ru`;
 принимаются только коды Whisper из `ASR_LANGUAGES` в `ml/models.py`, иначе
 400 — значение проверяется до бэкенда), `diarize` (`false`). Типы —
-`audio/webm|ogg|wav|mpeg|mp4|m4a` (`;codecs=opus` допускается), иначе 415
-`unsupported_media`. Размер — до
+`audio/webm|ogg|wav|mpeg|mp4|m4a` и `video/webm|mp4` (`;codecs=opus`
+допускается), иначе 415 `unsupported_media`. Последние два — те же
+контейнеры: MediaRecorder с видеодорожкой и любой прокси, определяющий тип по
+расширению (`session.webm` → `video/webm`), иначе получали бы 415 на живую
+запись; декодирование всё равно по содержимому, берётся аудиодорожка. Размер — до
 `CC_ML_ASR_MAX_MB` (200 МБ ≈ 3 ч opus) и проверяется дважды: по
 `Content-Length` до разбора мультипарта и по фактической длине файла.
 
@@ -145,8 +149,10 @@ curl -s -X POST http://ml:8080/v1/transcribe \
 бэкенда на самом файле, а не 500); 503 `asr_disabled` (`CC_ML_ASR=0` — без
 `Retry-After`, повтор не поможет); 503 `model_loading` + `Retry-After: 10`
 (веса грузятся фоном после `ready`, ответ отдаётся сразу — повторить через
-10 с); 503 `model_unavailable` (загрузка упала, подробности в логах;
-`Retry-After` есть, но до рестарта повторы бесполезны).
+10 с); 503 `model_unavailable` (загрузка упала, подробности в
+логах); 503 `busy` + `Retry-After: 5` (все слоты распознавания заняты,
+`CC_ML_ASR_CONCURRENCY`, по умолчанию 1 — второй параллельный запрос честно
+получает отказ, а не висит в очереди).
 
 ### Бэкенд и замеры
 
@@ -223,10 +229,14 @@ python -m pytest ml/tests -q            # stub, без torch/GPU/сети/ток
 
 Отдельно — контракт `/v1/transcribe` (`tests/test_transcribe.py`): форма
 ответа, 401 без токена, 413 (и middleware, и точная проверка файла), 415 на
-чужой тип, 400 на пустой файл и на код языка не из `ASR_LANGUAGES`, 422
-`asr_failed` при сбое бэкенда, 503 `asr_disabled` (без `Retry-After`), 503
-`model_loading` с `Retry-After` и без ожидания замка загрузчика, монотонность
-и непересечение сегментов, `degraded` только от `diarize=true`.
+чужой тип и 200 на `video/webm|mp4`, конверт `{"detail":{"code","message"}}`
+для 400 самого python-multipart (часть > 1 МиБ, multipart без boundary), 400
+на пустой файл и на код языка не из `ASR_LANGUAGES`, 422 `asr_failed` при
+сбое бэкенда, 503 `asr_disabled` (без `Retry-After`), 503 `model_loading` с
+`Retry-After` и без ожидания замка загрузчика, 503 `busy` для второго
+параллельного запроса, кривой `CC_ML_ASR_MAX_MB`/`CC_ML_ASR_CONCURRENCY` не
+роняет `create_app`, монотонность и непересечение сегментов, `degraded`
+только от `diarize=true`.
 
 ## Диагностика
 

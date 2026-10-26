@@ -41,6 +41,7 @@ from fastapi import Depends, FastAPI, File, Form, Header, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import models
 from models import (
@@ -49,6 +50,7 @@ from models import (
     MAX_CHARS,
     MAX_DOCUMENTS,
     MAX_NAMES,
+    ASRBusy,
     MAX_TEXTS,
     ASRDisabled,
     ASRFailed,
@@ -191,9 +193,26 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
     @app.exception_handler(ApiError)
     async def _api_error(request: Request, exc: ApiError) -> JSONResponse:  # noqa: ARG001
         # Retry-After — только для временных состояний: выключенная фича или
-        # несовместимый запрос повтором не лечатся.
-        retryable = exc.status_code == 503 and exc.code in {"model_loading", "model_unavailable"}
-        return _error(exc.status_code, exc.code, exc.message, {"Retry-After": "10"} if retryable else None)
+        # несовместимый запрос повтором не лечатся. busy — короткая пауза:
+        # чужое распознавание обычно занимает секунды, а не десятки.
+        if exc.status_code == 503 and exc.code in {"model_loading", "model_unavailable"}:
+            headers: dict[str, str] | None = {"Retry-After": "10"}
+        elif exc.code == "busy":
+            headers = {"Retry-After": "5"}
+        else:
+            headers = None
+        return _error(exc.status_code, exc.code, exc.message, headers)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:  # noqa: ARG001
+        """Starlette-ошибки (python-multipart, 404, 405) — в тот же конверт.
+
+        Иначе multipart отвечает ``{"detail": "строка"}`` и api, разбирающий
+        ``detail.code``, падает на живой сессии.
+        """
+        code = "invalid_request" if exc.status_code < 500 else "internal_error"
+        message = str(exc.detail) if exc.detail else "некорректный запрос"
+        return _error(exc.status_code, code, message)
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:  # noqa: ARG001
@@ -230,9 +249,13 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
             raise ModelNotReady()
         return registry
 
-    # Лимит тела для транскрипции: аудио + ~1 КБ мультипарт-обвязки.
+    # Лимит тела для транскрипции: аудио + ~64 КБ мультипарт-обвязки.
+    # Считаем только при включённой транскрипции: кривой CC_ML_ASR_MAX_MB у
+    # стека без ASR не должен ронять старт (иначе рестарт-луп утащит за собой
+    # эмбеддинги и маскирование).
     limits = dict(_BODY_LIMITS)
-    limits["/v1/transcribe"] = asr_max_mb() * 1024 * 1024 + 64 * 1024
+    if registry.asr_enabled:
+        limits["/v1/transcribe"] = asr_max_mb() * 1024 * 1024 + 64 * 1024
 
     @app.middleware("http")
     async def _limit_body(request: Request, call_next):  # noqa: ANN001 — сигнатура Starlette
@@ -330,11 +353,18 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
         file.file.seek(0)
         if size > limit:
             raise ApiError(413, "payload_too_large", f"аудио больше {limit} байт")
-        data = file.file.read()
-        if not data:
+        if not size:
             raise ApiError(400, "invalid_request", "пустой файл")
+        # Отдаём спуленый файл как есть: backend читает его сам, без лишней
+        # копии в bytes (200 МБ аудио = 200 МБ лишней RAM на запрос).
         try:
-            return registry.transcribe(data, code, diarize=diarize)
+            return registry.transcribe(file.file, code, diarize=diarize)
+        except ASRBusy as exc:
+            raise ApiError(
+                503,
+                "busy",
+                "распознавание занято другим запросом, повторите через несколько секунд",
+            ) from exc
         except ASRDisabled as exc:
             raise ApiError(503, "asr_disabled", str(exc) or "транскрипция выключена") from exc
         except ASRUnavailable as exc:

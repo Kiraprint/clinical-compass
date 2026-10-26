@@ -331,6 +331,7 @@ services:
       CC_ML_ASR_DEVICE: "${CC_ML_ASR_DEVICE:-cuda}"
       CC_ML_ASR_COMPUTE: "${CC_ML_ASR_COMPUTE:-int8_float16}"
       CC_ML_ASR_MAX_MB: "${CC_ML_ASR_MAX_MB:-200}"
+      CC_ML_ASR_CONCURRENCY: "${CC_ML_ASR_CONCURRENCY:-1}"
       HF_HOME: /models
       HF_HUB_DISABLE_TELEMETRY: "1"
       HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-1}"
@@ -341,6 +342,10 @@ services:
       - mlnet
     expose:
       - "8080"
+    # Потолок RAM: 3-часовой файл декодируется в ~700 МБ float32, плюс сам
+    # спул-файл до CC_ML_ASR_MAX_MB. Без лимита один такой запрос выедает
+    # память хоста и роняет соседей по стеку.
+    mem_limit: 8g
     deploy:
       resources:
         reservations:
