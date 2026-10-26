@@ -33,7 +33,7 @@ test("протокол подписывается, проверяется, пе�
   await expect(page.getByRole("button", { name: "Сформировать черновик протокола" })).toHaveCount(0);
 
   // §7/§8: до подтверждения документ объясняет, чего не хватает, вместо мёртвых кнопок.
-  await expect(page.getByText("Следующий шаг — «Подтверждён врачом»")).toBeVisible();
+  await expect(page.getByText("Следующий шаг — «Черновик протокола»")).toBeVisible();
   await expect(page.getByRole("button", { name: "Подписать", exact: true })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Скачать PDF" })).toBeDisabled();
   await page.screenshot({ path: testInfo.outputPath("document-unsigned.png"), fullPage: true });
@@ -45,6 +45,9 @@ test("протокол подписывается, проверяется, пе�
   await page.getByLabel("МКБ-10").fill("F41.1");
   await page.getByRole("button", { name: "Сохранить черновик" }).click();
   await expect(page.getByText(/Черновик сохранён \(версия/)).toBeVisible();
+
+  // Черновик сохранён, но не подтверждён: следующий шаг — подтверждение.
+  await expect(page.getByText("Следующий шаг — «Подтверждён врачом»")).toBeVisible();
   await page.getByRole("button", { name: "Подтвердить протокол" }).click();
   await expect(page.getByText("Протокол подтверждён.")).toBeVisible();
 
