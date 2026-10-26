@@ -308,6 +308,9 @@
 | `test_patient_report_audit_has_no_content` | создание НЯ пациентом | в `audit_log` только `ADVERSE_REPORT` и id объекта, без текста |
 | `test_consent_revoke_deletes_patient_events` | НЯ → отзыв согласия | строки пациента в `adverse_events` удалены |
 | `test_adverse_text_encrypted_at_rest` | после проверки врача | `event_text`/`verification_note` — `bytea`, plaintext на диске отсутствует, ORM расшифровывает |
+| `test_adverse_lists_batch_references` | очередь врача и `/me/adverse-events` на 2 и на 10 событиях с назначениями | число SQL не растёт (2 не 2·N; на родительском коде тест падает), названия назначений и ГРЛС — верные |
+| `test_adverse_lists_honour_limit` | `?limit=0`, `?limit=201` и `?limit=2` | 422 на границы (1..200), выдача усечена до `limit`; без параметра — все строки |
+| `test_index_migration_roundtrip` (`test_migrations_indexes.py`) | alembic upgrade → downgrade -1 → upgrade на реальном Postgres | композитные индексы появляются/исчезают, одноколоночные дубли удалены, единственный head |
 | `test_drugs_list_returns_whole_library` (`test_drugs.py`): справочник из `drugs.json` | GET `/drugs` | 3 препарата (Авиандр, Золофт, Эсциталопрам Канон); у каждого заполнены показания/дозы/противопоказания, `ЛП-` в РУ и непустой `source_urls` |
 | `test_drugs_filter_by_query`: `q=маритупир / сертралин / эсциталопрам / ЗОЛОФТ` | GET `/drugs?q=` | находит ровно один препарат по МНН или торговому названию; несовпадающий фильтр — пусто |
 | `test_drug_detail_and_404`: `/drugs/{drug_id}` | карточка препарата | поля и `source_urls`; 404 на неизвестный `drug_id` |

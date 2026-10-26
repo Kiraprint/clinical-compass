@@ -138,10 +138,11 @@ async def create_visit(
 @router.get("/clinician/patients/{patient_id}/visits")
 async def list_visits(
     patient_id: uuid.UUID,
+    limit: int = Query(default=100, ge=1, le=200),
     user: User = Depends(require_clinician), db: AsyncSession = Depends(get_db),
 ):
     """История приёмов пациента (задача кейса 6, п. «приём»). Roster-гейт."""
-    return {"items": await services.clinician.list_visits(db, user.id, patient_id)}
+    return {"items": await services.clinician.list_visits(db, user.id, patient_id, limit)}
 
 @router.get("/clinician/patients/{patient_id}/emias")
 async def emias_summary(

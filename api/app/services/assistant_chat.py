@@ -281,25 +281,83 @@ async def delete_thread(db: AsyncSession, clinician_id, thread_id) -> None:
     await db.commit()
 
 
+# Разделитель реплик при батч-скрабе: пунктуация не даёт склеить соседние
+# сущности, а после маскирования он же служит обратным разрезом.
+HISTORY_SEP = "\n\n%%MSG%%\n\n"
+# Потолок одного egress-текста: /v1/mask принимает ≤20k символов (ml/models.py),
+# поэтому историю режем на пачки по размеру, а не всей портянкой.
+HISTORY_SCRUB_CHARS = 6_000
+
+
+def _chunk_texts(texts: list[str], limit: int) -> list[list[str]]:
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    size = 0
+    for text in texts:
+        extra = len(text) + (len(HISTORY_SEP) if current else 0)
+        if current and size + extra > limit:
+            chunks.append(current)
+            current, size = [], 0
+            extra = len(text)
+        current.append(text)
+        size += extra
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 async def _history_for_llm(db: AsyncSession, thread_id, names: list[str]) -> list[dict]:
     """Последние реплики треда, деперсонализированные, oldest → newest.
 
     Для LLM-переформулировки уточняющего вопроса (FR-21): в промпт не должны
-    попасть ФИО пациента/врача и прочие ПДн, поэтому каждая реплика проходит
-    scrub_for_llm. Обрезку по количеству/длине делает llm_router.
+    попасть ФИО пациента/врача и прочие ПДн, поэтому реплики проходят
+    scrub_for_llm ДО обрезки (обрезку по количеству/длине делает llm_router).
+    Скрабим пачками: один и тот же deny-list/ML-детектор на пачку дешевле,
+    чем запрос на каждую реплику.
     """
-    rows = (await db.scalars(
+    rows = list((await db.scalars(
         select(AssistantMessage)
         .where(AssistantMessage.thread_id == thread_id)
         .order_by(AssistantMessage.created_at.desc(), AssistantMessage.id.desc())
         .limit(llm_router.REWRITE_HISTORY_MESSAGES)
-    )).all()
-    out: list[dict] = []
-    for m in reversed(rows):
-        # remote-backend ходит по HTTP (docs/12): не блокируем event loop.
-        scrubbed = await anyio.to_thread.run_sync(scrub_for_llm, m.content, None, names)
-        out.append({"role": m.role, "content": scrubbed[0]})
-    return out
+    )).all())
+    rows.reverse()
+    if not rows:
+        return []
+    texts = [m.content or "" for m in rows]
+    scrubbed: list[str] = []
+    for chunk in _chunk_texts(texts, HISTORY_SCRUB_CHARS):
+        masked = await anyio.to_thread.run_sync(
+            scrub_for_llm, HISTORY_SEP.join(chunk), None, names
+        )
+        scrubbed.extend(masked[0].split(HISTORY_SEP))
+    if len(scrubbed) != len(texts):
+        # Разделитель не пережил маскирование — безопасный откат на поштучный
+        # скраб: потерять реплику хуже, чем сделать лишний вызов.
+        scrubbed = [
+            (await anyio.to_thread.run_sync(scrub_for_llm, text, None, names))[0]
+            for text in texts
+        ]
+    return [{"role": m.role, "content": text} for m, text in zip(rows, scrubbed)]
+
+
+async def _scrub_patient_contexts(
+    contexts: list[dict], names: list[str]
+) -> tuple[list[dict], dict[str, int]]:
+    """Маскирует свободный текст карт (ФИО, дневник) и сводит категории находок.
+
+    Вопрос в контекст не входит, поэтому здесь передаётся пустой запрос: без
+    этого тот же текст скрабился бы вторым и третьим вызовом (он уже прошёл
+    scrub_for_llm как вопрос выше).
+    """
+    masked: list[dict] = []
+    counts: dict[str, int] = {}
+    for ctx in contexts:
+        _, masked_ctx, report = await anyio.to_thread.run_sync(scrub_for_llm, "", ctx, names)
+        masked.append(masked_ctx)
+        for kind, number in report["masked"].items():
+            counts[kind] = counts.get(kind, 0) + number
+    return masked, counts
 
 
 async def answer_query(
@@ -328,15 +386,13 @@ async def answer_query(
     await db.commit()  # PDn-access audit персистируется до вызова агента (152-ФЗ)
 
     scrubbed_query, _, report = await anyio.to_thread.run_sync(
-        scrub_for_llm,
-        query,
-        patient_contexts[0] if patient_contexts else None,
-        names,
+        scrub_for_llm, query, None, names
     )
-    scrubbed_contexts = [
-        (await anyio.to_thread.run_sync(scrub_for_llm, query, ctx, names))[1]
-        for ctx in patient_contexts
-    ]
+    scrubbed_contexts, context_findings = await _scrub_patient_contexts(patient_contexts, names)
+    if context_findings:
+        report["applied"] = True
+        for kind, number in context_findings.items():
+            report["masked"][kind] = report["masked"].get(kind, 0) + number
     result = await _invoke_agent(
         scrubbed_query,
         topic=topic,
@@ -393,13 +449,10 @@ async def _prepare_turn(
     corpus_drugs = await load_drug_docs(db)
     await db.commit()  # PDn-access audit + вопрос персистируются до вызова агента
 
-    scrubbed_query, _, _ = await anyio.to_thread.run_sync(
+    scrubbed_query, _, report = await anyio.to_thread.run_sync(
         scrub_for_llm, content, None, names
     )
-    scrubbed_contexts = [
-        (await anyio.to_thread.run_sync(scrub_for_llm, content, ctx, names))[1]
-        for ctx in contexts
-    ]
+    scrubbed_contexts, _ = await _scrub_patient_contexts(contexts, names)
 
     # Одиночный вопрос (истории нет) LLM не вызывает: переформулировать нечего.
     search_query = scrubbed_query

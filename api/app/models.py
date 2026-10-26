@@ -297,7 +297,7 @@ class Notification(Base):
     __tablename__ = "notifications"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
     kind: Mapped[str] = mapped_column(String)  # RED_ESCALATION | REMINDER | ADVERSE_EVENT
     title: Mapped[str] = mapped_column(String)
     body: Mapped[str] = mapped_column(String)
@@ -467,7 +467,7 @@ class Visit(Base):
     __tablename__ = "visits"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
     clinician_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     visited_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     visit_type: Mapped[str] = mapped_column(String(16))  # in_person | online | phone
@@ -783,7 +783,7 @@ class PatientMedication(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
     clinician_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     title: Mapped[str] = mapped_column(EncryptedText())
     dosage: Mapped[str | None] = mapped_column(EncryptedText(), nullable=True)

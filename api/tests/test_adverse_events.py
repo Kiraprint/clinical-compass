@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 
 from app import db
 from app.models import AdverseEvent, ClinicianRoster, Notification, PatientMedication
@@ -449,3 +449,94 @@ def test_patient_report_has_no_severity_until_clinician_verifies(client):
     )
     assert verdict.status_code == 200, verdict.text
     assert verdict.json()["severity"] == "moderate"
+
+
+def _count_statements(call):
+    """Сколько SQL ушло на один HTTP-вызов (слушатель на sync_engine async-движка)."""
+    statements: list[str] = []
+
+    def _count(conn, cursor, statement, params, context, executemany):
+        statements.append(statement)
+
+    engine = db.engine.sync_engine
+    event.listen(engine, "before_cursor_execute", _count)
+    try:
+        response = call()
+    finally:
+        event.remove(engine, "before_cursor_execute", _count)
+    return response, len(statements)
+
+
+def test_adverse_lists_batch_references(client):
+    """N+1 → константа: число SQL не растёт от числа строк (было 2 запроса на строку).
+
+    Раньше очередь врача и /me/adverse-events делали `_drug_ref` + `_medication_title`
+    на каждое событие; теперь назначения и справочник ГРЛС — по одному запросу
+    на список.
+    """
+    h, pid = patient_ctx(client, "ae-n1-p@test.ru")
+    ch, cid = clinician_ctx(client, "ae-n1-doc@test.ru")
+    _roster(pid, cid)
+    med_id = _medication(pid, "Авиандр")
+
+    def _report(n: int) -> None:
+        for i in range(n):
+            resp = client.post(
+                "/api/v1/me/adverse-events",
+                json={
+                    "event_text": f"Событие {i}", "onset_date": "2026-10-20",
+                    "medication_id": med_id,
+                },
+                headers=h,
+            )
+            assert resp.status_code == 201, resp.text
+
+    _report(2)
+    _, queue_small = _count_statements(
+        lambda: client.get("/api/v1/clinician/adverse-events", headers=ch)
+    )
+    _, patient_small = _count_statements(
+        lambda: client.get("/api/v1/me/adverse-events", headers=h)
+    )
+
+    _report(8)  # всего 10 событий: если запросы идут на строку, счётчик вырастет
+    queue, queue_big = _count_statements(
+        lambda: client.get("/api/v1/clinician/adverse-events", headers=ch)
+    )
+    patient, patient_big = _count_statements(
+        lambda: client.get("/api/v1/me/adverse-events", headers=h)
+    )
+
+    assert queue.status_code == 200 and len(queue.json()["items"]) == 10, queue.text
+    assert len(patient.json()["items"]) == 10
+    # Названия назначений у всех строк одни — по запросу на список, не на строку.
+    assert queue.json()["items"][0]["medication_title"] == "Авиандр"
+    assert queue_big == queue_small, (queue_small, queue_big)
+    assert patient_big == patient_small, (patient_small, patient_big)
+    assert queue_big <= 5 and patient_big <= 4, (queue_big, patient_big)
+
+
+def test_adverse_lists_honour_limit(client):
+    """limit валидируется (0/201 → 422) и реально ограничивает выдачу."""
+    h, pid = patient_ctx(client, "ae-lim-p@test.ru")
+    ch, cid = clinician_ctx(client, "ae-lim-doc@test.ru")
+    _roster(pid, cid)
+    for i in range(3):
+        resp = client.post(
+            "/api/v1/me/adverse-events",
+            json={"event_text": f"Событие {i}", "onset_date": "2026-10-20"},
+            headers=h,
+        )
+        assert resp.status_code == 201, resp.text
+
+    for path, headers in (
+        ("/api/v1/me/adverse-events", h),
+        ("/api/v1/clinician/adverse-events", ch),
+    ):
+        assert client.get(path, params={"limit": 0}, headers=headers).status_code == 422
+        assert client.get(path, params={"limit": 201}, headers=headers).status_code == 422
+        limited = client.get(path, params={"limit": 2}, headers=headers)
+        assert limited.status_code == 200, limited.text
+        assert len(limited.json()["items"]) == 2
+        full = client.get(path, headers=headers)
+        assert len(full.json()["items"]) == 3

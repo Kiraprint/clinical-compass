@@ -53,18 +53,20 @@ async def report_adverse_event(
 
 @router.get("/me/adverse-events")
 async def my_adverse_events(
+    limit: int = Query(default=100, ge=1, le=200),
     user: User = Depends(require_consent), db: AsyncSession = Depends(get_db),
 ):
     """Свои НЯ со статусом проверки: проверено врачом / на проверке / отклонено."""
-    return {"items": await services.adverse.list_patient_events(db, user.id)}
+    return {"items": await services.adverse.list_patient_events(db, user.id, limit)}
 
 @router.get("/clinician/adverse-events")
 async def adverse_queue(
     status: str | None = Query(default=None, pattern="^(pending|confirmed|rejected)$"),
+    limit: int = Query(default=100, ge=1, le=200),
     user: User = Depends(require_clinician), db: AsyncSession = Depends(get_db),
 ):
     """Очередь НЯ по пациентам ростера врача (по умолчанию все статусы)."""
-    return {"items": await services.adverse.list_queue(db, user.id, status)}
+    return {"items": await services.adverse.list_queue(db, user.id, status, limit)}
 
 class VerifyBody(BaseModel):
     status: str = Field(pattern="^(confirmed|rejected)$")
