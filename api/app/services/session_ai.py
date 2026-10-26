@@ -1259,7 +1259,7 @@ def _same_lemma(needle: str, word: str) -> bool:
 
     Голый 4-буквенный префикс склеивал разные препараты («пароксетин» ↔
     «пароксизм», «мелатонин» ↔ «меланома»). Требуем общий префикс ≥ 5 букв и
-    расхождение окончания не больше 3 букв — этого хватает на русскую флексию
+    расхождение окончания не больше 2 букв — этого хватает на русскую флексию
     («сертралин» ↔ «сертралина»), но не на другой корень.
     """
     common = 0
@@ -1267,7 +1267,7 @@ def _same_lemma(needle: str, word: str) -> bool:
         if left != right:
             break
         common += 1
-    return common >= 5 and common >= min(len(needle), len(word)) - 3
+    return common >= 5 and common >= min(len(needle), len(word)) - 2
 
 
 def _mentions(needle: str, haystack: str) -> bool:

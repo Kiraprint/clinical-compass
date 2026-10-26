@@ -280,7 +280,7 @@ def test_draft_retrieval_disabled_counts_as_unavailable(monkeypatch):
 def test_drug_lookalike_root_is_not_a_source_proof():
     """Почти-омоним не считается подтверждением: «пароксетин» ≠ «пароксизм»."""
     chunk = RAGChunk(
-        text="Ночные пароксизмы тревоги купируют дыхательными упражнениями.",
+        text="Пароксизм тревоги купируют дыхательными упражнениями.",
         source_title="КР: панические атаки",
         guideline_id="kr-panic",
         topic="ЛЕКАРСТВА",
