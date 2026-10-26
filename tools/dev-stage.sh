@@ -326,17 +326,22 @@ cmd_test() {
     # auth-rate-limit.spec падает не по делу. redis стенда — только лимитер.
     compose exec -T redis redis-cli FLUSHDB >/dev/null 2>&1 || \
       log "предупреждение: не удалось сбросить redis стенда"
-    [ -d "$ROOT/e2e/node_modules" ] || ( cd "$ROOT/e2e" && npm ci )
+    [ -d "$ROOT/e2e/node_modules" ] || ( cd "$ROOT/e2e" && npm ci ) 9>&-
     # Логи api пишем потоком весь прогон: `logs --tail=N` после падения
     # показывает только хвост и теряет запрос, который и сломал спек.
+    # 9>&- обязателен: фоновый `compose logs -f` унаследовал бы fd блокировки
+    # и держал .stage/lock после выхода скрипта.
     local api_log="/tmp/cc-dev-stage-api.log"
+    local logs_pid=""
     : > "$api_log"
-    compose logs --no-color -f api >> "$api_log" 2>&1 &
-    local logs_pid=$!
+    compose logs --no-color -f api >> "$api_log" 2>&1 9>&- &
+    logs_pid=$!
+    trap '[ -n "${logs_pid:-}" ] && kill "$logs_pid" 2>/dev/null; exit 130' INT TERM
     local e2e_rc=0
-    ( cd "$ROOT/e2e" && CC_E2E_URL="http://127.0.0.1:${UI_PORT}" npx playwright test "${extra[@]}" ) || e2e_rc=$?
+    ( cd "$ROOT/e2e" && CC_E2E_URL="http://127.0.0.1:${UI_PORT}" npx playwright test "${extra[@]}" ) 9>&- || e2e_rc=$?
     kill "$logs_pid" 2>/dev/null || true
     wait "$logs_pid" 2>/dev/null || true
+    trap - INT TERM
     if [ "$e2e_rc" != 0 ]; then
       fail "e2e упали (rc=$e2e_rc); логи api: $api_log"
     fi
@@ -356,26 +361,34 @@ cmd_status() {
 
 cmd_down() {
   [ -f "$OVERRIDE" ] || return 0
-  compose --profile seed down
+  # --profile emias/seed: без них `down` оставляет контейнеры моков и
+  # one-shot сервисов, и `compose up` потом считает проект живым.
+  compose --profile seed --profile emias down
   log "стенд остановлен, тома сохранены (reset — чтобы снести данные)"
 }
 
 cmd_reset() {
-  [ -f "$OVERRIDE" ] && compose --profile seed down -v || true
+  # `--profile "*"` — снести и моки, и gpu-контур, если он поднимался.
+  [ -f "$OVERRIDE" ] && compose --profile "*" down -v || true
   rm -rf "$STATE_DIR"
   log "стенд снесён вместе с данными"
 }
 
 cmd="${1:-}"; shift || true
 
-# Один стенд — один прогон. Два параллельных `test` (или `up` во время `test`)
-# роняют друг другу compose (контейнер postgres пересоздаётся посреди прогона:
-# «the database system is shutting down») и портят схему compass_test.
-mkdir -p "$STATE_DIR"
-exec 9>"$STATE_DIR/lock"
-if ! flock -n 9; then
-  fail "стенд занят другим прогоном (lock: $STATE_DIR/lock); дождитесь его окончания"
-fi
+case "$cmd" in
+  up|seed|test|down|reset)
+    # Один стенд — один мутирующий прогон. Два параллельных `test` (или `up`
+    # во время `test`) роняют друг другу compose: postgres пересоздаётся
+    # посреди чужого pytest («the database system is shutting down»), схема
+    # compass_test портится. `status`/`help` блокировку не берут и не висят.
+    mkdir -p "$STATE_DIR"
+    exec 9>"$STATE_DIR/lock"
+    if ! flock -n 9; then
+      fail "стенд занят другим прогоном (lock: $STATE_DIR/lock); дождитесь его окончания"
+    fi
+    ;;
+esac
 
 case "$cmd" in
   up) cmd_up "$@" ;;
