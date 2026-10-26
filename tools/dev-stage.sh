@@ -84,7 +84,8 @@ done
 unset CC_COOKIE_SECURE CC_EMBEDDER CC_RERANKER CC_ML_URL CC_ML_TOKEN CC_ML_TIMEOUT \
       CC_DEPERSONALIZE_NER CC_ASSISTANT_LLM_URL CC_CHAT_INSIGHTS_ENABLED \
       CC_ALLOW_DEMO_SECRETS CC_QDRANT_COLLECTION CC_QDRANT_URL CC_KB_CHUNK_CHARS \
-      CC_KB_CHUNK_OVERLAP CC_ENRICH_CHUNK_CHARS CC_ENRICH_CHUNK_OVERLAP
+      CC_KB_CHUNK_OVERLAP CC_ENRICH_CHUNK_CHARS CC_ENRICH_CHUNK_OVERLAP \
+      CC_EMIAS_ENABLED CC_EMIAS_ALLOW_INSECURE CC_REMD_ENABLED CC_REMD_ALLOW_INSECURE
 export CC_EMBEDDER=hash
 export CC_QDRANT_COLLECTION="$STACK_COLLECTION"
 export CC_KB_CHUNK_CHARS=1800 CC_KB_CHUNK_OVERLAP=120
@@ -93,6 +94,11 @@ export CC_ML_URL= CC_ML_TOKEN= CC_ML_TIMEOUT=5
 export CC_DEPERSONALIZE_NER=off CC_RERANKER=off
 export CC_ASSISTANT_LLM_URL= CC_CHAT_INSIGHTS_ENABLED=false
 export CC_ALLOW_DEMO_SECRETS=true CC_COOKIE_SECURE=false
+# Внешние интеграции в стенде включены и указывают на моки профиля emias:
+# без них e2e-спеки протокола приёма (docs/18, FR-39…FR-41) проверяют только
+# выключенное состояние. Моки — внутренняя сеть, egress наружу не открывается.
+export CC_EMIAS_ENABLED=true CC_EMIAS_ALLOW_INSECURE=true
+export CC_REMD_ENABLED=true CC_REMD_ALLOW_INSECURE=true
 
 compose() { docker compose -f "$ROOT/infra/docker-compose.yml" -f "$OVERRIDE" -p "$STAGE_PROJECT" "$@"; }
 
@@ -214,6 +220,9 @@ cmd_up() {
   log "стенд $STAGE_PROJECT: Postgres :$PG_PORT, Qdrant :$QDRANT_PORT, UI :$UI_PORT (только 127.0.0.1)"
 
   compose up -d postgres qdrant redis >/dev/null
+  # Моки внешних интеграций (ЕМИАС + РЭМД) профиля emias: api смотрит на них
+  # по внутренним адресам, порты на хост не публикуются.
+  compose --profile emias up -d emias-mock remd-mock >/dev/null
   wait_pg
   wait_qdrant
   ensure_test_db
