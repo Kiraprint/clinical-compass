@@ -1185,7 +1185,9 @@ def _kb_sources(query: str) -> list[dict] | None:
 
     Вызов блокирующий (эмбеддер + Qdrant) — запускать в потоке. Падение KB
     (Qdrant/сайдкар эмбеддингов лежит) не роняет черновик: источников просто
-    нет, а врач получает `needs_review sources_unavailable`.
+    нет, а врач получает `needs_review sources_unavailable`. Выключенный
+    провайдер (`CC_SESSION_AI_SOURCES=0`) — та же недоступность: «источников
+    ноль» врач прочитал бы как «нечего обосновывать», а это не так.
 
     allow_redline=True — осознанный обход red-line гейта: гейт защищает
     публичный чат от подсказок терапии, здесь же врач-в-петле сам формирует
@@ -1194,7 +1196,7 @@ def _kb_sources(query: str) -> list[dict] | None:
     """
     limit = settings.session_ai_sources
     if limit <= 0:
-        return []
+        return None
     try:
         chunks = shared_factory().search_kb(
             query, topics=SOURCE_TOPICS, limit=limit, allow_redline=True
@@ -1252,16 +1254,40 @@ def _refs(value, sources: list[dict]) -> list[int]:
 _WORD = re.compile(r"[a-zа-яё0-9]{4,}")
 
 
+def _same_lemma(needle: str, word: str) -> bool:
+    """Слово и слово из чанка — одна лексема: общий корень, а не общие 4 буквы.
+
+    Голый 4-буквенный префикс склеивал разные препараты («пароксетин» ↔
+    «пароксизм», «мелатонин» ↔ «меланома»). Требуем общий префикс ≥ 5 букв и
+    расхождение окончания не больше 3 букв — этого хватает на русскую флексию
+    («сертралин» ↔ «сертралина»), но не на другой корень.
+    """
+    common = 0
+    for left, right in zip(needle, word):
+        if left != right:
+            break
+        common += 1
+    return common >= 5 and common >= min(len(needle), len(word)) - 3
+
+
 def _mentions(needle: str, haystack: str) -> bool:
-    """Препарат упомянут в чанке: подстрока или совпадение 4-буквенной леммы."""
+    """Препарат упомянут в чанке: подстрока или совпадение лексемы (см. `_same_lemma`).
+
+    Все значимые слова названия («магния сульфат») должны найтись в тексте:
+    «сульфат магния» — тот же препарат, «магния сульфат» в чанке про «сульфат»
+    без магния — уже нет.
+    """
     name = needle.strip().lower()
     if not name:
         return False
     text = haystack.lower()
     if name in text:
         return True
-    words = {word[:4] for word in _WORD.findall(text)}
-    return any(word[:4] in words for word in _WORD.findall(name))
+    words = _WORD.findall(text)
+    return all(
+        any(_same_lemma(word, candidate) for candidate in words)
+        for word in _WORD.findall(name)
+    )
 
 
 def _dose_pattern(dose: str) -> re.Pattern | None:
@@ -1447,14 +1473,26 @@ def _sanitize(
             grounded[source_index - 1]["used_by"].append(f"treatment.{index}")
 
     # Ссылки `[S3]` в тексте разделов: врач видит, откуда фраза (docs/18 §5.4).
+    # Ссылка на несуществующий источник — такая же непроверяемость, как у
+    # диагноза без чанка: текст остаётся, раздел помечается для врача.
     for name in NARRATIVE:
+        dangling = False
         for ref in _NARRATIVE_REF.findall(sections.get(name) or ""):
             if 1 <= int(ref) <= len(grounded):
                 grounded[int(ref) - 1]["used_by"].append(name)
+            else:
+                dangling = True
+        if dangling:
+            needs.append({"section": name, "reason": "source_missing"})
     for field, value in mental.items():
+        dangling = False
         for ref in _NARRATIVE_REF.findall(value or ""):
             if 1 <= int(ref) <= len(grounded):
                 grounded[int(ref) - 1]["used_by"].append(f"mental_status.{field}")
+            else:
+                dangling = True
+        if dangling:
+            needs.append({"section": f"mental_status.{field}", "reason": "source_missing"})
 
     sections["sources"] = _public_sources(grounded)
     if sources is None:

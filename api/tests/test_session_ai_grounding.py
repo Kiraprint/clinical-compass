@@ -266,11 +266,50 @@ def test_draft_retrieval_uses_topics_and_allow_redline(monkeypatch):
     assert chunks[0]["text"] == PRESCRIPTION
 
 
-def test_draft_retrieval_disabled_returns_empty(monkeypatch):
+def test_draft_retrieval_disabled_counts_as_unavailable(monkeypatch):
+    """CC_SESSION_AI_SOURCES=0 — «источников нет», а не «всё в порядке»."""
     fake = _kb(monkeypatch)
     monkeypatch.setattr(settings, "session_ai_sources", 0)
-    assert session_ai._kb_sources("тревога") == []
+
+    assert session_ai._kb_sources("тревога") is None
     assert fake.calls == []
+    _, needs = _sanitize({"complaints": "тревога"}, None)
+    assert _needs(needs, section="treatment", reason="sources_unavailable")
+
+
+def test_drug_lookalike_root_is_not_a_source_proof():
+    """Почти-омоним не считается подтверждением: «пароксетин» ≠ «пароксизм»."""
+    chunk = RAGChunk(
+        text="Ночные пароксизмы тревоги купируют дыхательными упражнениями.",
+        source_title="КР: панические атаки",
+        guideline_id="kr-panic",
+        topic="ЛЕКАРСТВА",
+        chunk_id="55555555-5555-5555-5555-555555555555",
+    )
+    raw = {"treatment": [{"drug": "пароксетин", "dose": "20 мг", "sources": ["S1"]}]}
+    _, needs = _sanitize(raw, _sources(chunk))
+    assert _needs(needs, section="treatment.0", reason="drug_not_in_source")
+
+    # Флексия того же слова — подтверждение.
+    chunk = RAGChunk(
+        text="Пароксетина суточная доза 20 мг.",
+        source_title="ГРЛС: пароксетин",
+        guideline_id="grls-paroxetine",
+        topic="ЛЕКАРСТВА",
+        chunk_id="66666666-6666-6666-6666-666666666666",
+    )
+    _, needs = _sanitize(raw, _sources(chunk))
+    assert not _needs(needs, section="treatment.0", reason="drug_not_in_source")
+
+
+def test_dangling_reference_in_narrative_is_flagged():
+    sections, needs = _sanitize(
+        {"recommendations": "КПТ [S7]", "complaints": "тревога [S1]"},
+        _sources(*CHUNKS),
+    )
+    assert sections["recommendations"] == "КПТ [S7]"  # текст не подменяем
+    assert _needs(needs, section="recommendations", reason="source_missing")
+    assert not _needs(needs, section="complaints", reason="source_missing")
 
 
 # --- сквозной путь через API ------------------------------------------------
