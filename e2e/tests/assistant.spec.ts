@@ -163,8 +163,16 @@ test("FR-47: Ctrl+Enter в композере отправляет вопрос"
   await openNewThread(page);
 
   await expect(page.locator(".chat-pane .compose-hint")).toHaveText("Ctrl+Enter — отправить");
-  // Детерминированный ответ без LLM: отказ по красной линии.
-  await page.getByLabel("Вопрос").fill("Поставь диагноз депрессии");
+  const question = "Поставь диагноз депрессии";
+  await page.getByLabel("Вопрос").fill(question);
+  // Кнопка активна ⇔ тред загружен и текст уже в состоянии React.
+  await expect(page.getByRole("button", { name: "Спросить" })).toBeEnabled();
   await page.getByLabel("Вопрос").press("Control+Enter");
-  await expect(page.getByText("Я не могу поставить диагноз")).toBeVisible();
+
+  // Кнопку не нажимали: пузырь вопроса — доказательство отправки по хоткею.
+  await expect(page.locator(".bubble.mine", { hasText: question })).toBeVisible();
+  await expect(page.getByLabel("Вопрос")).toHaveValue("");
+  // Ответ ассистента появляется (текст зависит от LLM/KB, проверяем наличие).
+  const answer = page.locator(".bubble", { hasText: "Ассистент" }).last();
+  await expect.poll(async () => (await answer.innerText()).trim().length).toBeGreaterThan(10);
 });

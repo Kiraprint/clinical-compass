@@ -85,4 +85,32 @@ test("оглавление карточки: чип «Динамика» рас�
     .poll(async () => (await dynamics.boundingBox())?.y ?? Infinity, { timeout: 5000 })
     .toBeLessThan(viewport.height / 2);
   expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+
+  // Липкая строка чипов не накрывает заголовок блока (scroll-margin-top).
+  const navBox = (await nav.boundingBox())!;
+  const box = (await dynamics.boundingBox())!;
+  expect(box.y).toBeGreaterThanOrEqual(navBox.y + navBox.height - 1);
+});
+
+test("оглавление карточки: на 390px чипы скроллятся вбок одной строкой", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 780 });
+  await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
+  await openSection(page, "Пациенты");
+  await page.locator('a[href^="#patient="]').first().click();
+  await expect(page.getByText("← Назад к списку")).toBeVisible();
+
+  const nav = page.getByRole("navigation", { name: "Разделы карточки пациента" });
+  await expect(nav).toBeVisible();
+  const metrics = await nav.evaluate((el) => ({
+    scrollWidth: el.scrollWidth,
+    clientWidth: el.clientWidth,
+    height: el.getBoundingClientRect().height,
+  }));
+  // Прокрутка вбок вместо переноса строк: ширина контента больше окна, высота — одна строка.
+  expect(metrics.scrollWidth).toBeGreaterThan(metrics.clientWidth);
+  expect(metrics.height).toBeLessThan(60);
+
+  // Липкость сохраняется: после прокрутки строка чипов прижата к верху окна.
+  await page.evaluate(() => window.scrollTo(0, 600));
+  await expect.poll(async () => (await nav.boundingBox())?.y ?? -1).toBe(0);
 });
