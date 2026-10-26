@@ -27,6 +27,7 @@ import hashlib
 import hmac
 import logging
 import uuid
+from datetime import timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -162,6 +163,36 @@ async def latest_delivery(db: AsyncSession, session_id) -> EmiasDelivery | None:
 # --- отправка ----------------------------------------------------------------
 
 
+def _age_seconds(row: EmiasDelivery, now) -> float:
+    """Сколько строка живёт в текущем статусе (по submitted_at/updated_at)."""
+    since = row.submitted_at or row.updated_at
+    if since is None:
+        return float("inf")
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    return (now - since).total_seconds()
+
+
+async def _lock_delivery(db: AsyncSession, delivery_id) -> EmiasDelivery:
+    """Строка доставки под FOR UPDATE: короткая транзакция записи результата."""
+    row = await db.scalar(
+        select(EmiasDelivery)
+        .where(EmiasDelivery.id == delivery_id)
+        .with_for_update()
+    )
+    assert row is not None  # строка создана/найдена этим же submit
+    return row
+
+
+async def _mark_registered(db: AsyncSession, row: EmiasDelivery) -> None:
+    """Перевести доставку и версию протокола в «зарегистрировано»."""
+    row.status = "registered"
+    row.registered_at = mapping.utcnow()
+    protocol = await db.get(SessionProtocol, row.protocol_id)
+    if protocol is not None and protocol.status == "signed":
+        protocol.status = "submitted"
+
+
 async def submit(
     db: AsyncSession,
     clinician_id,
@@ -170,7 +201,12 @@ async def submit(
     *,
     client: RemdClient | None = None,
 ) -> tuple[int, dict]:
-    """Отправить подписанный протокол. Возвращает (HTTP-код, Delivery)."""
+    """Отправить подписанный протокол. Возвращает (HTTP-код, Delivery).
+
+    Блокировка версии протокола держится только на решение о состоянии
+    (создать/взять строку доставки), затем коммит: сетевой вызов РЭМД идёт вне
+    транзакции, а результат пишется коротким `FOR UPDATE` по строке доставки.
+    """
     cfg = RemdConfig.from_settings()
     if not cfg.enabled:
         raise Problem(
@@ -178,95 +214,188 @@ async def submit(
         )
     session = await sessions.require_session(db, clinician_id, session_id)
     await sessions.require_patient_access(db, clinician_id, session.patient_id)
+    now = mapping.utcnow()
 
     protocol = await _signed_protocol(db, session.id, lock=True)
     if protocol is None:
         raise Problem(409, "PROTOCOL_NOT_SIGNED", "Передавать можно только подписанный протокол")
 
-    existing = await db.scalar(
+    row = await db.scalar(
         select(EmiasDelivery).where(EmiasDelivery.protocol_id == protocol.id)
     )
-    if existing is not None and existing.status != "failed":
-        # Повтор уже принятой/зарегистрированной версии: второй регистрации нет.
-        if existing.status in mapping.TERMINAL_STATUSES:
-            return 200, delivery_payload(existing)
-        return 202, delivery_payload(existing)
-
-    cda, signature, signature_der = await _prepared(db, session, protocol)
-    patient = await db.get(User, session.patient_id)
-    envelope = mapping.build_envelope(
-        cfg=cfg,
-        protocol_id=protocol.id,
-        version=protocol.version,
-        document_number_value=mapping.document_number(protocol.id, protocol.version),
-        cda=cda,
-        signature_der=signature_der,
-        patient_fio=patient.fio if patient else None,
-        patient_birth_date=patient.birth_date if patient else None,
-        patient_snils=None,
-        personals=_personals(await _protocol_rows(db, protocol.id)),
-    )
-    digest = hashlib.sha256(cda).hexdigest()
-
-    if existing is None:
-        row = EmiasDelivery(
-            session_id=session.id,
+    action = "register"
+    if row is not None and row.status in mapping.TERMINAL_STATUSES:
+        # Повтор уже зарегистрированной/отклонённой версии: второй регистрации нет.
+        await db.commit()
+        return 200, delivery_payload(row)
+    if row is not None and row.status == "sending":
+        if row.external_id:
+            action = "reconcile"
+        elif _age_seconds(row, now) < cfg.sending_stale_sec:
+            await db.commit()
+            return 202, delivery_payload(row)
+        # `sending` без callback'а дольше порога — передача потеряна, повторяем.
+        row.status = "sending"
+        row.attempts += 1
+        row.submitted_at = now
+        row.last_error_code = None
+        row.last_error_message = None
+    elif row is not None:
+        row.status = "sending"
+        row.attempts += 1
+        row.submitted_at = now
+        row.last_error_code = None
+        row.last_error_message = None
+    envelope: dict = {}
+    digest = ""
+    if action == "register":
+        cda, signature, signature_der = await _prepared(db, session, protocol)
+        patient = await db.get(User, session.patient_id)
+        envelope = mapping.build_envelope(
+            cfg=cfg,
             protocol_id=protocol.id,
-            status="queued",
-            local_document_uid=mapping.local_document_uid(protocol.id, protocol.version),
-            document_sha256=digest,
-            kind=cfg.document_kind,
-            attempts=0,
+            version=protocol.version,
+            document_number_value=mapping.document_number(protocol.id, protocol.version),
+            cda=cda,
+            signature_der=signature_der,
+            patient_fio=patient.fio if patient else None,
+            patient_birth_date=patient.birth_date if patient else None,
+            patient_snils=None,
+            personals=_personals(await _protocol_rows(db, protocol.id)),
         )
-        db.add(row)
-        await db.flush()
-    else:
-        row = existing
-    row.attempts += 1
-    row.status = "sending"
+        digest = hashlib.sha256(cda).hexdigest()
+        if row is None:
+            row = EmiasDelivery(
+                session_id=session.id,
+                protocol_id=protocol.id,
+                status="sending",
+                local_document_uid=mapping.local_document_uid(protocol.id, protocol.version),
+                document_sha256=digest,
+                kind=cfg.document_kind,
+                attempts=1,
+                submitted_at=now,
+            )
+            db.add(row)
+            await db.flush()
+        else:
+            row.document_sha256 = digest
+            row.kind = cfg.document_kind
+    await db.commit()  # блокировка версии снята до сети
 
     remd = client or RemdClient(cfg)
+
+    if action == "reconcile":
+        # emdr_id известен (например, callback был потерян, но реестр помнит
+        # документ): сверяемся с реестром, не отправляя повторно.
+        try:
+            info = await run_in_threadpool(remd.registry_item, row.external_id)
+        except RemdRejected as exc:
+            info = {"errors": [{"code": exc.code, "message": exc.message}]}
+        except Problem:
+            info = {}
+        row = await _lock_delivery(db, row.id)
+        if row.status == "sending":
+            state = str(info.get("status") or "").upper()
+            errors = info.get("errors") or []
+            if state == "REGISTERED":
+                await _mark_registered(db, row)
+                row.result = {
+                    "message_type": "registryItem",
+                    "status": "success",
+                    "emdr_id": row.external_id,
+                }
+            elif errors:
+                outcome = mapping.callback_outcome({"status": "error", "errors": errors})
+                row.status = outcome["status"]
+                row.last_error_code = outcome["error_code"]
+                row.last_error_message = outcome["error_message"]
+                row.result = outcome["result"]
+            elif _age_seconds(row, now) >= cfg.sending_stale_sec:
+                row.status = "failed"
+                row.last_error_code = "CALLBACK_TIMEOUT"
+                row.last_error_message = "Callback РЭМД не пришёл за отведённое время"
+        if row.status in mapping.TERMINAL_STATUSES:
+            await audit.record(
+                db, clinician_id, "EMIAS_SUBMIT", "session", str(session.id), ip=ip
+            )
+            await db.commit()
+            await db.refresh(row)
+            log.info("REMd reconciled protocol %s → %s", protocol.id, row.status)
+            return 200, delivery_payload(row)
+        if row.status == "sending":
+            await db.commit()
+            await db.refresh(row)
+            return 202, delivery_payload(row)
+        # reconcile дал `failed` — повторяем регистрацию тем же UID.
+        row.status = "sending"
+        row.attempts += 1
+        row.submitted_at = now
+        row.last_error_code = None
+        row.last_error_message = None
+        await db.commit()
+
+
     try:
         request_id = await run_in_threadpool(remd.register_document, envelope)
     except RemdRejected as exc:
-        row.status = "rejected"
-        row.last_error_code = exc.code
-        row.last_error_message = exc.message
-        row.result = {"message_type": "registerDocument", "status": "error",
-                      "errors": [{"code": exc.code, "message": exc.message}]}
+        row = await _lock_delivery(db, row.id)
+        if row.status not in mapping.TERMINAL_STATUSES:
+            # 403 (scope/конфигурация) и коды «повтор: да» — не приговор документу:
+            # это сбой контура, его лечит повтор тем же local_document_uid.
+            retryable = exc.status == 403 or exc.code in mapping.RETRYABLE_ERROR_CODES
+            row.status = "failed" if retryable else "rejected"
+            row.last_error_code = exc.code
+            row.last_error_message = exc.message
+            row.result = {
+                "message_type": "registerDocument",
+                "status": "error",
+                "errors": [{"code": exc.code, "message": exc.message}],
+            }
         await audit.record(
             db, clinician_id, "EMIAS_SUBMIT", "session", str(session.id), ip=ip
         )
         await db.commit()
-        log.info("REMd rejected protocol %s: %s", protocol.id, exc.code)
-        await db.refresh(row)  # updated_at считается на сервере, после commit истёк
+        log.info("REMd rejected protocol %s: %s (%s)", protocol.id, exc.code, row.status)
+        await db.refresh(row)
+        if row.status == "failed":
+            raise Problem(
+                502, "EMIAS_UNAVAILABLE", f"РЭМД недоступен (код {exc.code})"
+            ) from None
         return 202, delivery_payload(row)
     except Problem as exc:
-        row.status = "failed"
-        row.last_error_code = exc.code
-        row.last_error_message = exc.detail
+        row = await _lock_delivery(db, row.id)
+        if row.status not in mapping.TERMINAL_STATUSES:
+            row.status = "failed"
+            row.last_error_code = exc.code
+            row.last_error_message = exc.detail
         await audit.record(
             db, clinician_id, "EMIAS_SUBMIT", "session", str(session.id), ip=ip
         )
         await db.commit()
+        await db.refresh(row)
         raise
     except Exception:
-        row.status = "failed"
-        row.last_error_code = "EMIAS_UNAVAILABLE"
-        row.last_error_message = "Непредвиденная ошибка клиента РЭМД"
+        row = await _lock_delivery(db, row.id)
+        if row.status not in mapping.TERMINAL_STATUSES:
+            row.status = "failed"
+            row.last_error_code = "EMIAS_UNAVAILABLE"
+            row.last_error_message = "Непредвиденная ошибка клиента РЕМД"
         await audit.record(
             db, clinician_id, "EMIAS_SUBMIT", "session", str(session.id), ip=ip
         )
         await db.commit()
+        await db.refresh(row)
         raise
 
-    row.request_id = request_id
+    row = await _lock_delivery(db, row.id)
+    if row.status not in mapping.TERMINAL_STATUSES:
+        row.request_id = request_id
+        row.document_sha256 = digest
     await audit.record(db, clinician_id, "EMIAS_SUBMIT", "session", str(session.id), ip=ip)
     await db.commit()
     log.info("REMd accepted protocol %s request %s", protocol.id, request_id)
     await db.refresh(row)
     return 202, delivery_payload(row)
-
 
 # --- callback ----------------------------------------------------------------
 
@@ -286,6 +415,9 @@ def check_callback_token(token: str | None) -> RemdConfig:
 async def callback(db: AsyncSession, payload: dict, token: str | None) -> dict:
     """Приём `registerDocumentResult`. Идемпотентно, без клинической сессии."""
     cfg = check_callback_token(token)
+    if payload.get("lpu_uid") != cfg.lpu_uid:
+        # Чужой МО не может закрыть нашу доставку, даже зная request_id.
+        raise Problem(400, "VALIDATION_ERROR", "lpu_uid не совпадает с настройками")
     if payload.get("message_type") != "registerDocumentResult":
         # Callback-эндпоинт принимает только результат регистрации: иначе
         # getMetadataResult мог бы перевести доставку в registered.

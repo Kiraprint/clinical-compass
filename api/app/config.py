@@ -170,6 +170,12 @@ class Settings(BaseSettings):
     remd_timeout: float = 10.0  # CC_REMD_TIMEOUT
     remd_max_attempts: int = 3  # CC_REMD_MAX_ATTEMPTS
     remd_max_response_bytes: int = 4 * 1024 * 1024  # CC_REMD_MAX_RESPONSE_BYTES
+    # CC_REMD_RETRY_AFTER_CAP: потолок для Retry-After (шлюз может отдать 86400 с;
+    # ожидание идёт внутри submit, поэтому потолок обязателен).
+    remd_retry_after_cap: float = 60.0
+    # CC_REMD_SENDING_STALE_SEC: через сколько `sending` без callback'а считается
+    # потерянным и передача разрешается повторно.
+    remd_sending_stale_sec: int = 900
     # Демонстрационные данные СЭМД: СНИЛС пациента и вид документа НСИ 1520.
     # СНИЛС пациента в карточке не хранится (как и СНИЛС врача, docs/18 §7.2),
     # поэтому для демо-контура он берётся из конфигурации; в живом контуре —

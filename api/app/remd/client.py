@@ -39,8 +39,7 @@ _BACKOFF_BASE = 0.5
 _BACKOFF_CAP = 8.0
 _TOKEN_PATH = "/oauth/token"
 _REGISTER_PATH = "/remd/v1/register-document/"
-_METADATA_PATH = "/remd/v1/get-metadata/"
-_SEARCH_PATH = "/remd/v1/search-registry-item/"
+_SCOPE = "remd.write"
 _REGISTRY_PATH = "/remd/v1/registry/{emdr_id}"
 
 
@@ -97,13 +96,14 @@ class RemdClient:
         base = min(_BACKOFF_CAP, _BACKOFF_BASE * (2 ** (attempt - 1)))
         return base + self._rng.uniform(0, base / 4)
 
-    @staticmethod
-    def _retry_after(headers) -> float | None:
+    def _retry_after(self, headers) -> float | None:
         raw = headers.get("Retry-After") if headers else None
         if not raw:
             return None
         try:
-            return max(0.0, float(raw.strip()))
+            # Потолок обязателен: ожидание идёт внутри submit, `Retry-After: 86400`
+            # иначе замораживает поток и транзакцию на сутки.
+            return min(max(0.0, float(raw.strip())), self.cfg.retry_after_cap)
         except ValueError:
             return None  # HTTP-date игнорируем: сервер обязан отдать секунды
 
@@ -210,7 +210,7 @@ class RemdClient:
         _, body = self._call(
             "POST",
             _TOKEN_PATH,
-            form={"grant_type": "client_credentials"},
+            form={"grant_type": "client_credentials", "scope": _SCOPE},
             auth=False,
             basic=True,
         )
@@ -222,7 +222,8 @@ class RemdClient:
             ttl = float(expires_in)
         except (TypeError, ValueError):
             ttl = 60.0
-        self._tokens.put(str(access_token), ttl)
+        scopes = str(body.get("scope") or "").split()
+        self._tokens.put(str(access_token), ttl, scopes)
         return str(access_token)
 
     # --- контракт ------------------------------------------------------------
@@ -239,15 +240,6 @@ class RemdClient:
         if not request_id:
             raise Problem(502, "EMIAS_UNAVAILABLE", "РЭМД не вернул request_id")
         return str(request_id)
-
-    def get_metadata(self, emdr_id: str) -> str:
-        """Запросить метаданные зарегистрированного документа (202 → request_id)."""
-        _, body = self._call(
-            "POST",
-            _METADATA_PATH,
-            payload={"lpu_uid": self.cfg.lpu_uid, "emdr_id": emdr_id},
-        )
-        return str(body.get("request_id", ""))
 
     def registry_item(self, emdr_id: str) -> dict:
         """Элемент реестра (мок-only polling): status/errors/created_at."""

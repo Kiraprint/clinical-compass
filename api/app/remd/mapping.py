@@ -32,6 +32,9 @@ NSI_1520_KINDS = {
 
 DELIVERY_STATUSES = ("queued", "sending", "registered", "rejected", "failed")
 TERMINAL_STATUSES = frozenset({"registered", "rejected"})
+# Коды каталога НСИ, которые docs/18 §8.4 помечает «повтор: да»: такой ответ РЭМД
+# не «отказ в документе», а сбой, поэтому он даёт `failed` (повторяемо), не `rejected`.
+RETRYABLE_ERROR_CODES = frozenset({"RATE_LIMITED", "MIS_NOT_AVAILABLE", "INTERNAL_ERROR"})
 
 _SNILS_WEIGHTS = (9, 8, 7, 6, 5, 4, 3, 2, 1)
 
@@ -178,10 +181,11 @@ def callback_outcome(payload: dict) -> dict:
             "error_message": None,
             "result": result,
         }
+    code = str(first.get("code") or "INTERNAL_ERROR")[:64]
     return {
-        "status": "rejected",
+        "status": "failed" if code in RETRYABLE_ERROR_CODES else "rejected",
         "external_id": None,
-        "error_code": str(first.get("code") or "INTERNAL_ERROR")[:64],
+        "error_code": code,
         "error_message": str(first.get("message") or "РЭМД отклонил документ")[:400],
         "result": result,
     }

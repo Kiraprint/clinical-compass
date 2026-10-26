@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.config import settings
 from app.models import AuditLog
@@ -220,8 +220,12 @@ def test_concurrent_submit_registers_once(client, remd):
     results = asyncio.run(race())
     # Оба ответа 202: доставка ещё в `sending` (регистрация уже принята).
     assert [status for status, _ in results] == [202, 202]
-    request_ids = {payload["request_id"] for _, payload in results}
-    assert len(request_ids) == 1
+    # Второй submit мог ответить до того, как первый сохранил request_id:
+    # одинаковым обязан быть не ответ, а сама регистрация в РЭМД.
+    request_ids = {payload["request_id"] for _, payload in results if payload["request_id"]}
+    assert len(request_ids) <= 1
+    session_row = client.get(f"{BASE}/sessions/{session['id']}", headers=context["doctor"]).json()
+    assert session_row["delivery"]["request_id"] is not None
     entries = [e for e in mock.registry.values() if e.get("local_document_uid")]
     assert len(entries) == 1
     assert mock.module._register_calls == 1
@@ -281,3 +285,158 @@ def test_consent_gate(client, remd):
     response = _submit(client, context, session)
     assert response.status_code == 403
     assert response.json()["code"] == "CONSENT_REQUIRED"
+
+
+def test_stale_sending_is_retried(client, remd, monkeypatch):
+    """Потерянный callback: `sending` протухает и передача повторяется (P2)."""
+    mock, sink = remd
+    monkeypatch.setenv("CC_REMD_MOCK_CALLBACK_ATTEMPTS", "1")
+    sink.status = 500
+    session, context = _signed(client, "rd-stale")
+    assert _submit(client, context, session).status_code == 202
+    sink.wait_calls(1, timeout=10)
+    first = _delivery(client, context, session).json()
+    assert first["status"] == "sending" and first["external_id"] is None
+
+    monkeypatch.setattr(settings, "remd_sending_stale_sec", 0)
+    again = _submit(client, context, session)
+    assert again.status_code == 202
+    assert again.json()["status"] == "sending"
+    assert again.json()["attempts"] == 2
+    assert mock.module._register_calls == 2
+
+
+def test_sending_is_reconciled_against_registry(client, remd, db_session, monkeypatch):
+    """Если РЭМД уже знает emdr_id, повтор не отправляет документ, а сверяется (P2)."""
+    mock, sink = remd
+    monkeypatch.setenv("CC_REMD_MOCK_CALLBACK_ATTEMPTS", "1")
+    sink.status = 500
+    session, context = _signed(client, "rd-reconcile")
+    assert _submit(client, context, session).status_code == 202
+    sink.wait_calls(1, timeout=10)
+    delivery = db_session.execute(
+        text(
+            "SELECT id, request_id FROM emias_deliveries WHERE protocol_id = "
+            "(SELECT id FROM session_protocols WHERE session_id = CAST(:s AS uuid) "
+            "ORDER BY version DESC LIMIT 1)"
+        ).bindparams(s=session["id"])
+    ).one()
+    emdr_id = mock.registry[delivery.request_id]["emdr_id"]
+    db_session.execute(
+        text("UPDATE emias_deliveries SET external_id = :e WHERE id = :i").bindparams(
+            e=emdr_id, i=delivery.id
+        )
+    )
+    db_session.commit()
+    mock.registry[delivery.request_id]["status"] = "REGISTERED"
+
+    reconciled = _submit(client, context, session)
+    assert reconciled.status_code == 200
+    assert reconciled.json()["status"] == "registered"
+    assert reconciled.json()["external_id"] == emdr_id
+    assert mock.module._register_calls == 1  # повторной отправки не было
+
+
+def test_retryable_callback_codes_become_failed(client, remd):
+    """Сбои РЭМД (429/503/500 в каталоге) — `failed`, а не терминальный `rejected` (P2)."""
+    _, sink = remd
+    for prefix, code, expected in (
+        ("rd-rate", "RATE_LIMITED", "failed"),
+        ("rd-mis", "MIS_NOT_AVAILABLE", "failed"),
+        ("rd-internal", "INTERNAL_ERROR", "failed"),
+        ("rd-invalid", "INVALID_SIGNATURE", "rejected"),
+    ):
+        session, context = _signed(client, prefix)
+        assert _submit(client, context, session).status_code == 202
+        request_id = _delivery(client, context, session).json()["request_id"]
+        body = {
+            "from_system_id": "remd-mock",
+            "lpu_uid": settings.remd_lpu_uid,
+            "response_to_request_id": request_id,
+            "message_type": "registerDocumentResult",
+            "status": "error",
+            "errors": [{"code": code, "message": "сбой"}],
+        }
+        assert _callback(client, body).status_code == 200
+        result = _delivery(client, context, session).json()
+        assert result["status"] == expected, code
+        assert result["last_error_code"] == code
+
+
+def test_callback_with_foreign_lpu_is_rejected(client, remd):
+    """Чужой lpu_uid не закрывает нашу доставку (P3)."""
+    _, sink = remd
+    session, context = _signed(client, "rd-lpu")
+    assert _submit(client, context, session).status_code == 202
+    payload = sink.wait(timeout=15)["body"]
+    foreign = dict(payload, lpu_uid="1.2.643.5.1.13.13.12.2.99.9.9")
+    rejected = _callback(client, foreign)
+    assert rejected.status_code == 400
+    assert _delivery(client, context, session).json()["status"] == "sending"
+
+
+def test_forbidden_client_response_marks_failed(client, remd, monkeypatch):
+    """403 (scope) — сбой контура, а не отказ документу: `failed`, ответ 502 (P2/P3)."""
+    from app.remd.client import RemdClient, RemdRejected
+
+    def deny(self, envelope):
+        raise RemdRejected("INSUFFICIENT_SCOPE", "нет scope remd.write", 403)
+
+    monkeypatch.setattr(RemdClient, "register_document", deny)
+    session, context = _signed(client, "rd-403")
+    assert _submit(client, context, session).status_code == 502
+    result = _delivery(client, context, session).json()
+    assert result["status"] == "failed"
+    assert result["last_error_code"] == "INSUFFICIENT_SCOPE"
+
+
+def test_submit_does_not_hold_protocol_lock_during_network(client, remd, db_session, monkeypatch):
+    """Сеть РЭМД идёт вне транзакции: строка версии не заблокирована во время ответа (P1)."""
+    import asyncio
+    import threading
+    import time as _time
+
+    from app import db as db_module
+    from app.remd import service
+    from app.remd.client import RemdClient
+
+    session, context = _signed(client, "rd-lock")
+    protocol_id = db_session.execute(
+        text(
+            "SELECT id FROM session_protocols WHERE session_id = CAST(:s AS uuid) "
+            "ORDER BY version DESC LIMIT 1"
+        ).bindparams(s=session["id"])
+    ).scalar_one()
+    clinician_id = uuid.UUID(context["clinician_id"])
+    session_id = uuid.UUID(session["id"])
+    started, release = threading.Event(), threading.Event()
+
+    def slow(self, envelope):
+        started.set()
+        release.wait(10)
+        return "slow-request-id"
+
+    monkeypatch.setattr(RemdClient, "register_document", slow)
+
+    async def scenario():
+        async with db_module.AsyncSessionLocal() as first, db_module.AsyncSessionLocal() as second:
+            task = asyncio.create_task(service.submit(first, clinician_id, session_id))
+            deadline = _time.monotonic() + 10
+            while not started.is_set() and _time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            assert started.is_set(), "submit не дошёл до сети"
+            began = _time.monotonic()
+            await second.execute(
+                text("UPDATE session_protocols SET updated_at = now() WHERE id = :p"),
+                {"p": protocol_id},
+            )
+            await second.commit()
+            waited = _time.monotonic() - began
+            release.set()
+            status, payload = await task
+            return waited, status, payload
+
+    waited, status, payload = asyncio.run(scenario())
+    assert waited < 2.0, f"строка версии была заблокирована {waited:.1f} с"
+    assert status == 202 and payload["status"] == "sending"
+    assert payload["request_id"] == "slow-request-id"

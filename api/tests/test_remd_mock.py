@@ -54,7 +54,13 @@ def _register(api, token: str, body: dict, **params):
     )
 
 
-def _client(url: str, *, attempts: int = 3, sleeps: list | None = None) -> RemdClient:
+def _client(
+    url: str,
+    *,
+    attempts: int = 3,
+    sleeps: list | None = None,
+    retry_after_cap: float = 60.0,
+) -> RemdClient:
     cfg = RemdConfig(
         enabled=True,
         base_url=url,
@@ -66,6 +72,7 @@ def _client(url: str, *, attempts: int = 3, sleeps: list | None = None) -> RemdC
         allow_insecure=True,
         timeout=5,
         max_attempts=attempts,
+        retry_after_cap=retry_after_cap,
     )
     return RemdClient(cfg, sleep=(sleeps.append if sleeps is not None else lambda _s: None),
                       rng=random.Random(0))
@@ -306,3 +313,50 @@ def test_metadata_request_is_not_a_registry_item(api):
     assert reply.json()["request_id"] not in remd_mock._registry
     assert reply.json()["request_id"] in remd_mock._requests
     assert api.get(f"/remd/v1/registry/{emdr_id}").status_code == 200
+
+
+def test_client_caps_retry_after(monkeypatch):
+    """Retry-After от шлюза не может остановить submit на часы (P1)."""
+    sleeps: list[float] = []
+    with MockRemd() as remd:
+        monkeypatch.setenv("CC_REMD_MOCK_FORCE_STATUS", "429")
+        monkeypatch.setenv("CC_REMD_MOCK_RETRY_AFTER", "86400")
+        with pytest.raises(Problem):
+            _client(remd.url, attempts=2, sleeps=sleeps, retry_after_cap=2.0).register_document(
+                envelope()
+            )
+        assert sleeps == [2.0]
+
+
+def test_register_requires_submit_scope(api):
+    """Шаблон scope → 403 из мока ЕМИАС: без remd.write регистрации нет."""
+    narrow = api.post(
+        "/oauth/token",
+        auth=("compass-lpu", "remd-secret"),
+        data={"grant_type": "client_credentials", "scope": "registry.read"},
+    )
+    assert narrow.status_code == 200
+    assert narrow.json()["scope"] == "registry.read"
+    denied = _register(api, narrow.json()["access_token"], envelope())
+    assert denied.status_code == 403
+    assert denied.json()["errors"][0]["code"] == "INSUFFICIENT_SCOPE"
+
+
+def test_callback_retry_does_not_downgrade_registered(monkeypatch):
+    """Повторная доставка не может снять терминальный REGISTERED."""
+    with MockRemd() as remd, CallbackSink() as sink:
+        monkeypatch.setenv("CC_REMD_MOCK_CALLBACK_URL", sink.url)
+        request_id = _client(remd.url).register_document(envelope())
+        sink.wait_calls(1, timeout=10)
+        assert remd.registry[request_id]["status"] == "REGISTERED"
+
+        sink.status = 500
+        retry = urllib.request.Request(
+            f"{remd.url}/remd/v1/_test/callback-retry/{request_id}",
+            method="POST",
+            headers={"Authorization": f"Bearer {remd.token()}"},
+        )
+        with urllib.request.urlopen(retry, timeout=10) as response:
+            assert response.status == 200
+        assert sink.wait_calls(2, timeout=10)
+        assert remd.registry[request_id]["status"] == "REGISTERED"

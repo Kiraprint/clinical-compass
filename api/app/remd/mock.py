@@ -50,11 +50,13 @@ TOKEN_TTL = 3600
 DEFAULT_CLIENT_ID = "compass-lpu"
 DEFAULT_CLIENT_SECRET = "remd-secret"
 DEFAULT_LPU_UID = "1.2.643.5.1.13.13.12.2.77.1.1"
+SUBMIT_SCOPE = "remd.write"
 CALLBACK_HEADER = "X-Remd-Token"
 CDA_ROOT = "{urn:hl7-org:v3}ClinicalDocument"
 
 _lock = threading.Lock()
 _tokens: dict[str, float] = {}
+_scopes: dict[str, set[str]] = {}
 _fail_first_left: int | None = None
 _registry: dict[str, dict] = {}  # request_id → запись реестра
 _documents: dict[str, dict] = {}  # local_document_uid → {sha256, request_id}
@@ -71,6 +73,7 @@ def reset_state() -> None:
         _fail_first_left = None
         _register_calls = 0
         _tokens.clear()
+        _scopes.clear()
         _registry.clear()
         _documents.clear()
         _document_numbers.clear()
@@ -145,6 +148,19 @@ def _bearer_ok(request: Request) -> bool:
     with _lock:
         expires_at = _tokens.get(header[7:])
     return expires_at is not None and expires_at > time.monotonic()
+
+
+def _scopes_of(request: Request) -> set[str]:
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
+        return set()
+    with _lock:
+        return set(_scopes.get(header[7:], set()))
+
+
+def _forbidden_scope() -> JSONResponse:
+    """403 по шаблону мока ЕМИАС: не каталог НСИ, а нехватка scope у токена."""
+    return _error(403, "INSUFFICIENT_SCOPE", "токену нужен scope remd.write")
 
 
 def _unauthorized() -> JSONResponse:
@@ -265,6 +281,15 @@ def _callback_payload(entry: dict, message_type: str) -> dict:
     }
 
 
+def _client_success(body: bytes) -> bool:
+    """2xx считаем успехом доставки только при явном `{"status":"success"}`."""
+    try:
+        answer = json.loads(body or b"{}")
+    except ValueError:
+        return False
+    return isinstance(answer, dict) and answer.get("status") == "success"
+
+
 def _deliver(request_id: str) -> bool:
     """Доставить последний callback: настоящий HTTP POST, ретраи с backoff."""
     with _lock:
@@ -272,6 +297,7 @@ def _deliver(request_id: str) -> bool:
         payload = _callbacks.get(request_id)
     if entry is None or payload is None:
         return False
+    before = entry.get("status")
     url = _env("CC_REMD_MOCK_CALLBACK_URL", "") or entry.get("callback_url") or ""
     if not url:
         with _lock:
@@ -289,8 +315,9 @@ def _deliver(request_id: str) -> bool:
         request = urllib.request.Request(url, data=body, method="POST", headers=headers)
         try:
             with urllib.request.urlopen(request, timeout=5) as response:
-                response.read()
-                if response.status < 300:
+                answer = response.read()
+                accepted = response.status < 300 and _client_success(answer)
+                if accepted:
                     with _lock:
                         if payload.get("message_type") == "registerDocumentResult":
                             entry["status"] = "REGISTERED"
@@ -303,7 +330,8 @@ def _deliver(request_id: str) -> bool:
         if attempt < attempts and base_delay:
             time.sleep(base_delay * attempt)
     with _lock:
-        entry["status"] = "VALIDATING"
+        # Терминальный REGISTERED повторной доставкой не понижается.
+        entry["status"] = before or "VALIDATING"
         entry["updated_at"] = _now()
     return False
 
@@ -328,23 +356,36 @@ async def oauth_token(request: Request):
     if credentials != expected:
         return _error(401, "UNAUTHORIZED", "неверные client_id/client_secret")
     grant = ""
+    scope = ""
     content_type = request.headers.get("Content-Type", "")
     if "application/json" in content_type:
         try:
-            grant = (await request.json() or {}).get("grant_type", "")
+            form = await request.json() or {}
         except ValueError:
-            grant = ""
+            form = {}
+        grant, scope = form.get("grant_type", ""), form.get("scope", "")
     else:
         # application/x-www-form-urlencoded разбираем stdlib-ом: мок не тянет
         # python-multipart (он нужен только для загрузки файлов).
         raw = (await request.body()).decode("utf-8", "replace")
-        grant = (urllib.parse.parse_qs(raw).get("grant_type") or [""])[0]
+        fields = urllib.parse.parse_qs(raw)
+        grant = (fields.get("grant_type") or [""])[0]
+        scope = (fields.get("scope") or [""])[0]
     if grant != "client_credentials":
         return _error(400, "VALIDATION_ERROR", "grant_type=client_credentials")
+    # Без явного scope токен полноправный (совместимость с простыми клиентами);
+    # с явным — только перечисленное, и submit требует remd.write.
+    scopes = set(scope.split()) or {SUBMIT_SCOPE}
     token = uuid.uuid4().hex
     with _lock:
         _tokens[token] = time.monotonic() + TOKEN_TTL
-    return {"access_token": token, "token_type": "Bearer", "expires_in": TOKEN_TTL}
+        _scopes[token] = scopes
+    return {
+        "access_token": token,
+        "token_type": "Bearer",
+        "expires_in": TOKEN_TTL,
+        "scope": " ".join(sorted(scopes)),
+    }
 
 
 @app.post("/remd/v1/register-document/")
@@ -352,6 +393,8 @@ async def register_document(request: Request, tasks: BackgroundTasks):
     global _register_calls
     if not _bearer_ok(request):
         return _unauthorized()
+    if SUBMIT_SCOPE not in _scopes_of(request):
+        return _forbidden_scope()
     with _lock:
         _register_calls += 1
     try:

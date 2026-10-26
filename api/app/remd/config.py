@@ -44,6 +44,8 @@ class RemdConfig:
     timeout: float = 10.0
     max_attempts: int = 3
     max_response_bytes: int = 4 * 1024 * 1024
+    retry_after_cap: float = 60.0
+    sending_stale_sec: int = 900
     patient_snils: str = field(default="", repr=False)
     document_kind: int = 34
     org_name: str = ""
@@ -65,6 +67,8 @@ class RemdConfig:
             timeout=source.remd_timeout,
             max_attempts=source.remd_max_attempts,
             max_response_bytes=source.remd_max_response_bytes,
+            retry_after_cap=source.remd_retry_after_cap,
+            sending_stale_sec=source.remd_sending_stale_sec,
             patient_snils=source.remd_patient_snils,
             document_kind=source.remd_document_kind,
             org_name=source.remd_org_name,
@@ -98,6 +102,10 @@ class RemdConfig:
             raise RemdConfigError("CC_REMD_MAX_ATTEMPTS должен быть >= 1")
         if self.max_response_bytes <= 0:
             raise RemdConfigError("CC_REMD_MAX_RESPONSE_BYTES должен быть > 0")
+        if self.retry_after_cap <= 0:
+            raise RemdConfigError("CC_REMD_RETRY_AFTER_CAP должен быть > 0")
+        if self.sending_stale_sec < 0:
+            raise RemdConfigError("CC_REMD_SENDING_STALE_SEC должен быть >= 0")
         if self.callback_max_kb <= 0:
             raise RemdConfigError("CC_REMD_CALLBACK_MAX_KB должен быть > 0")
         if not self.enabled:
