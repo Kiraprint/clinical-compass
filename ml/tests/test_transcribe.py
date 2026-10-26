@@ -6,6 +6,8 @@ backend (faster-whisper) в CI не грузится — для него нуж�
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -100,12 +102,16 @@ def test_transcribe_language_override(monkeypatch):
     assert response.json()["language"] == "en"
 
 
-def test_transcribe_bad_language(monkeypatch):
+@pytest.mark.parametrize("language", ["ru-RU", "rus", "xx", "russian"])
+def test_transcribe_bad_language(monkeypatch, language):
+    """Код языка проверяется до бэкенда: иначе Whisper падает 500'ой."""
     app, _ = _app(monkeypatch)
     with TestClient(app) as client:
-        response = _post(client, language="ru-RU")
+        response = _post(client, language=language)
     assert response.status_code == 400
-    assert _detail(response)["code"] == "invalid_request"
+    detail = _detail(response)
+    assert detail["code"] == "invalid_request"
+    assert language in detail["message"]
 
 
 def test_transcribe_codecs_suffix_accepted(monkeypatch):
@@ -200,6 +206,8 @@ def test_transcribe_503_asr_disabled(monkeypatch):
         response = _post(client)
     assert response.status_code == 503
     assert _detail(response)["code"] == "asr_disabled"
+    # Выключенная фича повтором не лечится — Retry-After тут только путал бы.
+    assert response.headers.get("Retry-After") is None
 
 
 def test_transcribe_503_while_loading(monkeypatch):
@@ -230,3 +238,41 @@ def test_health_reports_asr_state(monkeypatch):
         after = client.get("/health").json()["models"]["asr"]
         assert after["status"] == "ready"
         assert after["model"] == "dropbox-dash/faster-whisper-large-v3-turbo"
+
+
+def test_transcribe_422_backend_failure(monkeypatch):
+    """Сбой бэкенда на самом аудио — 422 с конвертом, а не 500 text/plain."""
+    app, registry = _app(monkeypatch)
+
+    class _Broken:
+        model_id = "stub"
+        device = "stub"
+
+        def transcribe(self, data: bytes, language: str) -> dict:
+            raise ValueError("не декодируется")
+
+    registry._asr = _Broken()  # noqa: SLF001 — имитация сбоя декодера
+    with TestClient(app) as client:
+        response = _post(client)
+    assert response.status_code == 422, response.text
+    assert _detail(response)["code"] == "asr_failed"
+
+
+def test_transcribe_503_does_not_wait_for_loading(monkeypatch):
+    """Пока веса грузятся, ответ 503 отдаётся сразу, а не после загрузки."""
+    monkeypatch.setenv("CC_ML_ASR", "1")
+    registry = Registry(stub=True)
+    registry._status = "ready"  # noqa: SLF001 — модели поиска уже готовы
+    registry._asr_status = "loading"  # noqa: SLF001 — загрузчик держит замок
+    registry._asr_lock.acquire()  # noqa: SLF001
+    try:
+        with TestClient(create_app(registry, start_warmup=False)) as client:
+            started = time.perf_counter()
+            response = _post(client)
+            elapsed = time.perf_counter() - started
+    finally:
+        registry._asr_lock.release()  # noqa: SLF001
+    assert response.status_code == 503, response.text
+    assert _detail(response)["code"] == "model_loading"
+    # Замок занят «загрузкой» — запрос обязан ответить, не дожидаясь её.
+    assert elapsed < 1.0, elapsed

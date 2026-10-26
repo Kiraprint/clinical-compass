@@ -62,6 +62,17 @@ ASR_MEDIA_TYPES = frozenset(
         "audio/x-m4a",
     }
 )
+# Коды, которые понимает Whisper (faster_whisper.tokenizer._LANGUAGE_CODES).
+# Список статический: в stub-режиме и в CI faster-whisper не установлен, а
+# невалидный код иначе уходит в бэкенд и превращается в 500.
+ASR_LANGUAGES = frozenset(
+    """
+    af am ar as az ba be bg bn bo br bs ca cs cy da de el en es et eu fa fi fo
+    fr gl gu ha haw he hi hr ht hu hy id is it ja jw ka kk km kn ko la lb ln lo
+    lt lv mg mi mk ml mn mr ms mt my ne nl nn no oc pa pl ps pt ro ru sa sd si
+    sk sl sn so sq sr su sv sw ta te tg th tk tl tr tt uk ur uz vi yi yo yue zh
+    """.split()
+)
 # Оценка длительности в stub: 16 кГц, mono, int16 — без декодирования.
 _ASR_STUB_BYTES_PER_S = 32_000
 _ASR_STUB_SEGMENT_S = 5.0
@@ -180,6 +191,10 @@ class ASRUnavailable(RuntimeError):
     """Веса ASR не загрузились (текст ошибки остаётся в логах)."""
 
 
+class ASRFailed(RuntimeError):
+    """Бэкенд не смог обработать аудио (декодирование/распознавание)."""
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -197,6 +212,13 @@ def asr_max_mb() -> int:
         raise RuntimeError(f"CC_ML_ASR_MAX_MB: ожидалось целое число ({raw!r})") from exc
     if value <= 0:
         raise RuntimeError("CC_ML_ASR_MAX_MB: должно быть больше нуля")
+    return value
+
+def asr_language(raw: str) -> str:
+    """Код языка Whisper в нижнем регистре; незнакомый — ValueError."""
+    value = (raw or "").strip().lower()
+    if value not in ASR_LANGUAGES:
+        raise ValueError(f"language {raw!r} не поддерживается: нужен код ISO (ru, en, ...)")
     return value
 
 def load_profiles() -> dict[str, EmbedProfile]:
@@ -767,7 +789,14 @@ class Registry:
     # -- ASR ---------------------------------------------------------------
 
     def _start_asr(self) -> None:
-        """Фоновая загрузка весов ASR ровно один раз (не блокирует запрос)."""
+        """Фоновая загрузка весов ASR ровно один раз.
+
+        Быстрый путь без замка: во время самой загрузки `_asr_lock` держит
+        загрузчик, и запрос обязан отвечать 503 сразу, а не ждать десятки
+        секунд на этом замке.
+        """
+        if self._asr_status != "idle":
+            return
         with self._asr_lock:
             if self._asr_status != "idle":
                 return
@@ -812,22 +841,30 @@ class Registry:
             return self._asr
 
     def asr(self) -> Any:
-        """Бэкенд ASR или 503-причина (loading/unavailable/disabled)."""
+        """Бэкенд ASR или причина 503 (loading/unavailable/disabled)."""
         if not self.asr_enabled:
             raise ASRDisabled()
         backend = self._asr
         if backend is not None:
             return backend
-        if self._asr_status == "error":
+        status = self._asr_status
+        if status == "error":
             raise ASRUnavailable()
-        self._start_asr()
+        if status == "idle":
+            self._start_asr()
+        # "loading" — тоже сюда: 503 model_loading с Retry-After, без ожидания.
         raise ModelNotReady()
 
     def transcribe(self, data: bytes, language: str, *, diarize: bool = False) -> dict:
         self._require_ready()
+        code = asr_language(language)
         backend = self.asr()
         started = time.perf_counter()
-        raw = backend.transcribe(data, language)
+        try:
+            raw = backend.transcribe(data, code)
+        except Exception as exc:  # noqa: BLE001 — сбой бэкенда не должен быть 500
+            log.exception("ASR не смог обработать аудио")
+            raise ASRFailed() from exc
         elapsed = time.perf_counter() - started
         duration = float(raw.get("duration_s") or 0.0)
         segments = [
@@ -849,7 +886,7 @@ class Registry:
             "duration_s": round(duration, 3),
             # RTF < 1 — быстрее реального времени; 0 при отсутствии аудио.
             "rtf": round(elapsed / duration, 4) if duration > 0 else 0.0,
-            "language": str(raw.get("language") or language),
+            "language": str(raw.get("language") or code),
             "segments": segments,
             "speakers": [],
             # diarize=true без реализации — честный degraded, а не тихая подмена.

@@ -16,9 +16,11 @@ CC_ML_ALLOW_ANONYMOUS=1):
 ответ как отказ backend'а (docs/12).
 
 ``/v1/transcribe`` выключен по умолчанию (CC_ML_ASR=0) и отвечает 503
-``asr_disabled``; пока веса ASR грузятся — 503 ``model_loading``. Диаризация
-не реализована, поэтому ``diarize=true`` — всегда ``degraded=true`` со
-``speaker: null`` (см. ml/README.md).
+``asr_disabled``; пока веса ASR грузятся — 503 ``model_loading`` (ответ
+отдаётся сразу, без ожидания замка загрузчика); сбой декодирования на самом
+аудио — 422 ``asr_failed``. Код языка сверяется с ``ASR_LANGUAGES`` до
+бэкенда (иначе 400). Диаризация не реализована, поэтому ``diarize=true`` —
+всегда ``degraded=true`` со ``speaker: null`` (см. ml/README.md).
 
 Ошибки всегда структурированы: ``{"detail": {"code": ..., "message": ...}}``.
 Пока модели грузятся — 503 ``model_loading`` (с Retry-After); упавшая
@@ -49,11 +51,13 @@ from models import (
     MAX_NAMES,
     MAX_TEXTS,
     ASRDisabled,
+    ASRFailed,
     ASRUnavailable,
     ModelNotReady,
     Registry,
     UnknownProfile,
     asr_max_mb,
+    asr_language,
     public_model_name,
 )
 
@@ -186,8 +190,10 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
 
     @app.exception_handler(ApiError)
     async def _api_error(request: Request, exc: ApiError) -> JSONResponse:  # noqa: ARG001
-        headers = {"Retry-After": "10"} if exc.status_code == 503 else None
-        return _error(exc.status_code, exc.code, exc.message, headers)
+        # Retry-After — только для временных состояний: выключенная фича или
+        # несовместимый запрос повтором не лечатся.
+        retryable = exc.status_code == 503 and exc.code in {"model_loading", "model_unavailable"}
+        return _error(exc.status_code, exc.code, exc.message, {"Retry-After": "10"} if retryable else None)
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:  # noqa: ARG001
@@ -285,7 +291,9 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
         return registry.mask(body.text, body.names)
 
 
-    @app.post("/v1/transcribe", dependencies=[Depends(require_token), Depends(require_ready)])
+    # Без Depends(require_ready): порядок проверок важен — выключенную
+    # транскрипцию и кривой язык надо назвать до ответа про загрузку моделей.
+    @app.post("/v1/transcribe", dependencies=[Depends(require_token)])
     def transcribe(
         file: UploadFile = File(..., description="аудио сессии: webm/ogg/wav/mpeg/mp4/m4a"),
         language: str = Form(default=ASR_DEFAULT_LANGUAGE),
@@ -312,10 +320,10 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
                 f"тип {media_type or 'unknown'!r} не поддерживается: "
                 "нужен audio/webm|ogg|wav|mpeg|mp4|m4a",
             )
-        if not language.strip().lower().isalpha() or not 2 <= len(language.strip()) <= 3:
-            raise ApiError(
-                400, "invalid_request", "language: ожидался код языка (ru, en, ...)"
-            )
+        try:
+            code = asr_language(language)
+        except ValueError as exc:
+            raise ApiError(400, "invalid_request", str(exc)) from exc
         limit = asr_max_mb() * 1024 * 1024
         file.file.seek(0, os.SEEK_END)
         size = file.file.tell()
@@ -326,12 +334,20 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
         if not data:
             raise ApiError(400, "invalid_request", "пустой файл")
         try:
-            return registry.transcribe(data, language.strip().lower(), diarize=diarize)
+            return registry.transcribe(data, code, diarize=diarize)
         except ASRDisabled as exc:
             raise ApiError(503, "asr_disabled", str(exc) or "транскрипция выключена") from exc
         except ASRUnavailable as exc:
             raise ApiError(
                 503, "model_unavailable", "веса ASR не загрузились, подробности — в логах"
+            ) from exc
+        except ASRFailed as exc:
+            # Декодирование/распознавание упало на самом аудио — это 422, а не 500.
+            raise ApiError(
+                422,
+                "asr_failed",
+                "аудио не удалось обработать (декодирование/распознавание), "
+                "подробности — в логах сайдкара",
             ) from exc
 
     @app.get("/v1/profiles", dependencies=[Depends(require_token)])
