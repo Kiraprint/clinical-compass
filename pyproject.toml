@@ -18,4 +18,6 @@ dev = [
     "pytest-cov>=4",
     "httpx>=0.27",
     "pip-audit>=2.7",
+    # Разбор multipart в ml/tests (FastAPI Form/File без него не стартует).
+    "python-multipart>=0.0.32",
 ]

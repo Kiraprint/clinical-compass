@@ -7,11 +7,20 @@ CC_ML_ALLOW_ANONYMOUS=1):
 - ``POST /v1/embeddings`` {texts, kind, profile} -> {profile, dense_size, vectors}
 - ``POST /v1/rerank`` {query, documents, top_k} -> {scores}
 - ``POST /v1/mask`` {text, names} -> {text, spans, model, degraded}
+- ``POST /v1/transcribe`` multipart {file, language=ru, diarize=false} ->
+  {model, device, duration_s, rtf, language, segments, speakers, degraded}
 - ``GET  /health`` -> {status, device, models, error: bool}
 
 ``model`` в ответе маскирования — ``hybrid`` только когда NER реально
 отработал; ``regex`` + ``degraded=true`` означают, что api обязан трактовать
 ответ как отказ backend'а (docs/12).
+
+``/v1/transcribe`` выключен по умолчанию (CC_ML_ASR=0) и отвечает 503
+``asr_disabled``; пока веса ASR грузятся — 503 ``model_loading`` (ответ
+отдаётся сразу, без ожидания замка загрузчика); сбой декодирования на самом
+аудио — 422 ``asr_failed``. Код языка сверяется с ``ASR_LANGUAGES`` до
+бэкенда (иначе 400). Диаризация не реализована, поэтому ``diarize=true`` —
+всегда ``degraded=true`` со ``speaker: null`` (см. ml/README.md).
 
 Ошибки всегда структурированы: ``{"detail": {"code": ..., "message": ...}}``.
 Пока модели грузятся — 503 ``model_loading`` (с Retry-After); упавшая
@@ -28,20 +37,29 @@ import secrets
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import Depends, FastAPI, File, Form, Header, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import models
 from models import (
+    ASR_DEFAULT_LANGUAGE,
+    ASR_MEDIA_TYPES,
     MAX_CHARS,
     MAX_DOCUMENTS,
     MAX_NAMES,
+    ASRBusy,
     MAX_TEXTS,
+    ASRDisabled,
+    ASRFailed,
+    ASRUnavailable,
     ModelNotReady,
     Registry,
     UnknownProfile,
+    asr_max_mb,
+    asr_language,
     public_model_name,
 )
 
@@ -56,6 +74,8 @@ _BODY_LIMITS = {
     "/v1/rerank": 24 * 1024 * 1024,
     "/v1/mask": 1 * 1024 * 1024,
 }
+# ASR-лимит считается от CC_ML_ASR_MAX_MB уже в create_app: эндпоинт читает
+# файл целиком и режет по точному размеру (см. transcribe ниже).
 
 class ApiError(Exception):
     """Ошибка с машинным кодом и человекочитаемым сообщением."""
@@ -172,8 +192,29 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
 
     @app.exception_handler(ApiError)
     async def _api_error(request: Request, exc: ApiError) -> JSONResponse:  # noqa: ARG001
-        headers = {"Retry-After": "10"} if exc.status_code == 503 else None
+        # Retry-After — только для временных состояний: выключенная фича или
+        # несовместимый запрос повтором не лечатся. busy — короткая пауза:
+        # чужое распознавание обычно занимает секунды, а не десятки.
+        if exc.status_code == 503 and exc.code in {"model_loading", "model_unavailable"}:
+            headers: dict[str, str] | None = {"Retry-After": "10"}
+        elif exc.code == "busy":
+            headers = {"Retry-After": "5"}
+        else:
+            headers = None
         return _error(exc.status_code, exc.code, exc.message, headers)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:  # noqa: ARG001
+        """Starlette-ошибки (python-multipart, 404, 405) — в тот же конверт.
+
+        Иначе multipart отвечает ``{"detail": "строка"}`` и api, разбирающий
+        ``detail.code``, падает на живой сессии.
+        """
+        code = "invalid_request" if exc.status_code < 500 else "internal_error"
+        message = str(exc.detail) if exc.detail else "некорректный запрос"
+        # Заголовки Starlette не теряем: у 405 это Allow, без него клиент не
+        # узнает допустимые методы.
+        return _error(exc.status_code, code, message, dict(exc.headers or {}))
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:  # noqa: ARG001
@@ -210,15 +251,23 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
             raise ModelNotReady()
         return registry
 
+    # Лимит тела для транскрипции: аудио + ~64 КБ мультипарт-обвязки.
+    # Ставим всегда, даже при CC_ML_ASR=0: иначе гигабайтная загрузка
+    # спулится на диск целиком, и только потом приходит 503 asr_disabled.
+    # asr_max_mb() не бросает — кривой env даёт дефолт с предупреждением.
+    limits = dict(_BODY_LIMITS)
+    limits["/v1/transcribe"] = asr_max_mb() * 1024 * 1024 + 64 * 1024
+
     @app.middleware("http")
     async def _limit_body(request: Request, call_next):  # noqa: ANN001 — сигнатура Starlette
         """Отсечь гигантское тело по Content-Length до парсинга JSON.
 
         Лимиты в разы ниже максимального валидного тела под MAX_* из
-        models.py (64/256 текстов по 20 000 символов); token-проверка
-        остаётся первой зависимостью эндпоинта.
+        models.py (64/256 текстов по 20 000 символов), у транскрипции —
+        CC_ML_ASR_MAX_MB плюс мультипарт-обвязка; token-проверка остаётся
+        первой зависимостью эндпоинта.
         """
-        limit = _BODY_LIMITS.get(request.url.path)
+        limit = limits.get(request.url.path)
         if limit is not None and request.method == "POST":
             raw = request.headers.get("content-length")
             if raw is None:
@@ -264,6 +313,73 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
     @app.post("/v1/mask", dependencies=[Depends(require_token), Depends(require_ready)])
     def mask(body: MaskRequest) -> dict:
         return registry.mask(body.text, body.names)
+
+
+    # Без Depends(require_ready): порядок проверок важен — выключенную
+    # транскрипцию и кривой язык надо назвать до ответа про загрузку моделей.
+    @app.post("/v1/transcribe", dependencies=[Depends(require_token)])
+    def transcribe(
+        file: UploadFile = File(..., description="аудио сессии: webm/ogg/wav/mpeg/mp4/m4a"),
+        language: str = Form(default=ASR_DEFAULT_LANGUAGE),
+        diarize: bool = Form(default=False),
+    ) -> dict:
+        """Русская расшифровка аудио сессии (§4.3 «Клинические сессии»).
+
+        Аудио читается целиком: потолок — CC_ML_ASR_MAX_MB (200 МБ ≈ 3 часа
+        opus), размер проверяется и по Content-Length, и по факту. Диаризация
+        не реализована (веса pyannote gated): ``diarize=true`` возвращает
+        ``degraded=true``, спикеры — null и пустой список.
+        """
+        if not registry.asr_enabled:
+            raise ApiError(
+                503,
+                "asr_disabled",
+                "транскрипция выключена: CC_ML_ASR=0 (включите CC_ML_ASR=1)",
+            )
+        media_type = (file.content_type or "").split(";")[0].strip().lower()
+        if media_type not in ASR_MEDIA_TYPES:
+            raise ApiError(
+                415,
+                "unsupported_media",
+                f"тип {media_type or 'unknown'!r} не поддерживается: "
+                "нужен audio/webm|ogg|wav|mpeg|mp4|m4a",
+            )
+        try:
+            code = asr_language(language)
+        except ValueError as exc:
+            raise ApiError(400, "invalid_request", str(exc)) from exc
+        limit = asr_max_mb() * 1024 * 1024
+        file.file.seek(0, os.SEEK_END)
+        size = file.file.tell()
+        file.file.seek(0)
+        if size > limit:
+            raise ApiError(413, "payload_too_large", f"аудио больше {limit} байт")
+        if not size:
+            raise ApiError(400, "invalid_request", "пустой файл")
+        # Отдаём спуленый файл как есть: backend читает его сам, без лишней
+        # копии в bytes (200 МБ аудио = 200 МБ лишней RAM на запрос).
+        try:
+            return registry.transcribe(file.file, code, diarize=diarize)
+        except ASRBusy as exc:
+            raise ApiError(
+                503,
+                "busy",
+                "распознавание занято другим запросом, повторите через несколько секунд",
+            ) from exc
+        except ASRDisabled as exc:
+            raise ApiError(503, "asr_disabled", str(exc) or "транскрипция выключена") from exc
+        except ASRUnavailable as exc:
+            raise ApiError(
+                503, "model_unavailable", "веса ASR не загрузились, подробности — в логах"
+            ) from exc
+        except ASRFailed as exc:
+            # Декодирование/распознавание упало на самом аудио — это 422, а не 500.
+            raise ApiError(
+                422,
+                "asr_failed",
+                "аудио не удалось обработать (декодирование/распознавание), "
+                "подробности — в логах сайдкара",
+            ) from exc
 
     @app.get("/v1/profiles", dependencies=[Depends(require_token)])
     def profiles() -> dict:

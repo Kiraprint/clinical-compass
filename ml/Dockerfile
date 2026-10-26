@@ -19,10 +19,19 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
+# Внешний ffmpeg для /v1/transcribe не нужен: PyAV (зависимость faster-whisper)
+# несёт собственные FFmpeg-библиотеки, а CUDA-рантайм CTranslate2 берёт
+# libcublas/libcudnn из nvidia-колёс torch.
+
 WORKDIR /app
 
 # torch отдельным слоем: cu128-колёса тяжёлые и меняются реже кода.
 RUN pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.11.0
+
+# CTranslate2 (faster-whisper) ищет libcublas/libcudnn через ldconfig, а они
+# лежат в nvidia-колёсах torch; torch подхватывает их сам, поэтому без явного
+# LD_LIBRARY_PATH ASR работает только если torch успел загрузиться в процесс.
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib
 COPY ml/requirements.txt /app/requirements.txt
 RUN pip install -r /app/requirements.txt
 
