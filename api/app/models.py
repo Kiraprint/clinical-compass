@@ -957,6 +957,11 @@ class ClinicalSession(Base):
     # Код последнего сбоя ИИ-конвейера (§4.3): расшифровка упала — в detail видны
     # `ai_status='failed'` и код (AUDIO_MISSING/ML_UNAVAILABLE/…), без текста.
     ai_error: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    # Момент запуска расшифровки: реапер отличает живую задачу от зависшей
+    # после рестарта воркера (docs/18 §4.3).
+    ai_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )

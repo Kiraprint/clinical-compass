@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.responses import JSONResponse
 
 
@@ -78,8 +79,25 @@ async def pool_timeout_handler(request: Request, exc: Exception) -> JSONResponse
     )
 
 
+async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    """HTTP-исключения Starlette/FastAPI — в тот же Problem-конверт.
+
+    Без явного обработчика `{"detail": ...}` (битый multipart, несовпадение
+    метода, 404 роутера) ломал единый формат ошибок для клиента.
+    """
+    code = {404: "NOT_FOUND", 405: "METHOD_NOT_ALLOWED", 413: "PAYLOAD_TOO_LARGE"}.get(
+        exc.status_code, "HTTP_ERROR"
+    )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=_problem(exc.status_code, code, str(exc.detail), str(request.url.path)),
+        headers=getattr(exc, "headers", None) or None,
+    )
+
+
 def register_handlers(app) -> None:
     app.add_exception_handler(Problem, problem_handler)
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_handler)
     app.add_exception_handler(ValueError, value_error_handler)
     # sqlalchemy.exc.TimeoutError — исчерпан пул (см. CC_DB_POOL_TIMEOUT).

@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import uuid
 from pathlib import Path
+from typing import Iterable, Iterator
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
@@ -32,6 +35,7 @@ NONCE_BYTES = 12  # AES-GCM: 96-бит nonce (RFC 5116 §5.1)
 KEY_BYTES = 32  # AES-256
 HKDF_INFO = b"cc-artifacts-v1"  # смена info = смена поколения ключа артефактов
 TAG_BYTES = 16
+CHUNK_BYTES = 1024 * 1024  # размер порции при потоковой записи/чтении
 
 # §3.6: закрытый список видов — ограничение задано в БД (CHECK) и здесь, чтобы
 # ошибка была 422, а не 500 от constraint.
@@ -115,6 +119,169 @@ def put_bytes(
         mime=mime,
         encrypted=True,
     )
+
+
+def put_stream(
+    kind: str,
+    chunks: Iterable[bytes],
+    *,
+    session_id: uuid.UUID | None = None,
+    protocol_id: uuid.UUID | None = None,
+    mime: str,
+) -> DocumentArtifact:
+    """`put_bytes` без буферизации: шифрует порции по мере поступления.
+
+    Нужен загрузке аудио сессии (docs/18 §4.6): 200 МБ в память не читаются,
+    шифротекст пишется в файл сразу. Пока порции идут, на диске лежит только
+    `.tmp` с шифротекстом; при любом сбое он удаляется.
+    """
+    if kind not in KINDS:
+        raise Problem(422, "ARTIFACT_KIND_UNKNOWN", f"Неизвестный вид артефакта: {kind}")
+
+    root = _root()
+    rel = f"{kind}/{uuid.uuid4().hex}.bin"
+    target = root / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(".tmp")
+    nonce = os.urandom(NONCE_BYTES)
+    encryptor = Cipher(algorithms.AES(_key()), modes.GCM(nonce)).encryptor()
+    digest = hashlib.sha256()
+    size = 0
+
+    def _write(fh, blob: bytes) -> None:
+        nonlocal size
+        fh.write(blob)
+        digest.update(blob)
+        size += len(blob)
+
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            _write(fh, MAGIC + nonce)
+            for chunk in chunks:
+                if chunk:
+                    _write(fh, encryptor.update(chunk))
+            _write(fh, encryptor.finalize())
+            _write(fh, encryptor.tag)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+    return DocumentArtifact(
+        kind=kind,
+        session_id=session_id,
+        protocol_id=protocol_id,
+        path=rel,
+        sha256=digest.hexdigest(),
+        size_bytes=size,
+        mime=mime,
+        encrypted=True,
+    )
+
+
+def _artifact_path(artifact: DocumentArtifact) -> Path:
+    root = _root().resolve()
+    path = (root / artifact.path).resolve()
+    if root not in path.parents:
+        raise Problem(500, "ARTIFACT_CORRUPT", "Путь артефакта вне CC_ARTIFACTS_DIR")
+    return path
+
+
+def iter_plaintext(artifact: DocumentArtifact) -> Iterator[bytes]:
+    """Расшифровать артефакт порциями (по `CHUNK_BYTES`), не читая файл целиком.
+
+    Хэш сверяется по шифротексту на лету; тег GCM проверяется при `finalize`,
+    т.е. до этого места вызывающий уже записал часть открытого текста. Для
+    аудио сессии это допустимо: при провале тега вызывающий удаляет свой
+    временный файл (см. `decrypt_to_temp`).
+    """
+    path = _artifact_path(artifact)
+    try:
+        handle = path.open("rb")
+    except FileNotFoundError:
+        raise Problem(500, "ARTIFACT_MISSING", "Файл артефакта отсутствует")
+    with handle:
+        head = handle.read(len(MAGIC) + NONCE_BYTES)
+        if len(head) < len(MAGIC) + NONCE_BYTES:
+            raise Problem(500, "ARTIFACT_CORRUPT", "Артефакт обрезан")
+        if not head.startswith(MAGIC):
+            raise Problem(500, "ARTIFACT_CORRUPT", "Неизвестный формат артефакта")
+        nonce = head[len(MAGIC) : len(MAGIC) + NONCE_BYTES]
+        total = handle.seek(0, os.SEEK_END)
+        body_bytes = total - len(head) - TAG_BYTES
+        if body_bytes < 0:
+            raise Problem(500, "ARTIFACT_CORRUPT", "Артефакт обрезан")
+        # GCM-тег — в конце файла; хэш считается в файловом порядке байт.
+        handle.seek(total - TAG_BYTES)
+        tag = handle.read(TAG_BYTES)
+        handle.seek(len(head))
+        decryptor = Cipher(algorithms.AES(_key()), modes.GCM(nonce, tag)).decryptor()
+        digest = hashlib.sha256(head)
+
+        remaining = body_bytes
+        while remaining > 0:
+            chunk = handle.read(min(CHUNK_BYTES, remaining))
+            if not chunk:
+                raise Problem(500, "ARTIFACT_CORRUPT", "Артефакт обрезан")
+            remaining -= len(chunk)
+            digest.update(chunk)
+            plain = decryptor.update(chunk)
+            if plain:
+                yield plain
+        digest.update(tag)
+        if digest.hexdigest() != artifact.sha256:
+            raise Problem(
+                500, "ARTIFACT_CORRUPT", "Хэш артефакта не совпадает с метаданными"
+            )
+        try:
+            decryptor.finalize()
+        except InvalidTag:
+            raise Problem(500, "ARTIFACT_CORRUPT", "Артефакт повреждён или подменён") from None
+
+
+def decrypt_to_temp(artifact: DocumentArtifact) -> Path:
+    """Расшифровать артефакт в файл 0600 под `CC_ARTIFACTS_DIR/tmp`.
+
+    Открытый текст нужен внешнему потребителю (ASR-сайдкар принимает файл), но
+    в память целиком не поднимается. Файл обязательно удаляет вызывающий —
+    окно открытого текста на диске ограничено временем запроса.
+    """
+    tmp_dir = _root() / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    target = tmp_dir / f"{uuid.uuid4().hex}.plain"
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            for chunk in iter_plaintext(artifact):
+                fh.write(chunk)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
+    return target
+
+
+def temp_dir() -> Path:
+    """Каталог временных файлов расшифровки (для проверок и уборки)."""
+    return _root() / "tmp"
+
+
+def purge_temp() -> int:
+    """Удалить остатки открытого текста из `tmp` (старт приложения).
+
+    Штатно файл удаляет `_pipeline` в `finally`, но убитый процесс оставить его
+    мог: открытый текст аудио не должен переживать рестарт.
+    """
+    removed = 0
+    for path in temp_dir().glob("*"):
+        if path.is_file():
+            path.unlink(missing_ok=True)
+            removed += 1
+    return removed
 
 
 def get_bytes(artifact: DocumentArtifact) -> bytes:

@@ -315,14 +315,21 @@ class Settings(BaseSettings):
             # LLM-egress, regex-пути недостаточно (свободные ФИО не в ростре
             # утекали). Прод обязан иметь ML-backend; недоступность модели на
             # старте/в запросе даст 503 DEPERSONALIZATION_UNAVAILABLE.
-            if self.assistant_llm_url.strip() or self.chat_insights_enabled:
+            if (
+                self.assistant_llm_url.strip()
+                or self.chat_insights_enabled
+                # §4.3: аудио сессии уходит в ML-сайдкар и расшифровка хранится,
+                # поэтому ИИ-блок сессии — такой же PHI-egress, как чат.
+                or self.session_ai_enabled
+            ):
                 # Два допустимых прод-контура (docs/12): GPU-sidecar по HTTP
                 # (remote + CC_ML_URL, рекомендуется) или локальный extra
                 # (rubert/natasha/hybrid, torch внутри api-образа).
                 backend = str(self.depersonalize_ner).strip().lower()
                 if backend in ("", "off", "false", "0", "none", "no"):
                     raise ValueError(
-                        "CC_PROD_MODE с LLM-egress требует ML-деперсонализацию: "
+                        "CC_PROD_MODE с egress в LLM/ML (чат, инсайты, ИИ-блок "
+                        "сессии) требует ML-деперсонализацию: "
                         "CC_DEPERSONALIZE_NER=remote + CC_ML_URL (GPU-sidecar, "
                         "рекомендуется) либо hybrid/rubert/natasha + extra "
                         "api[ner-rubert]"

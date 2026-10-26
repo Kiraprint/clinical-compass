@@ -50,6 +50,11 @@ async def lifespan(app: FastAPI):
         # Общий счётчик логинов (docs/03 §12): PING Redis на старте фиксирует
         # режим до первого запроса; недоступный Redis — WARNING и memory, не 500.
         await asyncio.to_thread(ratelimit.init_backend)
+        # Задачи расшифровки не переживают процесс: строки, застрявшие в
+        # `transcribing`, возвращаем в failed (docs/18 §4.3).
+        await _reap_stale_sessions()
+        # Открытый текст аудио не должен переживать рестарт процесса (§4.6).
+        await _purge_artifacts_tmp()
         yield
     finally:
         # Закрываем пулы явно: иначе при рестарте/перезагрузке процесса воркеры
@@ -58,6 +63,30 @@ async def lifespan(app: FastAPI):
             await db.engine.dispose()
         if db.sync_engine is not None:
             await asyncio.to_thread(db.sync_engine.dispose)
+
+
+async def _purge_artifacts_tmp() -> None:
+    """Старт приложения: убрать осиротевшие расшифрованные файлы из `tmp`."""
+    from .services import artifacts
+
+    try:
+        await asyncio.to_thread(artifacts.purge_temp)
+    except OSError:  # noqa: BLE001 — уборка не должна блокировать старт
+        logging.getLogger(__name__).warning("Не удалось очистить tmp артефактов")
+
+
+async def _reap_stale_sessions() -> None:
+    """Старт приложения: снять «transcribing», оставшиеся от прошлого процесса."""
+    from .db import AsyncSessionLocal
+    from .services.session_ai import reap_stale
+
+    if AsyncSessionLocal is None:
+        return
+    try:
+        async with AsyncSessionLocal() as db:
+            await reap_stale(db)
+    except Exception:  # noqa: BLE001 — уборка не должна блокировать старт
+        logging.getLogger(__name__).exception("Реапер расшифровок не отработал")
 
 
 def create_app() -> FastAPI:

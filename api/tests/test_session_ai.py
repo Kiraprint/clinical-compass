@@ -1,7 +1,7 @@
 """FR-39 (docs/18 §4.3): ИИ-ассистент сессии — аудио → расшифровка → черновик.
 
 Контракт: docs/18 §1 (красные линии), §3.5, §4.3, §5.3. Сеть не нужна: ML
-сайдкар подменяется `ml_client.transcribe`, LLM — `llm_router.chat_completion`.
+сайдкар подменяется `ml_client.transcribe_file`, LLM — `llm_router.chat_completion`.
 
 Проверяется: флаг CC_SESSION_AI_ENABLED, согласие на запись, потолки формата,
 статусная машина `recording → transcribing → transcribed`, отсутствие сырых ПДн
@@ -13,6 +13,7 @@ PROTOCOL_LOCKED после подтверждения, fail-closed деперс�
 from __future__ import annotations
 
 import json
+import pathlib
 import threading
 import time
 
@@ -131,16 +132,17 @@ def _fake_ml(monkeypatch, *, gate: threading.Event | None = None) -> dict:
     """Подмена расшифровки в сайдкаре; `gate` держит вызов, чтобы увидеть AI_BUSY."""
     state: dict = {"calls": 0, "entered": threading.Event()}
 
-    def fake(data, *, filename="audio.bin", mime="application/octet-stream", language="ru"):
+    def fake(path, *, filename="audio.bin", mime="application/octet-stream", language="ru"):
         state["calls"] += 1
-        state["data"] = data
+        # Сайдкар получает расшифрованный временный файл 0600, а не буфер в RAM.
+        state["data"] = pathlib.Path(path).read_bytes()
         state["mime"] = mime
         state["entered"].set()
         if gate is not None:
             assert gate.wait(10), "тест не отпустил расшифровку"
         return json.loads(json.dumps(ML_RESULT))
 
-    monkeypatch.setattr(ml_client, "transcribe", fake)
+    monkeypatch.setattr(ml_client, "transcribe_file", fake)
     return state
 
 
@@ -221,7 +223,7 @@ def test_disabled_returns_503(client, monkeypatch):
     def boom(*a, **kw):
         raise AssertionError("ни ML, ни LLM не должны вызываться при выключенном флаге")
 
-    monkeypatch.setattr(ml_client, "transcribe", boom)
+    monkeypatch.setattr(ml_client, "transcribe_file", boom)
     monkeypatch.setattr(llm_router, "chat_completion", boom)
     ctx = _ctx(client, "off")
     session = _session(client, ctx)
@@ -324,7 +326,8 @@ def test_happy_path_transcribes_masked_and_counts_masks(client, monkeypatch, db_
     got = client.get(f"{BASE}/sessions/{sid}/transcript", headers=ctx["doctor"])
     assert got.status_code == 200, got.text
     payload = got.json()
-    assert payload["depersonalized"] is True
+    # Флаг честный: NER выключен (autouse `_defaults`) — маскировал только regex.
+    assert payload["depersonalized"] is False
     assert payload["model"] == "stub-asr"
     assert payload["duration_sec"] == 4
     assert payload["mask_categories"]["FIO"] >= 1
@@ -347,7 +350,7 @@ def test_happy_path_transcribes_masked_and_counts_masks(client, monkeypatch, db_
         ).bindparams(s=sid)
     ).one()
     assert row.mask_categories["FIO"] >= 1
-    assert row.depersonalized is True
+    assert row.depersonalized is False
     artifact = db_session.get(DocumentArtifact, row.segments_artifact_id)
     assert artifact.kind == "transcript"
     on_disk = artifacts_svc.get_bytes(artifact).decode("utf-8")
@@ -390,7 +393,7 @@ def test_ai_busy_and_failure_marks_session(client, monkeypatch, db_session):
     def broken(*a, **kw):
         raise ml_client.MlUnavailable("sidecar down")
 
-    monkeypatch.setattr(ml_client, "transcribe", broken)
+    monkeypatch.setattr(ml_client, "transcribe_file", broken)
     again = client.post(f"{BASE}/sessions/{session['id']}/transcribe", headers=ctx["doctor"])
     assert again.status_code == 202
     detail = _wait_ai_status(client, ctx["doctor"], session["id"], {"failed"})
@@ -551,3 +554,187 @@ def test_foreign_doctor_cannot_read_transcript(client, monkeypatch):
     resp = client.get(f"{BASE}/sessions/{session['id']}/transcript", headers=ctx["doctor2"])
     assert resp.status_code == 404
     assert resp.json()["code"] == "SESSION_NOT_FOUND"
+
+
+# --- правки по ревью PR #84 --------------------------------------------------
+
+
+def test_upload_streams_without_plaintext_spool(client, monkeypatch):
+    """413 по ходу потока: полного файла нет; временный открытый текст убран."""
+    _enable(monkeypatch)
+    monkeypatch.setattr(settings, "session_audio_max_mb", 1)
+    ctx = _ctx(client, "stream")
+    session = _session(client, ctx)
+    sid = session["id"]
+    def _files(sub: str) -> set[str]:
+        path = pathlib.Path(settings.artifacts_dir) / sub
+        return {p.name for p in path.glob("*")} if path.exists() else set()
+
+    before = _files("audio")
+
+    resp = _upload(client, ctx, sid, data=b"OggS" + b"\x00" * (2 * 1024 * 1024 + 64))
+    assert resp.status_code == 413, resp.text
+    assert resp.json()["code"] == "AUDIO_TOO_LARGE"
+    # Незавершённая шифровка не оставила ни артефакта, ни .tmp в каталоге.
+    assert _files("audio") == before
+    assert not _files("tmp")
+
+    # Успешная расшифровка: открытый текст аудио на диске не остаётся.
+    monkeypatch.setattr(settings, "session_audio_max_mb", 200)
+    ok = _upload(client, ctx, sid, data=AUDIO)
+    assert ok.status_code == 201, ok.text
+    _fake_ml(monkeypatch)
+    assert client.post(f"{BASE}/sessions/{sid}/transcribe", headers=ctx["doctor"]).status_code == 202
+    _wait_ai_status(client, ctx["doctor"], sid, {"transcribed"})
+    assert not _files("tmp")
+
+    # И при сбое сайдкара тоже: файл удаляется в finally.
+    def broken(path, **kw):
+        raise ml_client.MlUnavailable("sidecar down")
+
+    monkeypatch.setattr(ml_client, "transcribe_file", broken)
+    assert client.post(f"{BASE}/sessions/{sid}/transcribe", headers=ctx["doctor"]).status_code == 202
+    _wait_ai_status(client, ctx["doctor"], sid, {"failed"})
+    assert not _files("tmp")
+
+
+def test_multipart_without_boundary_is_problem(client, monkeypatch):
+    """Битый multipart — Problem-конверт, а не {"detail": ...} Starlette."""
+    _enable(monkeypatch)
+    ctx = _ctx(client, "boundary")
+    sid = _session(client, ctx)["id"]
+    resp = client.post(
+        f"{BASE}/sessions/{sid}/audio",
+        content=b"raw bytes",
+        headers={**ctx["doctor"], "content-type": "multipart/form-data"},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["code"] == "VALIDATION_ERROR" and "detail" in body and "type" in body
+
+
+def test_depersonalized_flag_follows_masking_backend(client, monkeypatch):
+    """§4.3: флаг отражает фактический backend и его деградацию."""
+    from app.services import depersonalize as dep
+
+    _enable(monkeypatch)
+    monkeypatch.setattr(settings, "depersonalize_ner", "hybrid")
+    monkeypatch.setattr(dep, "ner_backend", lambda: "hybrid")
+    # Деривация: backend включён и не деградировал → true (иначе — см. ниже).
+    monkeypatch.setattr(dep, "degraded", lambda: False)
+    ctx = _ctx(client, "flag")
+    _fake_ml(monkeypatch)
+    sid = _session(client, ctx)["id"]
+    assert _upload(client, ctx, sid).status_code == 201
+    assert client.post(f"{BASE}/sessions/{sid}/transcribe", headers=ctx["doctor"]).status_code == 202
+    _wait_ai_status(client, ctx["doctor"], sid, {"transcribed"})
+    got = client.get(f"{BASE}/sessions/{sid}/transcript", headers=ctx["doctor"]).json()
+    assert got["depersonalized"] is True
+
+    # Тот же процесс, backend отказал и маскирование шло regex — уже не true.
+    monkeypatch.setattr(dep, "degraded", lambda: True)
+    sid2 = _session(client, ctx)["id"]
+    assert _upload(client, ctx, sid2).status_code == 201
+    assert client.post(f"{BASE}/sessions/{sid2}/transcribe", headers=ctx["doctor"]).status_code == 202
+    _wait_ai_status(client, ctx["doctor"], sid2, {"transcribed"})
+    got2 = client.get(f"{BASE}/sessions/{sid2}/transcript", headers=ctx["doctor"]).json()
+    assert got2["depersonalized"] is False
+
+
+def test_prod_requires_ml_masking_for_session_ai():
+    """CC_PROD_MODE + CC_SESSION_AI_ENABLED требуют ML-деперсонализацию (fail-fast)."""
+    from pydantic import ValidationError
+
+    from app.config import Settings
+
+    try:
+        Settings(
+            _env_file=None,
+            allow_demo_secrets=False,
+            prod_mode=True,
+            require_otp=True,
+            session_ai_enabled=True,
+            depersonalize_ner="off",
+            jwt_secret="x" * 40,
+            data_key="y" * 40,
+        )
+        raise AssertionError("ожидали ValidationError")
+    except ValidationError as exc:
+        assert "CC_DEPERSONALIZE_NER" in str(exc)
+
+    # С ML-backend'ом та же конфигурация валидна.
+    ok = Settings(
+        _env_file=None,
+        allow_demo_secrets=False,
+        prod_mode=True,
+        require_otp=True,
+        session_ai_enabled=True,
+        depersonalize_ner="remote",
+        ml_url="http://ml:8080",
+        jwt_secret="x" * 40,
+        data_key="y" * 40,
+    )
+    assert ok.session_ai_enabled is True
+
+
+def test_finished_session_rejects_ai_block(client, monkeypatch):
+    """Завершённый приём не возвращается в recording: 409 SESSION_FINISHED."""
+    _enable(monkeypatch)
+    ctx = _ctx(client, "finished")
+    sid = _session(client, ctx)["id"]
+    assert _upload(client, ctx, sid).status_code == 201
+    fin = client.post(f"{BASE}/sessions/{sid}/finish", json={}, headers=ctx["doctor"])
+    assert fin.status_code == 200, fin.text
+
+    up = _upload(client, ctx, sid)
+    assert up.status_code == 409 and up.json()["code"] == "SESSION_FINISHED"
+    tr = client.post(f"{BASE}/sessions/{sid}/transcribe", headers=ctx["doctor"])
+    assert tr.status_code == 409 and tr.json()["code"] == "SESSION_FINISHED"
+
+
+def test_ai_busy_is_cross_process(client, monkeypatch, db_session):
+    """Захват расшифровки — в БД: второй процесс получает 409, а не второй прогон."""
+    from app.services import session_ai
+
+    _enable(monkeypatch)
+    ctx = _ctx(client, "lock")
+    sid = _session(client, ctx)["id"]
+    assert _upload(client, ctx, sid).status_code == 201
+    gate = threading.Event()
+    state = _fake_ml(monkeypatch, gate=gate)
+    assert client.post(f"{BASE}/sessions/{sid}/transcribe", headers=ctx["doctor"]).status_code == 202
+    assert state["entered"].wait(10)
+
+    # Имитируем второй воркер: его in-process реестр пуст.
+    monkeypatch.setattr(session_ai, "_inflight", set())
+    second = client.post(f"{BASE}/sessions/{sid}/transcribe", headers=ctx["doctor"])
+    assert second.status_code == 409 and second.json()["code"] == "AI_BUSY"
+    assert state["calls"] == 1
+
+    gate.set()
+    _wait_ai_status(client, ctx["doctor"], sid, {"transcribed"})
+
+
+def test_reaper_resets_stale_transcribing(client, monkeypatch, db_session):
+    """Зависшая после рестарта расшифровка возвращается в failed."""
+    _enable(monkeypatch)
+    ctx = _ctx(client, "reaper")
+    sid = _session(client, ctx)["id"]
+    db_session.execute(
+        text(
+            "update clinical_sessions set ai_status='transcribing', "
+            "ai_started_at = now() - interval '1 hour' where id = cast(:s as uuid)"
+        ).bindparams(s=sid)
+    )
+    db_session.commit()
+
+    # Старт приложения и запуск расшифровки вызывают одну и ту же уборку.
+    from app.services.session_ai import reap_stale
+
+    from .conftest import run_async
+
+    assert run_async(reap_stale) == 1
+    db_session.expire_all()
+    detail = _detail(client, ctx["doctor"], sid)
+    assert detail["ai_status"] == "failed"
+    assert detail["ai_error"] == "TRANSCRIBE_INTERRUPTED"

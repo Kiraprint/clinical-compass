@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, File, Request, UploadFile
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import services
@@ -28,13 +28,16 @@ def _ip(request: Request) -> str | None:
 async def upload_audio(
     session_id: uuid.UUID,
     request: Request,
-    file: UploadFile = File(...),
     user: User = Depends(require_clinician),
     db: AsyncSession = Depends(get_db),
 ):
-    """Загрузка записи приёма: 201 — артефакт; 422 без согласия, 413/415 — формат."""
+    """Загрузка записи приёма: 201 — артефакт; 422 без согласия, 413/415 — формат.
+
+    Тело не объявляется как `UploadFile`: Starlette спулил бы загрузку >1 МиБ
+    открытым текстом в /tmp. Сервис читает `request.stream()` сам (§4.6).
+    """
     return await services.session_ai.upload_audio(
-        db, user.id, session_id, file, ip=_ip(request)
+        db, user.id, session_id, request, ip=_ip(request)
     )
 
 
