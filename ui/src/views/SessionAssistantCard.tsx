@@ -70,6 +70,20 @@ const fmtSize = (bytes: number) =>
 const POLL_MS = 2000;
 const POLL_LIMIT_MS = 15 * 60 * 1000;
 
+/** Кодек записи: webm есть не везде (Safari), поэтому первый поддерживаемый. */
+const RECORDER_MIMES = ["audio/webm", "audio/mp4", "audio/ogg"];
+function pickRecorderMime(): string | null {
+  if (typeof MediaRecorder === "undefined") return null;
+  for (const candidate of RECORDER_MIMES) {
+    if (typeof MediaRecorder.isTypeSupported !== "function") return candidate;
+    if (MediaRecorder.isTypeSupported(candidate)) return candidate;
+  }
+  return null;
+}
+
+const mimeExtension = (value: string) =>
+  value.includes("mp4") ? "m4a" : value.includes("ogg") ? "ogg" : "webm";
+
 
 
 function SpeakerBadge({ speaker }: { speaker: string | null }) {
@@ -136,12 +150,17 @@ export default function SessionAssistantCard({
   const [note, setNote] = useState("");
 
   const recorder = useRef<MediaRecorder | null>(null);
+  // Кодек выбираем по возможностям браузера (Safari не умеет audio/webm).
+  const mime = useRef("audio/webm");
   const chunks = useRef<Blob[]>([]);
   const stream = useRef<MediaStream | null>(null);
   const alive = useRef(true);
   // Опрос расшифровки — цепочкой setTimeout: снимается на размонтировании, без утечки.
   const pollTimer = useRef<number | null>(null);
   const pollDeadline = useRef(0);
+  // Живость всей цепочки опроса: `pollTimer === null` бывает и внутри тика, пока запрос
+  // в полёте, — по нему нельзя судить, идёт ли опрос.
+  const chain = useRef(false);
 
   /** Микрофон отпускаем всегда: и на «стоп», и на размонтировании. */
   const releaseStream = useCallback(() => {
@@ -156,6 +175,7 @@ export default function SessionAssistantCard({
       if (recorder.current?.state === "recording") recorder.current.stop();
       recorder.current = null;
       releaseStream();
+      chain.current = false;
       if (pollTimer.current !== null) window.clearTimeout(pollTimer.current);
       pollTimer.current = null;
     };
@@ -223,7 +243,7 @@ export default function SessionAssistantCard({
   // Расшифровку могли запустить до перезагрузки панели: продолжаем опрос, а не висим
   // с надписью «идёт» без единого запроса.
   useEffect(() => {
-    if (session.ai_status === "transcribing" && pollTimer.current === null) startPoll();
+    if (session.ai_status === "transcribing" && !chain.current) startPoll();
     // eslint-disable-next-line react-hooks/exhaustive-deps — startPoll стабилен по refs
   }, [session.ai_status]);
 
@@ -250,19 +270,30 @@ export default function SessionAssistantCard({
   const startRecording = async () => {
     setErr("");
     setNote("");
+    const codec = pickRecorderMime();
+    if (!codec) {
+      setErr("Браузер не умеет записывать звук — загрузите файл записи.");
+      return;
+    }
+    let granted = false;
     try {
       const media = await navigator.mediaDevices.getUserMedia({ audio: true });
+      granted = true;
       stream.current = media;
       chunks.current = [];
-      const recorderInstance = new MediaRecorder(media, { mimeType: "audio/webm" });
+      mime.current = codec;
+      const recorderInstance = new MediaRecorder(media, { mimeType: codec });
       recorderInstance.ondataavailable = (event) => {
         if (event.data.size > 0) chunks.current.push(event.data);
       };
       recorderInstance.onstop = () => {
         releaseStream();
         if (!alive.current) return;
-        const blob = new Blob(chunks.current, { type: "audio/webm" });
-        setAudio({ blob, name: `приём-${session.id.slice(0, 8)}.webm` });
+        const blob = new Blob(chunks.current, { type: mime.current });
+        setAudio({
+          blob,
+          name: `приём-${session.id.slice(0, 8)}.${mimeExtension(mime.current)}`,
+        });
         setUploaded(null);
       };
       recorderInstance.start();
@@ -270,7 +301,16 @@ export default function SessionAssistantCard({
       setRecSec(0);
       setRecording(true);
     } catch {
-      setErr("Браузер не даёт доступ к микрофону — загрузите файл записи.");
+      // Микрофон могли отдать, а рекордер (кодек) — нет: поток всё равно отпускаем,
+      // иначе индикатор записи горит, а следующий `getUserMedia` теряет первый поток.
+      releaseStream();
+      recorder.current = null;
+      setRecording(false);
+      setErr(
+        granted
+          ? "Браузер не смог начать запись — загрузите файл записи."
+          : "Браузер не даёт доступ к микрофону — загрузите файл записи.",
+      );
     }
   };
 
@@ -307,6 +347,7 @@ export default function SessionAssistantCard({
     pollTimer.current = null;
     if (!alive.current) return;
     if (Date.now() > pollDeadline.current) {
+      chain.current = false;
       setPolling(false);
       setErr("Расшифровка идёт дольше 15 минут — нажмите «Обновить состояние».");
       return;
@@ -321,6 +362,7 @@ export default function SessionAssistantCard({
     if (detail) {
       setAiStatus(detail.ai_status);
       if (detail.ai_status === "transcribed") {
+        chain.current = false;
         setPolling(false);
         setAiError(null);
         await loadTranscript();
@@ -328,6 +370,7 @@ export default function SessionAssistantCard({
         return;
       }
       if (detail.ai_status === "failed") {
+        chain.current = false;
         setPolling(false);
         setAiError(detail.ai_error ?? "TRANSCRIBE_FAILED");
         setErr(
@@ -341,6 +384,7 @@ export default function SessionAssistantCard({
 
   const startPoll = () => {
     pollDeadline.current = Date.now() + POLL_LIMIT_MS;
+    chain.current = true;
     setPolling(true);
     if (pollTimer.current !== null) window.clearTimeout(pollTimer.current);
     pollTimer.current = window.setTimeout(() => void pollTick(), POLL_MS);
@@ -415,6 +459,15 @@ export default function SessionAssistantCard({
     }
   };
 
+  // Приём завершили посреди записи: рекордер и микрофон останавливаем, а не тянем дальше.
+  const sessionFinished = session.status === "finished";
+  useEffect(() => {
+    if (!sessionFinished) return;
+    setRecording(false);
+    recorder.current?.stop();
+    recorder.current = null;
+  }, [sessionFinished]);
+
   if (available === null) return null;
 
   if (!available) {
@@ -430,7 +483,7 @@ export default function SessionAssistantCard({
   }
 
   const consent = session.audio_consent;
-  const finished = session.status === "finished";
+  const finished = sessionFinished;
   const audioReady = !!uploaded || hasAudio;
   const canTranscribe = audioReady && !polling && !finished && aiStatus !== "transcribing";
   const transcribeLabel =

@@ -255,20 +255,45 @@ export default function SessionPanel({
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [review, setReview] = useState<Record<string, string[]>>({});
   const [conflicts, setConflicts] = useState<DraftConflict[]>([]);
+  // Живые снимки: ответы сервера (черновик ИИ, сохранение) приходят в замыкания момента
+  // клика, а слияние и сохранение обязаны считаться с тем, что врач напечатал за это время.
+  const liveSections = useRef(sections);
+  liveSections.current = sections;
+  const liveProtocol = useRef<SessionProtocol | null>(protocol);
+  liveProtocol.current = protocol;
 
   const refresh = useCallback(async () => {
     const fresh = await api.getSession(session.id);
     setDetail(fresh);
     setSession(fresh);
-    // Статус активной версии меняют подпись и передача — подтягиваем его в шапку и карточку
-    // документа; чужую версию (врач уже правил) не трогаем.
-    setProtocol((current) =>
-      current && fresh.protocol && fresh.protocol.version === current.version
-        ? { ...current, status: fresh.protocol.status }
-        : current,
-    );
+    const brief = fresh.protocol;
+    const current = liveProtocol.current;
+    if (brief && current && brief.version === current.version) {
+      // Статус активной версии меняют подпись и передача.
+      const merged = { ...current, status: brief.status };
+      liveProtocol.current = merged;
+      setProtocol(merged);
+    } else if (brief && (!current || brief.version !== current.version)) {
+      // Активную версию сменили в другой вкладке: показывать старую нельзя — подпись,
+      // PDF и передача уходят на сервер и работают с версией, которой на экране нет.
+      const reloaded = await api.getProtocol(session.id);
+      liveProtocol.current = reloaded;
+      setProtocol(reloaded);
+      const serverSections = withDefaults(base, reloaded.sections);
+      if (JSON.stringify(liveSections.current) === JSON.stringify(serverSections)) {
+        liveSections.current = serverSections;
+        setSections(serverSections);
+        setConflicts([]);
+        setReview({});
+      } else {
+        // Несохранённый текст врача не выбрасываем: сохранение создаст новую версию.
+        setNote(
+          `Протокол обновлён в другой вкладке (версия ${reloaded.version}) — ваши правки остались в редакторе.`,
+        );
+      }
+    }
     return fresh;
-  }, [session.id]);
+  }, [session.id, base]);
 
   useEffect(() => {
     let cancelled = false;
@@ -333,13 +358,26 @@ export default function SessionPanel({
     setErr("");
     setNote("");
     try {
-      const code = sections.diagnosis.icd10.trim() || null;
-      const p = await api.putProtocol(session.id, sections, code);
+      // Отправляем ровно то, что видит врач на момент клика.
+      const sent = liveSections.current;
+      const p = await api.putProtocol(session.id, sent, sent.diagnosis.icd10.trim() || null);
+      liveProtocol.current = p;
       setProtocol(p);
-      setSections(withDefaults(base, p.sections));
+      // Допечатанное за время round-trip не выбрасываем: серверное эхо переливаем в
+      // редактор, только если он не изменился (сравнение по ссылке состояния).
+      const typedLater = liveSections.current !== sent;
+      if (!typedLater) {
+        const next = withDefaults(base, p.sections);
+        liveSections.current = next;
+        setSections(next);
+      }
       setConflicts([]);
       await refresh();
-      setNote(`Черновик сохранён (версия ${p.version}).`);
+      setNote(
+        typedLater
+          ? `Черновик сохранён (версия ${p.version}). Текст, введённый во время сохранения, в версию не вошёл — сохраните ещё раз.`
+          : `Черновик сохранён (версия ${p.version}).`,
+      );
     } catch (e: unknown) {
       setErr(errText(e));
     } finally {
@@ -354,14 +392,34 @@ export default function SessionPanel({
     try {
       // Подтверждаем ровно то, что видит врач: approve уходит по последнему черновику,
       // поэтому несохранённые правки сначала сохраняем (§4.4 PUT → approve).
-      await api.putProtocol(session.id, sections, sections.diagnosis.icd10.trim() || null);
+      let sent = liveSections.current;
+      let saved = await api.putProtocol(session.id, sent, sent.diagnosis.icd10.trim() || null);
+      liveProtocol.current = saved;
+      setProtocol(saved);
+      if (liveSections.current !== sent) {
+        // Врач допечатал, пока шёл PUT: подтверждаем свежее состояние, а не снимок клика.
+        sent = liveSections.current;
+        saved = await api.putProtocol(session.id, sent, sent.diagnosis.icd10.trim() || null);
+        liveProtocol.current = saved;
+        setProtocol(saved);
+      }
       const p = await api.approveProtocol(session.id);
+      // Подтверждённая версия уходит из-под редактора: ввод в момент ответа уже не попадёт
+      // в неё, поэтому говорим об этом прямо, а не молча его теряем.
+      const typedDuringApprove = liveSections.current !== sent;
+      const next = withDefaults(base, p.sections);
+      liveProtocol.current = p;
+      liveSections.current = next;
       setProtocol(p);
-      setSections(withDefaults(base, p.sections));
+      setSections(next);
       setConflicts([]);
       setReview({});
       await refresh();
-      setNote("Протокол подтверждён.");
+      setNote(
+        typedDuringApprove
+          ? "Протокол подтверждён. Текст, введённый в момент подтверждения, в версию не вошёл."
+          : "Протокол подтверждён.",
+      );
     } catch (e: unknown) {
       // 409 PROTOCOL_NOT_READY — список незаполненных разделов в detail.
       setErr(errText(e));
@@ -389,15 +447,20 @@ export default function SessionPanel({
    * перезаписывается — расхождения уходят в блок выбора над редактором.
    */
   const applyDraft = (draft: SessionProtocol) => {
-    let merged = sections;
+    // `onDraft` приходит из замыкания момента клика, а ответ модели — секунды спустя:
+    // слияние считаем по живому тексту врача, иначе начатый им раздел выглядит пустым.
+    const current = liveSections.current;
+    let merged = current;
     const disputed: DraftConflict[] = [];
     for (const key of draftKeys(draft.sections)) {
       const proposed = fieldValue(draft.sections, key);
       if (!proposed.trim()) continue;
-      const mine = fieldValue(sections, key);
+      const mine = fieldValue(current, key);
       if (!mine.trim()) merged = withField(merged, key, proposed);
       else if (mine !== proposed) disputed.push({ key, next: proposed });
     }
+    liveSections.current = merged;
+    liveProtocol.current = draft;
     setSections(merged);
     setConflicts(disputed);
     setReview(reviewByField(draft.needs_review));

@@ -73,6 +73,13 @@ function documentError(e: unknown, fallback: string): string {
   return e instanceof Error && e.message ? e.message : fallback;
 }
 
+const STATUS_LABELS: Record<string, string> = {
+  draft: "черновик",
+  approved: "подтверждён",
+  signed: "подписан",
+  submitted: "передан",
+};
+
 const STAMP = new Intl.DateTimeFormat("ru-RU", { dateStyle: "short", timeStyle: "short" });
 
 const when = (iso: string | null | undefined) => (iso ? STAMP.format(new Date(iso)) : "—");
@@ -370,7 +377,8 @@ export default function SessionDocumentCard({
 
       {!signed && protocol && (
         <p className="small muted">
-          Подпись — только для подтверждённой версии (сейчас {protocol.status === "approved" ? "подтверждена" : protocol.status}).
+          Подпись — только для подтверждённой версии (сейчас{" "}
+          {STATUS_LABELS[protocol.status] ?? protocol.status}).
         </p>
       )}
 

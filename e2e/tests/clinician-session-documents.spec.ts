@@ -3,6 +3,7 @@
 // поэтому проверяется его информационное состояние без мёртвых кнопок.
 import { statSync } from "node:fs";
 import { expect, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
 import { DEMO_PASSWORD, openSection, setupClinicianPair, totp } from "./helpers";
 
 const BASE = process.env.CC_E2E_URL ?? "http://127.0.0.1:8090";
@@ -45,6 +46,10 @@ test("протокол подписывается, проверяется, пе�
   await page.getByLabel("МКБ-10").fill("F41.1");
   await page.getByRole("button", { name: "Сохранить черновик" }).click();
   await expect(page.getByText(/Черновик сохранён \(версия/)).toBeVisible();
+  // Регресс P1 ревью #88: ответ сервера не перезаливает редактор — введённый текст цел.
+  await expect(page.getByLabel("Жалобы")).toHaveValue(
+    "Тревога, нарушения сна, снижение рабочего тонуса.",
+  );
 
   // Черновик сохранён, но не подтверждён: следующий шаг — подтверждение.
   await expect(page.getByText("Следующий шаг — «Подтверждён врачом»")).toBeVisible();
@@ -94,4 +99,132 @@ test("протокол подписывается, проверяется, пе�
   });
   await expect(page.getByRole("button", { name: "Передать в ЕМИАС" })).toBeDisabled();
   await page.screenshot({ path: testInfo.outputPath("emias-registered.png"), fullPage: true });
+});
+
+// Регрессы P1 ревью #88: ввод врача не теряется ни при сохранении, ни при генерации.
+async function openWalkIn(
+  page: Page,
+  doctor: { email: string; totp_secret: string | null },
+  patientId: string,
+) {
+  await page.goto(`${BASE}/`);
+  await page.getByLabel("Email").fill(doctor.email);
+  await page.getByLabel("Пароль").fill(DEMO_PASSWORD);
+  await page.getByLabel("Код 2FA").fill(totp(doctor.totp_secret as string));
+  await page.getByRole("button", { name: "Войти" }).click();
+  await openSection(page, "Расписание");
+  await expect(page.getByRole("heading", { name: "Расписание" })).toBeVisible();
+  await page.getByRole("button", { name: "Начать приём без записи" }).click();
+  await page.getByLabel("Пациент без записи").selectOption(patientId);
+  await page.getByRole("button", { name: "Начать приём сейчас" }).click();
+  await expect(page.getByRole("heading", { name: /^Приём:/ })).toBeVisible();
+}
+
+test("текст, допечатанный во время сохранения, не выбрасывается", async ({ page, request }, testInfo) => {
+  const { docReg, patReg } = await setupClinicianPair(request, "srace");
+  // PUT протокола отвечает через 3 с: врач успевает допечатать в то же поле.
+  await page.route("**/api/v1/clinician/sessions/*/protocol", async (route) => {
+    if (route.request().method() !== "PUT") return route.fallback();
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    return route.fallback();
+  });
+  await openWalkIn(page, docReg, patReg.id);
+
+  await page.getByLabel("Правовое основание (ИДС)").fill("ИДС № 77 от 2026-10-26");
+  await page.getByLabel("Жалобы").fill("первая часть");
+  await page.getByLabel("Суицидальный риск (обязательно)").fill("Не выявлен.");
+  await page.getByLabel("МКБ-10").fill("F41.1");
+
+  await page.getByRole("button", { name: "Сохранить черновик" }).click();
+  await page.getByLabel("Жалобы").fill("первая часть ДОПЕЧАТКА");
+
+  await expect(page.getByText(/Черновик сохранён \(версия/)).toBeVisible();
+  // Серверное эхо не откатывает допечатанное — ни в редакторе, ни в сохранённой версии.
+  await expect(page.getByLabel("Жалобы")).toHaveValue("первая часть ДОПЕЧАТКА");
+  await page.screenshot({ path: testInfo.outputPath("save-race.png"), fullPage: true });
+
+  // Повторное сохранение отправляет именно этот текст, подтверждение фиксирует его.
+  await page.getByRole("button", { name: "Сохранить черновик" }).click();
+  await expect(page.getByText(/Черновик сохранён \(версия/)).toBeVisible();
+  await page.getByRole("button", { name: "Подтвердить протокол" }).click();
+  await expect(page.getByText("Протокол подтверждён.")).toBeVisible();
+  await expect(page.locator(".protocol-view")).toContainText("первая часть ДОПЕЧАТКА");
+});
+
+const DRAFT_SECTIONS = {
+  passport: { visit_at: "", channel: "", legal_basis: "" },
+  complaints: "ЧЕРНОВИК ИИ",
+  anamnesis_morbi: "",
+  somatic_status: "",
+  recommendations: "",
+  mental_status: {
+    appearance_behavior: "",
+    consciousness_orientation: "",
+    perception: "",
+    thinking_speech: "",
+    emotions_volition: "",
+    criticism: "",
+    suicidal_risk: "",
+  },
+  diagnosis: { syndrome: "", icd10: "", rationale: "" },
+  treatment: [],
+};
+
+test("черновик ИИ не перезаписывает текст, введённый во время генерации", async ({
+  page,
+  request,
+}, testInfo) => {
+  const { docReg, patReg } = await setupClinicianPair(request, "sdraft");
+  // ИИ в стеке CI выключен: пробу доступности и ответ модели подменяем (клиентская логика).
+  await page.route("**/api/v1/clinician/sessions/*/transcript", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        segments: [{ start: 0, end: 12, speaker: "врач", text: "Здравствуйте, что вас беспокоит?" }],
+        model: "whisper-e2e",
+        duration_sec: 12,
+        mask_categories: {},
+        depersonalized: true,
+      }),
+    }),
+  );
+  await page.route("**/api/v1/clinician/sessions/*/protocol/draft", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    return route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: "00000000-0000-4000-8000-000000000000",
+        session_id: "00000000-0000-4000-8000-000000000000",
+        version: 1,
+        status: "draft",
+        source: "llm",
+        content_sha256: null,
+        diagnosis_code: null,
+        model: "test",
+        prompt_version: "test",
+        needs_review: [{ section: "mental_status", reason: "clinical_risk" }],
+        created_by: "00000000-0000-4000-8000-000000000000",
+        approved_by: null,
+        approved_at: null,
+        created_at: null,
+        sections: DRAFT_SECTIONS,
+      }),
+    });
+  });
+  await openWalkIn(page, docReg, patReg.id);
+
+  // Карточка ИИ доступна (транскрипт есть), но свёрнута — раскрываем и берём черновик.
+  await page.getByText("ИИ-ассистент").click();
+  const draftButton = page.getByRole("button", { name: "Сформировать черновик протокола" });
+  await expect(draftButton).toBeEnabled();
+  await draftButton.click();
+
+  // Врач начинает заполнять «Жалобы», пока модель думает: этот текст перезаписывать нельзя.
+  await page.getByLabel("Жалобы").fill("мой текст");
+  await expect(page.getByText(/Черновик ИИ перенесён в редактор|не перезаписаны/)).toBeVisible();
+  await expect(page.getByLabel("Жалобы")).toHaveValue("мой текст");
+  await expect(page.getByText(/не перезаписаны/)).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("draft-race.png"), fullPage: true });
 });
