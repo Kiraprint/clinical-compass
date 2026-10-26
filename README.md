@@ -386,12 +386,12 @@ GitHub Actions остаются резервным путём, основной 
 - [x] TDD
 - [x] E1–E2: клинический движок (187 юнит-тестов)
 - [x] E3–E5: API (884 интеграционных теста)
-- [x] E6: UI, симулятор, docker compose, e2e (51 Playwright)
+- [x] E6: UI, симулятор, docker compose, e2e (53 Playwright)
 - [x] Кейс-дефициты P1–P9: Авиандр в KB, маршрутизация, НЯ, приверженность, парсинг историй, врач↔пациент чат, КР Минздрава
 - [x] ИИ-ассистент врача: раздел БЗ выбирает LLM-роутер (тулколлинг search_<раздел>, fallback все разделы)
 - [x] Security audit F1–F12 + NEW-1..5: pgcrypto на всех free-text ПДн, уничтожение при отзыве, ротация refresh, httpOnly cookies, fail-fast секреты, AES-256 backup, threat model (ГОСТ 14971), gate привилегированной регистрации
 
-**Регрессия:** 187 core + 884 API + 51 e2e = 1122 теста.
+**Регрессия:** 187 core + 884 API + 53 e2e = 1124 теста.
 
 **Первый администратор (прод):** публичная регистрация CLINICIAN/ADMIN запрещена вне демо-режима (NEW-1):
 `docker compose -f infra/docker-compose.yml run --rm --entrypoint /app/.venv/bin/python api -m app.bootstrap_user --email admin@clinic.ru --role ADMIN`
