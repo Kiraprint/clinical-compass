@@ -733,6 +733,20 @@ small { color: #8a94a8; }
 .protocol-view dd { margin: 2px 0 0; color: #2b3242; white-space: pre-wrap; }
 .readonly-value { margin: 2px 0 0; font-size: 14px; color: #2b3242; }
 
+
+/* FR-39: расшифровка ИИ — реплики с меткой времени (текст только как текст). */
+.transcript { margin: 6px 0 0; padding-left: 0; list-style: none; max-height: 320px; overflow-y: auto; }
+.transcript-segment { display: flex; gap: 8px; align-items: baseline; padding: 4px 0; border-bottom: 1px solid #eef1f6; font-size: 13px; }
+.transcript-time { font-variant-numeric: tabular-nums; color: #5a6478; font-size: 12px; min-width: 44px; }
+.transcript-text { white-space: pre-wrap; color: #2b3242; }
+
+/* FR-40/41: документ приёма — шаги готовности и блоки подписантов. */
+.doc-steps { list-style: none; padding: 0; margin: 6px 0; font-size: 13px; color: #2b3242; }
+.doc-steps li { padding: 2px 0; }
+.signature-block { border: 1px solid #dbe2ee; border-radius: 10px; padding: 8px 12px; margin-top: 10px; background: #f9fbfe; }
+.signature-block .subhead { margin: 0 0 4px; }
+.signature-block code { font-size: 12px; color: #3d4657; }
+
 @media (max-width: 640px) {
   .cal-day { min-height: 60px; padding: 2px 3px; }
   .cal-item { font-size: 9px; }

@@ -89,3 +89,45 @@ export async function openSection(page, name: string) {
     .getByRole("button", { name, exact: true })
     .click();
 }
+
+/**
+ * Свежие врач и пациент с согласием и roster: свой врач — свои слоты, спеки не мешают
+ * друг другу. `request` — APIRequestContext теста.
+ */
+export async function setupClinicianPair(request, prefix = "csp") {
+  const base = process.env.CC_E2E_URL ?? "http://127.0.0.1:8090";
+  const j = (resp) => resp.json();
+  const docReg = await j(
+    await request.post(`${base}/api/v1/auth/register`, {
+      data: { email: freshPatientEmail(`${prefix}doc`), password: DEMO_PASSWORD, role: "CLINICIAN" },
+    }),
+  );
+  const patReg = await j(
+    await request.post(`${base}/api/v1/auth/register`, {
+      data: { email: freshPatientEmail(`${prefix}pat`), password: DEMO_PASSWORD, role: "PATIENT" },
+    }),
+  );
+  const patTok = (
+    await j(
+      await request.post(`${base}/api/v1/auth/login`, {
+        data: { email: patReg.email, password: DEMO_PASSWORD },
+      }),
+    )
+  ).access_token as string;
+  await request.post(`${base}/api/v1/consent`, {
+    data: { version: 1 },
+    headers: { Authorization: `Bearer ${patTok}` },
+  });
+  const admTok = (
+    await j(
+      await request.post(`${base}/api/v1/auth/login`, {
+        data: { email: "admin@compass.demo", password: DEMO_PASSWORD, otp: totp(DEMO_TOTP) },
+      }),
+    )
+  ).access_token as string;
+  await request.post(`${base}/api/v1/admin/roster`, {
+    data: { patient_id: patReg.id, clinician_id: docReg.id },
+    headers: { Authorization: `Bearer ${admTok}` },
+  });
+  return { docReg, patReg };
+}

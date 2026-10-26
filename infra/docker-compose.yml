@@ -328,6 +328,12 @@ services:
     profiles: ["emias"]
     environment:
       CC_ARTIFACTS_DIR: /var/lib/compass/artifacts
+      # Мок импортирует app.signing (проверяет CMS по демо-УЦ) и читает шифрованные
+      # артефакты из общего volume — ключи обязаны совпадать с api, иначе Settings
+      # падает на fail-fast демо-секретов и мок не стартует вовсе.
+      CC_ALLOW_DEMO_SECRETS: "${CC_ALLOW_DEMO_SECRETS:-false}"
+      CC_DATA_KEY: ${CC_DATA_KEY:-compass-demo-data-key-do-not-use-in-prod-0123456789}
+      CC_JWT_SECRET: ${CC_JWT_SECRET:-demo-jwt-secret-0123456789abcdefghij}
       CC_REMD_MOCK_CLIENT_ID: "${CC_REMD_CLIENT_ID:-compass-lpu}"
       CC_REMD_MOCK_CLIENT_SECRET: "${CC_REMD_CLIENT_SECRET:-remd-secret}"
       CC_REMD_MOCK_LPU_UID: "${CC_REMD_LPU_UID:-1.2.643.5.1.13.13.12.2.77.1.1}"
