@@ -183,7 +183,7 @@ async def _wait_request_id(db: AsyncSession, row: EmiasDelivery) -> None:
 
     Транзакция чтения закрывается перед каждым `sleep`, поэтому ожидание (до
     `_REQUEST_ID_WAIT_SEC`) не держит соединение из пула и не блокирует соседние
-    запросы. По выходу транзакция открыта свежим `refresh` — её закрывает вызывающий.
+    запросы. По выходу сессия остаётся в открытой транзакции — её закрывает вызывающий.
     """
     if row.request_id is not None or row.status != "sending":
         return  # лидер уже дописал `request_id` — ждать нечего

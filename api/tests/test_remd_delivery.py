@@ -605,7 +605,7 @@ def test_request_id_wait_deadline_returns_null_request_id(client, remd, monkeypa
             return payload, waited
 
     payload, waited = asyncio.run(scenario())
-    assert waited >= 0.2 and waited < 5, f"дедлайн ожидания не сработал: {waited:.2f} с"
+    assert waited >= 0.2 and waited < 1, f"дедлайн ожидания не сработал: {waited:.2f} с"
     assert payload["status"] == "sending"
     assert payload["request_id"] is None
 
