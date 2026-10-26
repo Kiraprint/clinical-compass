@@ -779,7 +779,9 @@ def test_put_stream_failure_returns_problem_and_keeps_loop(client, monkeypatch):
     monkeypatch.setattr(artifacts_svc, "put_stream", boom)
     started = time.time()
     resp = _upload(client, ctx, sid, data=b"OggS" + b"\x00" * (8 * 1024 * 1024))
-    assert time.time() - started < 30, "запрос повис на блокирующем put"
+    # Зависание на блокирующем put проверяет соседний тест (_stream_artifact);
+    # здесь — конверт и чистота каталогов после сбоя потребителя.
+    assert time.time() - started < 30, "запрос не вернулся после сбоя put_stream"
     assert resp.status_code == 500, resp.text
     assert resp.json()["code"] == "ARTIFACT_WRITE_FAILED"
     assert seen, "до put_stream не дошло"
@@ -958,3 +960,75 @@ def test_empty_and_duplicate_file_parts_are_rejected(client, monkeypatch):
     )
     assert dup.status_code == 422, dup.text
     assert dup.json()["code"] == "VALIDATION_ERROR"
+
+def test_reap_then_retry_shows_transcribing(client, db_session, monkeypatch):
+    """Реапер + повторный transcribe: врач не видит failed при живой расшифровке."""
+    _enable(monkeypatch)
+    gate = threading.Event()
+    _fake_ml(monkeypatch, gate=gate)
+    ctx = _ctx(client, "reapretry")
+    sid = _session(client, ctx)["id"]
+    assert _upload(client, ctx, sid).status_code == 201
+    db_session.execute(
+        text(
+            "update clinical_sessions set ai_status='transcribing', "
+            "ai_error='TRANSCRIBE_INTERRUPTED', "
+            "ai_started_at = now() - interval '3 hours' where id = :i"
+        ),
+        {"i": sid},
+    )
+    db_session.commit()
+
+    resp = client.post(f"{BASE}/sessions/{sid}/transcribe", headers=ctx["doctor"])
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["ai_status"] == "transcribing"
+    db_session.expire_all()
+    row = db_session.execute(
+        text("select ai_status, ai_error, ai_started_at from clinical_sessions where id = :i"),
+        {"i": sid},
+    ).one()
+    assert row.ai_status == "transcribing", "реапер перетёр запуск: в БД failed"
+    assert row.ai_error is None
+    gate.set()
+    _wait_ai_status(client, ctx["doctor"], sid, {"transcribed"})
+
+
+def test_cancel_mid_upload_keeps_no_artifact(monkeypatch):
+    """Отмена посреди загрузки не оставляет финализированный шифротекст."""
+    import asyncio
+    import uuid
+
+    from app.services import session_ai
+
+    audio_dir = pathlib.Path(settings.artifacts_dir) / "audio"
+    before = {p.name for p in audio_dir.glob("*")} if audio_dir.exists() else set()
+    sid = uuid.uuid4()
+
+    async def _run() -> None:
+        started = asyncio.Event()
+
+        async def never():
+            while True:
+                started.set()
+                yield b"x" * 4096
+                await asyncio.sleep(0.001)
+
+        task = asyncio.create_task(
+            session_ai._stream_artifact(
+                "audio", never(), session_id=sid, mime="audio/webm"
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=10)
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # Поток-шифровальщик может доработать мгновение: ждём, пока он уберёт .tmp.
+        for _ in range(200):
+            if audio_dir.exists() and {p.name for p in audio_dir.glob("*")} != before:
+                await asyncio.sleep(0.01)
+            else:
+                break
+
+    asyncio.run(_run())
+    assert (set() if not audio_dir.exists() else {p.name for p in audio_dir.glob("*")}) == before

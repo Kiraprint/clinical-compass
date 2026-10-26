@@ -127,6 +127,10 @@ class _MultipartError(Exception):
     """Некорректный multipart: наружу — 422, тело не дочитано."""
 
 
+class _UploadAborted(Exception):
+    """Загрузку отменили: `put_stream` не должен финализировать артефакт."""
+
+
 class _BodyReader:
     """Потоковое чтение тела запроса: буфер + поиск разделителей.
 
@@ -207,13 +211,6 @@ class _BodyReader:
                         raise _too_large()
                     yield data
                 return
-            if len(self._buf) > keep:
-                cut = len(self._buf) - keep
-                data, self._buf = self._buf[:cut], self._buf[cut:]
-                total += len(data)
-                if total > limit:
-                    raise _too_large()
-                yield data
             if len(self._buf) > keep:
                 cut = len(self._buf) - keep
                 data, self._buf = self._buf[:cut], self._buf[cut:]
@@ -319,6 +316,8 @@ async def _stream_artifact(
                         # Потребитель отстаёт: ждём, не блокируя event loop.
                         await anyio.sleep(0.005)
         except asyncio.CancelledError:
+            # Отмена = тело не дочитано: обрезанный артефакт не финализируем.
+            box["abort"] = True
             raise
         except BaseException as exc:  # noqa: BLE001 — сбой разбора отдаём потребителю
             box["exc"] = exc
@@ -334,6 +333,10 @@ async def _stream_artifact(
                 try:
                     item = q.get_nowait()
                 except queue.Empty:
+                    if box.get("abort"):
+                        # Отмена важнее конца: иначе put_stream сделал бы
+                        # os.replace и оставил шифротекст недописанной записи.
+                        raise _UploadAborted()
                     if box.get("eof"):
                         exc = box.get("exc")
                         if exc is not None:
@@ -354,8 +357,15 @@ async def _stream_artifact(
 
     feeder = asyncio.create_task(_feed())
     try:
-        await anyio.to_thread.run_sync(_consume)
+        # abandon_on_cancel: при отмене запроса поток не ждём (200 МБ) — сразу
+        # ставим abort, он срабатывает на следующем пустом заборе очереди и
+        # put_stream удаляет .tmp вместо os.replace обрезанного артефакта.
+        await anyio.to_thread.run_sync(_consume, abandon_on_cancel=True)
+    except _UploadAborted:
+        # Загрузку отменили: артефакта нет, .tmp удалён put_stream.
+        raise asyncio.CancelledError() from None
     finally:
+        box["abort"] = True  # потребитель уже вышел: дальше писать некуда
         if not feeder.done():
             feeder.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -651,6 +661,11 @@ async def transcribe(
     if await _audio_artifact(db, session.id) is None:
         raise Problem(409, "AUDIO_MISSING", "Аудио сессии не загружено")
     await reap_stale(db)
+    # Реапер (и любой другой писатель) мог только что перевести эту строку в
+    # failed сырым UPDATE: без перечитывания `session.ai_status = "transcribing"`
+    # не попадёт в UPDATE (значение совпадёт с загруженным) и врач до конца
+    # прогона видел бы `failed`/`TRANSCRIBE_INTERRUPTED`.
+    await db.refresh(session, ["ai_status", "ai_error", "ai_started_at"])
     lock_conn = await _db_lock(session.id)
     if lock_conn is None:  # None = захват в БД не наш; _NO_DB = БД недоступна как арбитр
         raise Problem(409, "AI_BUSY", "Расшифровка этой сессии уже идёт")
