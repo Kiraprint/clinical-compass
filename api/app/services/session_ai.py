@@ -1157,10 +1157,13 @@ def _text(value) -> str:
 def _quote(text: str) -> str:
     """Цитата чанка для sources[].quote: короткий фрагмент, не рвём слово."""
     flat = " ".join((text or "").split())
+    # Многоточие — часть цитаты, поэтому режем короче потолка: иначе цитата без
+    # пробелов (одно длинное слово) выходит за потолок схемы §5.2.
+    limit = SOURCE_QUOTE_CHARS - 1
     if len(flat) <= SOURCE_QUOTE_CHARS:
         return flat
-    cut = flat[:SOURCE_QUOTE_CHARS].rsplit(" ", 1)[0]
-    return (cut or flat[:SOURCE_QUOTE_CHARS]) + "…"
+    cut = flat[:limit].rsplit(" ", 1)[0]
+    return (cut or flat[:limit]) + "…"
 
 
 def _source_entry(position: int, chunk) -> dict:
@@ -1296,8 +1299,12 @@ def _same_lemma(needle: str, word: str) -> bool:
         return True
     # Корни должны быть выровнены по началу слова, а не «совпадать в середине»:
     # «аспирин» → «аспирация» отличается на букву внутри и подтверждением не
-    # считается, а «магн»/«магни» — та же лексема.
+    # считается. Лишние 2 буквы допускаются только у корней от 4 букв: срезанные
+    # до 3 букв корни склеивают разные слова («кал» ↔ «каловые», «лит» ↔
+    # «литров», «сер» ↔ «сердце»), а «магн»/«магни» — та же лексема.
     shorter, longer = sorted((left, right), key=len)
+    if len(shorter) < 4:
+        return False
     return longer.startswith(shorter) and len(longer) - len(shorter) <= 2
 
 
