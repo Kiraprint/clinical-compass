@@ -220,6 +220,13 @@ export default function SessionAssistantCard({
     if (!polling) setAiStatus(session.ai_status);
   }, [session.ai_status, polling]);
 
+  // Расшифровку могли запустить до перезагрузки панели: продолжаем опрос, а не висим
+  // с надписью «идёт» без единого запроса.
+  useEffect(() => {
+    if (session.ai_status === "transcribing" && pollTimer.current === null) startPoll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps — startPoll стабилен по refs
+  }, [session.ai_status]);
+
   const toast = (ok: string) => {
     setNote(ok);
     setErr("");
@@ -283,12 +290,10 @@ export default function SessionAssistantCard({
       if (!alive.current) return;
       setUploaded(result.artifact_id);
       setAudio(null);
-      // Свежая запись сбрасывает прошлую расшифровку: статус берём у сервера.
+      // Свежая запись обесценивает прошлую расшифровку (даже если сервер ещё не ответил).
+      setTranscript(null);
       const detail = await onRefresh().catch(() => null);
-      if (detail) {
-        setAiStatus(detail.ai_status);
-        setTranscript(null);
-      }
+      if (detail) setAiStatus(detail.ai_status);
       toast(`Запись загружена (${fmtSize(result.size_bytes)}).`);
     } catch (e: unknown) {
       setErr(aiErrorText(e, "Не удалось загрузить запись"));
@@ -374,6 +379,7 @@ export default function SessionAssistantCard({
       if (!detail) return;
       setAiStatus(detail.ai_status);
       if (detail.ai_status === "transcribed") {
+        setAiError(null);
         await loadTranscript();
         toast("Расшифровка получена.");
       } else if (detail.ai_status === "failed") {
@@ -515,7 +521,7 @@ export default function SessionAssistantCard({
             Показать расшифровку
           </button>
         )}
-        {(aiError || err) && (
+        {(aiError || err || (aiStatus === "transcribing" && !polling)) && (
           <button type="button" className="ghost" onClick={() => void refreshState()} disabled={busy !== ""}>
             Обновить состояние
           </button>
