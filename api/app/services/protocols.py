@@ -289,6 +289,11 @@ async def _create_draft(
     Гонка реальна и между разными путями: PUT врача, черновик ИИ по кнопке,
     автодрафт после расшифровки и тул диалога. Все они идут через эту функцию,
     иначе второй писатель получал `IntegrityError` на `UNIQUE(session_id, version)`.
+
+    Повтор — **внутри SAVEPOINT**: занятый номер не должен откатывать транзакцию
+    вызывающего. В чате там уже лежит `flush`-нутая реплика врача и загруженная
+    сессия — `db.rollback()` выбросил бы реплику и экспайрил объекты (дальше
+    `session.id` → `MissingGreenlet`).
     """
     for _ in range(2):
         row = SessionProtocol(
@@ -300,12 +305,14 @@ async def _create_draft(
             diagnosis_code=code,
             created_by=clinician_id,
         )
-        db.add(row)
         try:
-            await db.flush()
+            # SAVEPOINT: после отката объект выпадает из сессии, транзакция
+            # вызывающего (реплика врача, правки PUT) остаётся целой.
+            async with db.begin_nested():
+                db.add(row)
+                await db.flush()
         except IntegrityError:
-            # UNIQUE(session_id, version): параллельный PUT забрал номер — берём следующий.
-            await db.rollback()
+            # UNIQUE(session_id, version): параллельный писатель забрал номер — берём следующий.
             continue
         # §3.4: активна максимум одна версия. В `superseded` уходят только
         # неотправленные версии: `submitted` уже зарегистрирована в РЭМД (FR-41),

@@ -520,6 +520,9 @@ async def ask(
     _ensure_enabled()
     _ensure_llm()
     session = await require_session(db, clinician_id, session_id)
+    # Локально: после возможного отката внутри сервисов объект `session`
+    # экспайрен, и `session.id` потребовал бы ленивой подгрузки (MissingGreenlet).
+    sid = session.id
     # 403 NO_ROSTER / CONSENT_REQUIRED — карта пациента без ростра и согласия
     # недоступна (152-ФЗ). Аудит ASK_ASSISTANT_WITH_PATIENT пишет patient_context.
     await require_patient_access(db, clinician_id, session.patient_id)
@@ -535,7 +538,7 @@ async def ask(
         select(func.count())
         .select_from(SessionChatMessage)
         .where(
-            SessionChatMessage.session_id == session.id,
+            SessionChatMessage.session_id == sid,
             SessionChatMessage.role == ROLE_CLINICIAN,
         )
     )
@@ -551,7 +554,7 @@ async def ask(
         lambda: scrub_for_llm(text, card, names)
     )
 
-    row = await protocols.active(db, session.id)
+    row = await protocols.active(db, sid)
     sections = protocols.decode_sections(row) if row is not None and row.status == "draft" else None
     if sections is not None:
         # Черновик собран из уже замаскированной расшифровки, но свободный текст
@@ -563,7 +566,7 @@ async def ask(
     else:
         sections_block = None
 
-    history_rows = await _history_rows(db, session.id, settings.session_chat_history)
+    history_rows = await _history_rows(db, sid, settings.session_chat_history)
     history = [
         {
             "role": "user" if item.role == ROLE_CLINICIAN else "assistant",
@@ -580,7 +583,7 @@ async def ask(
     asked_at = _now()
     db.add(
         SessionChatMessage(
-            session_id=session.id,
+            session_id=sid,
             clinician_id=clinician_id,
             role=ROLE_CLINICIAN,
             content_cipher=text,
@@ -620,7 +623,7 @@ async def ask(
         "proposal": proposal,
     }
     reply = SessionChatMessage(
-        session_id=session.id,
+        session_id=sid,
         clinician_id=clinician_id,
         role=ROLE_ASSISTANT,
         content_cipher=json.dumps(payload, ensure_ascii=False),
@@ -628,7 +631,7 @@ async def ask(
     )
     db.add(reply)
     await audit.record(
-        db, clinician_id, "SESSION_CHAT_ASK", "clinical_session", str(session.id), ip=ip
+        db, clinician_id, "SESSION_CHAT_ASK", "clinical_session", str(sid), ip=ip
     )
     await db.commit()
     await db.refresh(reply)

@@ -1009,16 +1009,17 @@ async def _autodraft(session_id: uuid.UUID) -> None:
                 await draft(
                     db,
                     session.clinician_id,
-                    session.id,
+                    session_id,
                     action="SESSION_PROTOCOL_AUTODRAFT",
                 )
             except IntegrityError:
                 # Коллизия номера версии: черновик уже создаёт другой писатель —
                 # кнопка «Сформировать черновик», тул диалога или второй автодрафт.
                 # Это не сбой: ai_error не пишем, иначе врач увидит ложную ошибку
-                # при живом черновике.
+                # при живом черновике. После отката — только аргумент `session_id`:
+                # объект `session` экспайрен и потребовал бы ленивой подгрузки.
                 await db.rollback()
-                if await protocols.active(db, session.id) is not None:
+                if await protocols.active(db, session_id) is not None:
                     log.info("Автодрафт сессии %s: черновик уже создан параллельно", session_id)
                     return
                 log.warning("Автодрафт сессии %s: версия занята параллельным писателем", session_id)

@@ -25,7 +25,7 @@ from compass.agent import RAGChunk
 from app import db as app_db
 from app.config import settings
 from app.errors import Problem
-from app.services import llm_router, session_agent, session_ai
+from app.services import llm_router, protocols, session_agent, session_ai
 
 from .conftest import run_async
 from .test_session_ai import (  # noqa: F401 — общие фикстуры/хелперы модуля FR-39
@@ -763,3 +763,62 @@ def test_chat_history_returns_last_rows(client, monkeypatch):
     ).json()["items"]
     assert [m["id"] for m in tail] == [m["id"] for m in full[-2:]]
     assert [m["role"] for m in tail] == ["clinician", "assistant"]
+
+
+def test_chat_draft_tool_survives_version_collision(client, monkeypatch, db_session):
+    """Ревью #100 (P1, второй заход): занятый номер версии не откатывает транзакцию чата.
+
+    Повтор номера в `protocols._create_draft` идёт внутри SAVEPOINT: реплика врача,
+    уже `flush`-нутая в транзакции `ask()`, и объект `ClinicalSession` переживают откат.
+    Без этого `/chat` падал `MissingGreenlet` и вопрос врача терялся.
+    """
+    _kb(monkeypatch)
+    _draft_llm(monkeypatch)
+    ctx = _ctx(client, "chatcollide")
+    session, _ = _transcribed(client, ctx, monkeypatch)
+    # Занятая версия 1: черновик есть, но он уже не активен (его перекрыл другой писатель).
+    _put_protocol(client, ctx, session["id"])
+    db_session.execute(
+        text("update session_protocols set status = 'superseded' where session_id = :i"),
+        {"i": session["id"]},
+    )
+    db_session.commit()
+
+    real = protocols._next_version
+    calls = {"n": 0}
+
+    async def next_version(db, session_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return 1  # номер занят параллельным писателем → IntegrityError → повтор
+        return await real(db, session_id)
+
+    monkeypatch.setattr(protocols, "_next_version", next_version)
+    _chat_llm(
+        monkeypatch,
+        content=json.dumps({"answer": "черновик готов", "proposal": None}),
+        tool_calls=[
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {
+                    "name": "draft_session_protocol",
+                    "arguments": json.dumps({"session_id": session["id"]}),
+                },
+            }
+        ],
+    )
+    _compose(monkeypatch)
+
+    resp = _chat(client, ctx, session["id"], "собери черновик заново")
+    assert resp.status_code == 200, resp.text
+    assert calls["n"] >= 2  # повтор действительно был
+
+    db_session.expire_all()
+    roles = db_session.execute(
+        text("select role from session_chat_messages where session_id = :i order by created_at"),
+        {"i": session["id"]},
+    ).scalars().all()
+    assert list(roles) == ["clinician", "assistant"]
+    rows = _protocol_rows(db_session, session["id"])
+    assert [(r.version, r.status) for r in rows] == [(1, "superseded"), (2, "draft")]
