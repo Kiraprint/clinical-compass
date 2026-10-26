@@ -69,10 +69,18 @@ async def _purge_artifacts_tmp() -> None:
     """Старт приложения: убрать осиротевшие расшифрованные файлы из `tmp`."""
     from .services import artifacts
 
+    # Только заведомо брошенные файлы: чужой воркер может прямо сейчас кормить
+    # сайдкар из своего (§4.6), поэтому порог — как у реапера расшифровок.
+    max_age = settings.session_ai_timeout * 2
     try:
-        await asyncio.to_thread(artifacts.purge_temp)
+        removed = await asyncio.to_thread(artifacts.purge_temp, max_age_sec=max_age)
     except OSError:  # noqa: BLE001 — уборка не должна блокировать старт
         logging.getLogger(__name__).warning("Не удалось очистить tmp артефактов")
+        return
+    if removed:
+        logging.getLogger(__name__).warning(
+            "Удалено %d брошенных файлов расшифровки из tmp", removed
+        )
 
 
 async def _reap_stale_sessions() -> None:

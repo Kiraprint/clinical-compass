@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import time
 import uuid
 from pathlib import Path
 from typing import Iterable, Iterator
@@ -270,17 +271,24 @@ def temp_dir() -> Path:
     return _root() / "tmp"
 
 
-def purge_temp() -> int:
-    """Удалить остатки открытого текста из `tmp` (старт приложения).
+def purge_temp(*, max_age_sec: float) -> int:
+    """Удалить остатки открытого текста старше `max_age_sec` из `tmp`.
 
     Штатно файл удаляет `_pipeline` в `finally`, но убитый процесс оставить его
-    мог: открытый текст аудио не должен переживать рестарт.
+    мог: открытый текст аудио не должен переживать рестарт. Чужие файлы не
+    трогаем — при `WEB_CONCURRENCY>1` соседний воркер в этот момент кормит
+    сайдкар из своего файла, поэтому порог задаёт вызывающий
+    (`CC_SESSION_AI_TIMEOUT × 2`).
     """
+    cutoff = time.time() - max_age_sec
     removed = 0
     for path in temp_dir().glob("*"):
-        if path.is_file():
-            path.unlink(missing_ok=True)
-            removed += 1
+        try:
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink(missing_ok=True)
+                removed += 1
+        except FileNotFoundError:  # файл убрал сам воркер
+            continue
     return removed
 
 

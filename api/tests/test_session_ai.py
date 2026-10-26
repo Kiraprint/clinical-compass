@@ -13,6 +13,7 @@ PROTOCOL_LOCKED после подтверждения, fail-closed деперс�
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import threading
 import time
@@ -738,3 +739,222 @@ def test_reaper_resets_stale_transcribing(client, monkeypatch, db_session):
     detail = _detail(client, ctx["doctor"], sid)
     assert detail["ai_status"] == "failed"
     assert detail["ai_error"] == "TRANSCRIBE_INTERRUPTED"
+
+def _multipart(boundary: str, *parts: bytes) -> tuple[bytes, str]:
+    """Собрать multipart руками: нужно контролировать boundary и лишние части."""
+    body = b""
+    for part in parts:
+        body += b"--" + boundary.encode() + b"\r\n" + part
+    body += b"--" + boundary.encode() + b"--\r\n"
+    return body, f"multipart/form-data; boundary={boundary}"
+
+
+def _file_part(name: str, data: bytes, mime: str = "audio/webm") -> bytes:
+    return (
+        f'Content-Disposition: form-data; name="file"; filename="{name}"\r\n'
+        f"Content-Type: {mime}\r\n\r\n"
+    ).encode() + data + b"\r\n"
+
+
+def test_put_stream_failure_returns_problem_and_keeps_loop(client, monkeypatch):
+    """Сбой шифрования (ENOSPC) не должен вешать loop: конверт 5xx и /health."""
+    _enable(monkeypatch)
+    ctx = _ctx(client, "enospc")
+    sid = _session(client, ctx)["id"]
+    before = {p.name for p in artifacts_svc.temp_dir().glob("*")} if artifacts_svc.temp_dir().exists() else set()
+
+    seen: list[int] = []
+
+    def boom(kind, chunks, *, session_id, protocol_id=None, mime=None):
+        # Потребитель умирает, набрав пару чанков (или один, если клиент прислал
+        # тело одним куском): дальше фидеру писать некуда.
+        it = iter(chunks)
+        for _ in range(2):
+            try:
+                seen.append(len(next(it)))
+            except StopIteration:
+                break
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(artifacts_svc, "put_stream", boom)
+    started = time.time()
+    resp = _upload(client, ctx, sid, data=b"OggS" + b"\x00" * (8 * 1024 * 1024))
+    assert time.time() - started < 30, "запрос повис на блокирующем put"
+    assert resp.status_code == 500, resp.text
+    assert resp.json()["code"] == "ARTIFACT_WRITE_FAILED"
+    assert seen, "до put_stream не дошло"
+    # Тело ответа не было дочитано, но loop жив и tmp чист.
+    assert client.get("/health").status_code == 200
+    after = {p.name for p in artifacts_svc.temp_dir().glob("*")} if artifacts_svc.temp_dir().exists() else set()
+    assert after == before
+    assert not list((pathlib.Path(settings.artifacts_dir) / "audio").glob(f"*{sid}*"))
+
+
+def test_stream_pump_does_not_block_when_consumer_dies(monkeypatch):
+    """Очередь полна, потребитель умер: фидер не должен блокировать loop.
+
+    Прямой вызов `_stream_artifact` с медленным потребителем — единственный
+    способ детерминированно переполнить очередь (через HTTP тело приходит
+    одним куском). Старый блокирующий `put` здесь повис бы навсегда.
+    """
+    import asyncio
+    import uuid
+
+    from app.services import session_ai
+
+    def boom(kind, chunks, *, session_id, protocol_id=None, mime=None):
+        next(iter(chunks))
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(artifacts_svc, "put_stream", boom)
+
+    async def _many():
+        for _ in range(5000):
+            yield b"x" * 4096
+
+    async def _run():
+        return await asyncio.wait_for(
+            session_ai._stream_artifact(
+                "audio", _many(), session_id=uuid.uuid4(), mime="audio/webm"
+            ),
+            timeout=15,
+        )
+
+    with pytest.raises(OSError):
+        asyncio.run(_run())
+
+
+def test_multipart_delimiter_needs_suffix(client, monkeypatch):
+    """`--boundary` без `\r\n`/`--` — это аудио, а не разделитель (не обрезать)."""
+    _enable(monkeypatch)
+    ctx = _ctx(client, "delim")
+    sid = _session(client, ctx)["id"]
+    boundary = "XyZb0und4ry"
+    audio = b"AAAA\r\n--" + boundary.encode() + b"suffix"
+    body, ctype = _multipart(boundary, _file_part("visit.webm", audio))
+
+    resp = client.post(
+        f"{BASE}/sessions/{sid}/audio",
+        content=body,
+        headers={**ctx["doctor"], "content-type": ctype},
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["size_bytes"] == len(audio), "загрузка обрезана по ложному разделителю"
+
+
+def test_double_unlock_is_safe(monkeypatch):
+    """`_on_done` и `finally` зовут unlock оба: второй вызов — no-op."""
+    import asyncio
+    import uuid
+
+    from app.services import session_ai
+
+    class _Conn:
+        closed = False
+        calls = 0
+
+        async def scalar(self, *args, **kwargs):
+            self.calls += 1
+            return True
+
+        async def close(self):
+            self.closed = True
+
+    async def _twice():
+        conn = _Conn()
+        sid = uuid.uuid4()
+        await session_ai._db_unlock(sid, conn)
+        await session_ai._db_unlock(sid, conn)
+        await session_ai._db_unlock(sid, session_ai._NO_DB)
+        await session_ai._db_unlock(sid, None)
+        return conn
+
+    conn = asyncio.run(_twice())
+    assert conn.calls == 1
+    assert conn.closed
+
+
+def test_purge_temp_keeps_fresh_files(monkeypatch):
+    """Уборка на старте не трогает файл соседнего воркера (свежий по mtime)."""
+    tmp = artifacts_svc.temp_dir()
+    tmp.mkdir(parents=True, exist_ok=True)
+    old = tmp / "orphan-from-dead-worker.pcm"
+    fresh = tmp / "live-worker-running.pcm"
+    old.write_bytes(b"raw")
+    fresh.write_bytes(b"raw")
+    os.utime(old, (time.time() - 10_000, time.time() - 10_000))
+
+    assert artifacts_svc.purge_temp(max_age_sec=600) >= 1
+    assert not old.exists()
+    assert fresh.exists()
+    fresh.unlink()
+
+
+def test_reaper_is_single_update_and_audits_once(client, db_session, monkeypatch):
+    """Повторный реапер не дублирует аудит и не переписывает статус дважды."""
+    from app.services.session_ai import reap_stale
+
+    from .conftest import run_async
+
+    _enable(monkeypatch)
+    ctx = _ctx(client, "reap2")
+    sid = _session(client, ctx)["id"]
+    assert _upload(client, ctx, sid).status_code == 201
+    db_session.execute(
+        text(
+            "update clinical_sessions set ai_status='transcribing', "
+            "ai_started_at = now() - interval '1 hour' where id = :i"
+        ),
+        {"i": sid},
+    )
+    db_session.commit()
+
+    assert run_async(reap_stale) == 1
+    assert run_async(reap_stale) == 0
+    audited = db_session.execute(
+        text(
+            "select count(*) from audit_log where action = 'SESSION_TRANSCRIBE' "
+            "and object_id = :i"
+        ),
+        {"i": sid},
+    ).scalar_one()
+    assert audited == 1
+
+
+def test_no_engine_falls_back_to_inflight_claim(client, monkeypatch):
+    """Без engine захват в БД невозможен: решает in-process реестр, а не вечный 409."""
+    from app import db as db_module
+
+    _enable(monkeypatch)
+    _fake_ml(monkeypatch)
+    ctx = _ctx(client, "noengine")
+    sid = _session(client, ctx)["id"]
+    assert _upload(client, ctx, sid).status_code == 201
+    monkeypatch.setattr(db_module, "engine", None)
+
+    resp = client.post(f"{BASE}/sessions/{sid}/transcribe", headers=ctx["doctor"])
+    assert resp.status_code == 202, resp.text
+    _wait_ai_status(client, ctx["doctor"], sid, {"transcribed", "failed"})
+
+
+def test_empty_and_duplicate_file_parts_are_rejected(client, monkeypatch):
+    """0 байт и вторая часть с `name="file"` — 422, а не тихая потеря записи."""
+    _enable(monkeypatch)
+    ctx = _ctx(client, "parts")
+    sid = _session(client, ctx)["id"]
+
+    empty = _upload(client, ctx, sid, data=b"")
+    assert empty.status_code == 422, empty.text
+    assert empty.json()["code"] == "VALIDATION_ERROR"
+
+    boundary = "b0undaryTwoParts"
+    body, ctype = _multipart(
+        boundary, _file_part("visit.webm", AUDIO), _file_part("second.webm", AUDIO)
+    )
+    dup = client.post(
+        f"{BASE}/sessions/{sid}/audio",
+        content=body,
+        headers={**ctx["doctor"], "content-type": ctype},
+    )
+    assert dup.status_code == 422, dup.text
+    assert dup.json()["code"] == "VALIDATION_ERROR"

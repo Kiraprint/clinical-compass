@@ -31,6 +31,7 @@ import os
 import queue
 import re
 import threading
+import time
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from datetime import date, datetime, timedelta, timezone
@@ -139,6 +140,7 @@ class _BodyReader:
         self._boundary = boundary.encode("latin-1", "ignore")
         self._buf = b""
         self._eof = False
+        self.terminated = b""
 
     async def _more(self) -> bool:
         if self._eof:
@@ -151,6 +153,25 @@ class _BodyReader:
         if chunk:
             self._buf += chunk
         return True
+
+    def _delimiter_at(self, marker: bytes) -> int | None:
+        """Позиция настоящего разделителя: за маркером идёт `\r\n` или `--`.
+
+        Иначе совпадение — просто байты аудио (`...--XyZb0und4ry suffix`), и
+        обрезать на нём загрузку нельзя.
+        """
+        start = 0
+        while True:
+            idx = self._buf.find(marker, start)
+            if idx < 0:
+                return None
+            tail = idx + len(marker)
+            suffix = self._buf[tail : tail + 2]
+            if len(suffix) < 2:
+                return None  # суффикс ещё не приехал: подождём байты
+            if suffix in (b"\r\n", b"--"):
+                return idx
+            start = idx + 1
 
     async def until(self, marker: bytes, *, limit: int) -> bytes:
         """Вернуть данные до `marker` (маркер вычитывается из буфера)."""
@@ -166,20 +187,33 @@ class _BodyReader:
                 raise _MultipartError("Тело запроса обрезано")
 
     async def chunks(self, marker: bytes, *, limit: int) -> AsyncIterator[bytes]:
-        """Отдавать данные частями до `marker`, считая объём на лету (413)."""
+        """Отдавать данные частями до `marker`, считая объём на лету (413).
+
+        По завершении `self.terminated` — суффикс разделителя: `b"\r\n"` (дальше
+        ещё часть) или `b"--"` (тело закончилось).
+        """
         total = 0
-        keep = len(marker) - 1
+        keep = len(marker) + 1  # маркер + 2 байта суффикса - 1: не отдаём вслепую
         while True:
-            idx = self._buf.find(marker)
-            if idx >= 0:
+            idx = self._delimiter_at(marker)
+            if idx is not None:
                 data = self._buf[:idx]
-                self._buf = self._buf[idx + len(marker) :]
+                tail = idx + len(marker)
+                self.terminated = self._buf[tail : tail + 2]
+                self._buf = self._buf[tail + 2 :]
                 if data:
                     total += len(data)
                     if total > limit:
                         raise _too_large()
                     yield data
                 return
+            if len(self._buf) > keep:
+                cut = len(self._buf) - keep
+                data, self._buf = self._buf[:cut], self._buf[cut:]
+                total += len(data)
+                if total > limit:
+                    raise _too_large()
+                yield data
             if len(self._buf) > keep:
                 cut = len(self._buf) - keep
                 data, self._buf = self._buf[:cut], self._buf[cut:]
@@ -197,6 +231,28 @@ def _too_large() -> Problem:
         "AUDIO_TOO_LARGE",
         f"Аудио больше {settings.session_audio_max_mb} МБ (CC_SESSION_AUDIO_MAX_MB)",
     )
+
+
+async def _file_chunks(
+    reader: _BodyReader, marker: bytes, limit: int
+) -> AsyncIterator[bytes]:
+    """Тело файловой части плюс проверки, которые видны только в конце.
+
+    Пустой файл и вторая часть с `name="file"` — 422: молча записать 0 байт
+    или проигнорировать присланное аудио нельзя (врач решит, что запись есть).
+    """
+    total = 0
+    async for chunk in reader.chunks(marker, limit=limit):
+        total += len(chunk)
+        yield chunk
+    if reader.terminated == b"\r\n":
+        # Тело продолжается: допустимы только не-файловые поля, второй файл —
+        # это молча потерянная запись, поэтому 422.
+        head = await reader.until(b"\r\n\r\n", limit=PART_HEAD_LIMIT)
+        if 'name="file"' in head.decode("latin-1", "ignore"):
+            raise _MultipartError("В запросе больше одной части с файлом")
+    if total == 0:
+        raise _MultipartError("Пустой файл")
 
 
 async def _open_multipart(request: BodySource) -> tuple[str, AsyncIterator[bytes]]:
@@ -225,9 +281,8 @@ async def _open_multipart(request: BodySource) -> tuple[str, AsyncIterator[bytes
                 headers.get("content-type"), filename.group(1) if filename else None
             )
             limit = settings.session_audio_max_mb * 1024 * 1024
-            return mime, reader.chunks(
-                b"\r\n--" + match.group(1).encode("latin-1", "ignore"), limit=limit
-            )
+            marker = b"\r\n--" + match.group(1).encode("latin-1", "ignore")
+            return mime, _file_chunks(reader, marker, limit)
         # Прочие поля формы (например language) просто дочитываем и пропускаем.
         async for _ in reader.chunks(
             b"\r\n--" + match.group(1).encode("latin-1", "ignore"), limit=PART_HEAD_LIMIT
@@ -244,24 +299,31 @@ async def _stream_artifact(
     поток, а разбор multipart остаётся асинхронным; мост — очередь с backpressure.
     """
     q: queue.Queue = queue.Queue(maxsize=8)
+    # "done" — потребитель уже вышел, "eof" — фидер закончил, "exc" — его сбой.
+    # Никаких блокирующих put: если потребитель умер (ENOSPC/EROFS в put_stream),
+    # заблокированный put заморозил бы весь event loop.
     box: dict = {}
 
     async def _feed() -> None:
         try:
             async for chunk in chunks:
+                if box.get("done"):
+                    return
                 while True:
                     try:
                         q.put_nowait(chunk)
                         break
                     except queue.Full:
+                        if box.get("done"):
+                            return  # потребитель умер: писать больше некому
                         # Потребитель отстаёт: ждём, не блокируя event loop.
                         await anyio.sleep(0.005)
         except asyncio.CancelledError:
             raise
         except BaseException as exc:  # noqa: BLE001 — сбой разбора отдаём потребителю
-            q.put(exc)
+            box["exc"] = exc
         finally:
-            q.put(None)
+            box["eof"] = True  # маркер конца без блокировки (см. _drain)
 
     def _consume() -> None:
         total = 0
@@ -269,18 +331,26 @@ async def _stream_artifact(
         def _drain():
             nonlocal total
             while True:
-                item = q.get()
-                if item is None:
-                    return
-                if isinstance(item, BaseException):
-                    raise item
+                try:
+                    item = q.get_nowait()
+                except queue.Empty:
+                    if box.get("eof"):
+                        exc = box.get("exc")
+                        if exc is not None:
+                            raise exc
+                        return
+                    time.sleep(0.002)  # рабочий поток, не loop
+                    continue
                 total += len(item)
                 yield item
 
-        box["artifact"] = artifacts.put_stream(
-            kind, _drain(), session_id=session_id, mime=mime
-        )
-        box["size"] = total
+        try:
+            box["artifact"] = artifacts.put_stream(
+                kind, _drain(), session_id=session_id, mime=mime
+            )
+            box["size"] = total
+        finally:
+            box["done"] = True  # фидеру больше некуда писать
 
     feeder = asyncio.create_task(_feed())
     try:
@@ -408,6 +478,13 @@ async def upload_audio(
         )
     except _MultipartError as exc:
         raise Problem(422, "VALIDATION_ERROR", str(exc)) from None
+    except OSError:
+        # ФС отказала посреди шифрования (ENOSPC/EROFS и т.п.): недописанный
+        # .tmp уже удалён, но и повиснуть запрос не должен — отдаём конверт.
+        log.exception("Не удалось записать аудио сессии %s", session.id)
+        raise Problem(
+            500, "ARTIFACT_WRITE_FAILED", "Не удалось сохранить аудио, повторите загрузку"
+        ) from None
 
     # Новая запись заменяет прежнюю: аудио приёма — спецкатегория ПДн, копить
     # дубли незачем, а расшифровка старой записи становится недействительной
@@ -456,6 +533,10 @@ def _lock_key(session_id: uuid.UUID) -> int:
     )
 
 
+#: `_db_lock` без engine: захват в БД не проверялся, «занято» решает `_inflight`.
+_NO_DB = object()
+
+
 async def _db_lock(session_id: uuid.UUID):
     """Межпроцессный захват расшифровки: `pg_try_advisory_lock` на отдельном соединении.
 
@@ -465,8 +546,8 @@ async def _db_lock(session_id: uuid.UUID):
     занято на время расшифровки — это осознанная плата за корректность).
     """
     engine = db_module.engine
-    if engine is None:  # тесты без engine: остаётся in-process реестр
-        return None
+    if engine is None:  # нет engine (нестандартная сборка): решает in-process реестр
+        return _NO_DB
     conn = await engine.connect()
     try:
         got = await conn.scalar(
@@ -482,7 +563,8 @@ async def _db_lock(session_id: uuid.UUID):
 
 
 async def _db_unlock(session_id: uuid.UUID, conn) -> None:
-    if conn is None:
+    """Снять захват; идемпотентно — `_on_done` и `finally` могут вызвать оба."""
+    if conn is None or conn is _NO_DB or conn.closed:
         return
     try:
         await conn.scalar(
@@ -528,29 +610,30 @@ async def reap_stale(db: AsyncSession) -> int:
     cutoff = datetime.now(timezone.utc) - timedelta(
         seconds=settings.session_ai_timeout * REAP_GRACE
     )
-    rows = (
-        await db.scalars(
-            select(ClinicalSession).where(
-                ClinicalSession.ai_status == "transcribing",
-                ClinicalSession.ai_started_at.is_not(None),
-                ClinicalSession.ai_started_at < cutoff,
-            )
+    # Один атомарный UPDATE: read-modify-write гонял бы с живым прогоном,
+    # который как раз ставит transcribing, и мог бы оставить дубль в аудите.
+    stale = (
+        await db.execute(
+            text(
+                "update clinical_sessions "
+                "set ai_status = 'failed', ai_error = 'TRANSCRIBE_INTERRUPTED', "
+                "    ai_started_at = null "
+                "where ai_status = 'transcribing' "
+                "  and ai_started_at is not null "
+                "  and ai_started_at < :cutoff "
+                "returning id, clinician_id"
+            ),
+            {"cutoff": cutoff},
         )
     ).all()
-    for session in rows:
-        session.ai_status = "failed"
-        session.ai_error = "TRANSCRIBE_INTERRUPTED"
+    for session_id, clinician_id in stale:
         await audit.record(
-            db,
-            session.clinician_id,
-            "SESSION_TRANSCRIBE",
-            "clinical_session",
-            str(session.id),
+            db, clinician_id, "SESSION_TRANSCRIBE", "clinical_session", str(session_id)
         )
-    if rows:
-        log.warning("Реапер вернул в failed %d зависших расшифровок", len(rows))
+    if stale:
+        log.warning("Реапер вернул в failed %d зависших расшифровок", len(stale))
         await db.commit()
-    return len(rows)
+    return len(stale)
 
 
 async def transcribe(
@@ -569,7 +652,7 @@ async def transcribe(
         raise Problem(409, "AUDIO_MISSING", "Аудио сессии не загружено")
     await reap_stale(db)
     lock_conn = await _db_lock(session.id)
-    if lock_conn is None:
+    if lock_conn is None:  # None = захват в БД не наш; _NO_DB = БД недоступна как арбитр
         raise Problem(409, "AI_BUSY", "Расшифровка этой сессии уже идёт")
     if not _claim(session.id):
         await _db_unlock(session.id, lock_conn)
