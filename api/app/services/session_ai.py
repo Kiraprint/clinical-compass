@@ -237,10 +237,28 @@ async def upload_audio(
     data = await _read_limited(file, settings.session_audio_max_mb * 1024 * 1024)
 
     artifact = await anyio.to_thread.run_sync(
-        lambda: artifacts.put_bytes(
-            "audio", data, session_id=session.id, mime=mime
-        )
+        lambda: artifacts.put_bytes("audio", data, session_id=session.id, mime=mime)
     )
+    # Новая запись заменяет прежнюю: аудио приёма — спецкатегория ПДн, копить
+    # дубли незачем, а расшифровка старой записи становится недействительной
+    # (иначе GET …/transcript отдал бы текст другого разговора).
+    superseded = (
+        await db.scalars(
+            select(DocumentArtifact).where(
+                DocumentArtifact.session_id == session.id,
+                DocumentArtifact.kind.in_(("audio", "transcript")),
+            )
+        )
+    ).all()
+    stale = await _transcript_row(db, session.id)
+    if stale is not None:
+        # Сначала метаданные (FK session_transcripts → document_artifacts), и
+        # отдельным flush: без relationship порядок delete'ов иначе не задан.
+        await db.delete(stale)
+        await db.flush()
+    for row in superseded:
+        await db.delete(row)
+
     db.add(artifact)
     session.ai_status = "recording"
     session.ai_error = None
@@ -250,6 +268,12 @@ async def upload_audio(
     size = len(data)
     await db.flush()
     await db.commit()
+    # Файлы удаляем после commit: осиротевший файл безопаснее ссылки в никуда.
+    for row in superseded:
+        try:
+            await anyio.to_thread.run_sync(artifacts.remove, row)
+        except OSError:  # noqa: PERF203 — удаление диска не должно ломать загрузку
+            log.warning("Не удалось удалить устаревший артефакт %s", row.id)
     return {"artifact_id": str(artifact.id), "size_bytes": size}
 
 
@@ -319,6 +343,14 @@ async def _mark_failed(session_id: uuid.UUID, code: str) -> None:
                 return
             session.ai_status = "failed"
             session.ai_error = code[:48]
+            # §2: SESSION_TRANSCRIBE — и успех, и сбой; в журнале только id сессии.
+            await audit.record(
+                db,
+                session.clinician_id,
+                "SESSION_TRANSCRIBE",
+                "clinical_session",
+                str(session.id),
+            )
             await db.commit()
     except Exception:  # noqa: BLE001 — БД могла умереть; исходная ошибка важнее
         log.exception("Не удалось отметить сбой расшифровки сессии %s", session_id)
@@ -361,10 +393,15 @@ def _mask_segments(segments: list[dict], names: list[str]) -> tuple[list[dict], 
 
 
 async def _pipeline(session_id: uuid.UUID) -> None:
-    """Аудио → ML `/v1/transcribe` → маски → артефакт + метаданные → transcribed."""
+    """Аудио → ML `/v1/transcribe` → маски → артефакт + метаданные → transcribed.
+
+    Соединение БД не держим ни во время ASR (минуты), ни во время маскирования:
+    пул из 20 соединений иначе выедят несколько параллельных расшифровок.
+    """
     factory = db_module.AsyncSessionLocal
     if factory is None:  # фон запускается только в процессе с БД
         raise RuntimeError("БД не инициализирована")
+
     async with factory() as db:
         session = await db.get(ClinicalSession, session_id)
         if session is None:
@@ -372,44 +409,57 @@ async def _pipeline(session_id: uuid.UUID) -> None:
         audio = await _audio_artifact(db, session.id)
         if audio is None:
             raise Problem(409, "AUDIO_MISSING", "Аудио сессии не загружено")
-
+        audio_id, audio_mime = audio.id, audio.mime
         data = await anyio.to_thread.run_sync(artifacts.get_bytes, audio)
-        result = await anyio.to_thread.run_sync(
-            lambda: ml_client.transcribe(
-                data, filename=f"session{_ext_for(audio.mime)}", mime=audio.mime
-            )
-        )
-        segments = _normalize_segments(result)
-
-        names = await deny_names(db, session.clinician_id, session.patient_id)
-        masked, counts = await anyio.to_thread.run_sync(
-            lambda: _mask_segments(segments, names)
+        # Ростер + ФИО самого врача: его имя звучит в записи так же, как имя пациента.
+        names = await deny_names(
+            db, session.clinician_id, session.patient_id, session.clinician_id
         )
 
-        payload = json.dumps(masked, ensure_ascii=False).encode("utf-8")
-        if len(payload) > TRANSCRIPT_MAX_BYTES:
-            raise Problem(413, "TRANSCRIPT_TOO_LARGE", "Расшифровка больше 5 МБ")
-
-        transcript = await anyio.to_thread.run_sync(
-            lambda: artifacts.put_bytes(
-                "transcript", payload, session_id=session.id, mime="application/json"
-            )
+    result = await anyio.to_thread.run_sync(
+        lambda: ml_client.transcribe(
+            data, filename=f"session{_ext_for(audio_mime)}", mime=audio_mime
         )
+    )
+    segments = _normalize_segments(result)
+    masked, counts = await anyio.to_thread.run_sync(lambda: _mask_segments(segments, names))
+
+    payload = json.dumps(masked, ensure_ascii=False).encode("utf-8")
+    if len(payload) > TRANSCRIPT_MAX_BYTES:
+        raise Problem(413, "TRANSCRIPT_TOO_LARGE", "Расшифровка больше 5 МБ")
+    transcript = await anyio.to_thread.run_sync(
+        lambda: artifacts.put_bytes(
+            "transcript", payload, session_id=session_id, mime="application/json"
+        )
+    )
+
+    async with factory() as db:
+        session = await db.get(ClinicalSession, session_id)
+        if session is None:
+            await anyio.to_thread.run_sync(artifacts.remove, transcript)
+            return
+        latest = await _audio_artifact(db, session.id)
+        if latest is None or latest.id != audio_id:
+            # Пока шла расшифровка, аудио перезаписали: результат устарел, статус
+            # новой записи не трогаем (её расшифровка запускается отдельно).
+            log.info("Расшифровка сессии %s устарела: аудио перезаписано", session_id)
+            await anyio.to_thread.run_sync(artifacts.remove, transcript)
+            return
+
         db.add(transcript)
         await db.flush()
-
         row = await _transcript_row(db, session.id)
-        duration = result.get("duration_s")
-        model = result.get("model")
         if row is None:
             row = SessionTranscript(session_id=session.id)
             db.add(row)
+        duration = result.get("duration_s")
+        model = result.get("model")
         row.model = (str(model) if model else None) or None
         row.language = (str(result.get("language") or "ru"))[:2]
         row.duration_sec = int(round(float(duration))) if duration is not None else None
         row.segments_artifact_id = transcript.id
         row.mask_categories = counts
-        # Расшифровка всегда прошла деперсонализацию ДО записи — иначе её бы не было.
+        # Расшифровка записана только после деперсонализации — иначе её бы не было.
         row.depersonalized = True
 
         session.ai_status = "transcribed"

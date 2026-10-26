@@ -28,6 +28,7 @@ BASE = "/api/v1/clinician"
 
 PATIENT_FIO = "Иванов Иван Иванович"
 PATIENT_PHONE = "+7 916 123-45-67"
+CLINICIAN_FIO = "Смирнова Ольга Петровна"
 
 AUDIO = b"OggS" + b"\x00" * 512
 ML_RESULT = {
@@ -39,7 +40,10 @@ ML_RESULT = {
             "start": 0.0,
             "end": 2.0,
             "speaker": None,
-            "text": f"{PATIENT_FIO}, телефон {PATIENT_PHONE}, жалуюсь на тревогу.",
+            "text": (
+                f"{PATIENT_FIO}, телефон {PATIENT_PHONE}, жалуюсь на тревогу. "
+                f"Врач {CLINICIAN_FIO} слушает."
+            ),
         },
         {
             "start": 2.0,
@@ -99,7 +103,13 @@ def _ctx(client, tag: str = "ai") -> dict:
         headers=admin,
     )
     assert resp.status_code == 201, resp.text
-    return {"patient": hp, "patient_id": pid, "doctor": h_doc, "doctor2": h_doc2}
+    return {
+        "patient": hp,
+        "patient_id": pid,
+        "doctor": h_doc,
+        "clinician_id": cid,
+        "doctor2": h_doc2,
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -193,11 +203,14 @@ def _transcribed(client, ctx, monkeypatch) -> tuple[dict, dict]:
 
 
 def _fio(db_session, ctx) -> None:
-    """ФИО пациента в карточке — deny-list деперсонализации (docs/12)."""
-    db_session.execute(
-        text("update users set fio=:f where id=:i"),
-        {"f": PATIENT_FIO, "i": ctx["patient_id"]},
-    )
+    """ФИО пациента и врача в карточках — deny-list деперсонализации (docs/12)."""
+    for user_id, fio in (
+        (ctx["patient_id"], PATIENT_FIO),
+        (ctx["clinician_id"], CLINICIAN_FIO),
+    ):
+        db_session.execute(
+            text("update users set fio=:f where id=:i"), {"f": fio, "i": user_id}
+        )
     db_session.commit()
 
 
@@ -322,7 +335,8 @@ def test_happy_path_transcribes_masked_and_counts_masks(client, monkeypatch, db_
     }
     joined = " ".join(seg["text"] for seg in payload["segments"])
     assert "[ФИО]" in joined and "[ТЕЛЕФОН]" in joined
-    for raw in ("Иванов", "Иван", "916", "123-45-67"):
+    # ФИО врача звучит в записи так же, как ФИО пациента: deny-list — оба.
+    for raw in ("Иванов", "Иван", "916", "123-45-67", "Смирнова", "Ольга"):
         assert raw not in joined
 
     # Артефакт на диске — шифротекст; после расшифровки — тот же маскированный текст.
@@ -337,7 +351,7 @@ def test_happy_path_transcribes_masked_and_counts_masks(client, monkeypatch, db_
     artifact = db_session.get(DocumentArtifact, row.segments_artifact_id)
     assert artifact.kind == "transcript"
     on_disk = artifacts_svc.get_bytes(artifact).decode("utf-8")
-    assert "Иванов" not in on_disk and "916" not in on_disk
+    assert "Иванов" not in on_disk and "916" not in on_disk and "Смирнова" not in on_disk
     assert "[ФИО]" in on_disk
 
     audio_row = db_session.execute(
@@ -353,7 +367,7 @@ def test_happy_path_transcribes_masked_and_counts_masks(client, monkeypatch, db_
     assert "SESSION_TRANSCRIBE" in actions
 
 
-def test_ai_busy_and_failure_marks_session(client, monkeypatch):
+def test_ai_busy_and_failure_marks_session(client, monkeypatch, db_session):
     _enable(monkeypatch)
     ctx = _ctx(client, "busy")
     session = _session(client, ctx)
@@ -381,6 +395,37 @@ def test_ai_busy_and_failure_marks_session(client, monkeypatch):
     assert again.status_code == 202
     detail = _wait_ai_status(client, ctx["doctor"], session["id"], {"failed"})
     assert detail["ai_error"] == "ML_UNAVAILABLE"
+    actions = db_session.execute(
+        text("select action from audit_log where object_id=:s"), {"s": session["id"]}
+    ).scalars().all()
+    assert "SESSION_TRANSCRIBE" in actions  # и успех, и сбой (docs/18 §2)
+
+
+def test_reupload_invalidates_previous_transcript(client, monkeypatch, db_session):
+    """Новая запись заменяет прежнюю: старая расшифровка не отдаётся (§4.3)."""
+    _enable(monkeypatch)
+    ctx = _ctx(client, "reupload")
+    session, _ = _transcribed(client, ctx, monkeypatch)
+    sid = session["id"]
+    assert _detail(client, ctx["doctor"], sid)["ai_status"] == "transcribed"
+
+    assert _upload(client, ctx, sid, data=AUDIO + b"new").status_code == 201
+    detail = _detail(client, ctx["doctor"], sid)
+    assert detail["ai_status"] == "recording"
+
+    gone = client.get(f"{BASE}/sessions/{sid}/transcript", headers=ctx["doctor"])
+    assert gone.status_code == 404
+    assert gone.json()["code"] == "TRANSCRIPT_MISSING"
+    kinds = db_session.execute(
+        text("select kind from document_artifacts where session_id = cast(:s as uuid)")
+        .bindparams(s=sid)
+    ).scalars().all()
+    assert kinds == ["audio"]
+    rows = db_session.execute(
+        text("select count(*) from session_transcripts where session_id = cast(:s as uuid)")
+        .bindparams(s=sid)
+    ).scalar_one()
+    assert rows == 0
 
 
 # --- черновик протокола -----------------------------------------------------
