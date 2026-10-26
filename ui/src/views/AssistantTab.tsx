@@ -3,6 +3,7 @@ import {
   api,
   AssistantThread,
   AssistantThreadDetail,
+  AssistantThreadMessage,
   KB_DESIGN_LABELS,
   KbWork,
   PatientCard,
@@ -204,6 +205,42 @@ export default function AssistantTab() {
           onToken: (t) => setStreamText((cur) => cur + t),
           onDone: (answer) => {
             outcome.done = true;
+            // Сразу кладём сохранённый ход в detail: refetch лишь заменит его
+            // серверной копией. Если refetch упадёт, ответ уже на экране и не
+            // дублируется при повторной загрузке треда.
+            const ts = new Date().toISOString();
+            const saved: AssistantThreadMessage[] = [
+              {
+                id: answer.message_ids[0] ?? `${targetId}-local-${seq}-q`,
+                role: "CLINICIAN",
+                content: text,
+                citations: [],
+                topic: null,
+                created_at: ts,
+              },
+              {
+                id: answer.message_ids[1] ?? `${targetId}-local-${seq}-a`,
+                role: "ASSISTANT",
+                content: answer.answer,
+                citations: answer.citations,
+                topic: answer.topic,
+                created_at: ts,
+              },
+            ];
+            setDetail((cur) =>
+              cur && cur.id === targetId
+                ? {
+                    ...cur,
+                    messages: [...cur.messages, ...saved],
+                    message_count: cur.message_count + saved.length,
+                    updated_at: ts,
+                  }
+                : cur,
+            );
+            setStreaming(false);
+            setPendingUser("");
+            setStreamThreadId(null);
+            setStreamText("");
             if (answer.skipped_patient_ids.length > 0) {
               setNotice(
                 `Пропущены пациенты без доступа: ${answer.skipped_patient_ids
@@ -215,25 +252,18 @@ export default function AssistantTab() {
         },
       );
       const fresh = await api.assistantThread(targetId);
-      if (selectSeq.current === seq) setDetail(fresh); // врач не переключил тред
-      setStreaming(false);
-      setPendingUser("");
-      setStreamThreadId(null);
-      setStreamText("");
+      // По id, а не только по seq: врач мог уйти в другой тред и вернуться.
+      setDetail((cur) => (cur?.id === targetId ? fresh : cur));
       await refreshThreads();
     } catch (e: unknown) {
       if (!outcome.done) setInput(text); // не терять вопрос при обрыве
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
-      // После done ответ сохранён: если refetch упал, оставляем пузыри видны,
-      // чтобы врач не потерял ответ; вопрос в поле не возвращаем.
-      if (!outcome.done) {
-        setStreaming(false);
-        setPendingUser("");
-        setStreamThreadId(null);
-        setStreamText("");
-      }
+      setStreaming(false);
+      setPendingUser("");
+      setStreamThreadId(null);
+      setStreamText("");
     }
   };
 
