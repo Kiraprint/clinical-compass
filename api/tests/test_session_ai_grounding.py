@@ -27,6 +27,12 @@ from compass.agent import RAGChunk
 
 from .test_session_ai import BASE, _ctx, _enable, _fake_llm, _fio, _transcribed
 
+
+@pytest.fixture(autouse=True)
+def _no_autodraft(monkeypatch):
+    """FR-44: автодрафт тестируется отдельно; здесь черновик зовёт сам тест."""
+    monkeypatch.setattr(settings, "session_ai_autodraft", False)
+
 PRESCRIPTION = "Сертралин назначают внутрь, стартовая доза 25 мг, средняя 50 мг/сут."
 GUIDELINE = "При генерализованном тревожном расстройстве (F41.1) рекомендована КПТ."
 

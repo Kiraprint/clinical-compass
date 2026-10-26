@@ -278,24 +278,43 @@ async def _next_version(db: AsyncSession, session_id) -> int:
     return (current or 0) + 1
 
 
-async def _create_draft(db: AsyncSession, session_id, sections: dict, code, clinician_id):
-    """Новая версия draft: номер — `max+1`, гонку двух PUT разбираем повтором."""
+async def _create_draft(
+    db: AsyncSession,
+    session_id,
+    sections: dict,
+    code,
+    clinician_id,
+    source: str = "manual",
+):
+    """Новая версия draft: номер — `max+1`, гонку писателей разбираем повтором.
+
+    Гонка реальна и между разными путями: PUT врача, черновик ИИ по кнопке,
+    автодрафт после расшифровки и тул диалога. Все они идут через эту функцию,
+    иначе второй писатель получал `IntegrityError` на `UNIQUE(session_id, version)`.
+
+    Повтор — **внутри SAVEPOINT**: занятый номер не должен откатывать транзакцию
+    вызывающего. В чате там уже лежит `flush`-нутая реплика врача и загруженная
+    сессия — `db.rollback()` выбросил бы реплику и экспайрил объекты (дальше
+    `session.id` → `MissingGreenlet`).
+    """
     for _ in range(2):
         row = SessionProtocol(
             session_id=session_id,
             version=await _next_version(db, session_id),
             status="draft",
-            source="manual",
+            source=source,
             sections_cipher=encode_sections(sections),
             diagnosis_code=code,
             created_by=clinician_id,
         )
-        db.add(row)
         try:
-            await db.flush()
+            # SAVEPOINT: после отката объект выпадает из сессии, транзакция
+            # вызывающего (реплика врача, правки PUT) остаётся целой.
+            async with db.begin_nested():
+                db.add(row)
+                await db.flush()
         except IntegrityError:
-            # UNIQUE(session_id, version): параллельный PUT забрал номер — берём следующий.
-            await db.rollback()
+            # UNIQUE(session_id, version): параллельный писатель забрал номер — берём следующий.
             continue
         # §3.4: активна максимум одна версия. В `superseded` уходят только
         # неотправленные версии: `submitted` уже зарегистрирована в РЭМД (FR-41),
@@ -406,11 +425,11 @@ async def save_llm_draft(
     clinician_id,
     session_id,
     sections: dict,
-    *,
     model: str | None = None,
     prompt_version: str | None = None,
     needs_review: list[dict] | None = None,
     ip: str | None = None,
+    action: str = "SESSION_PROTOCOL_DRAFT",
 ) -> dict:
     """Черновик ИИ (§4.3): версия `source='llm'`, сам никогда не подтверждается.
 
@@ -418,25 +437,27 @@ async def save_llm_draft(
     плодит версии, а заменяет предыдущий. Подтверждённая/подписанная/переданная
     запись не перезаписывается: 409 PROTOCOL_LOCKED (ИИ не трогает документ
     после врача, §1.1). `needs_review` — подсказки врачу, не блокировка.
+
+    `action` (FR-44): какой код писать в журнал. `audit.record` не принимает
+    metadata, поэтому единственный честный способ отличить ручной черновик от
+    автодрафта конвейера и от вызова тулом диалога — код действия:
+    `SESSION_PROTOCOL_DRAFT` (кнопка/POST), `SESSION_PROTOCOL_AUTODRAFT`
+    (после расшифровки), `SESSION_PROTOCOL_CHAT_DRAFT` (тул агента).
     """
     session = await require_session(db, clinician_id, session_id)
+    # id — локально: повтор версии внутри `_create_draft` делает rollback, после
+    # которого обращение к `session.id` потребовало бы ленивой подгрузки.
+    sid = session.id
     await require_patient_access(db, clinician_id, session.patient_id)
-    active = await _active(db, session.id)
+    active = await _active(db, sid)
     if active is not None and active.status != "draft":
         raise Problem(409, "PROTOCOL_LOCKED", "Протокол подтверждён — черновик недоступен")
 
     validate_sections(sections)
     if active is None:
-        row = SessionProtocol(
-            session_id=session.id,
-            version=await _next_version(db, session.id),
-            status="draft",
-            source="llm",
-            sections_cipher=encode_sections(sections),
-            created_by=clinician_id,
-        )
-        db.add(row)
-        await db.flush()
+        # Тот же путь, что у PUT: гонка версий (автодрафт/кнопка/тул/врач)
+        # разбирается повтором, а не 500 из `UNIQUE(session_id, version)`.
+        row = await _create_draft(db, sid, sections, None, clinician_id, source="llm")
     else:
         row = active
         row.sections_cipher = encode_sections(sections)
@@ -451,9 +472,9 @@ async def save_llm_draft(
     await audit.record(
         db,
         clinician_id,
-        "SESSION_PROTOCOL_DRAFT",
+        action,
         "session_protocol",
-        f"{session.id}:v{row.version}",
+        f"{sid}:v{row.version}",
         ip=ip,
     )
     await db.flush()

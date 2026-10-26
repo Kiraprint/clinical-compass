@@ -265,6 +265,31 @@ export interface SessionProtocol {
   created_at: string | null;
   updated_at: string | null;
 }
+/** docs/18 §10 (FR-44): цитата ответа агента — найденный чанк КБ. */
+export interface SessionChatCitation {
+  source_title: string;
+  guideline_id: string;
+  topic: string;
+  score: number;
+}
+/** §10: предложенная агентом правка раздела — применяет врач явным PUT. */
+export interface SessionChatProposal {
+  /** Ключ раздела §5.1 (`complaints`, `recommendations`, `mental_status.perception`…). */
+  section: string;
+  /** Текущая редакция в черновике — сервер берёт её из БД, а не из ответа модели. */
+  before: string;
+  after: string;
+  reason: string;
+  sources: { ref: number; source_title: string; guideline_id: string; topic: string }[];
+}
+export interface SessionChatMessage {
+  id: string;
+  role: "clinician" | "assistant";
+  content: string;
+  citations: SessionChatCitation[];
+  proposal: SessionChatProposal | null;
+  created_at: string | null;
+}
 /** Подсказка ИИ-черновика (§4.3, §5.3): раздел + причина проверки врачом. */
 export interface NeedsReview {
   section: string;
@@ -902,6 +927,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify({}),
     }),
+  /** §10: вопрос агенту по приёму — ответ с цитатами, `proposal` без мутаций. */
+  sessionChat: (sessionId: string, message: string) =>
+    req<SessionChatMessage>(`/api/v1/clinician/sessions/${sessionId}/chat`, {
+      method: "POST",
+      body: JSON.stringify({ message }),
+    }),
+  sessionChatHistory: (sessionId: string) =>
+    req<{ items: SessionChatMessage[] }>(
+      `/api/v1/clinician/sessions/${sessionId}/chat?limit=100`,
+    ),
   /** §7: две подписи (врач + МО) по подтверждённой версии; 409 до approve. */
   signProtocol: (sessionId: string) =>
     // Ответ — протокол (§4.4) + сводка подписей `signature` (§4.2), а не голый массив.
