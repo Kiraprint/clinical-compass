@@ -774,3 +774,9 @@ small { color: #8a94a8; }
   .cal-day { min-height: 60px; padding: 2px 3px; }
   .cal-item { font-size: 9px; }
 }
+
+/* FR-48 (AuthNative): формы входа — Enter отправляет, ссылка-кнопка и подсказки. */
+.auth-form { display: flex; flex-direction: column; gap: 10px; }
+.auth-form .row { flex-wrap: wrap; align-items: center; }
+.auth-link { background: none; border: 0; padding: 0; color: #2f6fed; font: inherit; font-size: 13px; cursor: pointer; text-decoration: underline; }
+.auth-hint { color: #5a6478; font-size: 13px; margin: 0; }
