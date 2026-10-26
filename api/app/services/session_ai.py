@@ -103,7 +103,9 @@ _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.S | re.I)
 # §5.3–5.4 (FR-43): темы KB, по которым ищутся обоснования черновика. Разделы
 # корпуса docs/08 §3 — терапия, рекомендации, шкалы, маршрутизация.
 SOURCE_TOPICS = ("ЛЕКАРСТВА", "РЕКОМЕНДАЦИИ", "ШКАЛЫ", "ТРИАЖ")
-SOURCE_QUOTE_CHARS = 320  # цитата в sources[].quote — короткий фрагмент чанка
+# Потолок цитаты один на пакет — схема §5.2 (`protocols.SOURCE_QUOTE_CHARS`);
+# своё, меньшее значение тут молча расходилось с валидацией документа.
+SOURCE_QUOTE_CHARS = protocols.SOURCE_QUOTE_CHARS
 SOURCE_QUERY_CHARS = 1200  # запрос к KB — начало расшифровки (жалобы звучат первыми)
 
 # Ссылки модели на источники: `S3` (метка из промпта), `[3]`, `[S3]`.
@@ -1155,10 +1157,13 @@ def _text(value) -> str:
 def _quote(text: str) -> str:
     """Цитата чанка для sources[].quote: короткий фрагмент, не рвём слово."""
     flat = " ".join((text or "").split())
+    # Многоточие — часть цитаты, поэтому режем короче потолка: иначе цитата без
+    # пробелов (одно длинное слово) выходит за потолок схемы §5.2.
+    limit = SOURCE_QUOTE_CHARS - 1
     if len(flat) <= SOURCE_QUOTE_CHARS:
         return flat
-    cut = flat[:SOURCE_QUOTE_CHARS].rsplit(" ", 1)[0]
-    return (cut or flat[:SOURCE_QUOTE_CHARS]) + "…"
+    cut = flat[:limit].rsplit(" ", 1)[0]
+    return (cut or flat[:limit]) + "…"
 
 
 def _source_entry(position: int, chunk) -> dict:
@@ -1251,48 +1256,75 @@ def _refs(value, sources: list[dict]) -> list[int]:
     return sorted(found)
 
 
-_WORD = re.compile(r"[a-zа-яё0-9]{4,}")
+# Слово препарата: только буквы/цифры, любой длины — короткие МНН («АСК», «Mg»)
+# сверяются отдельным токеном, а не подстрокой.
+_WORD = re.compile(r"[a-zа-яё0-9]+")
+# Падежные окончания, которые срезаются перед сравнением корней. Порядок не
+# важен: `_stem` перебирает их от длинных к коротким.
+_ENDINGS = tuple(
+    sorted(
+        (
+            "иями", "ями", "ами", "ыми", "ими", "ого", "его", "ому", "ему",
+            "ием", "ией", "иях", "ах", "ях", "ов", "ев", "ей", "ой", "ые", "ие",
+            "ых", "их", "ым", "им", "ом", "ем", "ий", "ый", "ия", "ию", "ии",
+            "ая", "яя", "ое", "ее", "а", "я", "о", "е", "ы", "и", "у", "ю", "ь",
+        ),
+        key=len,
+        reverse=True,
+    )
+)
+
+
+def _stem(word: str) -> str:
+    """Слово без падежного окончания («сертралина» → «сертралин», «литием» → «лит»)."""
+    for ending in _ENDINGS:
+        if word.endswith(ending) and len(word) - len(ending) >= 3:
+            return word[: -len(ending)]
+    return word
 
 
 def _same_lemma(needle: str, word: str) -> bool:
-    """Слово и слово из чанка — одна лексема: общий корень, а не общие 4 буквы.
+    """Слово и слово из чанка — одна лексема, а не «общий кусок в начале».
 
-    Голый 4-буквенный префикс склеивал разные препараты («пароксетин» ↔
-    «пароксизм», «мелатонин» ↔ «меланома»). Требуем общий префикс ≥ 5 букв и
-    расхождение окончания не больше 2 букв — этого хватает на русскую флексию
-    («сертралин» ↔ «сертралина»), но не на другой корень.
+    Сравниваются корни без падежных окончаний. Голый общий префикс склеивал
+    разные препараты и не-препараты («пароксетин» ↔ «пароксизм», «аспирин» ↔
+    «аспирация», «мелатонин» ↔ «меланома»), поэтому после срезания окончаний
+    корни должны совпасть, а если различаются — один обязан быть началом другого
+    с расхождением не больше 2 букв («магния» ↔ «магний», «литий» ↔ «литием»).
     """
-    common = 0
-    for left, right in zip(needle, word):
-        if left != right:
-            break
-        common += 1
-    shortest = min(len(needle), len(word))
-    # Короткие МНН («литий», «лития») не набирают 5 букв общего корня при
-    # флексии — для них порог 4 буквы и расхождение ≤ 2.
-    root = 4 if shortest <= 6 else 5
-    return common >= root and common >= shortest - 2
+    if needle == word:
+        return True
+    left, right = _stem(needle), _stem(word)
+    if left == right:
+        return True
+    # Корни должны быть выровнены по началу слова, а не «совпадать в середине»:
+    # «аспирин» → «аспирация» отличается на букву внутри и подтверждением не
+    # считается. Лишние 2 буквы допускаются только у корней от 4 букв: срезанные
+    # до 3 букв корни склеивают разные слова («кал» ↔ «каловые», «лит» ↔
+    # «литров», «сер» ↔ «сердце»), а «магн»/«магни» — та же лексема.
+    shorter, longer = sorted((left, right), key=len)
+    if len(shorter) < 4:
+        return False
+    return longer.startswith(shorter) and len(longer) - len(shorter) <= 2
 
 
 def _mentions(needle: str, haystack: str) -> bool:
-    """Препарат упомянут в чанке: подстрока или совпадение лексемы (см. `_same_lemma`).
+    """Препарат упомянут в чанке: совпадение лексемы (см. `_same_lemma`).
 
     Все значимые слова названия («магния сульфат») должны найтись в тексте:
     «сульфат магния» — тот же препарат, «магния сульфат» в чанке про «сульфат»
-    без магния — уже нет.
+    без магния — уже нет. Название, в котором нет слов ≥ 4 букв («АСК», «Mg»),
+    подтверждается только отдельным словом чанка, иначе «аскаридоз» подтверждал
+    бы «АСК» (§5.3, R30).
     """
     name = needle.strip().lower()
     if not name:
         return False
-    text = haystack.lower()
-    if name in text:
-        return True
-    words = _WORD.findall(text)
-    needles = _WORD.findall(name)
-    # Название без слов ≥ 4 букв («АСК», «Mg», «Li») сверить нельзя: пустой
-    # `all([])` подтвердил бы препарат любым чанком (обход §5.3, R30).
+    tokens = _WORD.findall(haystack.lower())
+    needles = [word for word in _WORD.findall(name) if len(word) >= 4]
     if not needles:
-        return False
+        return name in tokens
+    words = [token for token in tokens if len(token) >= 4]
     return all(any(_same_lemma(word, candidate) for candidate in words) for word in needles)
 
 
