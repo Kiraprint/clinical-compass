@@ -407,7 +407,85 @@ def test_validate_sections_rejects_source_outside_document():
         protocols.validate_sections(sections)
     assert caught.value.code == "PROTOCOL_SOURCE_UNKNOWN"
 
+
+def test_short_name_needs_its_own_word():
+    """«АСК» подтверждается только отдельным словом, а не «аскаридозом»."""
+    acarid = RAGChunk(
+        text="Аскаридоз лечат альбендазолом 400 мг однократно.",
+        source_title="КР: гельминтозы",
+        guideline_id="kr-helminth",
+        topic="ЛЕКАРСТВА",
+        chunk_id="99999999-9999-9999-9999-999999999999",
+    )
+    raw = {"treatment": [{"drug": "АСК", "dose": "50 мг", "sources": ["S1"]}]}
+    _, needs = _sanitize(raw, _sources(acarid))
+    assert _needs(needs, section="treatment.0", reason="drug_not_in_source")
+
+    aspirin = RAGChunk(
+        text="АСК 50 мг — антиагрегантная доза при ИБС.",
+        source_title="КР: ИБС",
+        guideline_id="kr-ihd",
+        topic="ЛЕКАРСТВА",
+        chunk_id="aaaaaaaa-1111-1111-1111-111111111111",
+    )
+    _, needs = _sanitize(raw, _sources(aspirin))
+    assert not _needs(needs, section="treatment.0", reason="drug_not_in_source")
+
+
+def test_prefix_of_another_word_is_not_a_source_proof():
+    """«Аспирин» не подтверждается «аспирацией»: корни должны совпасть."""
+    aspiration = RAGChunk(
+        text="Аспирация содержимого желудка при отравлении.",
+        source_title="КР: неотложные состояния",
+        guideline_id="kr-emergency",
+        topic="ЛЕКАРСТВА",
+        chunk_id="bbbbbbbb-2222-2222-2222-222222222222",
+    )
+    raw = {"treatment": [{"drug": "Аспирин", "dose": "75 мг", "sources": ["S1"]}]}
+    _, needs = _sanitize(raw, _sources(aspiration))
+    assert _needs(needs, section="treatment.0", reason="drug_not_in_source")
+
+    aspirin = RAGChunk(
+        text="Аспирина 75 мг на ночь.",
+        source_title="ГРЛС: аспирин",
+        guideline_id="grls-aspirin",
+        topic="ЛЕКАРСТВА",
+        chunk_id="cccccccc-3333-3333-3333-333333333333",
+    )
+    _, needs = _sanitize(raw, _sources(aspirin))
+    assert not _needs(needs, section="treatment.0", reason="drug_not_in_source")
+
+
+def test_citation_quote_uses_schema_cap():
+    """Потолок цитаты — один на пакет (`protocols.SOURCE_QUOTE_CHARS`)."""
+    assert session_ai.SOURCE_QUOTE_CHARS == protocols.SOURCE_QUOTE_CHARS
+
+    long_chunk = RAGChunk(
+        text="Сертралин. " + "Доза титруется постепенно. " * 40,
+        source_title="ГРЛС: сертралин",
+        guideline_id="grls-sertraline",
+        topic="ЛЕКАРСТВА",
+        chunk_id="dddddddd-4444-4444-4444-444444444444",
+    )
+    entry = session_ai._source_entry(1, long_chunk)
+    assert 320 < len(entry["quote"]) <= protocols.SOURCE_QUOTE_CHARS
+
+    huge_chunk = RAGChunk(
+        text="Сертралин. " + "Доза титруется постепенно. " * 200,
+        source_title="ГРЛС: сертралин",
+        guideline_id="grls-sertraline",
+        topic="ЛЕКАРСТВА",
+        chunk_id="eeeeeeee-5555-5555-5555-555555555555",
+    )
+    quote = session_ai._source_entry(1, huge_chunk)["quote"]
+    assert len(quote) <= protocols.SOURCE_QUOTE_CHARS + 1  # + многоточие
+    assert quote.endswith("…")
+    stored = {key: value for key, value in entry.items() if key != "text"}
+    protocols.validate_sections({"sources": [stored]})
+
+
 # --- сквозной путь через API ------------------------------------------------
+
 
 def test_draft_through_api_stores_sources_and_hashes_them(client, monkeypatch, db_session):
     _enable(monkeypatch)
