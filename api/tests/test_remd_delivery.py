@@ -164,6 +164,22 @@ def test_callback_requires_token(client, remd):
     assert rejected.status_code == 400
     assert rejected.json()["code"] == "VALIDATION_ERROR"
 
+def test_callback_body_cap(client, remd, monkeypatch):
+    """Потолок тела считается до чтения: Content-Length и chunked одинаково 413."""
+    monkeypatch.setattr(settings, "remd_callback_max_kb", 1)
+    url = "/api/v1/remd/callback"
+    headers = {"X-Remd-Token": TOKEN, "Content-Type": "application/json"}
+    big = b"{" + b" " * (1024 * 1024) + b"}"
+
+    declared = client.post(url, content=big, headers=headers)
+    assert declared.status_code == 413
+    assert declared.json()["code"] == "PAYLOAD_TOO_LARGE"
+
+    # Без Content-Length (chunked): отсекаем по ходу чтения потока.
+    chunked = client.post(url, content=iter([big[i : i + 8192] for i in range(0, len(big), 8192)]), headers=headers)
+    assert chunked.status_code == 413
+    assert chunked.json()["code"] == "PAYLOAD_TOO_LARGE"
+
 
 def test_repeated_submit_returns_existing_delivery(client, remd):
     mock, sink = remd

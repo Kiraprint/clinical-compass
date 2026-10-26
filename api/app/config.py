@@ -162,6 +162,9 @@ class Settings(BaseSettings):
     remd_callback_url: str = ""
     # CC_REMD_CALLBACK_TOKEN: общий секрет callback-эндпоинта (X-Remd-Token).
     remd_callback_token: str = ""
+    # CC_REMD_CALLBACK_MAX_KB: потолок тела callback'а (413 при превышении).
+    # Конверт registerDocumentResult — сотни байт; лимит защищает память, а не разбор.
+    remd_callback_max_kb: int = 256  # CC_REMD_CALLBACK_MAX_KB
     # CC_REMD_ALLOW_INSECURE: http допустим только для локального мока.
     remd_allow_insecure: bool = False
     remd_timeout: float = 10.0  # CC_REMD_TIMEOUT

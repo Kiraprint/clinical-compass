@@ -58,20 +58,24 @@ async def get_delivery(
     return await remd.get_delivery(db, user.id, session_id)
 
 
-MAX_CALLBACK_BYTES = 256 * 1024
-
-
 @router.post("/remd/callback")
 async def remd_callback(request: Request, db: AsyncSession = Depends(get_db)):
     """Callback РЭМД (`registerDocumentResult`). Без сессии, только по токену."""
-    # Конверт callback'а невелик (emdr_id + ошибки): тело читаем с потолком,
-    # а токен проверяем ДО разбора — незачем парсить JSON для чужого запроса.
-    remd.check_callback_token(request.headers.get("X-Remd-Token"))
-    raw = await request.body()
-    if len(raw) > MAX_CALLBACK_BYTES:
-        raise Problem(413, "PAYLOAD_TOO_LARGE", "Тело callback больше 256 КБ")
+    # Конверт callback'а невелик (emdr_id + ошибки): токен проверяем ДО чтения
+    # тела, затем объявленный Content-Length и поток с жёстким потолком — лимит
+    # ограничивает память, а не только разбор JSON.
+    cfg = remd.check_callback_token(request.headers.get("X-Remd-Token"))
+    limit = cfg.callback_max_kb * 1024
+    declared = (request.headers.get("content-length") or "").strip()
+    if declared.isdigit() and int(declared) > limit:
+        raise Problem(413, "PAYLOAD_TOO_LARGE", "Тело callback больше лимита")
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > limit:
+            raise Problem(413, "PAYLOAD_TOO_LARGE", "Тело callback больше лимита")
+        body.extend(chunk)
     try:
-        payload = json.loads(raw or b"{}")
+        payload = json.loads(bytes(body) or b"{}")
     except ValueError:
         raise Problem(400, "VALIDATION_ERROR", "Тело callback должно быть JSON") from None
     if not isinstance(payload, dict):

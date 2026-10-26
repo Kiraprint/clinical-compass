@@ -39,6 +39,7 @@ class RemdConfig:
     lpu_uid: str = ""
     callback_url: str = ""
     callback_token: str = field(default="", repr=False)
+    callback_max_kb: int = 256
     allow_insecure: bool = False
     timeout: float = 10.0
     max_attempts: int = 3
@@ -59,6 +60,7 @@ class RemdConfig:
             lpu_uid=source.remd_lpu_uid,
             callback_url=source.remd_callback_url,
             callback_token=source.remd_callback_token,
+            callback_max_kb=source.remd_callback_max_kb,
             allow_insecure=source.remd_allow_insecure,
             timeout=source.remd_timeout,
             max_attempts=source.remd_max_attempts,
@@ -96,6 +98,8 @@ class RemdConfig:
             raise RemdConfigError("CC_REMD_MAX_ATTEMPTS должен быть >= 1")
         if self.max_response_bytes <= 0:
             raise RemdConfigError("CC_REMD_MAX_RESPONSE_BYTES должен быть > 0")
+        if self.callback_max_kb <= 0:
+            raise RemdConfigError("CC_REMD_CALLBACK_MAX_KB должен быть > 0")
         if not self.enabled:
             return
         if not self.client_id or not self.client_secret:
