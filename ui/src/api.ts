@@ -74,11 +74,16 @@ async function refreshAccessToken(): Promise<boolean> {
 
 let refreshing = false;
 
-async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
+/**
+ * Сырой запрос: auth-заголовок, 401 → одна попытка refresh, повтор того же init.
+ * `FormData` не получает Content-Type: boundary выставляет браузер (ручной заголовок
+ * ломает разбор multipart на сервере).
+ */
+async function rawReq(path: string, init: RequestInit = {}): Promise<Response> {
   const headers: Record<string, string> = { ...(init.headers as Record<string, string>) };
   const token = getToken();
   if (token) headers["Authorization"] = `Bearer ${token}`;
-  if (init.body) headers["Content-Type"] = "application/json";
+  if (init.body && !(init.body instanceof FormData)) headers["Content-Type"] = "application/json";
   // F9: credentials: include — httpOnly cookies (cc_access/cc_refresh) отправляются
   // автоматически для same-origin (web). Для cross-origin (native) — Authorization header.
   const resp = await fetch(`${BASE}${path}`, { ...init, headers, credentials: "include" });
@@ -87,19 +92,43 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
     refreshing = true;
     try {
       if (await refreshAccessToken()) {
-        return req<T>(path, init);
+        return rawReq(path, init);
       }
     } finally {
       refreshing = false;
     }
     onAuthFail?.();
   }
-  if (resp.status === 204) return undefined as T;
+  return resp;
+}
+
+/** Тело ошибки (Problem `{code, detail}`): наружу — ApiError, не сырой JSON. */
+async function throwApiError(resp: Response): Promise<never> {
   const body = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    throw new ApiError(resp.status, body.code ?? "UNKNOWN", body.detail ?? resp.statusText);
-  }
-  return body as T;
+  throw new ApiError(
+    resp.status,
+    typeof body.code === "string" ? body.code : "UNKNOWN",
+    typeof body.detail === "string" ? body.detail : resp.statusText,
+  );
+}
+
+async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const resp = await rawReq(path, init);
+  if (resp.status === 204) return undefined as T;
+  if (!resp.ok) await throwApiError(resp);
+  return (await resp.json().catch(() => ({}))) as T;
+}
+
+/** Файл (PDF протокола): тело — как есть, имя — из Content-Disposition. */
+async function reqBlob(
+  path: string,
+  init: RequestInit = {},
+): Promise<{ blob: Blob; filename: string | null }> {
+  const resp = await rawReq(path, init);
+  if (!resp.ok) await throwApiError(resp);
+  const disposition = resp.headers.get("Content-Disposition") ?? "";
+  const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition);
+  return { blob: await resp.blob(), filename: match ? decodeURIComponent(match[1]) : null };
 }
 
 const verb =
@@ -207,12 +236,104 @@ export interface SessionProtocol {
   diagnosis_code: string | null;
   model: string | null;
   prompt_version: string | null;
-  needs_review: boolean;
+  /** §4.3: подсказки врачу — список, а не флаг (`[{section, reason, key?}]`). */
+  needs_review: NeedsReview[];
   created_by: string;
   approved_by: string | null;
   approved_at: string | null;
   created_at: string | null;
   updated_at: string | null;
+}
+/** Подсказка ИИ-черновика (§4.3, §5.3): раздел + причина проверки врачом. */
+export interface NeedsReview {
+  section: string;
+  reason: string;
+  /** Уточнение для `section='llm_output'`: какой ключ модели отброшен. */
+  key?: string;
+}
+export type AiStatus = "none" | "recording" | "transcribing" | "transcribed" | "failed";
+/** §4.2 SessionDetail: сессия + подпись + передача (свежие после каждой мутации). */
+export interface SessionDetail extends ClinicalSession {
+  ai_error: string | null;
+  artifacts: {
+    id: string;
+    kind: string;
+    mime: string;
+    size_bytes: number;
+    sha256?: string;
+    created_at: string | null;
+  }[];
+  signature: SignatureSummary | null;
+  delivery: Delivery | null;
+}
+/** §7: одна подпись протокола (УКЭП); приватных ключей и сырого cert_der в API нет. */
+export interface ProtocolSignature {
+  id: string;
+  role: "clinician" | "mo" | string;
+  fio: string;
+  position: string;
+  organization: string | null;
+  snils: string;
+  cert_serial: string;
+  cert_issuer: string;
+  cert_not_before?: string | null;
+  cert_not_after: string | null;
+  cert_thumbprint: string;
+  digest_algorithm?: string;
+  signature_algorithm?: string;
+  content_sha256?: string;
+  signed_at: string | null;
+  artifact_id?: string;
+}
+/** Сводка подписей в SessionDetail (§4.2): нет подписей — `null`. */
+export interface SignatureSummary {
+  status: "signed";
+  signed_at: string | null;
+  signatures: ProtocolSignature[];
+}
+export type VerifyStatus = "valid" | "invalid" | "unknown_ca" | "expired" | "digest_mismatch";
+export interface VerifyResult {
+  status: VerifyStatus;
+  reason: string | null;
+  document: {
+    id: string | null;
+    version: number | null;
+    digest: string | null;
+    digest_algorithm: string;
+  };
+  signatures: (ProtocolSignature & { status: VerifyStatus; reason: string | null })[];
+}
+export type DeliveryStatus = "queued" | "sending" | "registered" | "rejected" | "failed";
+/** §8.3: строка `emias_deliveries` — статус машины доставки и последняя ошибка РЭМД. */
+export interface Delivery {
+  id: string;
+  status: DeliveryStatus;
+  external_id: string | null;
+  request_id: string | null;
+  attempts: number;
+  last_error_code: string | null;
+  last_error_message: string | null;
+  submitted_at: string | null;
+  registered_at: string | null;
+  updated_at: string | null;
+}
+export interface TranscriptSegment {
+  start: number;
+  end: number;
+  speaker: string | null;
+  text: string;
+}
+/** §4.3: расшифровка уже деперсонализирована — исходной речи сервер не хранит. */
+export interface SessionTranscript {
+  segments: TranscriptSegment[];
+  model: string | null;
+  duration_sec: number | null;
+  mask_categories: Record<string, number>;
+  depersonalized: boolean;
+}
+export interface AudioUploadResult {
+  artifact_id: string;
+  size_bytes: number;
 }
 export type AppointmentPatchBody = {
   starts_at?: string;
@@ -655,6 +776,60 @@ export const api = {
       method: "POST",
       body: JSON.stringify({}),
     }),
+  /** §4.2 SessionDetail: подпись и передача — всегда свежие, читать после мутаций. */
+  getSession: (sessionId: string) =>
+    req<SessionDetail>(`/api/v1/clinician/sessions/${sessionId}`),
+  /** §1.3: согласие на запись — отдельное основание, `audio_consent` строго boolean. */
+  patchAudioConsent: (sessionId: string, consent: boolean) =>
+    req<ClinicalSession>(`/api/v1/clinician/sessions/${sessionId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ audio_consent: consent }),
+    }),
+  /** §4.3: multipart `file`; Content-Type выставляет браузер (boundary). */
+  uploadAudio: (sessionId: string, audio: Blob, filename: string) => {
+    const form = new FormData();
+    form.append("file", audio, filename);
+    return req<AudioUploadResult>(`/api/v1/clinician/sessions/${sessionId}/audio`, {
+      method: "POST",
+      body: form,
+    });
+  },
+  /** §4.3: 202 `{ai_status}` — прогресс виден только в детали сессии. */
+  transcribe: (sessionId: string) =>
+    req<{ ai_status: string }>(`/api/v1/clinician/sessions/${sessionId}/transcribe`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  getTranscript: (sessionId: string) =>
+    req<SessionTranscript>(`/api/v1/clinician/sessions/${sessionId}/transcript`),
+  /** §4.3: черновик ИИ (source='llm', needs_review); подтверждённый протокол → 409. */
+  draftProtocol: (sessionId: string) =>
+    req<SessionProtocol>(`/api/v1/clinician/sessions/${sessionId}/protocol/draft`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  /** §7: две подписи (врач + МО) по подтверждённой версии; 409 до approve. */
+  signProtocol: (sessionId: string) =>
+    req<{ protocol: SessionProtocol; signatures: ProtocolSignature[] }>(
+      `/api/v1/clinician/sessions/${sessionId}/protocol/sign`,
+      { method: "POST", body: JSON.stringify({}) },
+    ),
+  verifyProtocol: (sessionId: string) =>
+    req<VerifyResult>(`/api/v1/clinician/sessions/${sessionId}/protocol/verify`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  /** §7.5: печатная форма подписанного протокола (409 до подписи). */
+  protocolPdf: (sessionId: string) =>
+    reqBlob(`/api/v1/clinician/sessions/${sessionId}/protocol/pdf`),
+  /** §4.5: 202 при приёме / 200 при повторной отправке; 409 до подписи. */
+  submitEmias: (sessionId: string) =>
+    req<Delivery>(`/api/v1/clinician/sessions/${sessionId}/protocol/submit-emias`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  getDelivery: (sessionId: string) =>
+    req<Delivery>(`/api/v1/clinician/sessions/${sessionId}/delivery`),
   vapidPublicKey: () => req<{ public_key: string }>("/api/v1/push/vapid-public-key"),
   subscribePush: (endpoint: string, keys: { p256dh: string; auth: string }) =>
     req<{ subscribed: boolean }>("/api/v1/push/subscribe", {

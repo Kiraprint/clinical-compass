@@ -1,22 +1,28 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   ApiError,
   AppointmentChannel,
   ClinicalSession,
   MentalStatus,
+  NeedsReview,
   ProtocolSections,
   ProtocolStatus,
+  SessionDetail,
   SessionProtocol,
   TreatmentRow,
 } from "../api";
+import SessionAssistantCard from "./SessionAssistantCard";
+import SessionDocumentCard from "./SessionDocumentCard";
 
 /**
- * FR-39: панель приёма и ручной протокол (docs/18 §4.2, §4.4, §5).
+ * FR-39/40/41: панель приёма — ручной протокол (docs/18 §4.2, §4.4, §5), ИИ-ассистент
+ * (§4.3), подпись/PDF/передача в ЕМИАС (§7, §8).
  *
- * Аудио/ИИ/подпись/PDF/ЕМИАС — PR P3…P5, здесь их нет: только ручной протокол и
- * «Завершить приём» (создаёт приём в карточке пациента). Потолки разделов §5.2
- * показаны теми же числами, что валидирует сервер (`maxLength` + счётчик у предела).
+ * Панель владеет редактором и слиянием черновика: ИИ никогда не затирает введённый
+ * врачом текст — расхождения показываются отдельным блоком с выбором. Подпись и
+ * доставка берутся из свежей детали сессии после каждой мутации, чтобы после новой
+ * версии протокола не показывать старые квитанции.
  */
 
 const CHANNEL_LABELS: Record<AppointmentChannel, string> = {
@@ -61,6 +67,87 @@ const START_FMT = new Intl.DateTimeFormat("ru-RU", {
 
 const errText = (e: unknown): string =>
   e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e);
+/** §4.3: причины `needs_review` → подсказки врачу (код модели не показываем). */
+const REVIEW_REASONS: Record<string, string> = {
+  dosage_in_draft: "похоже на дозировку — проверьте вручную",
+  clinical_risk: "оценка риска требует проверки врачом",
+  unexpected_section: "модель вернула посторонний раздел — перенос отклонён",
+};
+const NARRATIVE_KEYS = ["complaints", "anamnesis_morbi", "somatic_status", "recommendations"] as const;
+const DIAGNOSIS_KEYS = ["syndrome", "icd10", "rationale"] as const;
+
+/** Поле редактора по пути из `needs_review` (`complaints`, `mental_status.criticism`, …). */
+function fieldLabel(key: string): string {
+  const mental = MENTAL_FIELDS.find((field) => `mental_status.${field.key}` === key);
+  if (mental) return mental.label;
+  const labels: Record<string, string> = {
+    complaints: "Жалобы",
+    anamnesis_morbi: "Анамнез",
+    somatic_status: "Соматический статус",
+    recommendations: "Рекомендации",
+    "diagnosis.syndrome": "Синдром",
+    "diagnosis.icd10": "МКБ-10",
+    "diagnosis.rationale": "Обоснование диагноза",
+    llm_output: "Посторонние ключи модели",
+  };
+  return labels[key] ?? key;
+}
+
+/** Только текстовые разделы: паспорт, диагноз и лечение ИИ не заполняет (§5.1). */
+function draftKeys(draft: ProtocolSections): string[] {
+  const keys: string[] = [];
+  for (const name of NARRATIVE_KEYS) {
+    if (typeof draft[name] === "string") keys.push(name);
+  }
+  for (const field of MENTAL_FIELDS) {
+    if (typeof draft.mental_status?.[field.key] === "string") keys.push(`mental_status.${field.key}`);
+  }
+  for (const name of DIAGNOSIS_KEYS) {
+    if (typeof draft.diagnosis?.[name] === "string") keys.push(`diagnosis.${name}`);
+  }
+  return keys;
+}
+
+function fieldValue(sections: ProtocolSections, key: string): string {
+  if (key.startsWith("mental_status.")) {
+    const name = key.slice("mental_status.".length) as keyof MentalStatus;
+    return sections.mental_status[name] ?? "";
+  }
+  if (key.startsWith("diagnosis.")) {
+    const name = key.slice("diagnosis.".length) as keyof ProtocolSections["diagnosis"];
+    return sections.diagnosis[name] ?? "";
+  }
+  const value = (sections as unknown as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : "";
+}
+
+function withField(sections: ProtocolSections, key: string, value: string): ProtocolSections {
+  if (key.startsWith("mental_status.")) {
+    const name = key.slice("mental_status.".length) as keyof MentalStatus;
+    return { ...sections, mental_status: { ...sections.mental_status, [name]: value } };
+  }
+  if (key.startsWith("diagnosis.")) {
+    const name = key.slice("diagnosis.".length) as keyof ProtocolSections["diagnosis"];
+    return { ...sections, diagnosis: { ...sections.diagnosis, [name]: value } };
+  }
+  return { ...sections, [key]: value };
+}
+
+/** Раздел → список причин проверки: бейдж ставится у самого поля редактора. */
+function reviewByField(items: NeedsReview[]): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const item of items) {
+    const key = item.key ?? item.section;
+    const reason = REVIEW_REASONS[item.reason] ?? "проверьте после ИИ";
+    (out[key] ??= []).push(reason);
+  }
+  return out;
+}
+
+interface DraftConflict {
+  key: string;
+  next: string;
+}
 
 /** Пустой протокол по §5.1: паспорт из сессии, остальное заполняет врач. */
 function emptySections(session: ClinicalSession): ProtocolSections {
@@ -111,12 +198,15 @@ function NarrativeField({
   value,
   max,
   rows = 3,
+  review,
   onChange,
 }: {
   label: string;
   value: string;
   max: number;
   rows?: number;
+  /** Причины из `needs_review` черновика ИИ: раздел проверяет врач (§4.3). */
+  review?: string[];
   onChange: (value: string) => void;
 }) {
   return (
@@ -131,6 +221,11 @@ function NarrativeField({
         />
       </label>
       <Counter value={value} max={max} />
+      {review && review.length > 0 && (
+        <p className="hint">
+          <span className="badge YELLOW">проверить после ИИ</span> {review.join("; ")}
+        </p>
+      )}
     </div>
   );
 }
@@ -156,6 +251,39 @@ export default function SessionPanel({
   // Ключи строк лечения: `key={i}` после удаления из середины переиспользует DOM строки.
   const [rowKeys, setRowKeys] = useState<string[]>([]);
   const rowSeq = useRef(0);
+  // §4.2: свежая деталь сессии — источник ai_status, подписи и доставки.
+  const [detail, setDetail] = useState<SessionDetail | null>(null);
+  const [review, setReview] = useState<Record<string, string[]>>({});
+  const [conflicts, setConflicts] = useState<DraftConflict[]>([]);
+
+  const refresh = useCallback(async () => {
+    const fresh = await api.getSession(session.id);
+    setDetail(fresh);
+    setSession(fresh);
+    // Статус активной версии меняют подпись и передача — подтягиваем его в шапку и карточку
+    // документа; чужую версию (врач уже правил) не трогаем.
+    setProtocol((current) =>
+      current && fresh.protocol && fresh.protocol.version === current.version
+        ? { ...current, status: fresh.protocol.status }
+        : current,
+    );
+    return fresh;
+  }, [session.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getSession(session.id)
+      .then((fresh) => {
+        if (!cancelled) setDetail(fresh);
+      })
+      .catch(() => {
+        // Деталь — вспомогательный блок: без неё ручной протокол работает, ошибка не нужна.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -209,6 +337,8 @@ export default function SessionPanel({
       const p = await api.putProtocol(session.id, sections, code);
       setProtocol(p);
       setSections(withDefaults(base, p.sections));
+      setConflicts([]);
+      await refresh();
       setNote(`Черновик сохранён (версия ${p.version}).`);
     } catch (e: unknown) {
       setErr(errText(e));
@@ -228,6 +358,9 @@ export default function SessionPanel({
       const p = await api.approveProtocol(session.id);
       setProtocol(p);
       setSections(withDefaults(base, p.sections));
+      setConflicts([]);
+      setReview({});
+      await refresh();
       setNote("Протокол подтверждён.");
     } catch (e: unknown) {
       // 409 PROTOCOL_NOT_READY — список незаполненных разделов в detail.
@@ -242,6 +375,7 @@ export default function SessionPanel({
     setErr("");
     try {
       setSession(await api.finishSession(session.id));
+      await refresh();
       setNote("Приём завершён, запись добавлена в карточку пациента.");
     } catch (e: unknown) {
       setErr(errText(e));
@@ -249,6 +383,40 @@ export default function SessionPanel({
       setBusy(false);
     }
   };
+
+  /**
+   * Слияние черновика ИИ (§4.3): пустые разделы заполняются, введённый текст не
+   * перезаписывается — расхождения уходят в блок выбора над редактором.
+   */
+  const applyDraft = (draft: SessionProtocol) => {
+    let merged = sections;
+    const disputed: DraftConflict[] = [];
+    for (const key of draftKeys(draft.sections)) {
+      const proposed = fieldValue(draft.sections, key);
+      if (!proposed.trim()) continue;
+      const mine = fieldValue(sections, key);
+      if (!mine.trim()) merged = withField(merged, key, proposed);
+      else if (mine !== proposed) disputed.push({ key, next: proposed });
+    }
+    setSections(merged);
+    setConflicts(disputed);
+    setReview(reviewByField(draft.needs_review));
+    setProtocol(draft);
+    setErr("");
+    setNote(
+      disputed.length > 0
+        ? `Черновик перенесён в редактор; ${disputed.length} раздел(ов) не перезаписаны — выберите ниже.`
+        : "Черновик ИИ перенесён в редактор — проверьте разделы с бейджем и сохраните.",
+    );
+  };
+
+  const replaceWithDraft = (conflict: DraftConflict) => {
+    setSections((current) => withField(current, conflict.key, conflict.next));
+    setConflicts((list) => list.filter((item) => item.key !== conflict.key));
+  };
+
+  const keepMine = (conflict: DraftConflict) =>
+    setConflicts((list) => list.filter((item) => item.key !== conflict.key));
 
   const setTreatment = (i: number, key: keyof TreatmentRow, value: string) =>
     setSections((s) => ({
@@ -284,6 +452,14 @@ export default function SessionPanel({
         )}
         {note && !err && <p className="small muted">{note}</p>}
       </div>
+
+      <SessionAssistantCard
+        session={session}
+        protocolLocked={locked}
+        hasAudio={detail?.artifacts.some((artifact) => artifact.kind === "audio") ?? false}
+        onRefresh={refresh}
+        onDraft={applyDraft}
+      />
 
       <div className="card">
         <h2>Протокол приёма</h2>
@@ -339,6 +515,26 @@ export default function SessionPanel({
           </div>
         ) : (
           <div>
+            {conflicts.length > 0 && (
+              <div className="alert-warn">
+                <p>
+                  Черновик ИИ не перезаписал введённый текст: по каждому разделу ниже выберите
+                  вариант.
+                </p>
+                {conflicts.map((conflict) => (
+                  <div className="row" key={conflict.key}>
+                    <span className="small">{fieldLabel(conflict.key)}</span>
+                    <button type="button" className="ghost" onClick={() => replaceWithDraft(conflict)}>
+                      Заменить на текст ИИ
+                    </button>
+                    <button type="button" className="ghost" onClick={() => keepMine(conflict)}>
+                      Оставить моё
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
             <h3>Паспорт</h3>
             <div className="row">
               <div>
@@ -366,6 +562,7 @@ export default function SessionPanel({
               label="Жалобы"
               value={sections.complaints}
               max={LIMIT.complaints}
+              review={review["complaints"]}
               onChange={(v) => setSections((s) => ({ ...s, complaints: v }))}
             />
 
@@ -375,6 +572,7 @@ export default function SessionPanel({
               value={sections.anamnesis_morbi}
               max={LIMIT.anamnesis_morbi}
               rows={4}
+              review={review["anamnesis_morbi"]}
               onChange={(v) => setSections((s) => ({ ...s, anamnesis_morbi: v }))}
             />
 
@@ -385,7 +583,7 @@ export default function SessionPanel({
                 label={f.label}
                 value={sections.mental_status[f.key]}
                 max={LIMIT.mental}
-                rows={2}
+                review={review[`mental_status.${String(f.key)}`]}
                 onChange={(v) =>
                   setSections((s) => ({ ...s, mental_status: { ...s.mental_status, [f.key]: v } }))
                 }
@@ -397,7 +595,7 @@ export default function SessionPanel({
               label="Соматический статус"
               value={sections.somatic_status}
               max={LIMIT.somatic_status}
-              rows={2}
+              review={review["somatic_status"]}
               onChange={(v) => setSections((s) => ({ ...s, somatic_status: v }))}
             />
 
@@ -435,7 +633,7 @@ export default function SessionPanel({
               label="Обоснование диагноза"
               value={sections.diagnosis.rationale}
               max={LIMIT.rationale}
-              rows={2}
+              review={review["diagnosis.rationale"]}
               onChange={(v) => setSections((s) => ({ ...s, diagnosis: { ...s.diagnosis, rationale: v } }))}
             />
 
@@ -510,6 +708,7 @@ export default function SessionPanel({
               label="Рекомендации"
               value={sections.recommendations}
               max={LIMIT.recommendations}
+              review={review["recommendations"]}
               onChange={(v) => setSections((s) => ({ ...s, recommendations: v }))}
             />
 
@@ -524,6 +723,14 @@ export default function SessionPanel({
           </div>
         )}
       </div>
+
+      <SessionDocumentCard
+        sessionId={session.id}
+        protocol={protocol}
+        signature={detail?.signature ?? null}
+        delivery={detail?.delivery ?? null}
+        onRefresh={refresh}
+      />
     </div>
   );
 }
