@@ -416,6 +416,13 @@ async def _run_tool(
             )
         except Problem as exc:
             return {"error": exc.code}
+        except Exception as exc:  # noqa: BLE001 — сбой тула не роняет диалог (как у search_kb)
+            log.warning(
+                "Диалог сессии %s: тул черновика недоступен (%s)",
+                session.id,
+                type(exc).__name__,
+            )
+            return {"error": "DRAFT_UNAVAILABLE"}
         return summary
 
     return {"error": "UNKNOWN_TOOL"}
@@ -648,15 +655,12 @@ async def _history_rows(db: AsyncSession, session_id, limit: int) -> list[Sessio
 
 
 async def history(db: AsyncSession, clinician_id, session_id, *, limit: int = 50) -> dict:
-    """`GET …/sessions/{id}/chat`: реплики диалога (старые → новые)."""
+    """`GET …/sessions/{id}/chat`: **последние** `limit` реплик (старые → новые).
+
+    Лимит применяется к убывающему порядку: иначе на длинном диалоге панель
+    показывала бы самые старые реплики, а свежие пропадали бы после перезагрузки.
+    """
     session = await require_session(db, clinician_id, session_id)
     await require_patient_access(db, clinician_id, session.patient_id)
-    rows = (
-        await db.scalars(
-            select(SessionChatMessage)
-            .where(SessionChatMessage.session_id == session.id)
-            .order_by(SessionChatMessage.created_at, SessionChatMessage.id)
-            .limit(limit)
-        )
-    ).all()
+    rows = await _history_rows(db, session.id, limit)
     return {"items": [_message(row) for row in rows]}

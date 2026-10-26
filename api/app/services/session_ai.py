@@ -40,6 +40,7 @@ from typing import Protocol
 
 import anyio
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import db as db_module
@@ -1004,12 +1005,24 @@ async def _autodraft(session_id: uuid.UUID) -> None:
             if active is not None and active.status != "draft":
                 log.info("Автодрафт сессии %s пропущен: протокол уже подтверждён", session_id)
                 return
-            await draft(
-                db,
-                session.clinician_id,
-                session.id,
-                action="SESSION_PROTOCOL_AUTODRAFT",
-            )
+            try:
+                await draft(
+                    db,
+                    session.clinician_id,
+                    session.id,
+                    action="SESSION_PROTOCOL_AUTODRAFT",
+                )
+            except IntegrityError:
+                # Коллизия номера версии: черновик уже создаёт другой писатель —
+                # кнопка «Сформировать черновик», тул диалога или второй автодрафт.
+                # Это не сбой: ai_error не пишем, иначе врач увидит ложную ошибку
+                # при живом черновике.
+                await db.rollback()
+                if await protocols.active(db, session.id) is not None:
+                    log.info("Автодрафт сессии %s: черновик уже создан параллельно", session_id)
+                    return
+                log.warning("Автодрафт сессии %s: версия занята параллельным писателем", session_id)
+                return
         log.info("Автодрафт сессии %s: черновик создан", session_id)
     except Problem as exc:
         if exc.code == "PROTOCOL_LOCKED":
@@ -1704,6 +1717,12 @@ async def draft(
         raise Problem(
             503, "DRAFT_FAILED", "Модель не вернула корректный черновик — попробуйте ещё раз"
         )
+
+    if session.ai_error:
+        # Черновик готов: прежний код сбоя (`DRAFT_FAILED`/`AUTODRAFT_FAILED`/`KB_*`)
+        # больше не описывает состояние и не должен висеть подсказкой в UI.
+        session.ai_error = None
+        await db.flush()
 
     return await protocols.save_llm_draft(
         db,

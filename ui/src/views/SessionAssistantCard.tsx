@@ -666,7 +666,8 @@ export default function SessionAssistantCard({
       if (detail.ai_status === "transcribed") {
         chain.current = false;
         setPolling(false);
-        setAiError(null);
+        // Расшифровка могла пройти, а автодрафт — нет: код с сервера не теряем.
+        setAiError(detail.ai_error ?? null);
         await loadTranscript();
         toast("Расшифровка готова.");
         return;
@@ -725,7 +726,7 @@ export default function SessionAssistantCard({
       if (!detail) return;
       setAiStatus(detail.ai_status);
       if (detail.ai_status === "transcribed") {
-        setAiError(null);
+        setAiError(detail.ai_error ?? null);
         await loadTranscript();
         toast("Расшифровка получена.");
       } else if (detail.ai_status === "failed") {
@@ -762,6 +763,7 @@ export default function SessionAssistantCard({
           ? `Черновик готов: обоснований из базы знаний — ${grounded}, отметок «проверить» — ${flags}.`
           : "Черновик готов без обоснований: база знаний не дала источников — лечение проверьте вручную.",
       );
+      setAiError(null); // черновик есть — подсказка о сбое автодрафта больше не нужна
       onDraft(draft);
     } catch (e: unknown) {
       setErr(aiErrorText(e, "Не удалось сформировать черновик"));
@@ -900,6 +902,12 @@ export default function SessionAssistantCard({
       {audioReady && (
         <p className="small muted">
           Запись загружена{aiStatus === "transcribed" ? ", расшифровка готова" : "; запустите расшифровку"}.
+        </p>
+      )}
+
+      {aiError && aiStatus === "transcribed" && !err && (
+        <p className="small error">
+          {AI_ERRORS[aiError] ?? "ИИ-шаг после расшифровки не выполнился — нажмите «Сформировать черновик»"}
         </p>
       )}
 

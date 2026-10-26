@@ -11,15 +11,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from compass.agent import RAGChunk
 
+from app import db as app_db
 from app.config import settings
 from app.errors import Problem
 from app.services import llm_router, session_agent, session_ai
@@ -650,3 +653,113 @@ def test_chat_history_requires_access(client):
     session = _session(client, ctx)
     resp = client.get(f"{BASE}/sessions/{session['id']}/chat", headers=ctx["doctor2"])
     assert resp.status_code == 404
+
+
+# --- ревью PR #100: гонки писателей, история, сбой тула ---------------------
+
+
+def _protocol_rows(db_session, session_id):
+    db_session.expire_all()
+    return db_session.execute(
+        text("select version, status from session_protocols where session_id = :i order by version"),
+        {"i": session_id},
+    ).all()
+
+
+def test_parallel_drafts_share_version_number(client, monkeypatch, db_session):
+    """Ревью #100 P1: два черновика одновременно — не 500 и не два активных draft."""
+    _kb(monkeypatch)
+    _draft_llm(monkeypatch)
+    ctx = _ctx(client, "draftrace")
+    session, _ = _transcribed(client, ctx, monkeypatch)
+    sid, clin = uuid.UUID(session["id"]), uuid.UUID(ctx["clinician_id"])
+
+    async def both():
+        async def one():
+            async with app_db.AsyncSessionLocal() as session_db:
+                try:
+                    return await session_ai.draft(session_db, clin, sid)
+                except BaseException as exc:  # noqa: BLE001 — ошибка и есть предмет проверки
+                    return exc
+
+        return await asyncio.gather(one(), one())
+
+    results = asyncio.run(both())
+    assert [r for r in results if isinstance(r, BaseException)] == []
+    rows = _protocol_rows(db_session, session["id"])
+    assert [r.status for r in rows].count("draft") == 1
+    assert rows[-1].status == "draft"
+
+
+def test_parallel_autodrafts_do_not_report_false_failure(client, monkeypatch, db_session):
+    """Ревью #100 P1: коллизия версий в автодрафте — не сбой, `ai_error` пуст."""
+    _kb(monkeypatch)
+    _draft_llm(monkeypatch)
+    ctx = _ctx(client, "autorace")
+    session, _ = _transcribed(client, ctx, monkeypatch)
+    sid = uuid.UUID(session["id"])
+
+    async def both():
+        await asyncio.gather(session_ai._autodraft(sid), session_ai._autodraft(sid))
+
+    asyncio.run(both())
+    rows = _protocol_rows(db_session, session["id"])
+    assert [r.status for r in rows].count("draft") == 1
+    assert _detail(client, ctx["doctor"], session["id"])["ai_error"] is None
+
+    # Повторный автодрафт поверх готового черновика — тихий пропуск, не ошибка.
+    asyncio.run(session_ai._autodraft(sid))
+    assert _detail(client, ctx["doctor"], session["id"])["ai_error"] is None
+
+
+def test_chat_survives_unexpected_tool_failure(client, monkeypatch):
+    """Ревью #100 P1: исключение в туле не роняет `/chat` (модель видит `error`)."""
+    _kb(monkeypatch, [CHUNK])
+    ctx = _ctx(client, "chatboom")
+    session, _ = _transcribed(client, ctx, monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise IntegrityError("insert", {}, Exception("duplicate"))
+
+    monkeypatch.setattr(session_ai, "draft", boom)
+    state = _chat_llm(
+        monkeypatch,
+        content=json.dumps({"answer": "черновик сейчас недоступен", "proposal": None}),
+        tool_calls=[
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {
+                    "name": "draft_session_protocol",
+                    "arguments": json.dumps({"session_id": session["id"]}),
+                },
+            }
+        ],
+    )
+    _compose(monkeypatch)
+
+    resp = _chat(client, ctx, session["id"], "собери черновик")
+    assert resp.status_code == 200, resp.text
+    tool_results = json.dumps(state["payloads"][-1]["messages"], ensure_ascii=False)
+    assert "DRAFT_UNAVAILABLE" in tool_results
+
+
+def test_chat_history_returns_last_rows(client, monkeypatch):
+    """Ревью #100 P2: `limit` — это последние реплики, а не первые."""
+    _kb(monkeypatch, [CHUNK])
+    _chat_llm(monkeypatch, content=json.dumps({"answer": "ответ", "proposal": None}))
+    _compose(monkeypatch)
+    ctx = _ctx(client, "chatlast")
+    session = _session(client, ctx)
+    for question in ("первый вопрос", "второй вопрос"):
+        assert _chat(client, ctx, session["id"], question).status_code == 200
+
+    full = client.get(f"{BASE}/sessions/{session['id']}/chat", headers=ctx["doctor"]).json()["items"]
+    assert [m["role"] for m in full] == ["clinician", "assistant", "clinician", "assistant"]
+    tail = client.get(
+        f"{BASE}/sessions/{session['id']}/chat",
+        params={"limit": 2},
+        headers=ctx["doctor"],
+    ).json()["items"]
+    assert [m["id"] for m in tail] == [m["id"] for m in full[-2:]]
+    assert [m["role"] for m in tail] == ["clinician", "assistant"]
