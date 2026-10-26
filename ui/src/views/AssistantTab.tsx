@@ -227,16 +227,19 @@ export default function AssistantTab() {
                 created_at: ts,
               },
             ];
-            setDetail((cur) =>
-              cur && cur.id === targetId
-                ? {
-                    ...cur,
-                    messages: [...cur.messages, ...saved],
-                    message_count: cur.message_count + saved.length,
-                    updated_at: ts,
-                  }
-                : cur,
-            );
+            setDetail((cur) => {
+              if (!cur || cur.id !== targetId) return cur;
+              // Повторная загрузка могла уже принести эти сообщения: не дублируем.
+              const have = new Set(cur.messages.map((m) => m.id));
+              const added = saved.filter((m) => !have.has(m.id));
+              if (added.length === 0) return cur;
+              return {
+                ...cur,
+                messages: [...cur.messages, ...added],
+                message_count: cur.message_count + added.length,
+                updated_at: ts,
+              };
+            });
             setStreaming(false);
             setPendingUser("");
             setStreamThreadId(null);

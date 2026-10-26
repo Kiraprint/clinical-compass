@@ -148,7 +148,11 @@ test("поток: ответ остаётся при сбое refetch и не д
   await expect(page.locator(".error")).toBeVisible();
 
   // Повторная загрузка треда: сервер вернул тот же ход, дубля быть не должно.
+  const refreshed = page.waitForResponse(
+    (r) => r.request().method() === "GET" && new URL(r.url()).pathname.endsWith(`/${threadId}`),
+  );
   await page.getByLabel("Обновить диалоги").click();
+  await refreshed;
   await expect(page.getByText(savedAnswer, { exact: true })).toHaveCount(1);
   await expect(page.getByText(savedQuestion, { exact: true })).toHaveCount(1);
   await expect(page.locator(".bubble", { hasText: "Думаю…" })).toHaveCount(0);
