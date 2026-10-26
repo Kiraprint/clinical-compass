@@ -335,8 +335,20 @@ def test_happy_path_transcribes_masked_and_counts_masks(client, monkeypatch, db_
     assert payload["mask_categories"]["PHONE"] >= 1
     assert len(payload["segments"]) == 2
     assert set(payload) == {
-        "segments", "model", "duration_sec", "mask_categories", "depersonalized"
+        "segments",
+        "model",
+        "duration_sec",
+        "mask_categories",
+        "depersonalized",
+        # FR-42: без этих полей UI не отличит разделённые реплики от деградации.
+        "diarized",
+        "speaker_roles",
+        "speaker_roles_assumed",
     }
+    # Сайдкар в этом тесте диаризацию не делает: ролей нет, флаг честный.
+    assert payload["diarized"] is False
+    assert payload["speaker_roles"] == {}
+    assert payload["speaker_roles_assumed"] is False
     joined = " ".join(seg["text"] for seg in payload["segments"])
     assert "[ФИО]" in joined and "[ТЕЛЕФОН]" in joined
     # ФИО врача звучит в записи так же, как ФИО пациента: deny-list — оба.

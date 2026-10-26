@@ -6,6 +6,7 @@ import {
   SessionDetail,
   SessionProtocol,
   SessionTranscript,
+  SpeakerRole,
   TranscriptSegment,
 } from "../api";
 
@@ -41,6 +42,10 @@ const AI_ERRORS: Record<string, string> = {
   TRANSCRIPT_TOO_LARGE: "Запись слишком длинная для расшифровки",
   ML_UNAVAILABLE: "Сервис расшифровки недоступен — попробуйте позже",
   ARTIFACT_CORRUPT: "Файл расшифровки повреждён",
+  // FR-42: PATCH ролей — метки и роли проверяет сервер (422).
+  SPEAKER_ROLE_DUPLICATE: "Врач и пациент должны быть разными участниками",
+  SPEAKER_ROLE_INVALID: "Недопустимая роль участника",
+  SPEAKER_UNKNOWN: "Такой метки нет в расшифровке — обновите страницу",
 };
 
 /** Ошибка ИИ по-русски: код не протекает в интерфейс (§6). */
@@ -86,13 +91,41 @@ const mimeExtension = (value: string) =>
 
 
 
-function SpeakerBadge({ speaker }: { speaker: string | null }) {
-  if (!speaker) return null;
-  return <span className="badge GREEN">{speaker}</span>;
+const ROLE_LABELS: Record<SpeakerRole, string> = {
+  clinician: "Врач",
+  patient: "Пациент",
+  unknown: "Говорящий",
+};
+
+function SpeakerBadge({ segment }: { segment: TranscriptSegment }) {
+  const label = segment.role
+    ? ROLE_LABELS[segment.role]
+    : segment.speaker
+      ? `Говорящий ${segment.speaker}`
+      : null;
+  if (!label) return null;
+  // Врач и пациент различаются цветом: в длинной расшифровке читают по бейджу.
+  const color =
+    segment.role === "clinician" ? " GREEN" : segment.role === "patient" ? " YELLOW" : "";
+  return <span className={`badge${color}`}>{label}</span>;
 }
 
-function TranscriptView({ transcript }: { transcript: SessionTranscript }) {
+function TranscriptView({
+  transcript,
+  onRoles,
+  busy,
+}: {
+  transcript: SessionTranscript;
+  onRoles: (roles: Record<string, SpeakerRole>) => void;
+  busy: boolean;
+}) {
   const segments: TranscriptSegment[] = transcript.segments;
+  const speakers = Array.from(
+    new Set(segments.map((s) => s.speaker).filter((s): s is string => !!s)),
+  );
+  const roles = transcript.speaker_roles;
+  const [first, second] = speakers;
+  const firstIsDoctor = roles[first] === "clinician" || !roles[first];
   return (
     <div>
       <p className="hint">
@@ -101,6 +134,46 @@ function TranscriptView({ transcript }: { transcript: SessionTranscript }) {
         {transcript.duration_sec ? ` Длительность ${mmss(transcript.duration_sec)}.` : ""}
         {transcript.model ? ` Модель: ${transcript.model}.` : ""}
       </p>
+      {!transcript.diarized && (
+        <p className="small muted">
+          Говорящие не разделены (модель диаризации недоступна) — реплики идут одним потоком.
+        </p>
+      )}
+      {transcript.diarized && speakers.length === 2 && (
+        <div className="row" style={{ marginTop: 8 }}>
+          <span className="small muted">
+            {transcript.speaker_roles_assumed
+              ? `Роли проставлены автоматически: «${first}» говорит первой — проверьте.`
+              : "Роли участников подтверждены врачом."}
+          </span>
+          {transcript.speaker_roles_assumed && (
+            <button
+              type="button"
+              data-testid="speakers-confirm-role"
+              disabled={busy}
+              onClick={() => onRoles({ [first]: "clinician", [second]: "patient" })}
+            >
+              {`«${first}» — это врач`}
+            </button>
+          )}
+          <button
+            type="button"
+            className="ghost"
+            data-testid="speakers-swap"
+            disabled={busy}
+            onClick={() =>
+              // «Переставить» — перестановка, а не догадка: пациент становится врачом.
+              onRoles(
+                firstIsDoctor
+                  ? { [first]: "patient", [second]: "clinician" }
+                  : { [first]: "clinician", [second]: "patient" },
+              )
+            }
+          >
+            Переставить врача и пациента
+          </button>
+        </div>
+      )}
       {segments.length === 0 ? (
         <p className="small muted">В расшифровке нет реплик.</p>
       ) : (
@@ -108,7 +181,7 @@ function TranscriptView({ transcript }: { transcript: SessionTranscript }) {
           {segments.map((segment, i) => (
             <li key={i} className="transcript-segment">
               <span className="transcript-time">{mmss(segment.start)}</span>
-              <SpeakerBadge speaker={segment.speaker} />
+              <SpeakerBadge segment={segment} />
               <span className="transcript-text">{segment.text}</span>
             </li>
           ))}
@@ -144,7 +217,9 @@ export default function SessionAssistantCard({
   const [uploaded, setUploaded] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
   const [recSec, setRecSec] = useState(0);
-  const [busy, setBusy] = useState<"" | "consent" | "upload" | "transcribe" | "draft" | "load">("");
+  const [busy, setBusy] = useState<
+    "" | "consent" | "upload" | "transcribe" | "draft" | "load" | "speakers"
+  >("");
   const [polling, setPolling] = useState(false);
   const [err, setErr] = useState("");
   const [note, setNote] = useState("");
@@ -199,6 +274,23 @@ export default function SessionAssistantCard({
       setErr(aiErrorText(e, "Не удалось загрузить расшифровку"));
     }
   }, [session.id]);
+
+  /** FR-42: роли врач/пациент подтверждает человек — сервер снимает `assumed`. */
+  const saveRoles = async (roles: Record<string, SpeakerRole>) => {
+    setBusy("speakers");
+    setErr("");
+    setNote("");
+    try {
+      const updated = await api.setSpeakerRoles(session.id, roles);
+      if (!alive.current) return;
+      setTranscript(updated);
+      toast("Роли участников сохранены.");
+    } catch (e: unknown) {
+      setErr(aiErrorText(e, "Не удалось сохранить роли участников"));
+    } finally {
+      setBusy("");
+    }
+  };
 
   // Доступность ИИ определяется самим сервером: 503 SESSION_AI_DISABLED — карточка
   // становится информационной, 404 TRANSCRIPT_MISSING — ИИ работает, расшифровки нет.
@@ -592,7 +684,13 @@ export default function SessionAssistantCard({
         </p>
       )}
 
-      {transcript && <TranscriptView transcript={transcript} />}
+      {transcript && (
+        <TranscriptView
+          transcript={transcript}
+          onRoles={(roles) => void saveRoles(roles)}
+          busy={busy !== ""}
+        />
+      )}
 
       <div className="row" style={{ marginTop: 10 }}>
         <button

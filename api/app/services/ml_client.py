@@ -220,11 +220,17 @@ def transcribe_file(
     filename: str = "audio.bin",
     mime: str = "application/octet-stream",
     language: str = "ru",
+    diarize: bool = True,
 ) -> dict:
     """Расшифровка аудио сессии (docs/18 §4.3, PR P3): multipart в сайдкар.
 
     Файл передаётся потоком (тело не собирается в память): на входе — уже
     расшифрованный временный файл 0600, который удаляет вызывающий.
+
+    `diarize=True` (FR-42) просит сайдкар разделить реплики по спикерам:
+    стоимость — ещё ~10 % RTF на CPU сайдкара, а ответ честно говорит
+    `diarized=false`, если моделей нет. Старый сайдкар лишнее поле формы
+    просто игнорирует.
 
     Таймаут — `CC_SESSION_AI_TIMEOUT` (часовой приём расшифровывается минутами),
     повтора нет: после таймаута повторный прогон ASR только удвоит ожидание.
@@ -240,7 +246,11 @@ def transcribe_file(
     epilogue = (
         f"\r\n--{boundary}\r\n"
         'Content-Disposition: form-data; name="language"\r\n\r\n'
-        f"{language}\r\n--{boundary}--\r\n"
+        f"{language}\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="diarize"\r\n\r\n'
+        f"{'true' if diarize else 'false'}\r\n"
+        f"--{boundary}--\r\n"
     ).encode("utf-8")
     body = _FileMultipartBody(prologue, path, epilogue)
     headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}

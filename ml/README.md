@@ -8,7 +8,7 @@ GPU-сервис с моделями, которые нельзя держать
 | `POST /v1/embeddings` | `Qwen/Qwen3-Embedding-0.6B` (профиль по умолчанию) или `intfloat/multilingual-e5-large-instruct` | dense-векторы БЗ, 1024; асимметричные префиксы query/passage |
 | `POST /v1/rerank` | `BAAI/bge-reranker-v2-m3` (CrossEncoder) | cross-encoder реранк, сырые логиты |
 | `POST /v1/mask` | `compass.depersonalize` + `redmadrobot-rnd/rubert-base-pii-ner` | маскирование ПДн; `model: hybrid\|regex`, `degraded: bool` |
-| `POST /v1/transcribe` | `dropbox-dash/faster-whisper-large-v3-turbo` (faster-whisper, CT2) | расшифровка аудио сессии на русском; `degraded: bool`, диаризации нет |
+| `POST /v1/transcribe` | `dropbox-dash/faster-whisper-large-v3-turbo` (faster-whisper, CT2) + диаризация sherpa-onnx | расшифровка аудио сессии на русском; `diarized/degraded: bool`, реплики с метками спикеров `A`/`B` |
 | `GET /health` | — | `status` (`loading`/`ready`/`error`), `device`, `models`, `error: bool` |
 
 Контракт заморожен в `api/app/services/ml_client.py`; конфигурация и
@@ -125,23 +125,52 @@ curl -s -X POST http://ml:8080/v1/transcribe \
   "model": "dropbox-dash/faster-whisper-large-v3-turbo",
   "device": "cuda",
   "duration_s": 138.356,
-  "rtf": 0.0245,
+  "rtf": 0.0321,
   "language": "ru",
   "segments": [
-    {"start": 0.0, "end": 4.14, "speaker": null,
+    {"start": 0.0, "end": 4.14, "speaker": "A",
      "text": "Пациент жалуется на боль в груди и одышку в течение трёх дней."}
   ],
-  "speakers": [],
+  "speakers": [
+    {"id": "A", "label": null, "seconds": 74.2, "segments": 12},
+    {"id": "B", "label": null, "seconds": 61.5, "segments": 9}
+  ],
+  "diarized": true,
   "degraded": false
 }
 ```
 
 Гарантии ответа: `start < end`, сегменты отсортированы по `start` и не
 пересекаются, `duration_s` — длительность из декодера,
-`rtf = время_обработки / duration_s`. `speaker` всегда `null`, `speakers`
-всегда `[]`: диаризации нет (см. ниже), поэтому `diarize=true` — это
-`degraded: true`, и api обязан читать это как «спикеры неизвестны», а не как
-«один спикер».
+`rtf = время_обработки / duration_s` (ASR + диаризация). `label` у спикера
+всегда `null`: роль «врач/пациент» назначает api, а не сайдкар (метки `A`/`B` —
+кластеры, причём `A` — тот, кто заговорил первым).
+
+### Диаризация (`diarize=true`, FR-42)
+
+| Что | Значение |
+|---|---|
+| Библиотека | `sherpa-onnx` 2.0 (pip-колесо, свой onnxruntime внутри, **CPU**; GPU-сборки в PyPI нет и не нужна) |
+| Segmentation | pyannote segmentation 3.0 ONNX, **MIT**, `model.onnx` 5.7 МБ (int8 — 1.5 МБ, но на тесте схлопывал два голоса в один кластер: 6/12 реплик) |
+| Embeddings | 3D-Speaker CAM++ zh/en advanced ONNX, **Apache-2.0**, 27 МБ |
+| Кластеризация | AHC внутри sherpa, `num_clusters=2` (врач + пациент) |
+| Источник весов | релизы k2-fsa на GitHub (не HF: pyannote.audio там gated), sha256 в `ml/models.py`, качает `ml-warmup` в `/models/diarize` |
+| Замер | 50.6 с синтетического русского диалога (2 голоса piper, 12 реплик): **12/12** реплик размечены верно, RTF **0.078–0.095** на 2 потоках CPU, VRAM 0, RSS процесса ~1.3 ГБ вместе с весами |
+
+Аудио берётся из того же PyAV-декодера, что у Whisper (16 кГц mono float32), —
+повторного декодирования нет. Сшивка с сегментами ASR — по максимальному
+перекрытию по времени.
+
+Ограничения (сознательные): ровно два участника; пересекающаяся речь уходит
+говорящему с большим перекрытием; реплики короче `min_duration_on=0.3` с
+отбрасываются; соло-запись тоже делится на два кластера (поэтому api помечает
+роли как допущение); схожие голоса и шум кабинета снижают точность — роли
+подтверждает врач.
+
+Деградация: нет весов / `CC_ML_DIARIZE=0` / сбой модели — ответ **200** с
+`diarized=false`, `speaker: null`, `degraded=true`; причина пишется в лог один
+раз (статус липкий до рестарта). Диаризация никогда не роняет ASR: `diarize=true`
+не меняет коды ошибок транскрипции.
 
 Коды ошибок: 401/403 — токен; 415 `unsupported_media`; 413
 `payload_too_large`; 400 `invalid_request` (пустой файл, код языка не из

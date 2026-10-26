@@ -1073,6 +1073,15 @@ class SessionTranscript(Base):
     )
     mask_categories: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     depersonalized: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    # FR-42 (PR P7): диаризация. `diarized` — сайдкар реально разделил
+    # говорящих; `speaker_roles` — {"A": "clinician", "B": "patient"} или NULL,
+    # когда кластеров не два; `speaker_roles_assumed` — роли назначены по
+    # умолчанию (первый заговоривший = врач) и врач их ещё не подтвердил.
+    diarized: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    speaker_roles: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    speaker_roles_assumed: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )

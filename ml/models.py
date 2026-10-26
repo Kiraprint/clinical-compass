@@ -86,6 +86,52 @@ ASR_LANGUAGES = frozenset(
 _ASR_STUB_BYTES_PER_S = 32_000
 _ASR_STUB_SEGMENT_S = 5.0
 
+# --- Диаризация (FR-42, docs/18 §4.5) --------------------------------------
+# sherpa-onnx — обычное pip-колесо (CPU, свой onnxruntime внутри), веса —
+# ONNX-файлы из GitHub releases k2-fsa, без HF-гейта:
+#   pyannote/segmentation-3.0 (MIT) → границы реплик,
+#   3D-Speaker CAM++ zh/en advanced (Apache-2.0) → эмбеддинги голоса,
+#   кластеризация AHC внутри sherpa.
+# Замер на 50.6 с синтетического русского диалога (2 голоса piper):
+# RTF 0.086 (2 потока CPU), 12/12 реплик размечены верно; подробности —
+# ml/README.md (раздел «Диаризация»). pyannote.audio не используется: их веса на HF gated.
+DIARIZE_MODEL_DIR = "/models/diarize"
+DIARIZE_SEGMENTATION_FILE = "segmentation.onnx"
+DIARIZE_EMBEDDING_FILE = "embedding.onnx"
+# Эмбеддинги sherpa считает по 16 кГц mono float32 — ровно тот формат, в
+# котором декодирует PyAV, поэтому пересэмплировать ничего не нужно.
+DIARIZE_SAMPLE_RATE = 16_000
+# Клинический приём — два участника (врач и пациент): фиксированное число
+# кластеров детерминированнее порога и не плодит «спикеров» из шума.
+DIARIZE_CLUSTERS = 2
+DIARIZE_MIN_DURATION_ON = 0.3
+DIARIZE_MIN_DURATION_OFF = 0.5
+# Stub-диаризация (CC_ML_STUB=1): чередование спикеров ровно на длину
+# stub-сегмента, чтобы маппинг сегмент→спикер покрывался тестами без GPU.
+_DIARIZE_STUB_TURN_S = 5.0
+# Откуда берутся веса: релизы k2-fsa/sherpa-onnx на GitHub (pyannote.audio в
+# HF-gated виде недоступен по лицензии). Хэши зафиксированы — прогрев качает
+# файлы из сети, а офлайн-сайдкар потом сверяет их же.
+DIARIZE_SEGMENTATION_URL = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+    "speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
+)
+# В архиве лежат model.onnx и model.int8.onnx; int8 на тесте схлопнул диалог в
+# один кластер (6/12 реплик), поэтому берём fp32 (6 МБ).
+DIARIZE_SEGMENTATION_SHA256 = (
+    "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079"
+)
+DIARIZE_SEGMENTATION_ARCHIVE_SHA256 = (
+    "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488"
+)
+DIARIZE_EMBEDDING_URL = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+    "speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"
+)
+DIARIZE_EMBEDDING_SHA256 = (
+    "aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2"
+)
+
 # Окно NER: rubert видит 512 токенов, поэтому длинный текст режется на
 # перекрывающиеся куски с привязкой к пробелам (см. HybridMasker).
 NER_CHUNK_CHARS = 1200
@@ -624,6 +670,128 @@ class WhisperTranscriber:
             duration = out[-1]["end"] if out else 0.0
         return {"duration_s": duration, "language": detected, "segments": out}
 
+# ---------------------------------------------------------------------------
+# Диаризация (FR-42)
+# ---------------------------------------------------------------------------
+
+
+class DiarizeUnavailable(RuntimeError):
+    """Моделей диаризации нет/они не открылись: путь деградации, не 5xx."""
+
+
+def diarize_labels(count: int) -> list[str]:
+    """Индексы кластеров → ``A``, ``B``, … (роли назначает api, не сайдкар)."""
+    return [chr(ord("A") + index) for index in range(max(0, count))]
+
+
+def label_clusters(turns: list[dict]) -> dict[Any, str]:
+    """Кластеры → метки в порядке первого появления (``A`` говорит первым)."""
+    order: list[Any] = []
+    for turn in sorted(turns, key=lambda item: (item["start"], item["end"])):
+        if turn["speaker"] not in order:
+            order.append(turn["speaker"])
+    return dict(zip(order, diarize_labels(len(order))))
+
+
+def assign_speakers(segments: list[dict], turns: list[dict]) -> list[Any]:
+    """Сегмент → кластер поворота с максимальным перекрытием по времени.
+
+    Сегмент без перекрытия (тишина/шум между репликами) получает ``None``:
+    подставлять «соседнего» спикера было бы выдумкой.
+    """
+    assigned: list[Any] = []
+    for segment in segments:
+        start, end = float(segment["start"]), float(segment["end"])
+        best: Any = None
+        best_overlap = 0.0
+        for turn in turns:
+            overlap = min(end, float(turn["end"])) - max(start, float(turn["start"]))
+            if overlap > best_overlap:
+                best, best_overlap = turn["speaker"], overlap
+        assigned.append(best)
+    return assigned
+
+
+class StubDiarizer:
+    """Детерминированная заглушка: спикеры чередуются каждые 5 с.
+
+    Настоящая модель в CI/тестах не грузится (GPU и 30 МБ весов), но маппинг
+    сегмент→спикер и сборка ``speakers`` проверяются на реальном коде.
+    """
+
+    device = "stub"
+    model_id = "stub"
+
+    def diarize(self, audio: Any, duration_s: float) -> list[dict]:
+        turns: list[dict] = []
+        start = 0.0
+        while start < duration_s:
+            end = round(min(duration_s, start + _DIARIZE_STUB_TURN_S), 3)
+            if end <= start:  # округление съело остаток — хвост не нужен
+                break
+            turns.append({"start": start, "end": end, "speaker": len(turns) % 2})
+            start = end
+        return turns
+
+
+class SherpaDiarizer:
+    """sherpa-onnx: pyannote segmentation 3.0 + 3D-Speaker CAM++ (CPU).
+
+    Оба файла — ONNX из GitHub releases k2-fsa (MIT и Apache-2.0), лежат в
+    ``CC_ML_DIARIZE_MODEL_DIR`` (том ml-models): офлайн, без HF-гейта.
+    ``num_clusters`` фиксирован: приём ведёт врач с пациентом, а автопорог
+    давал на тестовой записи третий «спикер» из шума. ``OfflineSpeakerDiarization``
+    потокобезопасностью не славится (общий onnxruntime-сеанс) — держим замок.
+    """
+
+    device = "cpu"
+
+    def __init__(
+        self,
+        model_dir: str,
+        *,
+        num_threads: int = 2,
+        num_clusters: int = DIARIZE_CLUSTERS,
+    ) -> None:
+        import sherpa_onnx
+
+        segmentation = os.path.join(model_dir, DIARIZE_SEGMENTATION_FILE)
+        embedding = os.path.join(model_dir, DIARIZE_EMBEDDING_FILE)
+        missing = [path for path in (segmentation, embedding) if not os.path.isfile(path)]
+        if missing:
+            raise DiarizeUnavailable(f"нет весов диаризации: {', '.join(missing)}")
+        config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
+            segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
+                pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(
+                    model=segmentation
+                ),
+                num_threads=num_threads,
+            ),
+            embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(
+                model=embedding, num_threads=num_threads
+            ),
+            clustering=sherpa_onnx.FastClusteringConfig(num_clusters=num_clusters),
+            min_duration_on=DIARIZE_MIN_DURATION_ON,
+            min_duration_off=DIARIZE_MIN_DURATION_OFF,
+        )
+        if not config.validate():
+            raise DiarizeUnavailable(f"конфиг диаризации в {model_dir} не прошёл проверку")
+        self._diarizer = sherpa_onnx.OfflineSpeakerDiarization(config)
+        self._lock = threading.Lock()
+        self.model_id = f"{DIARIZE_SEGMENTATION_FILE}+{DIARIZE_EMBEDDING_FILE}"
+
+    def diarize(self, audio: Any, duration_s: float) -> list[dict]:
+        with self._lock:
+            result = self._diarizer.process(audio).sort_by_start_time()
+        return [
+            {
+                "start": round(float(segment.start), 3),
+                "end": round(float(segment.end), 3),
+                "speaker": int(segment.speaker),
+            }
+            for segment in result
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Реестр
@@ -711,6 +879,18 @@ class Registry:
         # декодированный файл в памяти, а CTranslate2 всё равно сериализует.
         self.asr_concurrency = min(max(1, slots), 4)
         self._asr_slots = threading.BoundedSemaphore(self.asr_concurrency)
+        # Диаризация (FR-42): включена по умолчанию, но грузится лениво —
+        # стеку без транскрипции 30 МБ весов в памяти не нужны. Ошибка
+        # загрузки липкая (как у ASR): деградация вместо ретрая на каждом
+        # запросе, причина — в логах один раз.
+        self.diarize_enabled = _env_bool("CC_ML_DIARIZE", True)
+        self.diarize_model_dir = (
+            os.environ.get("CC_ML_DIARIZE_MODEL_DIR", "").strip() or DIARIZE_MODEL_DIR
+        )
+        self._diarizer: Any = None
+        self._diarizer_status = "idle"  # idle|ready|error
+        self._diarizer_error: str | None = None
+        self._diarizer_lock = threading.Lock()
 
     # -- статус ------------------------------------------------------------
 
@@ -748,6 +928,11 @@ class Registry:
                             if self._asr is not None
                             else None
                         ),
+                    },
+                    # Диаризация грузится лениво; наружу — только статус и флаг.
+                    "diarize": {
+                        "enabled": self.diarize_enabled,
+                        "status": self._diarizer_status,
                     },
                 },
                 # Никаких путей к весам/текстов ошибок наружу: только флаг.
@@ -901,6 +1086,101 @@ class Registry:
         # "loading" — тоже сюда: 503 model_loading с Retry-After, без ожидания.
         raise ModelNotReady()
 
+    # -- диаризация --------------------------------------------------------
+
+    def diarizer(self) -> Any:
+        """Бэкенд диаризации или ``None`` — деградация без исключений.
+
+        В отличие от ASR отсутствие весов не срывает запрос: расшифровка
+        остаётся ценной сама по себе, поэтому ``diarize=true`` на сломанной
+        модели отдаёт ``diarized=false, degraded=true`` (200), а не 503.
+        """
+        if not self.diarize_enabled:
+            return None
+        if self._diarizer_status == "ready":
+            return self._diarizer
+        if self._diarizer_status == "error":
+            return None
+        with self._diarizer_lock:
+            if self._diarizer_status == "idle":
+                try:
+                    self._diarizer = (
+                        StubDiarizer()
+                        if self.stub
+                        else SherpaDiarizer(self.diarize_model_dir)
+                    )
+                    self._diarizer_status = "ready"
+                    log.info(
+                        "Диаризация готова: %s (каталог %s)",
+                        self._diarizer.model_id,
+                        self.diarize_model_dir,
+                    )
+                except Exception as exc:  # noqa: BLE001 — деградация, не падение
+                    self._diarizer_status = "error"
+                    # Причина — в лог один раз: дальше только флаг статуса.
+                    self._diarizer_error = f"{type(exc).__name__}: {exc}"[:300]
+                    log.warning(
+                        "Диаризация недоступна (каталог %s), diarize=true будет "
+                        "деградировать: %s",
+                        self.diarize_model_dir,
+                        self._diarizer_error,
+                    )
+            return self._diarizer if self._diarizer_status == "ready" else None
+
+    def _diarize_turns(self, source: Any, duration_s: float) -> dict:
+        """Повороты спикеров для транскрипции; никогда не бросает.
+
+        Возвращает ``{turns, diarized, degraded, reason}``: ``reason`` уходит
+        в лог (в ответе — только флаги, без путей к весам).
+        """
+        if not self.diarize_enabled:
+            return {"turns": [], "diarized": False, "degraded": False, "reason": "disabled"}
+        backend = self.diarizer()
+        if backend is None:
+            return {
+                "turns": [],
+                "diarized": False,
+                "degraded": True,
+                "reason": self._diarizer_error or "unavailable",
+            }
+        started = time.perf_counter()
+        try:
+            audio: Any = None
+            if not isinstance(backend, StubDiarizer):
+                # Тот же декодер PyAV, что у Whisper: 16 кГц mono float32 —
+                # формат, который ждут эмбеддинги sherpa.
+                from faster_whisper.audio import decode_audio
+
+                if hasattr(source, "seek"):
+                    source.seek(0)
+                audio = decode_audio(source, sampling_rate=DIARIZE_SAMPLE_RATE)
+            turns = backend.diarize(audio, duration_s)
+        except Exception:  # noqa: BLE001 — сбой диаризации не должен ронять ASR
+            log.exception("Диаризация не удалась, сегменты останутся без спикеров")
+            return {
+                "turns": [],
+                "diarized": False,
+                "degraded": True,
+                "reason": "failed",
+            }
+        if not turns:
+            log.warning("Диаризация не нашла реплик: сегменты останутся без спикеров")
+            return {
+                "turns": [],
+                "diarized": False,
+                "degraded": True,
+                "reason": "no_turns",
+            }
+        elapsed = time.perf_counter() - started
+        log.info(
+            "Диаризация: %d поворотов, %d спикеров, %.2f с на %.1f с аудио",
+            len(turns),
+            len({turn["speaker"] for turn in turns}),
+            elapsed,
+            duration_s,
+        )
+        return {"turns": turns, "diarized": True, "degraded": False, "reason": None}
+
     def transcribe(self, source: Any, language: str, *, diarize: bool = False) -> dict:
         self._require_ready()
         code = asr_language(language)
@@ -911,38 +1191,66 @@ class Registry:
             raise ASRBusy()
         started = time.perf_counter()
         try:
-            raw = backend.transcribe(source, code)
-        except Exception as exc:  # noqa: BLE001 — сбой бэкенда не должен быть 500
-            log.exception("ASR не смог обработать аудио")
-            raise ASRFailed() from exc
+            try:
+                raw = backend.transcribe(source, code)
+            except Exception as exc:  # noqa: BLE001 — сбой бэкенда не должен быть 500
+                log.exception("ASR не смог обработать аудио")
+                raise ASRFailed() from exc
+            duration = float(raw.get("duration_s") or 0.0)
+            segments = [
+                {
+                    "start": round(float(segment["start"]), 3),
+                    "end": round(float(segment["end"]), 3),
+                    # Спикера выставит диаризация ниже; без неё — честный null.
+                    "speaker": None,
+                    "text": str(segment["text"]),
+                }
+                for segment in raw.get("segments") or []
+                if float(segment["end"]) > float(segment["start"])
+            ]
+            # Гарантия контракта: сегменты отсортированы и не пересекаются.
+            segments.sort(key=lambda s: (s["start"], s["end"]))
+            # Диаризация — под тем же слотом: она тоже держит декодированное
+            # аудио в памяти (3 ч ≈ 700 МБ float32) и грузит CPU.
+            diarization = (
+                self._diarize_turns(source, duration)
+                if diarize
+                else {"turns": [], "diarized": False, "degraded": False, "reason": "disabled"}
+            )
         finally:
             self._asr_slots.release()
         elapsed = time.perf_counter() - started
-        duration = float(raw.get("duration_s") or 0.0)
-        segments = [
-            {
-                "start": round(float(segment["start"]), 3),
-                "end": round(float(segment["end"]), 3),
-                # Диаризация не реализована (pyannote gated) — спикер всегда null.
-                "speaker": None,
-                "text": str(segment["text"]),
-            }
-            for segment in raw.get("segments") or []
-            if float(segment["end"]) > float(segment["start"])
-        ]
-        # Гарантия контракта: сегменты отсортированы и не пересекаются.
-        segments.sort(key=lambda s: (s["start"], s["end"]))
+        speakers: list[dict] = []
+        if diarization["diarized"]:
+            labels = label_clusters(diarization["turns"])
+            totals: dict[str, dict] = {}
+            assigned = assign_speakers(segments, diarization["turns"])
+            for segment, cluster in zip(segments, assigned):
+                label = labels.get(cluster) if cluster is not None else None
+                segment["speaker"] = label
+                if label is None:
+                    continue
+                item = totals.setdefault(
+                    label, {"id": label, "label": None, "seconds": 0.0, "segments": 0}
+                )
+                item["seconds"] = round(
+                    item["seconds"] + max(0.0, segment["end"] - segment["start"]), 3
+                )
+                item["segments"] += 1
+            speakers = [totals[label] for label in sorted(totals)]
         return {
             "model": public_model_name(backend.model_id),
             "device": backend.device,
             "duration_s": round(duration, 3),
-            # RTF < 1 — быстрее реального времени; 0 при отсутствии аудио.
+            # RTF < 1 — быстрее реального времени (ASR + диаризация); 0 без аудио.
             "rtf": round(elapsed / duration, 4) if duration > 0 else 0.0,
             "language": str(raw.get("language") or code),
             "segments": segments,
-            "speakers": [],
-            # diarize=true без реализации — честный degraded, а не тихая подмена.
-            "degraded": bool(diarize),
+            "speakers": speakers,
+            # diarized=false — честная деградация (весов нет/упало/выключено),
+            # а не тихая подмена: api покажет, что говорящие не разделены.
+            "diarized": bool(diarization["diarized"]),
+            "degraded": bool(diarization["degraded"]),
         }
 
     # -- операции ----------------------------------------------------------
