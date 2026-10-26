@@ -54,6 +54,13 @@ export default function App() {
     localStorage.removeItem("cc_role");
     localStorage.removeItem("cc_email");
     setSession(null);
+    // FR-48: возвращаемся на первый шаг, а не на OTP/сброс прошлой сессии.
+    setStep("login");
+    setOtp("");
+    setCode("");
+    setChallenge("");
+    setNotice("");
+    setError("");
   };
 
   // При неудачном refresh (истёкший refresh-токен) — принудительный логаут.
