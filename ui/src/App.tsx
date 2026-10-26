@@ -88,6 +88,8 @@ export default function App() {
   };
 
   const completeLogin = (data: LoginResp) => {
+    // Вход другим пользователем в той же вкладке: кэш прошлой сессии не наш.
+    api.invalidate();
     setToken(data.access_token);
     setRefreshToken(data.refresh_token);
     localStorage.setItem("cc_role", data.role);

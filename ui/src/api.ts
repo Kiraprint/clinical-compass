@@ -113,12 +113,70 @@ async function throwApiError(resp: Response): Promise<never> {
     typeof body.detail === "string" ? body.detail : resp.statusText,
   );
 }
+// --- Кэш GET -----------------------------------------------------------------
+// Новые экраны делают при возврате те же GET, что и при первом входе: без кэша это
+// заметный «мигающий» экран и лишний RTT. Кэш тонкий: ключ method+path, TTL 30 c,
+// дедуп одновременных одинаковых GET, никакого фонового рефетча (истёкшая запись
+// просто перезапрашивается при чтении). Значение — ответ как есть; компоненты не
+// должны его мутировать (setState всегда заменяет объект целиком).
+const CACHE_TTL_MS = 30_000;
+const getCache = new Map<string, { at: number; value: unknown }>();
+const getInflight = new Map<string, Promise<unknown>>();
 
-async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
+// Фрагмент пути, похожий на идентификатор: UUID или число.
+const ID_SEGMENT = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\d+)$/i;
+
+/** Мутация меняет коллекцию выше своего id: получаем префикс кэша из пути запроса. */
+function mutatedPrefix(path: string): string {
+  const segs = path.split("?")[0].split("/").filter(Boolean);
+  const cut = segs.findIndex((s) => ID_SEGMENT.test(s));
+  const keep = cut === -1 ? segs : segs.slice(0, cut);
+  return keep.length > 0 ? `/${keep.join("/")}` : "/";
+}
+
+function invalidateCache(prefix?: string) {
+  if (!prefix) {
+    getCache.clear();
+    return;
+  }
+  for (const key of [...getCache.keys()]) {
+    const path = key.slice(4);  // после "GET "
+    if (!path.startsWith(prefix)) continue;
+    const next = path[prefix.length];
+    // Граница сегмента: префикс не должен совпадать с огрызком другого пути.
+    if (next === undefined || next === "/" || next === "?") getCache.delete(key);
+  }
+}
+
+async function send<T>(path: string, init: RequestInit): Promise<T> {
   const resp = await rawReq(path, init);
   if (resp.status === 204) return undefined as T;
   if (!resp.ok) await throwApiError(resp);
   return (await resp.json().catch(() => ({}))) as T;
+}
+
+async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const method = (init.method ?? "GET").toUpperCase();
+  if (method !== "GET") {
+    const result = await send<T>(path, init);
+    // Любая мутация сбрасывает кэш затронутой коллекции — следующий читатель
+    // увидит свежие данные, а не ответ «до действия».
+    invalidateCache(mutatedPrefix(path));
+    return result;
+  }
+  const key = `GET ${path}`;
+  const hit = getCache.get(key);
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value as T;
+  const pending = getInflight.get(key);
+  if (pending) return pending as Promise<T>;
+  const request = send<T>(path, init)
+    .then((value) => {
+      getCache.set(key, { at: Date.now(), value });
+      return value;
+    })
+    .finally(() => getInflight.delete(key));
+  getInflight.set(key, request);
+  return request;
 }
 
 /** Файл (PDF протокола): тело — как есть, имя — из Content-Disposition. */
@@ -425,6 +483,9 @@ export const api = {
   // F4: отзыв refresh-токена на сервере (best-effort, не блокирует UI).
   // F9: web-режим — refresh_token в cookie, body пустой; native — из localStorage.
   logout: () => {
+    // Кэш не переживает выход: иначе следующий пользователь в этой вкладке
+    // увидел бы данные прошлого.
+    invalidateCache();
     const rt = getRefreshToken();
     fetch(`${BASE}/api/v1/auth/logout`, {
       method: "POST",
@@ -434,6 +495,8 @@ export const api = {
       keepalive: true,
     }).catch(() => {});
   },
+  /** Сброс кэша GET: без аргумента — весь (смена пользователя/роли). */
+  invalidate: (prefix?: string) => invalidateCache(prefix),
   getConsent: () => req<Consent>("/api/v1/consent"),
   postConsent: verb<Consent>("POST")("/api/v1/consent"),
   revokeConsent: () => req<void>("/api/v1/consent/revoke", { method: "POST" }),
