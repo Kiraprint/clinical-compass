@@ -130,6 +130,98 @@ export interface ScreeningRun {
   started_at: string;
 }
 
+// FR-38/39: календарь приёмов, клинические сессии и протокол (docs/18 §4.1, §4.2, §4.4).
+export type AppointmentChannel = "in_person" | "online" | "phone";
+export type AppointmentStatus = "planned" | "confirmed" | "completed" | "cancelled" | "no_show";
+export interface Appointment {
+  id: string;
+  patient_id: string;
+  patient_fio: string | null;
+  starts_at: string;
+  duration_min: number;
+  channel: AppointmentChannel;
+  status: AppointmentStatus;
+  location: string | null;
+  /** Приём уже начат: сессия по этой записи существует. */
+  has_session: boolean;
+}
+export type SessionStatus = "active" | "finished";
+export type ProtocolStatus = "draft" | "approved" | "signed" | "submitted" | "superseded";
+/** Активная версия протокола в ответе сессии. */
+export interface ProtocolBrief {
+  version: number;
+  status: ProtocolStatus;
+}
+export interface ClinicalSession {
+  id: string;
+  appointment_id: string | null;
+  patient_id: string;
+  patient_fio: string | null;
+  channel: AppointmentChannel;
+  started_at: string;
+  ended_at: string | null;
+  status: SessionStatus;
+  audio_consent: boolean;
+  ai_status: string;
+  protocol: ProtocolBrief | null;
+}
+export interface MentalStatus {
+  appearance_behavior: string;
+  consciousness_orientation: string;
+  perception: string;
+  thinking_speech: string;
+  emotions_volition: string;
+  criticism: string;
+  suicidal_risk: string;
+}
+export interface ProtocolPassport {
+  visit_at: string;
+  channel: string;
+  legal_basis: string;
+}
+export interface TreatmentRow {
+  drug: string;
+  dose: string;
+  schedule: string;
+  duration: string;
+}
+/** docs/18 §5.1: разделы протокола. Структурные (passport/diagnosis/treatment) — только врач. */
+export interface ProtocolSections {
+  passport: ProtocolPassport;
+  complaints: string;
+  anamnesis_morbi: string;
+  mental_status: MentalStatus;
+  somatic_status: string;
+  diagnosis: { syndrome: string; icd10: string; rationale: string };
+  treatment: TreatmentRow[];
+  recommendations: string;
+}
+export interface SessionProtocol {
+  id: string;
+  session_id: string;
+  version: number;
+  status: ProtocolStatus;
+  source: string;
+  sections: ProtocolSections;
+  content_sha256: string | null;
+  diagnosis_code: string | null;
+  model: string | null;
+  prompt_version: string | null;
+  needs_review: boolean;
+  created_by: string;
+  approved_by: string | null;
+  approved_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+export type AppointmentPatchBody = {
+  starts_at?: string;
+  duration_min?: number;
+  channel?: AppointmentChannel;
+  status?: AppointmentStatus;
+  location?: string | null;
+};
+
 export const api = {
   register: verb<RegisterResp>("POST")("/api/v1/auth/register"),
   login: verb<LoginResp>("POST")("/api/v1/auth/login"),
@@ -490,6 +582,79 @@ export const api = {
     req<ClinicianReminder>(`/api/v1/clinician/reminders/${id}/done`, { method: "POST" }),
   cancelReminder: (id: string) =>
     req<ClinicianReminder>(`/api/v1/clinician/reminders/${id}/cancel`, { method: "POST" }),
+  // --- FR-38/39: календарь, сессии, протокол (docs/18 §4.1, §4.2, §4.4) ----------
+  /** Окно ≤ 62 дней; страница — до 200 строк, поэтому `offset`. */
+  clinicianAppointments: (
+    from: string,
+    to: string,
+    opts: { patientId?: string; offset?: number } = {},
+  ) =>
+    req<{ items: Appointment[] }>(
+      `/api/v1/clinician/appointments?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}` +
+        (opts.patientId ? `&patient_id=${encodeURIComponent(opts.patientId)}` : "") +
+        (opts.offset ? `&offset=${opts.offset}` : ""),
+    ),
+  createAppointment: (body: {
+    patient_id: string;
+    starts_at: string;
+    duration_min?: number;
+    channel?: AppointmentChannel;
+    location?: string | null;
+  }) =>
+    req<Appointment>("/api/v1/clinician/appointments", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  patchAppointment: (id: string, body: AppointmentPatchBody) =>
+    req<Appointment>(`/api/v1/clinician/appointments/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  /** 201 — новая сессия, 200 — уже начатая по этой записи (идемпотентно). */
+  startAppointment: (id: string) =>
+    req<ClinicalSession>(`/api/v1/clinician/appointments/${id}/start`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  createSession: (body: {
+    patient_id: string;
+    channel?: AppointmentChannel;
+    appointment_id?: string | null;
+    audio_consent?: boolean;
+  }) =>
+    req<ClinicalSession>("/api/v1/clinician/sessions", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  clinicianSessions: (
+    from: string,
+    to: string,
+    opts: { status?: SessionStatus; offset?: number } = {},
+  ) =>
+    req<{ items: ClinicalSession[] }>(
+      `/api/v1/clinician/sessions?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}` +
+        (opts.status ? `&status=${opts.status}` : "") +
+        (opts.offset ? `&offset=${opts.offset}` : ""),
+    ),
+  finishSession: (id: string, durationMin?: number) =>
+    req<ClinicalSession & { visit_id: string | null; duration_min?: number | null }>(
+      `/api/v1/clinician/sessions/${id}/finish`,
+      { method: "POST", body: JSON.stringify({ duration_min: durationMin }) },
+    ),
+  /** 404 PROTOCOL_NOT_FOUND — версий протокола ещё нет. */
+  getProtocol: (sessionId: string) =>
+    req<SessionProtocol>(`/api/v1/clinician/sessions/${sessionId}/protocol`),
+  putProtocol: (sessionId: string, sections: ProtocolSections, diagnosisCode?: string | null) =>
+    req<SessionProtocol>(`/api/v1/clinician/sessions/${sessionId}/protocol`, {
+      method: "PUT",
+      body: JSON.stringify({ sections, diagnosis_code: diagnosisCode ?? null }),
+    }),
+  /** 409 PROTOCOL_NOT_READY — пустые обязательные разделы, список в `detail`. */
+  approveProtocol: (sessionId: string) =>
+    req<SessionProtocol>(`/api/v1/clinician/sessions/${sessionId}/protocol/approve`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
   vapidPublicKey: () => req<{ public_key: string }>("/api/v1/push/vapid-public-key"),
   subscribePush: (endpoint: string, keys: { p256dh: string; auth: string }) =>
     req<{ subscribed: boolean }>("/api/v1/push/subscribe", {

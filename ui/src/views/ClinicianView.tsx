@@ -23,6 +23,7 @@ import {
 import TrendChart from "../TrendChart";
 import ChatsView from "./ChatsView";
 import LibraryView from "./LibraryView";
+import ScheduleView from "./ScheduleView";
 
 // Текст ошибки для пользователя: ApiError несёт серверный detail.
 const errText = (e: unknown): string =>
@@ -703,9 +704,9 @@ function Dashboard({
   );
 }
 
-// FR-24/FR-32: «Расписание» — планирование созвонов и приёмов. Использует те же
-// напоминания врача (kind=appointment для приёма), отдельного календаря нет.
-function ScheduleView({
+// FR-24/FR-32: «Напоминания» — планирование созвонов и приёмов. Использует те же
+// напоминания врача (kind=appointment для приёма); календарь — в ScheduleView.
+function RemindersView({
   cards,
   version,
   onChanged,
@@ -769,7 +770,7 @@ function ScheduleView({
 
   return (
     <div className="card">
-      <h2>Расписание</h2>
+      <h2>Напоминания</h2>
       <p className="muted small">
         Планируйте созвоны и приёмы: напоминание появится в кабинете и в списке ниже.
         «Назначить приём» — это запись пациента на приём.
@@ -832,7 +833,14 @@ function ScheduleView({
   );
 }
 
-type Section = "dashboard" | "patients" | "assistant" | "chats" | "schedule" | "library";
+type Section =
+  | "dashboard"
+  | "patients"
+  | "assistant"
+  | "chats"
+  | "schedule"
+  | "reminders"
+  | "library";
 
 const NAV_ITEMS: { id: Section; label: string }[] = [
   { id: "dashboard", label: "Кабинет" },
@@ -840,6 +848,7 @@ const NAV_ITEMS: { id: Section; label: string }[] = [
   { id: "assistant", label: "Ассистент" },
   { id: "chats", label: "Чаты с пациентами" },
   { id: "schedule", label: "Расписание" },
+  { id: "reminders", label: "Напоминания" },
   { id: "library", label: "Библиотека" },
 ];
 
@@ -1095,7 +1104,7 @@ export default function ClinicianView() {
             onClick={() => openSection(item.id)}
           >
             {item.label}
-            {item.id === "schedule" &&
+            {item.id === "reminders" &&
               reminders.filter((r) => r.due_state === "overdue").length > 0 && (
                 <span className="count-badge">
                   {reminders.filter((r) => r.due_state === "overdue").length}
@@ -1133,8 +1142,11 @@ export default function ClinicianView() {
     if (section === "library") {
       return <LibraryView />;
     }
+    if (section === "reminders") {
+      return <RemindersView cards={cards} version={reminderVersion} onChanged={bump} />;
+    }
     if (section === "schedule") {
-      return <ScheduleView cards={cards} version={reminderVersion} onChanged={bump} />;
+      return <ScheduleView />;
     }
     if (section === "dashboard") {
       return (

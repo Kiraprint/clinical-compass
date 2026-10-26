@@ -707,3 +707,33 @@ small { color: #8a94a8; }
 }
 .modal h3 { margin: 0 0 8px; }
 .modal p { font-size: 14px; color: #2b3242; }
+
+/* FR-38: календарь приёмов (ScheduleView) — сетка месяца 7×6 и записи дня. */
+.schedule-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.schedule-head h2 { margin: 0; }
+.schedule-month { font-weight: 600; min-width: 170px; text-align: center; text-transform: capitalize; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; margin-top: 12px; }
+.cal-weekday { padding: 4px 0; font-size: 11px; color: #5a6478; text-align: center; text-transform: uppercase; }
+.cal-day { display: flex; flex-direction: column; align-items: stretch; gap: 2px; min-height: 76px; padding: 4px 6px; overflow: hidden; font-size: 11px; text-align: left; color: #2a3350; background: #f7f9fc; border: 1px solid #e2e6ee; border-radius: 8px; }
+.cal-day:hover { border-color: #2f6fed; }
+.cal-day.other-month { opacity: 0.45; }
+.cal-day.today .cal-num { background: #2f6fed; color: #fff; }
+.cal-day.selected { background: #eef4ff; outline: 2px solid #2f6fed; }
+.cal-num { align-self: flex-start; padding: 0 5px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+.cal-item { display: block; overflow: hidden; color: #174a9c; text-overflow: ellipsis; white-space: nowrap; }
+.cal-item.completed { color: #1f7a3d; }
+.cal-item.cancelled, .cal-item.no_show { color: #a3aab8; text-decoration: line-through; }
+.cal-more { font-size: 10px; color: #5a6478; }
+
+/* FR-39: протокол приёма (SessionPanel) — счётчики разделов у предела §5.2. */
+.counter { display: block; font-size: 11px; color: #5a6478; text-align: right; }
+.counter.over { color: #b3261e; font-weight: 600; }
+.protocol-view { margin: 0; font-size: 13px; }
+.protocol-view dt { margin-top: 8px; font-size: 12px; color: #5a6478; }
+.protocol-view dd { margin: 2px 0 0; color: #2b3242; white-space: pre-wrap; }
+.readonly-value { margin: 2px 0 0; font-size: 14px; color: #2b3242; }
+
+@media (max-width: 640px) {
+  .cal-day { min-height: 60px; padding: 2px 3px; }
+  .cal-item { font-size: 9px; }
+}
