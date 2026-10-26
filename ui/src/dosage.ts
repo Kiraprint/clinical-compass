@@ -66,3 +66,21 @@ export function describeRegimeMismatch(stored: number | null, derived: number | 
   if (derived == null || derived === stored) return null;
   return `в дозировке ${derived}, сохранено ${stored ?? "—"}`;
 }
+
+/**
+ * Доля принятого приёма для уточнения «частично» (FR-27) — зеркало бэкенда
+ * `app.services.adherence.PARTIAL_SHARE`.
+ *
+ * Нужно, чтобы после отметки приёма пересчитать процент на экране из ответа
+ * сервера, не делая повторный GET всего агрегата. Правила обязаны совпадать с
+ * бэкендом: разойдутся — процент в UI разойдётся с карточкой врача.
+ */
+export const PARTIAL_SHARE: Record<string, number> = {
+  quarter: 0.25,
+  half: 0.5,
+  three_quarters: 0.75,
+  one_of_two: 0.5,
+  two_of_three: 2 / 3,
+  less_than_prescribed: 0.5,
+  self_changed: 0.5,
+};

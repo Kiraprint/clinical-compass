@@ -1,5 +1,12 @@
 import { useEffect, useState } from "react";
-import { api, ApiError, ChatInsight, PatientChat, PatientChatMessage } from "../api";
+import {
+  api,
+  ApiError,
+  ChatInsight,
+  PatientCard,
+  PatientChat,
+  PatientChatMessage,
+} from "../api";
 import AssistantTab from "./AssistantTab";
 
 const SENDER_LABELS: Record<string, string> = {
@@ -33,11 +40,23 @@ function fmtTime(iso: string): string {
 export default function ChatsView({
   mode: initialMode,
   patientId,
+  roster,
+  chats,
+  chatsLoaded,
+  onRefreshChats,
+  onChatPatched,
   onSelectPatient,
   onModeChange,
 }: {
   mode?: "assistant" | "patients";
   patientId?: string | null;
+  /** Ростер врача из кабинета: ассистенту нужны пациенты для контекста. */
+  roster: PatientCard[];
+  /** Переписки врача грузит кабинет — экран не делает второй запрос. */
+  chats: PatientChat[];
+  chatsLoaded: boolean;
+  onRefreshChats: () => void;
+  onChatPatched: (patientId: string, message: PatientChatMessage) => void;
   onSelectPatient: (id: string | null) => void;
   onModeChange?: (mode: "assistant" | "patients") => void;
 }) {
@@ -82,9 +101,16 @@ export default function ChatsView({
         </button>
       </div>
       {mode === "assistant" ? (
-        <AssistantTab />
+        <AssistantTab patients={roster} />
       ) : (
-        <PatientChats selected={patientId ?? null} onSelect={onSelectPatient} />
+        <PatientChats
+          selected={patientId ?? null}
+          chats={chats}
+          loaded={chatsLoaded}
+          onRefresh={onRefreshChats}
+          onChatPatched={onChatPatched}
+          onSelect={onSelectPatient}
+        />
       )}
     </div>
   );
@@ -92,17 +118,23 @@ export default function ChatsView({
 
 function PatientChats({
   selected,
+  chats,
+  loaded,
+  onRefresh,
+  onChatPatched,
   onSelect,
 }: {
   selected: string | null;
+  chats: PatientChat[];
+  loaded: boolean;
+  onRefresh: () => void;
+  onChatPatched: (patientId: string, message: PatientChatMessage) => void;
   onSelect: (id: string | null) => void;
 }) {
-  const [chats, setChats] = useState<PatientChat[]>([]);
   const [messages, setMessages] = useState<PatientChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [loaded, setLoaded] = useState(false);
   // На узком экране список пациентов сворачивается в кнопку над диалогом.
   const [listOpen, setListOpen] = useState(false);
   // FR-31: черновики фактов из переписки и состояние фичи (локальная модель).
@@ -111,27 +143,13 @@ function PatientChats({
   const [insightsBusy, setInsightsBusy] = useState(false);
   const [insightsNote, setInsightsNote] = useState("");
 
-  const loadChats = async (): Promise<PatientChat[]> => {
-    try {
-      const r = await api.clinicianChats();
-      setChats(r.items);
-      setError("");
-      return r.items;
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-      return [];
-    }
-  };
-
+  // Первый диалог открываем, когда кабинет догрузил список переписок.
   useEffect(() => {
-    void (async () => {
-      const items = await loadChats();
-      setLoaded(true);
-      if (!selected && items.length > 0) onSelect(items[0].patient_id);
-    })();
-    // Первичная загрузка: дальше список обновляется после отправки/кнопкой «Обновить».
+    if (!loaded || selected) return;
+    if (chats.length > 0) onSelect(chats[0].patient_id);
+    // Только на появление списка: ручной выбор пациента не перебиваем.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loaded, chats.length, selected]);
 
   const loadMessages = async (patientId: string) => {
     try {
@@ -240,7 +258,9 @@ function PatientChats({
       const msg = await api.clinicianChatPost(selected, input.trim());
       setMessages((cur) => [...cur, msg]);
       setInput("");
-      await loadChats();
+      // Список диалогов обновляем из ответа (превью, счётчик, время последнего),
+      // а не повторным GET: кабинет — единственный владелец списка.
+      onChatPatched(selected, msg);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -272,7 +292,9 @@ function PatientChats({
                 aria-label="Обновить переписки"
                 title="Обновить"
                 onClick={() => {
-                  void loadChats();
+                  // Явное обновление — мимо кэша GET (список и диалог).
+                  api.invalidate("/api/v1/clinician/chats");
+                  onRefresh();
                   if (selected) void loadMessages(selected);
                 }}
               >
@@ -297,6 +319,7 @@ function PatientChats({
                 {c.preview && <span className="preview">{c.preview}</span>}
               </button>
             ))}
+            {!loaded && <p className="muted small">Загрузка переписок…</p>}
             {loaded && chats.length === 0 && (
               <p className="muted small">Переписок пока нет.</p>
             )}
@@ -314,7 +337,10 @@ function PatientChats({
                   className="icon-btn ghost"
                   aria-label="Обновить диалог"
                   title="Обновить"
-                  onClick={() => void loadMessages(selected)}
+                  onClick={() => {
+                    api.invalidate("/api/v1/clinician/chats");
+                    void loadMessages(selected);
+                  }}
                 >
                   ↻
                 </button>

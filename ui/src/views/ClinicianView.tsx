@@ -13,6 +13,7 @@ import {
   ImportHistoryResult,
   PatientCard,
   PatientChat,
+  PatientChatMessage,
   PatientContacts,
   PatientHistoryItem,
   PatientMedication,
@@ -107,9 +108,15 @@ function Highlight({ text, query }: { text: string; query: string }) {
   );
 }
 
+// Программное раскрытие блока карточки (чипы оглавления): `details.open = true`
+// извне React не обновляет состояние Collapsible, поэтому контент бы не смонтировался.
+// Реестр открывателей: элемент details → «раскрыть и смонтировать».
+const detailOpeners = new WeakMap<HTMLDetailsElement, () => void>();
+
 // Сворачиваемый блок карточки врача: состояние раскрытия запоминаем в localStorage,
 // чтобы врач не терял привычный вид между визитами (отзыв эксперта: шкала Гамильтона
-// занимает весь экран).
+// занимает весь экран). Контент монтируется при первом раскрытии: свёрнутый блок не
+// должен делать запросы (шкалы, история, лекарства грузятся только по требованию).
 function Collapsible({
   storageKey,
   summary,
@@ -131,22 +138,58 @@ function Collapsible({
       return defaultOpen;
     }
   });
+  // everOpened: после закрытия контент остаётся смонтированным и не теряет
+  // введённое/загруженное состояние.
+  const [everOpened, setEverOpened] = useState(open);
+  const ref = useRef<HTMLDetailsElement>(null);
+  // Раскрытие из оглавления (jump) — программное: оно не должно переписывать
+  // пользовательскую настройку «свёрнут» в localStorage.
+  const ignoreToggle = useRef(false);
+
+  const remember = (next: boolean) => {
+    try {
+      localStorage.setItem(storageKey, next ? "1" : "0");
+    } catch {
+      // приватный режим — просто не запоминаем
+    }
+  };
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    detailOpeners.set(el, () => {
+      setEverOpened(true);
+      if (!el.open) {
+        ignoreToggle.current = true;
+        setOpen(true);
+      }
+    });
+    return () => {
+      detailOpeners.delete(el);
+    };
+    // storageKey элемента не меняется за его жизнь; функция-сеттер стабильна.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storageKey]);
+
   return (
     <details
       id={id}
+      ref={ref}
       open={open}
       onToggle={(e) => {
         const next = e.currentTarget.open;
         setOpen(next);
-        try {
-          localStorage.setItem(storageKey, next ? "1" : "0");
-        } catch {
-          // приватный режим — просто не запоминаем
+        if (next) setEverOpened(true);
+        // toggle от программного раскрытия: состояние применяем, настройку не трогаем.
+        if (ignoreToggle.current) {
+          ignoreToggle.current = false;
+          if (next) return;
         }
+        remember(next);
       }}
     >
       <summary className="collapse-summary">{summary}</summary>
-      {children}
+      {everOpened && children}
     </details>
   );
 }
@@ -581,6 +624,39 @@ function DashboardChats({
   );
 }
 
+// FR-28: очередь НЯ, ждущих проверки врача. Один компонент на дашборд и реестр
+// пациентов: раньше блок был скопирован дословно, а имена в нём — некликабельные,
+// так что из очереди нельзя было попасть в карточку пациента.
+function AdverseQueueAlert({
+  items,
+  limit,
+}: {
+  items: ClinicianAdverseEvent[];
+  /** Дашборд показывает первые 5; реестр пациентов — всю очередь. */
+  limit?: number;
+}) {
+  if (items.length === 0) return null;
+  const shown = limit ? items.slice(0, limit) : items;
+  return (
+    <div className="alert-warn">
+      <b>НЯ на проверке: {items.length}</b>
+      <ul className="dash-alert-list">
+        {shown.map((e) => (
+          <li key={e.id}>
+            {/* Ссылка, а не кнопка: deep-link #patient=<id> открывает карточку
+                и переживает F5. */}
+            <a href={"#patient=" + e.patient_id}>{e.patient_fio ?? "Пациент"}</a>{" "}
+            <span className="muted small">{e.event_text}</span>
+          </li>
+        ))}
+      </ul>
+      {items.length > shown.length && (
+        <p className="small">…и ещё {items.length - shown.length} — раздел «Пациенты».</p>
+      )}
+    </div>
+  );
+}
+
 function Dashboard({
   fio,
   cards,
@@ -689,15 +765,7 @@ function Dashboard({
           </div>
         )}
 
-        {pendingAe.length > 0 && (
-          <div className="alert-warn">
-            <strong>НЯ на проверке: {pendingAe.length}</strong>
-            <div className="small">
-              {pendingAe.slice(0, 3).map((e) => e.patient_fio ?? "Пациент").join(", ")}
-              {pendingAe.length > 3 ? " …" : ""} — откройте карточку пациента.
-            </div>
-          </div>
-        )}
+        <AdverseQueueAlert items={pendingAe} limit={5} />
 
         <EscalationsQueue items={escalations} onResolved={onResolved} />
         <DoctorProfileCard profile={profile} />
@@ -893,13 +961,21 @@ export default function ClinicianView() {
   const [selected, setSelected] = useState<string | null>(null);
   const [report, setReport] = useState<Report | null>(null);
   const [reportError, setReportError] = useState("");
-  // Счётчик перезагрузки: врачебная оценка меняет риск/эскалации, и карточка
-  // со списком должны показать это сразу, без ручного F5.
+  // Явная перезагрузка карточки и реестра («Повторить», возврат в список):
+  // действия внутри карточки патчат локальное состояние из ответа и сюда не пишут.
   const [reportVersion, setReportVersion] = useState(0);
+  // Списки, не зависящие от выбранного пациента, перезагружаются только при
+  // входе в раздел или явном повторе после ошибки.
+  const [listsVersion, setListsVersion] = useState(0);
   const [reminderVersion, setReminderVersion] = useState(0);
   const [reminders, setReminders] = useState<ClinicianReminder[]>([]);
   const [profile, setProfile] = useState<ClinicianProfile | null>(null);
   const [chats, setChats] = useState<PatientChat[]>([]);
+  const [chatsLoaded, setChatsLoaded] = useState(false);
+  // Ростер без фильтра триажа: ассистенту, расписанию и распознаванию НЯ нужны все
+  // свои пациенты, а `cards` — это реестр под выбранным фильтром.
+  const [roster, setRoster] = useState<PatientCard[]>([]);
+  const [rosterError, setRosterError] = useState("");
   // Общая очередь эскалаций — не только свои пациенты (docs/16 §3).
   const [escalations, setEscalations] = useState<Escalation[]>([]);
   // FR-28: НЯ, сообщённые пациентами и ждущие проверки врача.
@@ -940,6 +1016,8 @@ export default function ClinicianView() {
 
   useEffect(() => {
     let cancelled = false;
+    // Раздел «Напоминания» — явный запрос за актуальным «просрочено»: мимо кэша.
+    if (section === "reminders") api.invalidate("/api/v1/clinician/reminders");
     api
       .clinicianReminders()
       .then((r) => {
@@ -954,7 +1032,7 @@ export default function ClinicianView() {
     return () => {
       cancelled = true;
     };
-  }, [reminderVersion, reportVersion]);
+  }, [section, reminderVersion]);
 
   useEffect(() => {
     let cancelled = false;
@@ -974,6 +1052,31 @@ export default function ClinicianView() {
     };
   }, [filter, reportVersion]);
 
+  // Ростер без фильтра: тот же GET, что и у реестра при пустом фильтре (кэш и
+  // дедуп в api.ts склеивают их в один запрос).
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .clinicianPatients()
+      .then((data) => {
+        if (!cancelled) {
+          setRoster(data.items);
+          setRosterError("");
+        }
+      })
+      .catch((e: unknown) => {
+        // Свой текст: ошибка фильтра реестра к выбору пациента в расписании
+        // отношения не имеет.
+        if (!cancelled) {
+          setRoster([]);
+          setRosterError(errText(e));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [reportVersion]);
+
   useEffect(() => {
     if (section !== "dashboard") return;
     let cancelled = false;
@@ -991,10 +1094,11 @@ export default function ClinicianView() {
     return () => {
       cancelled = true;
     };
-  }, [section, reportVersion]);
+  }, [section, listsVersion]);
 
   useEffect(() => {
-    if (section !== "dashboard") return;
+    // Очередь и бейдж НЯ живут и на дашборде, и в реестре пациентов.
+    if (section !== "dashboard" && section !== "patients") return;
     let cancelled = false;
     api
       .adverseQueue("pending")
@@ -1007,7 +1111,7 @@ export default function ClinicianView() {
     return () => {
       cancelled = true;
     };
-  }, [section, reportVersion]);
+  }, [section, listsVersion]);
 
   useEffect(() => {
     if (section !== "dashboard" && section !== "chats") return;
@@ -1019,11 +1123,16 @@ export default function ClinicianView() {
       })
       .catch(() => {
         if (!cancelled) setChats([]);
+      })
+      .finally(() => {
+        // Экран «Чаты» показывает «Загрузка…», пока кабинет не ответил: своего
+        // запроса у списка больше нет, второй GET не нужен.
+        if (!cancelled) setChatsLoaded(true);
       });
     return () => {
       cancelled = true;
     };
-  }, [section, reportVersion]);
+  }, [section, listsVersion]);
 
   // Карточка пациента — отдельная ссылка (#patient=<id>): синхронизируем с hash,
   // чтобы клик по уведомлению об эскалации открывал нужного пациента.
@@ -1053,6 +1162,9 @@ export default function ClinicianView() {
       setReport(null);
       return;
     }
+    // Другой пациент: прошлый отчёт не показываем даже один кадр — карточка
+    // монтируется по key=patient_id и не должна наследовать чужое состояние.
+    setReport((cur) => (cur && cur.patient_id !== selected ? null : cur));
     let cancelled = false;
     setReportError("");
     api
@@ -1082,8 +1194,32 @@ export default function ClinicianView() {
   };
 
   const bump = () => setReminderVersion((v) => v + 1);
-  // Повтор после ошибки: те же загрузчики висят на reportVersion.
-  const retryLoads = () => setReportVersion((v) => v + 1);
+  // Повтор после ошибки: перезапрашиваем всё, что могло не загрузиться, — карточку,
+  // реестр, списки и напоминания. Действия внутри карточки сюда не пишут.
+  const retryLoads = () => {
+    // Явное «Обновить»/повтор после ошибки — мимо кэша GET.
+    api.invalidate();
+    setReportVersion((v) => v + 1);
+    setListsVersion((v) => v + 1);
+    setReminderVersion((v) => v + 1);
+  };
+
+  // Отправка сообщения врача: превью диалога обновляем из ответа, без GET списка.
+  const patchChat = (patientId: string, message: PatientChatMessage) => {
+    setChats((prev) =>
+      prev.map((c) =>
+        c.patient_id === patientId
+          ? {
+              ...c,
+              last_at: message.created_at,
+              last_sender: "CLINICIAN",
+              preview: message.content.slice(0, 120),
+              message_count: c.message_count + 1,
+            }
+          : c,
+      ),
+    );
+  };
 
   const nav = (
     <>
@@ -1129,6 +1265,17 @@ export default function ClinicianView() {
                   {reminders.filter((r) => r.due_state === "overdue").length}
                 </span>
               )}
+            {/* НЯ на проверке: очередь живёт в реестре пациентов, бейдж ведёт к ней.
+                aria-hidden — бейдж не меняет доступное имя кнопки («Пациенты»). */}
+            {item.id === "patients" && pendingAe.length > 0 && (
+              <span
+                className="count-badge"
+                aria-hidden="true"
+                title={`НЯ на проверке: ${pendingAe.length}`}
+              >
+                {pendingAe.length}
+              </span>
+            )}
           </button>
         ))}
       </nav>
@@ -1144,6 +1291,11 @@ export default function ClinicianView() {
       return (
         <ChatsView
           mode="assistant"
+          roster={roster}
+          chats={chats}
+          chatsLoaded={chatsLoaded}
+          onRefreshChats={() => setListsVersion((v) => v + 1)}
+          onChatPatched={patchChat}
           onSelectPatient={(id) => setChatPatient(id)}
           onModeChange={(m) => setSection(m === "patients" ? "chats" : "assistant")}
         />
@@ -1154,6 +1306,11 @@ export default function ClinicianView() {
         <ChatsView
           mode="patients"
           patientId={chatPatient}
+          roster={roster}
+          chats={chats}
+          chatsLoaded={chatsLoaded}
+          onRefreshChats={() => setListsVersion((v) => v + 1)}
+          onChatPatched={patchChat}
           onSelectPatient={(id) => {
             setChatPatient(id);
             if (id) window.location.hash = `chats=patient:${id}`;
@@ -1169,7 +1326,7 @@ export default function ClinicianView() {
       return <RemindersView cards={cards} version={reminderVersion} onChanged={bump} />;
     }
     if (section === "schedule") {
-      return <ScheduleView />;
+      return <ScheduleView roster={roster} rosterError={rosterError} />;
     }
     if (section === "dashboard") {
       return (
@@ -1194,12 +1351,21 @@ export default function ClinicianView() {
     if (selected) {
       return (
         <ReportView
+          // Смена пациента — новый пациент: все per-patient состояния (черновик НЯ,
+          // история, ответы шкал, приёмы) сбрасываются вместе с компонентом.
+          key={report?.patient_id ?? "none"}
           report={report}
           error={reportError}
           onBack={() => {
             window.location.hash = "";
+            setSelected(null);
+            // Возврат в список — явное действие: реестр перечитывается и показывает
+            // обновлённый риск, даже если карточку не трогали.
+            setReportVersion((v) => v + 1);
           }}
-          onRefresh={() => setReportVersion((v) => v + 1)}
+          onReportPatch={(patch) =>
+            setReport((prev) => (prev ? { ...prev, ...patch } : prev))
+          }
           onOpenLibrary={() => openSection("library")}
           onOpenChats={(pid) => openChats(pid)}
         />
@@ -1223,15 +1389,7 @@ export default function ClinicianView() {
           Риск: GREEN — низкий, YELLOW — средний, RED — высокий. Сначала красные: выше —
           больше открытых эскалаций и более свежая оценка.
         </p>
-        {pendingAe.length > 0 && (
-          <div className="alert-warn">
-            <strong>НЯ на проверке: {pendingAe.length}</strong>
-            <div className="small">
-              {pendingAe.slice(0, 3).map((e) => e.patient_fio ?? "Пациент").join(", ")}
-              {pendingAe.length > 3 ? " …" : ""} — откройте карточку пациента.
-            </div>
-          </div>
-        )}
+        <AdverseQueueAlert items={pendingAe} />
         <div className="card">
           <h2>Мои пациенты{cardsError ? "" : ` (${cards.length})`}</h2>
           {cardsError ? (
@@ -1303,9 +1461,21 @@ export default function ClinicianView() {
   );
 }
 
-function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenChats }: {
-  report: Report | null; error: string; onBack: () => void; onRefresh: () => void;
-  onOpenLibrary: () => void; onOpenChats: (patientId: string) => void;
+function ReportView({
+  report,
+  error,
+  onBack,
+  onReportPatch,
+  onOpenLibrary,
+  onOpenChats,
+}: {
+  report: Report | null;
+  error: string;
+  onBack: () => void;
+  /** Локальный патч отчёта из ответа мутации: без рефетча карточки и реестра. */
+  onReportPatch: (patch: Partial<Report>) => void;
+  onOpenLibrary: () => void;
+  onOpenChats: (patientId: string) => void;
 }) {
   const [picked, setPicked] = useState<string[]>([]);
   // FR-47: блок, к которому врач прыгнул по оглавлению (подсветка чипа).
@@ -1333,6 +1503,10 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
   const [visitNotes, setVisitNotes] = useState("");
   const [visitErr, setVisitErr] = useState("");
   const [visitSaved, setVisitSaved] = useState<number | null>(null);
+  // Инициализация пер-пациентских полей из загруженного отчёта. Зависимость — только
+  // пациент: локальный патч отчёта после мутации не должен сбрасывать введённое
+  // и уже показанный результат оценки (компонент пересоздаётся по key при смене).
+  const reportPatientId = report?.patient_id ?? null;
   useEffect(() => {
     if (report) { setPicked(report.prescribed_scales ?? []); setAeList(report.adverse_events ?? []); }
     const clinicianScale = report?.available_scales.find((s) => s.audience === "CLINICIAN");
@@ -1340,8 +1514,11 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
     setAssessAnswers({});
     setAssessResult(null);
     setAssessErr("");
-  }, [report]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reportPatientId]);
 
+  // Справочник ГРЛС — один запрос на карточку: им пользуются и форма НЯ,
+  // и автодополнение препарата в назначениях (пропсом ниже).
   useEffect(() => {
     let cancelled = false;
     api.drugs()
@@ -1351,13 +1528,13 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
   }, []);
 
   useEffect(() => {
-    if (!report) return;
+    if (!reportPatientId) return;
     let cancelled = false;
-    api.clinicianVisits(report.patient_id)
+    api.clinicianVisits(reportPatientId)
       .then((r) => { if (!cancelled) setVisits(r.items); })
       .catch(() => { if (!cancelled) setVisits([]); });
     return () => { cancelled = true; };
-  }, [report]);
+  }, [reportPatientId]);
 
   const addVisit = async () => {
     if (!report || !visitNotes.trim()) return;
@@ -1403,6 +1580,8 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
       const res = await api.setPrescribedScales(report.patient_id, picked);
       setScaleSaved(Date.now());
       setPicked(res.scales);
+      // Назначение видно в оглавлении карточки сразу: ответ сервера — истина.
+      onReportPatch({ prescribed_scales: res.scales });
     } catch (e: unknown) {
       setScaleError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1420,8 +1599,31 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
       const answers = Object.fromEntries(
         scale.items.map((i) => [i.key, assessAnswers[i.key] ?? 0]),
       );
-      setAssessResult(await api.createClinicianAssessment(report.patient_id, scale.code, answers));
-      onRefresh();
+      const created = await api.createClinicianAssessment(report.patient_id, scale.code, answers);
+      setAssessResult(created);
+      // Ответ уже содержит итог: патчим отчёт локально. Полный рефетч отчёта и
+      // реестра — только по явному «Повторить»/возврату в список.
+      onReportPatch({
+        last_assessment: {
+          assessment_id: created.assessment_id,
+          total_score: created.total_score,
+          severity: created.severity,
+          triage: created.triage,
+          risk_flags: created.risk_flags,
+          omitted_items: created.omitted_items,
+          omitted_scale: scale.code,
+          computed_at: created.computed_at,
+        },
+        history: [
+          ...report.history,
+          {
+            total_score: created.total_score,
+            severity: created.severity,
+            triage: created.triage,
+            computed_at: created.computed_at,
+          },
+        ],
+      });
     } catch (e: unknown) {
       setAssessErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1450,7 +1652,13 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
     setActiveBlock(id);
     const details = el instanceof HTMLDetailsElement ? el : el.closest("details");
     const scroll = () => el.scrollIntoView({ behavior: "smooth", block: "start" });
-    if (details && !details.open) {
+    const open = details ? detailOpeners.get(details) : undefined;
+    if (open) {
+      // Ленивый блок: раскрываем через состояние React — контент смонтируется
+      // до прокрутки, иначе прокручивать будет нечего.
+      open();
+      requestAnimationFrame(scroll);
+    } else if (details && !details.open) {
       details.open = true;
       requestAnimationFrame(scroll);
     } else {
@@ -2001,7 +2209,7 @@ function ReportView({ report, error, onBack, onRefresh, onOpenLibrary, onOpenCha
       )}
 
       <div id="clinician-medications">
-        <MedicationsBlock patientId={report.patient_id} />
+        <MedicationsBlock patientId={report.patient_id} drugs={drugs} />
       </div>
 
       {/* FR-47: объединённая история — редкий при чтении блок; свёрнута по
@@ -2552,7 +2760,7 @@ function ContactsBlock({ patientId, hasConsent }: { patientId: string; hasConsen
 }
 // FR-23: назначения препаратов в карточке. Импорт ЕМИАС — только чтение,
 // локальные назначения врач останавливает/удаляет.
-function MedicationsBlock({ patientId }: { patientId: string }) {
+function MedicationsBlock({ patientId, drugs }: { patientId: string; drugs: Drug[] }) {
   const [items, setItems] = useState<PatientMedication[]>([]);
   const [title, setTitle] = useState("");
   const [dosage, setDosage] = useState("");
@@ -2566,20 +2774,12 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
   const [busy, setBusy] = useState(false);
   // Защита от гонки: ответ устаревшего запроса не перезаписывает свежий список.
   const reqRef = useRef(0);
-  // FR-32: автодополнение препарата из справочника ГРЛС (GET /drugs).
-  const [drugs, setDrugs] = useState<Drug[]>([]);
+  // FR-32: автодополнение препарата из справочника ГРЛС. Справочник грузит
+  // карточка пациента один раз и передаёт пропсом (второй GET /drugs не нужен).
   const [suggestOpen, setSuggestOpen] = useState(false);
   const [suggestIdx, setSuggestIdx] = useState(-1);
   // Подсказка дозировки: препарат, выбранный из справочника (dosage → special_notes → form).
   const [pickedDrug, setPickedDrug] = useState<Drug | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    api.drugs()
-      .then((r) => { if (!cancelled) setDrugs(r.items); })
-      .catch(() => { if (!cancelled) setDrugs([]); });
-    return () => { cancelled = true; };
-  }, []);
 
   const drugQuery = title.trim().toLowerCase();
   const suggestions = drugQuery.length >= 2
@@ -2981,7 +3181,16 @@ function HistoryBlock({ patientId }: { patientId: string }) {
             >{chip.label}</button>
           );
         })}
-        <button className="link" style={{ fontSize: 13 }} onClick={() => load()} disabled={loading}>
+        <button
+          className="link"
+          style={{ fontSize: 13 }}
+          onClick={() => {
+            // Явное «Обновить» — мимо кэша GET (события истории могли добавиться).
+            api.invalidate("/api/v1/clinician/patients");
+            void load();
+          }}
+          disabled={loading}
+        >
           Обновить
         </button>
       </div>

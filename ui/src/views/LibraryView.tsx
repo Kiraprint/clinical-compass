@@ -82,8 +82,17 @@ function ArticlesLibrary() {
     setPending(work.work_id);
     setError("");
     try {
-      await api.clinicianKbDecision(work.work_id, decision);
-      await load();
+      const updated = await api.clinicianKbDecision(work.work_id, decision);
+      // Решение уже в ответе: статья либо остаётся в текущем фильтре (обновлённая),
+      // либо уходит из него — без повторного GET списка.
+      const stays =
+        status === "all" ||
+        (status === "new" ? updated.decision === null : updated.decision === status);
+      setItems((cur) =>
+        stays
+          ? cur.map((w) => (w.work_id === updated.work_id ? updated : w))
+          : cur.filter((w) => w.work_id !== updated.work_id),
+      );
     } catch (e: unknown) {
       setError(e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e));
     } finally {

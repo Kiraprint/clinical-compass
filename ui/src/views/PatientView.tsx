@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  AdherenceMedication,
   AdherenceRecord,
   AdherenceSummary,
   api,
@@ -19,6 +20,7 @@ import {
   Questionnaire,
   Timeline,
 } from "../api";
+import { PARTIAL_SHARE } from "../dosage";
 
 type Tab =
   | "today"
@@ -479,23 +481,26 @@ function SafetyBlock({ safety, notified }: { safety: string; notified: boolean }
 }
 
 // Адаптивный чек-ин: один шаг за раз, ответы уходят только за текущий шаг (docs/16 §4).
-function CheckinCard() {
-  const [state, setState] = useState<CheckinState | null>(null);
+function CheckinCard({
+  state,
+  err: loadErr,
+  onState,
+}: {
+  state: CheckinState | null;
+  /** Ошибка загрузки из «Сегодня»: своего запроса у карточки нет. */
+  err: string;
+  onState: (next: CheckinState) => void;
+}) {
   const [stepAnswers, setStepAnswers] = useState<Record<string, number>>({});
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
+  // Владелец состояния — «Сегодня»: HomeHead и карточка показывают одно и то же,
+  // поэтому отправленный шаг сразу обновляет и напоминание сверху.
   const apply = (next: CheckinState) => {
-    setState(next);
+    onState(next);
     setStepAnswers({});
   };
-
-  useEffect(() => {
-    api
-      .todayCheckin()
-      .then(apply)
-      .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)));
-  }, []);
 
   const run = async (action: () => Promise<CheckinState>) => {
     setErr("");
@@ -513,7 +518,9 @@ function CheckinCard() {
     }
   };
 
-  if (!state) return <p style={{ color: "#5a6478" }}>{err || "Загрузка чек-ина…"}</p>;
+  if (!state) {
+    return <p style={{ color: "#5a6478" }}>{err || loadErr || "Загрузка чек-ина…"}</p>;
+  }
 
   // HR4 — только на шаге безопасности (docs/16 §2); в ядре его больше нет.
   const items = state.step.items.filter(
@@ -626,6 +633,9 @@ function TodayTab({
   const [adhMeds, setAdhMeds] = useState<AdherenceSummary["active_medications"]>([]);
   const [adhMedId, setAdhMedId] = useState("");
   const [adhItems, setAdhItems] = useState<AdherenceRecord[]>([]);
+  // Чек-ин — один источник для карточки и для напоминания в HomeHead.
+  const [checkin, setCheckin] = useState<CheckinState | null>(null);
+  const [checkinErr, setCheckinErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState("");
   const [err, setErr] = useState("");
@@ -637,6 +647,17 @@ function TodayTab({
     setAdhMeds(a.active_medications);
     setAdhItems(a.items);
     setAdhMedId((prev) => prev || a.active_medications[0]?.id || "");
+    // Чек-ин грузим отдельно: его ошибка не должна ронять дневник и приём,
+    // а карточка чек-ина покажет свою причину вместо вечного «Загрузка…».
+    api
+      .todayCheckin()
+      .then((c) => {
+        setCheckin(c);
+        setCheckinErr("");
+      })
+      .catch((e: unknown) => {
+        setCheckinErr(e instanceof Error ? e.message : String(e));
+      });
   };
 
   useEffect(() => {
@@ -685,28 +706,38 @@ function TodayTab({
     const parts: string[] = [];
     try {
       if (content.trim()) {
-        await api.postDiary({ content, mood: mood ?? undefined, sleep_h: sleep, tags: [] });
+        const entry = await api.postDiary({
+          content,
+          mood: mood ?? undefined,
+          sleep_h: sleep,
+          tags: [],
+        });
         setContent("");
+        // Ответ — это и есть новая запись: список дневника патчим локально.
+        if (sameDay(entry.created_at, new Date())) {
+          setEntriesToday((cur) => [...cur, entry]);
+        }
         // Выбор настроения оставляем: пользователь видит, что именно сохранилось.
         parts.push("дневник");
       }
       // Каждый клик — новая запись приёма, пока не набрался режим: прежнюю
       // отметку не перезаписываем, иначе второй приём за день терялся бы.
       if (status && !intakesComplete) {
-        await api.recordAdherence({
+        const record = await api.recordAdherence({
           medication_id: adhMedId || undefined,
           medication: adhMedId ? undefined : medication.trim() || undefined,
           status,
           partial_kind: status === "partial" ? partialKind ?? undefined : undefined,
           note: adhNote.trim() || undefined,
         });
+        // Отметка приёма — из ответа: счётчики «N из M» считаются по списку.
+        setAdhItems((cur) => [record, ...cur]);
         setMedication("");
         setAdhNote("");
         setStatus(null);
         setPartialKind(null);
         parts.push("приём лекарств");
       }
-      await load();
       const savedLabel =
         parts.length > 0
           ? `Сохранено: ${parts.join(" · ")}`
@@ -724,7 +755,15 @@ function TodayTab({
 
   return (
     <>
-      <HomeHead onOpen={onOpen} />
+      <HomeHead
+        onOpen={onOpen}
+        checkinDone={checkin ? checkin.status === "completed" : null}
+        medsMarked={
+          adhMeds.length === 0
+            ? true
+            : adhItems.some((r) => sameDay(r.created_at, new Date()))
+        }
+      />
       <div className="card">
       <h2>Сегодня</h2>
       <p style={{ color: "#5a6478", fontSize: 14 }}>
@@ -734,7 +773,7 @@ function TodayTab({
 
       <div id="today-checkin">
         <h3>Чек-ин</h3>
-        <CheckinCard />
+        <CheckinCard state={checkin} err={checkinErr} onState={setCheckin} />
       </div>
 
       <h3>Дневник</h3>
@@ -913,6 +952,69 @@ const intakePlural = (n: number, genitive = false) => {
 };
 const fmtScore = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
 
+/**
+ * Отметка приёма: агрегат приверженности дополняется из ответа сервера, без
+ * повторного GET. Формулы — как в бэкенде (`app.services.adherence`): знаменатель
+ * назначения — режим × дни окна минус «не назначено», числитель — taken + доли
+ * partial. Новая отметка не растит знаменатель (сегодняшний день уже посчитан),
+ * а «не назначено сегодня» снимает с назначения один ожидаемый приём.
+ */
+function withAdherenceRecord(
+  data: AdherenceSummary,
+  record: AdherenceRecord,
+): AdherenceSummary {
+  const share =
+    record.status === "taken"
+      ? 1
+      : record.status === "partial"
+        ? PARTIAL_SHARE[record.partial_kind ?? ""] ?? 0.5
+        : 0;
+  const med = data.medications.find((m) => m.id === record.medication_id);
+  // Отметки без назначения и назначения без режима в процент не входят.
+  const counted = med !== undefined && med.times_per_day !== null;
+  const tpd = med?.times_per_day ?? 0;
+  const unscheduled = record.status === "not_scheduled";
+
+  const medications: AdherenceMedication[] = data.medications.map((m) => {
+    if (!counted || m.id !== med.id) return m;
+    const expected = unscheduled ? Math.max(0, m.expected - tpd) : m.expected;
+    const score = m.score + share;
+    return {
+      ...m,
+      expected,
+      score,
+      taken: m.taken + (record.status === "taken" ? 1 : 0),
+      partial: m.partial + (record.status === "partial" ? 1 : 0),
+      missed: m.missed + (record.status === "missed" ? 1 : 0),
+      not_scheduled: m.not_scheduled + (unscheduled ? 1 : 0),
+      pct: expected > 0 ? Math.round((score / expected) * 100) : null,
+    };
+  });
+
+  const expected = Math.max(0, data.summary.expected - (counted && unscheduled ? tpd : 0));
+  const score = data.summary.score + (counted ? share : 0);
+  return {
+    ...data,
+    items: [record, ...data.items],
+    today: sameDay(record.created_at, new Date()) ? record : data.today,
+    medications,
+    summary: {
+      ...data.summary,
+      expected,
+      score,
+      pct: expected > 0 ? Math.round((score / expected) * 100) : null,
+    },
+    total: data.total + 1,
+    taken: data.taken + (record.status === "taken" ? 1 : 0),
+    partial: data.partial + (record.status === "partial" ? 1 : 0),
+    missed: data.missed + (record.status === "missed" ? 1 : 0),
+    not_scheduled: data.not_scheduled + (unscheduled ? 1 : 0),
+    excluded: counted
+      ? data.excluded
+      : { count: data.excluded.count + 1, items: [record, ...data.excluded.items] },
+  };
+}
+
 function AdherenceTab() {
   const [data, setData] = useState<AdherenceSummary | null>(null);
   const [days, setDays] = useState(30);
@@ -946,15 +1048,16 @@ function AdherenceTab() {
     setSaved("");
     setBusy(true);
     try {
-      await api.recordAdherence({
+      const record = await api.recordAdherence({
         medication_id: medId || undefined,
         status,
         partial_kind: status === "partial" ? partialKind ?? undefined : undefined,
       });
+      // Ответ сервера — единственная правда: патчим агрегат локально, без GET.
+      setData((cur) => (cur ? withAdherenceRecord(cur, record) : cur));
       setStatus(null);
       setPartialKind(null);
       setSaved("Отметка сохранена");
-      await load();
     } catch (e: unknown) {
       setErr(e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e));
     } finally {
@@ -1124,7 +1227,10 @@ function ChatTab() {
       setAlert(Boolean(reply.reply?.help_resources.length));
       // Помощник отвечает не чаще раза в день: второе сообщение просто сохраняется.
       setQuiet(reply.reply === null);
-      await load();
+      // Ответ содержит и своё сообщение, и автоответ — дописываем, без GET треда.
+      setMessages((cur) =>
+        reply.reply ? [...cur, reply.message, reply.reply] : [...cur, reply.message],
+      );
     } catch (e: unknown) {
       setError(e instanceof ApiError ? e.detail : String(e));
     }
@@ -1420,7 +1526,7 @@ function AdverseTab() {
     setSaved(false);
     setBusy(true);
     try {
-      await api.reportAdverseEvent({
+      const created = await api.reportAdverseEvent({
         event_text: text.trim(),
         onset_date: onsetDate,
         medication_id: medId || undefined,
@@ -1428,7 +1534,8 @@ function AdverseTab() {
       setText("");
       setMedId("");
       setSaved(true);
-      await load();
+      // Сообщение уже вернулось из API — кладём его первым в список, без GET.
+      setItems((cur) => [created, ...cur]);
     } catch (e: unknown) {
       setError(e instanceof ApiError ? e.detail : String(e));
     } finally {
@@ -1557,11 +1664,19 @@ type HomeReminder = {
   action?: { label: string; aria: string; tab: Tab; focus?: TodayFocus };
 };
 
-function HomeHead({ onOpen }: { onOpen: OpenTab }) {
+function HomeHead({
+  onOpen,
+  checkinDone,
+  medsMarked,
+}: {
+  onOpen: OpenTab;
+  /** Пройден ли чек-ин и отмечен ли приём — считает «Сегодня» (один источник).
+      Своей копии этих данных нет: иначе напоминание остаётся после действия. */
+  checkinDone: boolean | null;
+  medsMarked: boolean | null;
+}) {
   const [contacts, setContacts] = useState<PatientContacts | null>(null);
   const [scales, setScales] = useState<PrescribedScale[]>([]);
-  const [checkinDone, setCheckinDone] = useState<boolean | null>(null);
-  const [medsMarked, setMedsMarked] = useState<boolean | null>(null);
   const [unread, setUnread] = useState<NotificationItem[]>([]);
 
   useEffect(() => {
@@ -1570,18 +1685,6 @@ function HomeHead({ onOpen }: { onOpen: OpenTab }) {
       .prescribedScales()
       .then((p) => setScales(p.scales))
       .catch(() => undefined);
-    api
-      .todayCheckin()
-      .then((s) => setCheckinDone(s.status === "completed"))
-      .catch(() => setCheckinDone(null));
-    api
-      .getMyAdherence(1)
-      .then((a) => {
-        const today = new Date();
-        const marked = a.items.some((r) => sameDay(r.created_at, today));
-        setMedsMarked(a.active_medications.length === 0 ? true : marked);
-      })
-      .catch(() => setMedsMarked(null));
     api
       .getNotifications()
       .then((n) => setUnread(n.items.filter((item) => !item.read).slice(0, 3)))
