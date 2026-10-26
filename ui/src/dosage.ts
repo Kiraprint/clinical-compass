@@ -52,3 +52,17 @@ export function formatTimesPerDay(times: number): string {
 export function resolveTimesPerDay(drug: { times_per_day: number | null }): number {
   return drug.times_per_day ?? 1;
 }
+
+/**
+ * Расхождение сохранённого режима с кратностью из текста дозировки.
+ *
+ * В колонке «Режим» показывается `PatientMedication.times_per_day` — именно по
+ * нему считается приверженность (FR-27), а не по тексту дозировки. Если числа
+ * разошлись (назначение создано до того, как форма начала брать кратность из
+ * текста), врач должен видеть оба и привести сохранённое к дозировке. `null` —
+ * расхождения нет либо кратности в тексте нет, править нечего.
+ */
+export function describeRegimeMismatch(stored: number | null, derived: number | null): string | null {
+  if (derived == null || derived === stored) return null;
+  return `в дозировке ${derived}, сохранено ${stored ?? "—"}`;
+}

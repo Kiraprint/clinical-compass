@@ -20,7 +20,7 @@ import {
   Report,
   Visit,
 } from "../api";
-import { formatTimesPerDay, parseIntakeFrequency, resolveTimesPerDay } from "../dosage";
+import { describeRegimeMismatch, formatTimesPerDay, parseIntakeFrequency, resolveTimesPerDay } from "../dosage";
 import TrendChart from "../TrendChart";
 import ChatsView from "./ChatsView";
 import LibraryView from "./LibraryView";
@@ -2634,10 +2634,14 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
             </thead>
             <tbody>
               {items.map((m) => {
-                // Кратность из текста дозировки задаёт режим: если она есть,
-                // отдельный выбор (и правка) количества раз в день не нужен.
+                // В колонке — сохранённый режим: по нему считается
+                // приверженность (FR-27). Расхождение с кратностью в тексте
+                // дозировки показываем и оставляем правку, чтобы врач свёл
+                // сохранённое к дозировке (в т.ч. для назначений до фикса).
                 const derived = parseIntakeFrequency(m.dosage ?? "");
-                const shown = derived ?? m.times_per_day;
+                const mismatch = describeRegimeMismatch(m.times_per_day, derived);
+                const canEditRegime =
+                  m.editable && m.source === "clinician" && (derived == null || mismatch != null);
                 return (
                 <tr key={m.id}>
                   <td>
@@ -2651,7 +2655,7 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
                   </td>
                   <td>{m.dosage ?? "—"}</td>
                   <td style={{ whiteSpace: "nowrap" }}>
-                    {editId === m.id && derived == null ? (
+                    {editId === m.id && canEditRegime ? (
                       <>
                         <select
                           aria-label="Раз в день"
@@ -2664,12 +2668,22 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
                           Сохранить
                         </button>
                       </>
-                    ) : shown != null ? (
-                      <span title={derived != null ? "Из текста дозировки" : undefined}>
-                        {shown} р/день
-                      </span>
                     ) : (
-                      <span style={{ color: "#5a6478", fontSize: 12 }}>не задан</span>
+                      <>
+                        {m.times_per_day != null ? (
+                          <span>{m.times_per_day} р/день</span>
+                        ) : (
+                          <span style={{ color: "#5a6478", fontSize: 12 }}>не задан</span>
+                        )}
+                        {mismatch && (
+                          <span
+                            title="Кратность в тексте дозировки расходится с сохранённым режимом — поправьте режим"
+                            style={{ color: "#b45309", fontSize: 12, marginLeft: 4 }}
+                          >
+                            · {mismatch}
+                          </span>
+                        )}
+                      </>
                     )}
                   </td>
                   <td>{m.started_on ?? "—"}</td>
@@ -2684,11 +2698,16 @@ function MedicationsBlock({ patientId }: { patientId: string }) {
                             Остановить
                           </button>
                         )}
-                        {m.editable && editId !== m.id && m.source === "clinician" && derived == null && (
+                        {canEditRegime && editId !== m.id && (
                           <button
                             className="link"
                             style={{ fontSize: 12, marginLeft: 8 }}
-                            onClick={() => { setEditId(m.id); setEditTimes(m.times_per_day ?? 1); }}
+                            title={mismatch ? "Привести сохранённый режим к кратности из дозировки" : undefined}
+                            onClick={() => {
+                              setEditId(m.id);
+                              // При расхождении предлагаем кратность из дозировки.
+                              setEditTimes(derived ?? m.times_per_day ?? 1);
+                            }}
                           >Режим</button>
                         )}
                         <button

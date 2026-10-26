@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  describeRegimeMismatch,
   formatTimesPerDay,
   parseIntakeFrequency,
   resolveTimesPerDay,
@@ -66,4 +67,15 @@ test("formatTimesPerDay: русские формы", () => {
 test("resolveTimesPerDay: null сбрасывает select в 1, а не наследует прошлый препарат", () => {
   assert.equal(resolveTimesPerDay({ times_per_day: 2 }), 2);
   assert.equal(resolveTimesPerDay({ times_per_day: null }), 1);
+});
+
+test("describeRegimeMismatch: старые назначения расходятся с текстом", () => {
+  // Назначение до фикса: в дозировке «2 раза/сут», сохранено 1 — приверженность
+  // считается по сохранённому, поэтому расхождение должно быть видно врачу.
+  assert.equal(describeRegimeMismatch(1, 2), "в дозировке 2, сохранено 1");
+  assert.equal(describeRegimeMismatch(null, 2), "в дозировке 2, сохранено —");
+  // Совпало или кратности в тексте нет — править нечего, поведение прежнее.
+  assert.equal(describeRegimeMismatch(2, 2), null);
+  assert.equal(describeRegimeMismatch(1, null), null);
+  assert.equal(describeRegimeMismatch(null, null), null);
 });
