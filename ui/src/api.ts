@@ -165,9 +165,6 @@ export interface ClinicalSession {
   ai_status: string;
   protocol: ProtocolBrief | null;
 }
-export interface SessionDetail extends ClinicalSession {
-  artifacts?: { id: string; kind: string; size_bytes: number | null; created_at: string }[];
-}
 export interface MentalStatus {
   appearance_behavior: string;
   consciousness_orientation: string;
@@ -586,10 +583,16 @@ export const api = {
   cancelReminder: (id: string) =>
     req<ClinicianReminder>(`/api/v1/clinician/reminders/${id}/cancel`, { method: "POST" }),
   // --- FR-38/39: календарь, сессии, протокол (docs/18 §4.1, §4.2, §4.4) ----------
-  clinicianAppointments: (from: string, to: string, patientId?: string) =>
+  /** Окно ≤ 62 дней; страница — до 200 строк, поэтому `offset`. */
+  clinicianAppointments: (
+    from: string,
+    to: string,
+    opts: { patientId?: string; offset?: number } = {},
+  ) =>
     req<{ items: Appointment[] }>(
       `/api/v1/clinician/appointments?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}` +
-        (patientId ? `&patient_id=${encodeURIComponent(patientId)}` : ""),
+        (opts.patientId ? `&patient_id=${encodeURIComponent(opts.patientId)}` : "") +
+        (opts.offset ? `&offset=${opts.offset}` : ""),
     ),
   createAppointment: (body: {
     patient_id: string;
@@ -623,21 +626,21 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  clinicianSessions: (from: string, to: string) =>
+  clinicianSessions: (
+    from: string,
+    to: string,
+    opts: { status?: SessionStatus; offset?: number } = {},
+  ) =>
     req<{ items: ClinicalSession[] }>(
-      `/api/v1/clinician/sessions?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+      `/api/v1/clinician/sessions?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}` +
+        (opts.status ? `&status=${opts.status}` : "") +
+        (opts.offset ? `&offset=${opts.offset}` : ""),
     ),
-  getSession: (id: string) => req<SessionDetail>(`/api/v1/clinician/sessions/${id}`),
   finishSession: (id: string, durationMin?: number) =>
     req<ClinicalSession & { visit_id: string | null; duration_min?: number | null }>(
       `/api/v1/clinician/sessions/${id}/finish`,
       { method: "POST", body: JSON.stringify({ duration_min: durationMin }) },
     ),
-  patchSession: (id: string, body: { audio_consent: boolean }) =>
-    req<ClinicalSession>(`/api/v1/clinician/sessions/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    }),
   /** 404 PROTOCOL_NOT_FOUND — версий протокола ещё нет. */
   getProtocol: (sessionId: string) =>
     req<SessionProtocol>(`/api/v1/clinician/sessions/${sessionId}/protocol`),

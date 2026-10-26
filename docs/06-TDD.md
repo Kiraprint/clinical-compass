@@ -247,8 +247,9 @@
 | `test_patients_sorted_by_escalations_then_freshness` (FR-30) | два GREEN-пациента: открытая эскалация, затем состаренная оценка | выше тот, у кого больше открытых эскалаций; при равенстве — свежая оценка |
 | `test_clinician_chats_only_roster_sorted_with_preview` (FR-29) | `GET /clinician/chats` для двух roster-пациентов и одного вне roster | только roster; `last_at` desc; `preview` ≤120 с «…», дешифрован сервером; `message_count`/`last_sender` |
 | `test_clinician_chats_scoped_to_clinician_and_role` (FR-29) | второй врач и пациент | чужой врач видит пустой список; пациенту — 403 `ROLE_MISMATCH` |
-| `clinician-admin.spec.ts`, `chats.spec.ts`, `escalations-queue.spec.ts` (FR-32) | врач после входа | кабинет с приветствием/напоминаниями/очередью; левое меню открывается и ведёт в «Пациенты», «Ассистент», «Чаты с пациентами», «Расписание», «Библиотеку»; фильтры называются «Риск» |
+| `clinician-admin.spec.ts`, `chats.spec.ts`, `escalations-queue.spec.ts` (FR-32) | врач после входа | кабинет с приветствием/напоминаниями/очередью; левое меню открывается и ведёт в «Пациенты», «Ассистент», «Чаты с пациентами», «Расписание», «Напоминания», «Библиотеку»; фильтры называются «Риск» |
 | `clinician-assessment.spec.ts`, `clinician-visit.spec.ts`, `clinician-adverse-event.spec.ts`, `clinician-links.spec.ts` (FR-32) | карточка пациента | сверху риск и алёрт при RED; HDRS-17 внутри «Назначить скрининг»; «Приёмы»/НЯ доступны; deep-link `#patient=` работает; «Динамика»/«История скринингов» свёрнуты |
+| `clinician-schedule.spec.ts` (FR-38/39) | врач после входа → «Расписание» | запись создаётся формой и видна в списке дня; пересечение — 409 `SLOT_CONFLICT` строкой; «Начать приём» открывает панель; пустой черновик не подтверждается (409 `PROTOCOL_NOT_READY` со списком разделов); после заполнения §5.1 и approve протокол read-only и переживает перезагрузку; приём без записи находится через «Приёмы без записи» после закрытия панели и reload; запись правится (PATCH) и отменяется |
 | `test_analyze_creates_pending_encrypted_and_dedupes` (FR-31) | fake `/chat/completions` вернул 2 факта; повторный `POST .../chat/analyze` | оба факта `pending`, `text` в БД — bytea, `source_message_ids` заполнены; повтор: `created=0`, `skipped=2`, строк по-прежнему 2 |
 | `test_prompt_masks_fio_and_limits` (FR-31) | в переписке ФИО пациента и врача, телефон | в теле запроса к LLM нет ФИО/телефона; есть `[ФИО]`; промпт ограничивает 10 фактов и 200 символов |
 | `test_disabled_returns_503_without_llm_call` (FR-31) | `CC_CHAT_INSIGHTS_ENABLED=false`, URL задан | `503 CHAT_INSIGHTS_DISABLED` (detail ссылается на docs/17); `urlopen` не вызван; list — тоже 503 |
@@ -468,6 +469,7 @@
 `clinician-assessment.spec.ts` — врачебная шкала HDRS-17: врач заполняет её в карточке, отчёт сразу показывает RED-эскалацию; каталог пациента клиницистскую шкалу не содержит.
 `drug-library.spec.ts` — библиотека препаратов: поиск по ГРЛС, разделы НЯ и противопоказаний, пустой результат.
 `clinician-visit.spec.ts` — запись приёма: сохранение, формат/длительность, запись видна после перезагрузки.
+`clinician-schedule.spec.ts` — календарь приёмов и ручной протокол: запись/правка/отмена, старт приёма, протокол с подтверждением и persist, приём без записи после перезагрузки.
 
 e2e-хелперы вынесены в `e2e/tests/helpers.ts` (TOTP RFC 4648 base32 + HMAC-SHA1, `login`, `registerPatient`, `freshPatientEmail`, `totp`).
 

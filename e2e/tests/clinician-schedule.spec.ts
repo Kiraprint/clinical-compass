@@ -1,5 +1,5 @@
 // FR-38/39: календарь приёмов, ручной протокол приёма и его подтверждение (docs/18 §4.1, §4.4).
-import { expect, test, type APIResponse } from "@playwright/test";
+import { expect, test, type APIRequestContext, type APIResponse, type Page } from "@playwright/test";
 import { DEMO_PASSWORD, freshPatientEmail, openSection, totp } from "./helpers";
 
 const BASE = process.env.CC_E2E_URL ?? "http://127.0.0.1:8090";
@@ -10,8 +10,8 @@ function ymd(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-test("врач записывает приём, ведёт протокол и подтверждает его", async ({ page, request }, testInfo) => {
-  // API-подготовка: свежие врач и пациент + согласие + roster (свой врач — свои слоты).
+/** Свежие врач и пациент с согласием и roster: свой врач — свои слоты, спеки не мешают друг другу. */
+async function setupPair(request: APIRequestContext) {
   const docReg = await j(
     await request.post(`${BASE}/api/v1/auth/register`, {
       data: { email: freshPatientEmail("schdoc"), password: DEMO_PASSWORD, role: "CLINICIAN" },
@@ -44,8 +44,11 @@ test("врач записывает приём, ведёт протокол и �
     data: { patient_id: patReg.id, clinician_id: docReg.id },
     headers: { Authorization: `Bearer ${admTok}` },
   });
+  return { docReg, patReg };
+}
 
-  // Вход врача в UI.
+/** Вход врача в UI (email/пароль/2FA) — обе сцены спека начинаются одинаково. */
+async function loginDoctor(page: Page, docReg: { email: string; totp_secret: unknown }) {
   await page.goto(`${BASE}/`);
   await page.getByLabel("Email").fill(docReg.email);
   await page.getByLabel("Пароль").fill(DEMO_PASSWORD);
@@ -53,10 +56,15 @@ test("врач записывает приём, ведёт протокол и �
   await page.getByRole("button", { name: "Войти" }).click();
   await openSection(page, "Расписание");
   await expect(page.getByRole("heading", { name: "Расписание" })).toBeVisible();
+}
+
+test("врач записывает приём, ведёт протокол и подтверждает его", async ({ page, request }, testInfo) => {
+  const { docReg, patReg } = await setupPair(request);
+  await loginDoctor(page, docReg);
 
   // Новая запись: сегодня 10:00, 50 минут.
   const today = ymd(new Date());
-  await page.getByLabel("Пациент").selectOption({ label: patReg.email });
+  await page.getByLabel("Пациент для записи").selectOption({ label: patReg.email });
   await page.getByLabel("Дата").fill(today);
   await page.getByLabel("Время").fill("10:00");
   await page.getByLabel("Длительность").selectOption("50");
@@ -109,4 +117,59 @@ test("врач записывает приём, ведёт протокол и �
   await expect(page.getByText("протокол подтверждён")).toBeVisible();
   await expect(page.getByText("Тревога, нарушения сна")).toBeVisible();
   await expect(page.getByRole("button", { name: "Подтвердить протокол" })).toHaveCount(0);
+});
+
+// §6: приём без записи не должен теряться при закрытии панели и перезагрузке,
+// а запись — правиться и отменяться из календаря.
+test("приём без записи находится после перезагрузки, запись правится и отменяется", async ({
+  page,
+  request,
+}) => {
+  const { docReg, patReg } = await setupPair(request);
+  await loginDoctor(page, docReg);
+
+  // Приём без записи → панель → «К расписанию» (штатное закрытие, раньше терял сессию).
+  await page.getByRole("button", { name: "Начать приём без записи" }).click();
+  await page.getByLabel("Пациент без записи").selectOption({ label: patReg.email });
+  await page.getByRole("button", { name: "Начать приём сейчас" }).click();
+  await expect(page.getByRole("heading", { name: `Приём: ${patReg.email}` })).toBeVisible();
+  await page.getByRole("button", { name: "К расписанию" }).click();
+  await expect(page.getByRole("heading", { name: "Приёмы без записи" })).toBeVisible();
+
+  // После перезагрузки сессия находится через список активных приёмов (GET …/sessions?status=active).
+  await page.reload();
+  await openSection(page, "Расписание");
+  const walkRow = page.getByRole("row", { name: new RegExp(patReg.email) });
+  await expect(walkRow).toHaveCount(1);
+  await walkRow.getByRole("button", { name: "Открыть приём" }).click();
+  await expect(page.getByRole("heading", { name: `Приём: ${patReg.email}` })).toBeVisible();
+
+  // Повторный «без записи» для того же пациента продолжает начатую сессию, а не создаёт вторую.
+  await page.getByRole("button", { name: "К расписанию" }).click();
+  await page.getByRole("button", { name: "Начать приём без записи" }).click();
+  await page.getByLabel("Пациент без записи").selectOption({ label: patReg.email });
+  await page.getByRole("button", { name: "Начать приём сейчас" }).click();
+  await expect(page.getByRole("heading", { name: `Приём: ${patReg.email}` })).toBeVisible();
+
+  // Завершение приёма убирает его из активных.
+  await page.getByRole("button", { name: "Завершить приём" }).click();
+  await expect(page.getByText(/Приём завершён/)).toBeVisible();
+  await page.getByRole("button", { name: "К расписанию" }).click();
+  await expect(page.getByRole("heading", { name: "Приёмы без записи" })).toHaveCount(0);
+
+  // Запись → правка времени (PATCH) → отмена (PATCH status=cancelled).
+  await page.getByLabel("Пациент для записи").selectOption({ label: patReg.email });
+  await page.getByLabel("Дата").fill(ymd(new Date()));
+  await page.getByLabel("Время").fill("15:00");
+  await page.getByRole("button", { name: "Записать", exact: true }).click();
+  await expect(page.getByText("Запись создана.")).toBeVisible();
+  const row = page.getByRole("row", { name: /15:00.*Запланирован/ });
+  await expect(row).toBeVisible();
+  await row.getByRole("button", { name: "Изменить" }).click();
+  await page.getByLabel("Новое время").fill("16:15");
+  await page.getByRole("button", { name: "Сохранить запись" }).click();
+  const moved = page.getByRole("row", { name: /16:15.*50 мин.*Запланирован/ });
+  await expect(moved).toBeVisible();
+  await moved.getByRole("button", { name: "Отменить" }).click();
+  await expect(page.getByRole("row", { name: /16:15.*Отменён/ })).toBeVisible();
 });

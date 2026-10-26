@@ -37,6 +37,9 @@ const CHANNELS: AppointmentChannel[] = ["in_person", "online", "phone"];
 /** Терминальные статусы: перепланировать/начать нельзя (сервер → 409). */
 const TERMINAL: AppointmentStatus[] = ["completed", "cancelled", "no_show"];
 const GRID_DAYS = 42;
+/** §4.1: окно запроса ≤ 62 дней, страница ≤ 200 строк — берём кусками и листаем offset. */
+const CHUNK_DAYS = 31;
+const PAGE_LIMIT = 200;
 
 const TIME_FMT = new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" });
 const MONTH_FMT = new Intl.DateTimeFormat("ru-RU", { month: "long", year: "numeric" });
@@ -63,18 +66,35 @@ function gridStart(month: Date): Date {
   return addDays(first, -offset);
 }
 
-/** Окно запроса — кусками по 31 дню: сервер отдаёт ≤ 200 строк на страницу (§4). */
-async function fetchWindow<T>(
-  fn: (from: string, to: string) => Promise<{ items: T[] }>,
+/** Окно запроса: куски по 31 дню, внутри куска — постранично (сервер ≤ 200 строк, §4). */
+async function fetchWindow<T extends { id: string }>(
+  fn: (from: string, to: string, offset: number) => Promise<{ items: T[] }>,
   from: Date,
   to: Date,
 ): Promise<T[]> {
-  const calls: Promise<{ items: T[] }>[] = [];
-  for (let start = from; start < to; start = addDays(start, 31)) {
-    const next = addDays(start, 31);
-    calls.push(fn(start.toISOString(), (next > to ? to : next).toISOString()));
+  const chunks: [Date, Date][] = [];
+  for (let start = from; start < to; start = addDays(start, CHUNK_DAYS)) {
+    const next = addDays(start, CHUNK_DAYS);
+    // Конец куска инклюзивный (как `starts_at <= to` на сервере) — минус миллисекунда,
+    // иначе запись ровно на стыке придёт из обоих кусков.
+    chunks.push([start, new Date((next > to ? to : next).getTime() - 1)]);
   }
-  return (await Promise.all(calls)).flatMap((page) => page.items);
+  const pages = await Promise.all(
+    chunks.map(async ([a, b]) => {
+      const rows = new Map<string, T>();
+      for (let offset = 0; ; offset += PAGE_LIMIT) {
+        const page = await fn(a.toISOString(), b.toISOString(), offset);
+        for (const row of page.items) rows.set(row.id, row);
+        if (page.items.length < PAGE_LIMIT) return [...rows.values()];
+      }
+    }),
+  );
+  return pages.flat();
+}
+
+/** ФИО есть не у всех пациентов (регистрация без ФИО) — тогда email из ростера. */
+function patientLabel(fio: string | null, patientId: string, roster: PatientCard[]): string {
+  return fio ?? roster.find((p) => p.patient_id === patientId)?.email ?? patientId.slice(0, 8);
 }
 
 export default function ScheduleView() {
@@ -87,6 +107,7 @@ export default function ScheduleView() {
   const [selected, setSelected] = useState(today);
   const [items, setItems] = useState<Appointment[]>([]);
   const [sessions, setSessions] = useState<ClinicalSession[]>([]);
+  const [active, setActive] = useState<ClinicalSession[]>([]);
   const [patients, setPatients] = useState<PatientCard[]>([]);
   const [rosterError, setRosterError] = useState("");
   const [version, setVersion] = useState(0);
@@ -105,13 +126,24 @@ export default function ScheduleView() {
     const to = addDays(gridFrom, GRID_DAYS);
     setLoading(true);
     Promise.all([
-      fetchWindow(api.clinicianAppointments, gridFrom, to),
-      fetchWindow(api.clinicianSessions, gridFrom, to),
+      fetchWindow(
+        (f, t, o) => api.clinicianAppointments(f, t, { offset: o }),
+        gridFrom,
+        to,
+      ),
+      fetchWindow((f, t, o) => api.clinicianSessions(f, t, { offset: o }), gridFrom, to),
+      // Незавершённые приёмы: приём без записи живёт только здесь (у записи нет appointment_id).
+      fetchWindow(
+        (f, t, o) => api.clinicianSessions(f, t, { status: "active", offset: o }),
+        gridFrom,
+        to,
+      ),
     ])
-      .then(([apps, sess]) => {
+      .then(([apps, sess, running]) => {
         if (cancelled) return;
         setItems(apps);
         setSessions(sess);
+        setActive(running);
         setLoadError("");
       })
       .catch((e: unknown) => {
@@ -290,6 +322,13 @@ export default function ScheduleView() {
       setRowErr("Выберите пациента");
       return;
     }
+    // Сервер не дедуплицирует приёмы без записи (у них нет appointment_id) — второй
+    // старт оставил бы первую сессию висеть active, поэтому продолжаем уже начатую.
+    const running = active.find((s) => s.patient_id === walkPatient && !s.appointment_id);
+    if (running) {
+      setSession(running);
+      return;
+    }
     setRowErr("");
     try {
       setSession(await api.createSession({ patient_id: walkPatient, channel: walkChannel }));
@@ -302,6 +341,7 @@ export default function ScheduleView() {
     return (
       <SessionPanel
         session={session}
+        patientLabel={patientLabel(session.patient_fio, session.patient_id, patients)}
         onClose={() => {
           setSession(null);
           setVersion((v) => v + 1);
@@ -309,6 +349,8 @@ export default function ScheduleView() {
       />
     );
   }
+
+  const walkIns = active.filter((s) => !s.appointment_id);
 
   return (
     <div>
@@ -366,7 +408,8 @@ export default function ScheduleView() {
                 <span className="cal-num">{d.getDate()}</span>
                 {list.slice(0, 2).map((a) => (
                   <span key={a.id} className={`cal-item ${a.status}`}>
-                    {TIME_FMT.format(new Date(a.starts_at))} {a.patient_fio ?? "—"}
+                    {TIME_FMT.format(new Date(a.starts_at))}{" "}
+                    {patientLabel(a.patient_fio, a.patient_id, patients)}
                   </span>
                 ))}
                 {list.length > 2 && <span className="cal-more">ещё {list.length - 2}</span>}
@@ -377,6 +420,34 @@ export default function ScheduleView() {
         {loading && <p className="small muted">Загрузка…</p>}
       </div>
 
+      {walkIns.length > 0 && (
+        <div className="card">
+          <h2>Приёмы без записи</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Пациент</th>
+                <th>Начало</th>
+                <th>Действия</th>
+              </tr>
+            </thead>
+            <tbody>
+              {walkIns.map((s) => (
+                <tr key={s.id} data-session={s.id}>
+                  <td>{patientLabel(s.patient_fio, s.patient_id, patients)}</td>
+                  <td>{TIME_FMT.format(new Date(s.started_at))}</td>
+                  <td>
+                    <button type="button" className="ghost" onClick={() => setSession(s)}>
+                      Открыть приём
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
       <div className="card">
         <h2>{DAY_FMT.format(selected)}</h2>
         {rowErr && (
@@ -385,7 +456,7 @@ export default function ScheduleView() {
           </p>
         )}
         {dayItems.length === 0 ? (
-          <p className="small muted">Приёмов нет.</p>
+          !loadError && <p className="small muted">Приёмов нет.</p>
         ) : (
           <div className="table-wrap">
             <table>
@@ -401,11 +472,11 @@ export default function ScheduleView() {
             </thead>
             <tbody>
               {dayItems.map((a) => {
-                const active = !TERMINAL.includes(a.status);
+                const live = !TERMINAL.includes(a.status);
                 return [
                   <tr key={a.id} data-appointment={a.id}>
                     <td>{TIME_FMT.format(new Date(a.starts_at))}</td>
-                    <td>{a.patient_fio ?? "—"}</td>
+                    <td>{patientLabel(a.patient_fio, a.patient_id, patients)}</td>
                     <td>
                       {CHANNEL_LABELS[a.channel]}
                       {a.location ? <span className="small muted"> · {a.location}</span> : null}
@@ -428,13 +499,13 @@ export default function ScheduleView() {
                             Открыть приём
                           </button>
                         ) : (
-                          active && (
+                          live && (
                             <button type="button" onClick={() => start(a)}>
                               Начать приём
                             </button>
                           )
                         )}
-                        {active && (
+                        {live && (
                           <>
                             <button className="ghost" onClick={() => openEdit(a)}>
                               Изменить
@@ -534,7 +605,11 @@ export default function ScheduleView() {
         <div className="row">
           <label>
             Пациент
-            <select value={patientId} onChange={(e) => setPatientId(e.target.value)}>
+            <select
+              value={patientId}
+              aria-label="Пациент для записи"
+              onChange={(e) => setPatientId(e.target.value)}
+            >
               {patients.map((c) => (
                 <option key={c.patient_id} value={c.patient_id}>
                   {c.fio ?? c.email}
@@ -624,7 +699,7 @@ export default function ScheduleView() {
               </select>
             </label>
             <button type="button" onClick={startWalkIn}>
-              Начать приём
+              Начать приём сейчас
             </button>
           </div>
         )}

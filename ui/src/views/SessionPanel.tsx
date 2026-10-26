@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   ApiError,
@@ -137,9 +137,12 @@ function NarrativeField({
 
 export default function SessionPanel({
   session: initial,
+  patientLabel,
   onClose,
 }: {
   session: ClinicalSession;
+  /** ФИО или email из ростера: у пациента без ФИО в сессии только `patient_fio = null`. */
+  patientLabel: string;
   onClose: () => void;
 }) {
   const [session, setSession] = useState(initial);
@@ -150,6 +153,9 @@ export default function SessionPanel({
   const [err, setErr] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
+  // Ключи строк лечения: `key={i}` после удаления из середины переиспользует DOM строки.
+  const [rowKeys, setRowKeys] = useState<string[]>([]);
+  const rowSeq = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -159,6 +165,7 @@ export default function SessionPanel({
         if (cancelled) return;
         setProtocol(p);
         setSections(withDefaults(base, p.sections));
+        setRowKeys((p.sections.treatment ?? []).map(() => `t${++rowSeq.current}`));
       })
       .catch((e: unknown) => {
         if (cancelled) return;
@@ -172,14 +179,26 @@ export default function SessionPanel({
   }, [session.id, base]);
 
   const locked = protocol !== null && protocol.status !== "draft";
-  const minutes = session.ended_at
-    ? Math.max(
-        1,
-        Math.round(
-          (new Date(session.ended_at).getTime() - new Date(session.started_at).getTime()) / 60000,
-        ),
-      )
-    : null;
+  // Таймер приёма (§6): у завершённой сессии время считается один раз, у идущей — тикает.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (session.ended_at) return;
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(tick);
+  }, [session.ended_at]);
+
+  const elapsedSec = Math.max(
+    0,
+    Math.floor(
+      ((session.ended_at ? new Date(session.ended_at).getTime() : now) -
+        new Date(session.started_at).getTime()) /
+        1000,
+    ),
+  );
+  const duration =
+    session.ended_at === null
+      ? `идёт ${Math.floor(elapsedSec / 60)}:${String(elapsedSec % 60).padStart(2, "0")}`
+      : `${Math.max(1, Math.round(elapsedSec / 60))} мин`;
 
   const save = async () => {
     setBusy(true);
@@ -241,14 +260,14 @@ export default function SessionPanel({
     <div>
       <div className="card">
         <div className="schedule-head">
-          <h2>Приём: {session.patient_fio ?? "—"}</h2>
+          <h2>Приём: {patientLabel}</h2>
           <button className="ghost" onClick={onClose}>
             К расписанию
           </button>
         </div>
         <p className="small muted">
           {CHANNEL_LABELS[session.channel]} · начало {START_FMT.format(new Date(session.started_at))}{" "}
-          · длительность {minutes === null ? "идёт" : `${minutes} мин`} · статус{" "}
+          · длительность {duration} · статус{" "}
           {session.status === "finished" ? "завершён" : "активен"} · протокол{" "}
           {PROTOCOL_STATUS_LABELS[protocol?.status ?? "draft"]}
           {protocol ? ` (v${protocol.version})` : ""}
@@ -406,7 +425,7 @@ export default function SessionPanel({
                   onChange={(e) =>
                     setSections((s) => ({
                       ...s,
-                      diagnosis: { ...s.diagnosis, icd10: e.target.value },
+                      diagnosis: { ...s.diagnosis, icd10: e.target.value.toUpperCase() },
                     }))
                   }
                 />
@@ -423,7 +442,7 @@ export default function SessionPanel({
             <h3>Лечение</h3>
             {sections.treatment.length === 0 && <p className="small muted">Позиций нет.</p>}
             {sections.treatment.map((row, i) => (
-              <div className="row" key={i}>
+              <div className="row" key={rowKeys[i] ?? `t${i}`}>
                 <label>
                   Препарат
                   <input
@@ -459,12 +478,13 @@ export default function SessionPanel({
                 <button
                   type="button"
                   className="ghost"
-                  onClick={() =>
+                  onClick={() => {
                     setSections((s) => ({
                       ...s,
                       treatment: s.treatment.filter((_, idx) => idx !== i),
-                    }))
-                  }
+                    }));
+                    setRowKeys((k) => k.filter((_, idx) => idx !== i));
+                  }}
                 >
                   Убрать
                 </button>
@@ -474,12 +494,13 @@ export default function SessionPanel({
               type="button"
               className="ghost"
               disabled={sections.treatment.length >= LIMIT.treatmentMax}
-              onClick={() =>
+              onClick={() => {
                 setSections((s) => ({
                   ...s,
                   treatment: [...s.treatment, { drug: "", dose: "", schedule: "", duration: "" }],
-                }))
-              }
+                }));
+                setRowKeys((k) => [...k, `t${++rowSeq.current}`]);
+              }}
             >
               Добавить позицию
             </button>
