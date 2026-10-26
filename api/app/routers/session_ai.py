@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -101,4 +101,44 @@ async def draft_protocol(
 ):
     """Черновик протокола ИИ: 201 Protocol (`source='llm'`, `needs_review`)."""
     return await services.session_ai.draft(db, user.id, session_id, ip=_ip(request))
+
+
+# FR-44 (docs/18 §10): диалог по сессии. Верхняя граница длины — общий потолок
+# pydantic (8000), фактический лимит — CC_SESSION_CHAT_MESSAGE_CHARS в сервисе
+# (422 MESSAGE_TOO_LONG), чтобы его можно было менять без рестарта схемы.
+class ChatBody(BaseModel):
+    """`{"message": "..."}` — вопрос врача агенту по этому приёму."""
+
+    message: str = Field(min_length=1, max_length=8000)
+
+
+@router.post("/clinician/sessions/{session_id}/chat")
+async def session_chat(
+    session_id: uuid.UUID,
+    body: ChatBody,
+    request: Request,
+    user: User = Depends(require_clinician),
+    db: AsyncSession = Depends(get_db),
+):
+    """Вопрос агенту по приёму: ответ с цитатами `[n]` и `proposal` без мутаций.
+
+    503 SESSION_AI_DISABLED / MODEL_NOT_CONFIGURED, 404 чужая сессия,
+    403 NO_ROSTER / CONSENT_REQUIRED, 422 MESSAGE_TOO_LONG,
+    409 CHAT_LIMIT_REACHED. Завершение приёма чат не блокирует.
+    """
+    return await services.session_agent.ask(
+        db, user.id, session_id, body.message, ip=_ip(request)
+    )
+
+
+@router.get("/clinician/sessions/{session_id}/chat")
+async def session_chat_history(
+    session_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(require_clinician),
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """История диалога по сессии (старые → новые); текст только врачу, не в аудит."""
+    return await services.session_agent.history(db, user.id, session_id, limit=limit)
 

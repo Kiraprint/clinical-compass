@@ -135,6 +135,21 @@ class Settings(BaseSettings):
     # черновика протокола (docs/18 §5.3–5.4). 0 — не ходить в KB вовсе
     # (черновик без источников, needs_review sources_unavailable).
     session_ai_sources: int = Field(default=12, ge=0, le=50)
+    # FR-44 (docs/18 §10): автодрафт — черновик протокола создаётся тем же кодом
+    # сразу после успешной расшифровки, без HTTP-запроса врача. false — только
+    # ручной POST …/protocol/draft. Сбой автодрафта расшифровку не ломает
+    # (`ai_status` остаётся `transcribed`, код — в `ai_error`).
+    session_ai_autodraft: bool = True  # CC_SESSION_AI_AUTODRAFT
+    # FR-44: диалог по сессии (§10). Потолок одного сообщения врача; всё, что
+    # длиннее, — 422 MESSAGE_TOO_LONG, а не обрезка «молча».
+    session_chat_message_chars: int = Field(default=2000, ge=1, le=8000)
+    # Окно истории, которое уходит в модель: последние N реплик (свежее важнее).
+    session_chat_history: int = Field(default=10, ge=0, le=50)
+    # Потолок реплик врача на сессию: диалог — разбор приёма, а не общий чат;
+    # лимит защищает LLM-бюджет и таблицу `session_chat_messages`.
+    session_chat_max_turns: int = Field(default=100, ge=1)
+    # Сколько чанков KB отдаёт тул `search_kb` в диалоге по сессии.
+    session_chat_sources: int = Field(default=5, ge=0, le=20)
     # CC_ARTIFACTS_DIR: каталог шифрованных артефактов (AES-256-GCM, docs/18 §4.6;
     # в compose — volume, в тестах — tmp-каталог).
     artifacts_dir: str = "/var/lib/compass/artifacts"

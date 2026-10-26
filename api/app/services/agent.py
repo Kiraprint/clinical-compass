@@ -185,6 +185,18 @@ def _compose_answer(
     return _finalize_llm_answer(text, chunks)
 
 
+def compose_grounded_answer(
+    query: str, history: list[dict], chunks: list[RAGChunk]
+) -> RAGAnswer | None:
+    """Публичный вход детерминированной сборки ответа (FR-17, FR-44).
+
+    Нужен диалогу по сессии (docs/18 §10): там действует тот же инвариант —
+    текст ответа собирается по найденным сниппетам с проверкой ссылок `[n]`,
+    а не пишется моделью от себя. `None` — брать `build_rag_answer`.
+    """
+    return _compose_answer(query, history, chunks)
+
+
 def _finalize_llm_answer(text: str | None, chunks: list[RAGChunk]) -> RAGAnswer | None:
     """Проверка ссылок модели и сборка citations; None — брать детерминированный."""
     if not text:
