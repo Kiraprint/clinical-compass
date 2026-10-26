@@ -733,6 +733,21 @@ small { color: #8a94a8; }
 .protocol-view dd { margin: 2px 0 0; color: #2b3242; white-space: pre-wrap; }
 .readonly-value { margin: 2px 0 0; font-size: 14px; color: #2b3242; }
 
+/* FR-43 (docs/18 §5.4): обоснования черновика — чипы-источники с цитатой. */
+.source-block { margin: 4px 0 8px; }
+.source-chip {
+  background: #f6f7fb;
+  border: 1px solid #d4d8e3;
+  border-radius: 10px;
+  padding: 2px 10px;
+  font-size: 12px;
+  max-width: 100%;
+}
+.source-chip summary { cursor: pointer; color: #1b3a8a; }
+.source-chip p { margin: 6px 0 4px; }
+.source-chip a { color: #2f6fed; }
+.treatment-row { border-bottom: 1px solid #eef1f6; padding: 6px 0; }
+
 
 /* FR-39: расшифровка ИИ — реплики с меткой времени (текст только как текст). */
 .transcript { margin: 6px 0 0; padding-left: 0; list-style: none; max-height: 320px; overflow-y: auto; }

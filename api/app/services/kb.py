@@ -370,10 +370,16 @@ def hybrid_search(
         return []
     hits = [
         {
+            # id точки — стабильный идентификатор чанка для ссылок в ответах
+            # (черновик протокола, docs/18 §5.4: sources[].id).
+            "id": str(p.id),
             "guideline_id": p.payload["guideline_id"],
             "source_title": p.payload["source_title"],
             "topic": p.payload.get("topic", ""),
             "text": p.payload.get("text", ""),
+            # Провенанс для sources[].url: seed-корпус ссылки не несёт (""),
+            # гайдлайны/статьи — несут (enrichment/index.py).
+            "url": p.payload.get("source_url") or "",
             "score": p.score,
             # FR-36: work_id/kind — для персонального фильтра видимости в агенте.
             "work_id": p.payload.get("work_id"),

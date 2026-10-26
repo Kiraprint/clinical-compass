@@ -7,6 +7,7 @@ import {
   MentalStatus,
   NeedsReview,
   ProtocolSections,
+  ProtocolSource,
   ProtocolStatus,
   SessionDetail,
   SessionProtocol,
@@ -72,6 +73,13 @@ const REVIEW_REASONS: Record<string, string> = {
   dosage_in_draft: "похоже на дозировку — проверьте вручную",
   clinical_risk: "оценка риска требует проверки врачом",
   unexpected_section: "модель вернула посторонний раздел — перенос отклонён",
+  source_missing: "нет источника в базе знаний — элемент не перенесён",
+  drug_not_in_source: "препарата нет в указанном источнике — сверьте с базой знаний",
+  dosage_not_in_source: "дозы нет в указанном источнике — сверьте с базой знаний",
+  icd10_unverified: "код МКБ-10 не подтверждён источником — сверьте по справочнику",
+  sources_unavailable: "база знаний недоступна — обоснований нет, проверьте вручную",
+  invalid_item: "элемент модели не по схеме — перенос отклонён",
+  too_many_items: "позиций больше лимита (20) — лишние не перенесены",
 };
 const NARRATIVE_KEYS = ["complaints", "anamnesis_morbi", "somatic_status", "recommendations"] as const;
 const DIAGNOSIS_KEYS = ["syndrome", "icd10", "rationale"] as const;
@@ -80,11 +88,17 @@ const DIAGNOSIS_KEYS = ["syndrome", "icd10", "rationale"] as const;
 function fieldLabel(key: string): string {
   const mental = MENTAL_FIELDS.find((field) => `mental_status.${field.key}` === key);
   if (mental) return mental.label;
+  if (key.startsWith("treatment.")) {
+    const index = Number(key.slice("treatment.".length));
+    return `Лечение, позиция ${Number.isNaN(index) ? "?" : index + 1}`;
+  }
   const labels: Record<string, string> = {
     complaints: "Жалобы",
     anamnesis_morbi: "Анамнез",
     somatic_status: "Соматический статус",
     recommendations: "Рекомендации",
+    diagnosis: "Диагноз",
+    treatment: "Лечение",
     "diagnosis.syndrome": "Синдром",
     "diagnosis.icd10": "МКБ-10",
     "diagnosis.rationale": "Обоснование диагноза",
@@ -93,7 +107,7 @@ function fieldLabel(key: string): string {
   return labels[key] ?? key;
 }
 
-/** Только текстовые разделы: паспорт, диагноз и лечение ИИ не заполняет (§5.1). */
+/** Текстовые разделы черновика: лечение (список) сливается отдельно, см. `applyDraft`. */
 function draftKeys(draft: ProtocolSections): string[] {
   const keys: string[] = [];
   for (const name of NARRATIVE_KEYS) {
@@ -114,7 +128,7 @@ function fieldValue(sections: ProtocolSections, key: string): string {
     return sections.mental_status[name] ?? "";
   }
   if (key.startsWith("diagnosis.")) {
-    const name = key.slice("diagnosis.".length) as keyof ProtocolSections["diagnosis"];
+    const name = key.slice("diagnosis.".length) as (typeof DIAGNOSIS_KEYS)[number];
     return sections.diagnosis[name] ?? "";
   }
   const value = (sections as unknown as Record<string, unknown>)[key];
@@ -127,7 +141,7 @@ function withField(sections: ProtocolSections, key: string, value: string): Prot
     return { ...sections, mental_status: { ...sections.mental_status, [name]: value } };
   }
   if (key.startsWith("diagnosis.")) {
-    const name = key.slice("diagnosis.".length) as keyof ProtocolSections["diagnosis"];
+    const name = key.slice("diagnosis.".length) as (typeof DIAGNOSIS_KEYS)[number];
     return { ...sections, diagnosis: { ...sections.diagnosis, [name]: value } };
   }
   return { ...sections, [key]: value };
@@ -227,6 +241,66 @@ function NarrativeField({
         </p>
       )}
     </div>
+  );
+}
+
+/**
+ * §5.3–5.4 (FR-43): чипы источников у диагноза/лечения/рекомендаций.
+ *
+ * Чип раскрывается в цитату чанка КБ и ссылку на первоисточник: врач видит, на
+ * чём основано предложение модели, прежде чем подписать протокол.
+ */
+function SourceChips({
+  sources,
+  ids,
+  usedBy,
+  review,
+}: {
+  sources: ProtocolSource[];
+  /** id чанков, на которые ссылается элемент (diagnosis.sources / treatment[i].sources). */
+  ids?: string[];
+  /** Либо раздел целиком — по `used_by`. */
+  usedBy?: string;
+  review?: string[];
+}) {
+  const shown = ids && ids.length > 0
+    ? sources.filter((source) => ids.includes(source.id))
+    : usedBy
+      ? sources.filter((source) => (source.used_by ?? []).includes(usedBy))
+      : [];
+  if (shown.length === 0 && (!review || review.length === 0)) return null;
+  return (
+    <div className="source-block">
+      {shown.length > 0 && (
+        <div className="chips">
+          {shown.map((source) => (
+            <details className="source-chip" key={source.id}>
+              <summary>
+                [{source.ref}] {source.title || source.section || "источник"}
+                {source.section && source.title ? ` · ${source.section}` : ""}
+              </summary>
+              <p className="small muted">{source.quote}</p>
+              {source.url && (
+                <a className="small" href={source.url} target="_blank" rel="noreferrer">
+                  Первоисточник
+                </a>
+              )}
+            </details>
+          ))}
+        </div>
+      )}
+      <ReviewHint reasons={review} />
+    </div>
+  );
+}
+
+/** Причины `needs_review` раздела: бейдж + русский текст (коды модели не показываем). */
+function ReviewHint({ reasons }: { reasons?: string[] }) {
+  if (!reasons || reasons.length === 0) return null;
+  return (
+    <p className="hint">
+      <span className="badge YELLOW">проверить</span> {reasons.join("; ")}
+    </p>
   );
 }
 
@@ -459,17 +533,46 @@ export default function SessionPanel({
       if (!mine.trim()) merged = withField(merged, key, proposed);
       else if (mine !== proposed) disputed.push({ key, next: proposed });
     }
+    // FR-43: лечение и его обоснования переносим только целиком и только если
+    // врач ещё не вёл лечение сам — иначе его назначения важнее черновика.
+    const proposedRows = draft.sections.treatment ?? [];
+    const treatmentKept = proposedRows.length > 0 && merged.treatment.length > 0;
+    if (proposedRows.length > 0 && merged.treatment.length === 0) {
+      merged = { ...merged, treatment: proposedRows.map((row) => ({ ...row })) };
+    }
+    if (draft.sections.sources && draft.sections.sources.length > 0) {
+      merged = { ...merged, sources: draft.sections.sources };
+    }
+    if (draft.sections.diagnosis?.sources && draft.sections.diagnosis.sources.length > 0) {
+      merged = {
+        ...merged,
+        diagnosis: { ...merged.diagnosis, sources: draft.sections.diagnosis.sources },
+      };
+    }
     liveSections.current = merged;
     liveProtocol.current = draft;
     setSections(merged);
     setConflicts(disputed);
-    setReview(reviewByField(draft.needs_review));
+    const nextReview = reviewByField(draft.needs_review);
+    if (treatmentKept) {
+      nextReview.treatment = [
+        ...(nextReview.treatment ?? []),
+        "модель предложила свои позиции — ваши назначения не перезаписаны",
+      ];
+    }
+    setReview(nextReview);
     setProtocol(draft);
     setErr("");
+    const grounded = draft.sections.sources?.length ?? 0;
+    const hints = [
+      grounded > 0 ? `обоснований из базы знаний: ${grounded}` : "обоснований нет",
+    ];
+    if (disputed.length > 0) {
+      hints.push(`${disputed.length} раздел(ов) не перезаписаны — выберите ниже`);
+    }
     setNote(
-      disputed.length > 0
-        ? `Черновик перенесён в редактор; ${disputed.length} раздел(ов) не перезаписаны — выберите ниже.`
-        : "Черновик ИИ перенесён в редактор — проверьте разделы с бейджем и сохраните.",
+      `Черновик ИИ перенесён в редактор (${hints.join("; ")}). ` +
+        "Проверьте разделы с бейджем и сохраните.",
     );
   };
 
@@ -484,7 +587,11 @@ export default function SessionPanel({
   const setTreatment = (i: number, key: keyof TreatmentRow, value: string) =>
     setSections((s) => ({
       ...s,
-      treatment: s.treatment.map((row, idx) => (idx === i ? { ...row, [key]: value } : row)),
+      treatment: s.treatment.map((row, idx) =>
+        // Правка врача фиксируется в подписываемом документе: видно, что позицию
+        // менял человек, а не модель.
+        idx === i ? { ...row, [key]: value, edited: true } : row,
+      ),
     }));
 
   return (
@@ -562,18 +669,33 @@ export default function SessionPanel({
               <dd>{sections.diagnosis.icd10 || "—"}</dd>
               <dt>Обоснование диагноза</dt>
               <dd>{sections.diagnosis.rationale || "—"}</dd>
+              <dt>Обоснование диагноза (источники)</dt>
+              <dd>
+                <SourceChips sources={sections.sources ?? []} ids={sections.diagnosis.sources} />
+              </dd>
               <dt>Лечение</dt>
               <dd>
                 {sections.treatment.length === 0
                   ? "—"
                   : sections.treatment.map((row, i) => (
                       <div key={i}>
-                        {row.drug} {row.dose} {row.schedule} {row.duration}
+                        <div>
+                          {row.drug} {row.dose} {row.schedule} {row.duration}
+                          {row.edited ? " · изменено врачом" : ""}
+                        </div>
+                        <SourceChips sources={sections.sources ?? []} ids={row.sources} />
                       </div>
                     ))}
               </dd>
               <dt>Рекомендации</dt>
               <dd>{sections.recommendations || "—"}</dd>
+              <dt>Источники (база знаний)</dt>
+              <dd>
+                <SourceChips
+                  sources={sections.sources ?? []}
+                  ids={(sections.sources ?? []).map((source) => source.id)}
+                />
+              </dd>
             </dl>
           </div>
         ) : (
@@ -699,56 +821,76 @@ export default function SessionPanel({
               review={review["diagnosis.rationale"]}
               onChange={(v) => setSections((s) => ({ ...s, diagnosis: { ...s.diagnosis, rationale: v } }))}
             />
+            <SourceChips
+              sources={sections.sources ?? []}
+              ids={sections.diagnosis.sources}
+              review={[
+                ...(review["diagnosis"] ?? []),
+                ...(review["diagnosis.icd10"] ?? []),
+                ...(review["diagnosis.syndrome"] ?? []),
+              ]}
+            />
 
             <h3>Лечение</h3>
+            <ReviewHint reasons={review["treatment"]} />
             {sections.treatment.length === 0 && <p className="small muted">Позиций нет.</p>}
             {sections.treatment.map((row, i) => (
-              <div className="row" key={rowKeys[i] ?? `t${i}`}>
-                <label>
-                  Препарат
-                  <input
-                    value={row.drug}
-                    maxLength={LIMIT.line}
-                    onChange={(e) => setTreatment(i, "drug", e.target.value)}
+              <div className="treatment-row" key={rowKeys[i] ?? `t${i}`}>
+                <div className="row">
+                  <label>
+                    Препарат
+                    <input
+                      value={row.drug}
+                      maxLength={LIMIT.line}
+                      onChange={(e) => setTreatment(i, "drug", e.target.value)}
+                    />
+                  </label>
+                  <label>
+                    Доза
+                    <input
+                      value={row.dose}
+                      maxLength={LIMIT.line}
+                      onChange={(e) => setTreatment(i, "dose", e.target.value)}
+                    />
+                  </label>
+                  <label>
+                    Схема
+                    <input
+                      value={row.schedule}
+                      maxLength={LIMIT.line}
+                      onChange={(e) => setTreatment(i, "schedule", e.target.value)}
+                    />
+                  </label>
+                  <label>
+                    Длительность
+                    <input
+                      value={row.duration}
+                      maxLength={LIMIT.line}
+                      onChange={(e) => setTreatment(i, "duration", e.target.value)}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => {
+                      setSections((s) => ({
+                        ...s,
+                        treatment: s.treatment.filter((_, idx) => idx !== i),
+                      }));
+                      setRowKeys((k) => k.filter((_, idx) => idx !== i));
+                    }}
+                  >
+                    Убрать
+                  </button>
+                </div>
+                <div className="row">
+                  {row.edited && <span className="badge YELLOW">изменено врачом</span>}
+                  <SourceChips
+                    sources={sections.sources ?? []}
+                    ids={row.sources}
+                    review={review[`treatment.${i}`]}
                   />
-                </label>
-                <label>
-                  Доза
-                  <input
-                    value={row.dose}
-                    maxLength={LIMIT.line}
-                    onChange={(e) => setTreatment(i, "dose", e.target.value)}
-                  />
-                </label>
-                <label>
-                  Схема
-                  <input
-                    value={row.schedule}
-                    maxLength={LIMIT.line}
-                    onChange={(e) => setTreatment(i, "schedule", e.target.value)}
-                  />
-                </label>
-                <label>
-                  Длительность
-                  <input
-                    value={row.duration}
-                    maxLength={LIMIT.line}
-                    onChange={(e) => setTreatment(i, "duration", e.target.value)}
-                  />
-                </label>
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => {
-                    setSections((s) => ({
-                      ...s,
-                      treatment: s.treatment.filter((_, idx) => idx !== i),
-                    }));
-                    setRowKeys((k) => k.filter((_, idx) => idx !== i));
-                  }}
-                >
-                  Убрать
-                </button>
+                </div>
               </div>
             ))}
             <button
@@ -774,6 +916,7 @@ export default function SessionPanel({
               review={review["recommendations"]}
               onChange={(v) => setSections((s) => ({ ...s, recommendations: v }))}
             />
+            <SourceChips sources={sections.sources ?? []} usedBy="recommendations" />
 
             <div className="row" style={{ marginTop: 12 }}>
               <button type="button" onClick={save} disabled={busy}>

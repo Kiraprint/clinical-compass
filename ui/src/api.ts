@@ -210,22 +210,41 @@ export interface ProtocolPassport {
   channel: string;
   legal_basis: string;
 }
+/** docs/18 §5.4: обоснование черновика — чанк KB, полученный в этом запросе. */
+export interface ProtocolSource {
+  /** id чанка (точка Qdrant) — на него ссылаются элементы протокола. */
+  id: string;
+  /** Метка из промпта (`S1`) — по ней модель ссылается в тексте `[S1]`. */
+  ref: string;
+  section: string;
+  title: string;
+  url: string;
+  quote: string;
+  /** Что опирается на источник: `diagnosis`, `treatment.0`, `recommendations`, … */
+  used_by: string[];
+}
 export interface TreatmentRow {
   drug: string;
   dose: string;
   schedule: string;
   duration: string;
+  /** FR-43: id чанков KB, на которых основана позиция. */
+  sources?: string[];
+  /** Позицию правил врач (черновик ИИ помечается в редакторе). */
+  edited?: boolean;
 }
-/** docs/18 §5.1: разделы протокола. Структурные (passport/diagnosis/treatment) — только врач. */
+/** docs/18 §5.1: разделы протокола. Диагноз/лечение — черновик ИИ только с sources (§5.3). */
 export interface ProtocolSections {
   passport: ProtocolPassport;
   complaints: string;
   anamnesis_morbi: string;
   mental_status: MentalStatus;
   somatic_status: string;
-  diagnosis: { syndrome: string; icd10: string; rationale: string };
+  diagnosis: { syndrome: string; icd10: string; rationale: string; sources?: string[] };
   treatment: TreatmentRow[];
   recommendations: string;
+  /** Обоснования черновика; входят в подписываемый content_sha256 (§5.4). */
+  sources?: ProtocolSource[];
 }
 export interface SessionProtocol {
   id: string;

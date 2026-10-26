@@ -53,6 +53,11 @@ TREATMENT_MAX = 20  # позиций назначений
 LINE_CHARS = 500  # потолок одной строки (паспорт, назначение)
 PASSPORT_FIELDS = ("visit_at", "channel", "legal_basis")
 ICD10 = re.compile(r"^[A-Z]\d{2}(\.\d{1,2})?$")
+# §5.4 (FR-43): обоснования черновика. Потолки — чтобы документ не разросся
+# и подпись не считалась по мегабайту цитат.
+SOURCES_MAX = 50
+SOURCE_QUOTE_CHARS = 2000
+SOURCE_FIELDS = ("id", "ref", "section", "title", "url")
 
 # §5.2: обязательны для approve (пусто → 409 PROTOCOL_NOT_READY со списком).
 REQUIRED = (
@@ -155,6 +160,26 @@ def validate_sections(sections: dict) -> None:
                 raise Problem(422, "VALIDATION_ERROR", f"treatment[{i}]: ожидался объект")
             for field in ("drug", "dose", "schedule", "duration"):
                 _check_text(item.get(field), f"treatment[{i}].{field}", LINE_CHARS)
+
+    sources = sections.get("sources")
+    if sources is not None:
+        if not isinstance(sources, list):
+            raise Problem(422, "VALIDATION_ERROR", "sources: ожидался массив")
+        if len(sources) > SOURCES_MAX:
+            raise Problem(
+                422, "PROTOCOL_SECTION_TOO_LONG", f"sources: максимум {SOURCES_MAX} записей"
+            )
+        for i, item in enumerate(sources):
+            if not isinstance(item, dict):
+                raise Problem(422, "VALIDATION_ERROR", f"sources[{i}]: ожидался объект")
+            for field in SOURCE_FIELDS:
+                _check_text(item.get(field), f"sources[{i}].{field}", LINE_CHARS)
+            _check_text(item.get("quote"), f"sources[{i}].quote", SOURCE_QUOTE_CHARS)
+            used = item.get("used_by", [])
+            if not isinstance(used, list) or not all(isinstance(name, str) for name in used):
+                raise Problem(
+                    422, "VALIDATION_ERROR", f"sources[{i}].used_by: ожидался массив строк"
+                )
 
 
 def _value(sections: dict, path: tuple[str, ...]):
