@@ -209,6 +209,17 @@ wait_api_healthy() {
   done
   fail "api не стал healthy за 120 с (${api_health:-нет контейнера})"
 }
+wait_remd() {
+  # Порт remd-mock не публикуется на хост: спрашиваем /health из api — тем же
+  # путём, которым пойдёт передача СЭМД.
+  for _ in $(seq 1 60); do
+    compose exec -T api /app/.venv/bin/python -c \
+      'import urllib.request; urllib.request.urlopen("http://remd-mock:8091/health", timeout=2)' \
+      >/dev/null 2>&1 && return 0
+    sleep 2
+  done
+  fail "remd-mock не отвечает на /health (профиль emias)"
+}
 
 # --- up -----------------------------------------------------------------------
 cmd_up() {
@@ -246,13 +257,14 @@ cmd_up() {
   if [ "$want" != "$have" ] || [ -z "$(compose images -q api 2>/dev/null)" ]; then
     log "код изменился (или образов нет) — собираю образы (кеш слоёв docker сохраняется)…"
     compose --profile seed build
-    compose up -d --force-recreate api ui reminders-worker kb-enrichment >/dev/null
+    compose --profile emias up -d --force-recreate api ui reminders-worker kb-enrichment remd-mock >/dev/null
     echo "$want" > "$IMAGES_MARK"
   else
     log "код не менялся — образы не пересобираю, поднимаю как есть"
-    compose up -d api ui reminders-worker kb-enrichment >/dev/null
+    compose --profile emias up -d api ui reminders-worker kb-enrichment remd-mock >/dev/null
   fi
   wait_api_healthy
+  wait_remd
   wait_ui
 
   local kb_want kb_have points
