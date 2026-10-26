@@ -371,8 +371,9 @@ def hybrid_search(
     hits = [
         {
             # id точки — стабильный идентификатор чанка для ссылок в ответах
-            # (черновик протокола, docs/18 §5.4: sources[].id).
-            "id": str(p.id),
+            # (черновик протокола, docs/18 §5.4: sources[].id). У настоящей точки
+            # Qdrant он есть всегда, у фейковых точек в тестах — нет.
+            "id": str(getattr(p, "id", "") or ""),
             "guideline_id": p.payload["guideline_id"],
             "source_title": p.payload["source_title"],
             "topic": p.payload.get("topic", ""),
