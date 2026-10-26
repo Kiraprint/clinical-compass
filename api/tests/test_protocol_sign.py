@@ -13,6 +13,7 @@ from app.config import settings
 from app.models import DocumentArtifact
 from app.services import artifacts
 from app.signing import ca, cms, gost
+from app.signing import x509 as signing_x509
 
 from . import protocol_signing as ps
 from .protocol_signing import BASE
@@ -241,3 +242,149 @@ def test_verify_after_edit_uses_signed_version(client):
     payload = verified.json()
     assert payload["status"] == "valid", payload
     assert payload["document"]["version"] == 1
+
+
+def test_foreign_cms_with_genuine_cert_der_is_invalid(client, db_session, tmp_path):
+    """Подпись чужого УЦ при нетронутой строке подписи не проходит.
+
+    Регресс на обход привязки: цепочка проверялась по `row.cert_der`, а подпись —
+    по сертификату внутри CMS; без сверки этих двух сертификатов подпись,
+    сделанная посторонним УЦ, принималась как валидная.
+    """
+    context = ps.ctx(client, "sg-foreign-cms")
+    session = ps.approved(client, context)
+    signed = _sign(client, context, session)
+    assert signed.status_code == 200, signed.text
+    protocol_id = signed.json()["id"]
+
+    cda = ps.cda_bytes(db_session, protocol_id)
+    rows = ps.signature_rows(db_session, protocol_id)
+    foreign = ca.authority(tmp_path / "foreign-ca").issue("mo", ca.mo_identity(), 365)
+    ps.replace_signature(
+        db_session,
+        rows["mo"],
+        cert_der=rows["mo"].cert_der,  # строка подписи не тронута
+        cms_der=cms.sign(cda, foreign),  # контейнер подписан чужим УЦ
+        protocol_id=protocol_id,
+        session_id=session["id"],
+    )
+
+    payload = _verify(client, context, session).json()
+    assert payload["status"] == "invalid", payload
+    statuses = {item["role"]: item["status"] for item in payload["signatures"]}
+    assert statuses["mo"] == "invalid"
+    assert statuses["clinician"] == "valid"
+
+
+def test_swapped_cms_between_roles_is_invalid(client, db_session):
+    """Перенос CMS врача в строку МО (и наоборот) даёт `invalid` у обеих."""
+    context = ps.ctx(client, "sg-swap")
+    session = ps.approved(client, context)
+    signed = _sign(client, context, session)
+    assert signed.status_code == 200, signed.text
+    protocol_id = signed.json()["id"]
+
+    rows = ps.signature_rows(db_session, protocol_id)
+    doctor_cms = artifacts.get_bytes(cms_artifact(db_session, rows["clinician"]))
+    mo_cms = artifacts.get_bytes(cms_artifact(db_session, rows["mo"]))
+    ps.replace_signature(
+        db_session,
+        rows["clinician"],
+        cert_der=rows["clinician"].cert_der,
+        cms_der=mo_cms,
+        protocol_id=protocol_id,
+        session_id=session["id"],
+    )
+    ps.replace_signature(
+        db_session,
+        rows["mo"],
+        cert_der=rows["mo"].cert_der,
+        cms_der=doctor_cms,
+        protocol_id=protocol_id,
+        session_id=session["id"],
+    )
+
+    payload = _verify(client, context, session).json()
+    assert payload["status"] == "invalid", payload
+    assert [item["status"] for item in payload["signatures"]] == ["invalid", "invalid"]
+
+
+def test_malformed_cms_is_invalid_not_500(client, db_session):
+    """Мусор вместо CMS — статус `cms_malformed`, а не 500."""
+    context = ps.ctx(client, "sg-garbage")
+    session = ps.approved(client, context)
+    signed = _sign(client, context, session)
+    assert signed.status_code == 200, signed.text
+    protocol_id = signed.json()["id"]
+
+    rows = ps.signature_rows(db_session, protocol_id)
+    ps.replace_signature(
+        db_session,
+        rows["mo"],
+        cert_der=rows["mo"].cert_der,
+        cms_der=b"\x30\x03\x02\x01\x00",
+        protocol_id=protocol_id,
+        session_id=session["id"],
+    )
+
+    resp = _verify(client, context, session)
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["status"] == "invalid", payload
+    reasons = {item["role"]: item["reason"] for item in payload["signatures"]}
+    assert "cms_malformed" in reasons["mo"]
+
+
+def test_broken_cms_signature_is_invalid(client, db_session):
+    """Испорченное значение подписи в валидном по форме CMS — `signature_invalid`."""
+    context = ps.ctx(client, "sg-broken-sig")
+    session = ps.approved(client, context)
+    signed = _sign(client, context, session)
+    assert signed.status_code == 200, signed.text
+    protocol_id = signed.json()["id"]
+
+    rows = ps.signature_rows(db_session, protocol_id)
+    der = artifacts.get_bytes(cms_artifact(db_session, rows["clinician"]))
+    content_info = cms.asn1cms.ContentInfo.load(der)
+    signer_info = content_info["content"]["signer_infos"][0]
+    value = bytearray(signer_info["signature"].native)
+    value[0] ^= 0xFF
+    signer_info["signature"] = bytes(value)
+
+    ps.replace_signature(
+        db_session,
+        rows["clinician"],
+        cert_der=rows["clinician"].cert_der,
+        cms_der=content_info.dump(),
+        protocol_id=protocol_id,
+        session_id=session["id"],
+    )
+
+    payload = _verify(client, context, session).json()
+    assert payload["status"] == "invalid", payload
+    reasons = {item["role"]: item["reason"] for item in payload["signatures"]}
+    assert "signature_invalid" in reasons["clinician"]
+
+
+def test_leaf_certificate_parses_with_independent_parser(tmp_path):
+    """Лист разбирается `cryptography`, СНИЛС — в SAN otherName в обёртке [0]."""
+    from cryptography import x509 as cryptography_x509
+
+    authority = ca.authority(tmp_path / "ca")
+    signer = authority.issue(
+        "clinician",
+        ca.Identity("Петров Пётр", "Врач-психиатр", "МО", "12345678901"),
+        365,
+    )
+
+    certificate = cryptography_x509.load_der_x509_certificate(signer.der)
+    san = certificate.extensions.get_extension_for_class(
+        cryptography_x509.SubjectAlternativeName
+    ).value
+    names = san.get_values_for_type(cryptography_x509.OtherName)
+    assert len(names) == 1, san
+    assert names[0].type_id.dotted_string == "1.2.643.100.3"
+    # Значение в [0] EXPLICIT: внутри UTF8String (тег 0x0c), а не «сырой» текст.
+    assert names[0].value[:2] == b"\x0c\x0b", names[0].value
+    assert names[0].value[2:] == b"12345678901"
+    assert signing_x509.parse(signer.der).snils == "12345678901"

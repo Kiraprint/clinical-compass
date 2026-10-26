@@ -116,6 +116,9 @@ def verify_cms(
         signed_data = info["content"]
         if len(signed_data["signer_infos"]) != 1:
             return False, None, REASON_FORMAT
+        # Подпись уходит в РЭМД (P5): мусор после SignedData недопустим.
+        if info.dump() != der:
+            return False, None, REASON_FORMAT
         signer_info = signed_data["signer_infos"][0]
         if signed_data["encap_content_info"]["content"].native is not None:
             # В контейнере лежит сам документ: это не detached-подпись РЭМД.

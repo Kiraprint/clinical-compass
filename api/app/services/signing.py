@@ -425,11 +425,20 @@ async def _verify_one(
     if certificate.expired():
         return {**base, "status": "expired", "reason": "срок действия сертификата истёк"}
 
-    ok, _info, reason = cms.verify_cms(cda, der)
+    ok, info, reason = cms.verify_cms(cda, der)
     if reason == cms.REASON_DIGEST:
         return {**base, "status": "digest_mismatch", "reason": "хэш документа не совпадает"}
     if not ok:
         return {**base, "status": "invalid", "reason": f"подпись недействительна ({reason})"}
+    # Контейнер и строка подписи обязаны описывать один и тот же сертификат:
+    # иначе CMS чужого УЦ (или CMS другой роли) принималась бы как наша —
+    # цепочка проверялась по row.cert_der, а подпись по вложенному сертификату.
+    if info is None or info.certificate.der != row.cert_der:
+        return {
+            **base,
+            "status": "invalid",
+            "reason": "контейнер подписи не соответствует сохранённому сертификату",
+        }
 
     expected = await _expected_identity(db, session, row.role)
     bound = row.fio == expected.fio and row.position == expected.position

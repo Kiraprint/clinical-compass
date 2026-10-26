@@ -106,6 +106,33 @@ def subject_name(
     return asn1x509.Name.build(values)
 
 
+def _tlv(tag: int, body: bytes) -> bytes:
+    """DER TLV с поддержкой длин до 65535 байт."""
+    size = len(body)
+    if size < 0x80:
+        length = bytes([size])
+    elif size < 0x100:
+        length = b"\x81" + bytes([size])
+    else:
+        length = b"\x82" + size.to_bytes(2, "big")
+    return bytes([tag]) + length + body
+
+
+def _snils_general_names(snils: str) -> core.ParsableOctetString:
+    """GeneralNames с `otherName` для СНИЛС, собранный как готовый DER.
+
+    `AnotherName` в asn1crypto объявляет `value` как ANY с `explicit: 0`, но для
+    ANY явный тег не применяется и получается невалидный по RFC 5280
+    `a0 … 06 … 0c …` без обёртки `[0] EXPLICIT`: asn1crypto не может разобрать
+    собственный SAN, а `cryptography`/`openssl` отвергают сертификат целиком.
+    Поэтому корректный DER собирается вручную: `a0 { oid, a0 { UTF8String } }`.
+    """
+    another_name = core.ObjectIdentifier(OID_SNILS).dump() + _tlv(
+        0xA0, core.UTF8String(snils).dump()
+    )
+    return core.ParsableOctetString(_tlv(0x30, _tlv(0xA0, another_name)))
+
+
 def _extensions(ca: bool, spki: keys.PublicKeyInfo, snils: str | None) -> asn1x509.Extensions:
     items = [
         asn1x509.Extension({
@@ -134,14 +161,7 @@ def _extensions(ca: bool, spki: keys.PublicKeyInfo, snils: str | None) -> asn1x5
             asn1x509.Extension({
                 "extn_id": "subject_alt_name",
                 "critical": False,
-                "extn_value": asn1x509.GeneralNames([
-                    asn1x509.GeneralName({
-                        "other_name": asn1x509.AnotherName({
-                            "type_id": OID_SNILS,
-                            "value": core.Any(core.UTF8String(snils)),
-                        }),
-                    }),
-                ]),
+                "extn_value": _snils_general_names(snils),
             })
         )
     return asn1x509.Extensions(items)
@@ -214,9 +234,10 @@ def _snils(parsed: asn1x509.Certificate) -> str | None:
         other = name.chosen
         if other["type_id"].dotted != OID_SNILS:
             continue
+        # value — [0] EXPLICIT { UTF8String }; ANY отдаёт уже развёрнутое значение.
         try:
-            return str(other["value"].parsed.native)
-        except Exception:  # noqa: BLE001 — значение может быть не UTF8String
+            return str(other["value"].native)
+        except Exception:  # noqa: BLE001 — значение не строка
             return None
     return None
 
