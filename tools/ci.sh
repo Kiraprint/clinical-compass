@@ -24,8 +24,12 @@ PY="${CC_PY:-$ROOT/.venv/bin/python}"
 # В worktree своего .venv нет — берём venv основного чекаута, но код под тестом
 # обязан быть из этого дерева: PYTHONPATH перекрывает editable-установку app/compass.
 if [ ! -x "$PY" ]; then
-  MAIN_WT="$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
-  [ -n "$MAIN_WT" ] && [ -x "$MAIN_WT/.venv/bin/python" ] && PY="$MAIN_WT/.venv/bin/python"
+  # sed читает поток целиком: awk с `exit` роняет git по SIGPIPE, под pipefail
+  # подстановка возвращает 141, и `set -e` молча обрывает гейт.
+  MAIN_WT="$(git worktree list --porcelain | sed -n '1s/^worktree //p')"
+  if [ -n "$MAIN_WT" ] && [ -x "$MAIN_WT/.venv/bin/python" ]; then
+    PY="$MAIN_WT/.venv/bin/python"
+  fi
 fi
 export PYTHONPATH="$ROOT/api:$ROOT/core${PYTHONPATH:+:$PYTHONPATH}"
 STAGE="$ROOT/tools/dev-stage.sh"

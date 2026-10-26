@@ -33,9 +33,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 PY="${CC_PY:-$ROOT/.venv/bin/python}"
+# В worktree своего .venv нет — берём venv основного чекаута, но код под тестом
+# обязан быть из этого дерева: PYTHONPATH перекрывает editable-установку app/compass.
+# sed читает весь поток: awk с `exit` роняет git по SIGPIPE, и под pipefail
+# подстановка возвращала 141, а `set -e` молча обрывал скрипт.
 if [ ! -x "$PY" ]; then
-  MAIN_WT="$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
-  [ -n "$MAIN_WT" ] && [ -x "$MAIN_WT/.venv/bin/python" ] && PY="$MAIN_WT/.venv/bin/python"
+  MAIN_WT="$(git worktree list --porcelain | sed -n '1s/^worktree //p')"
+  if [ -n "$MAIN_WT" ] && [ -x "$MAIN_WT/.venv/bin/python" ]; then
+    PY="$MAIN_WT/.venv/bin/python"
+  fi
 fi
 
 STAGE_PROJECT="${CC_STAGE_PROJECT:-cc-dev-stage}"
@@ -69,6 +75,10 @@ done
 [[ "$QDRANT_PORT" =~ ^[0-9]{2,5}$ ]] || fail "некорректный порт Qdrant: $QDRANT_PORT"
 [[ "$UI_PORT" =~ ^[0-9]{2,5}$ ]] || fail "некорректный порт UI: $UI_PORT"
 
+# Проект compose тоже защищаем: `-p infra` — это РАБОЧИЙ проект, и `reset`
+# снёс бы его тома вместе с базой, реестром КБ и коллекцией kb_stage/kb.
+[[ "$STAGE_PROJECT" == cc-* ]] || fail "проект стенда должен начинаться с 'cc-' (сейчас '${STAGE_PROJECT}'): рабочий проект infra запрещён"
+
 # Наследованные CC_* из шелла подменяют поведение стенда (эмбеддер, коллекция,
 # cookie-secure). Чистим и задаём ровно те значения, что и в CI.
 unset CC_COOKIE_SECURE CC_EMBEDDER CC_RERANKER CC_ML_URL CC_ML_TOKEN CC_ML_TIMEOUT \
@@ -86,7 +96,6 @@ export CC_ALLOW_DEMO_SECRETS=true CC_COOKIE_SECURE=false
 
 compose() { docker compose -f "$ROOT/infra/docker-compose.yml" -f "$OVERRIDE" -p "$STAGE_PROJECT" "$@"; }
 
-port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
 write_override() {
   mkdir -p "$STATE_DIR"
@@ -133,9 +142,11 @@ with psycopg.connect(admin, autocommit=True) as conn:
 PY
 }
 
-# Отпечатки: меняется содержимое входов — пересобираем/переиндексируем.
+# Отпечаток входов: содержимое отслеживаемых файлов (ls-files -s — по блобам,
+# а не по времени) плюс незакоммиченные правки. HEAD в отпечаток НЕ входит:
+# иначе коммит, трогающий только docs/, заставлял бы пересобирать образы.
 fingerprint() {
-  { git rev-parse HEAD; git ls-files -s "$@" 2>/dev/null; git status --porcelain -- "$@" 2>/dev/null; } \
+  { git ls-files -s "$@" 2>/dev/null; git status --porcelain -- "$@" 2>/dev/null; } \
     | sha256sum | cut -d' ' -f1
 }
 
