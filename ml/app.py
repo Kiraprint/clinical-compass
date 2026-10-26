@@ -299,7 +299,7 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
         language: str = Form(default=ASR_DEFAULT_LANGUAGE),
         diarize: bool = Form(default=False),
     ) -> dict:
-        """Русская расшифровка аудио сессии (docs/18 §4.3, research-asr.md).
+        """Русская расшифровка аудио сессии (§4.3 «Клинические сессии»).
 
         Аудио читается целиком: потолок — CC_ML_ASR_MAX_MB (200 МБ ≈ 3 часа
         opus), размер проверяется и по Content-Length, и по факту. Диаризация
