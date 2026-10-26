@@ -18,9 +18,9 @@ test.describe("Отзыв согласия на обработку ПДн", () =
     await page.getByRole("button", { name: "Сохранить за сегодня" }).click();
     await expect(page.getByText(content)).toBeVisible();
 
-    // Отзыв согласия живёт в личном кабинете: свёрнутая «Опасная зона» + подтверждение в диалоге.
+    // Отзыв согласия живёт в личном кабинете: свёрнутый блок «Отзыв согласия» + подтверждение в диалоге.
     await page.getByRole("button", { name: "Личный кабинет" }).click();
-    await page.locator("summary", { hasText: "Опасная зона" }).click();
+    await page.locator("summary", { hasText: "Отзыв согласия" }).click();
     await page.getByRole("button", { name: "Отозвать согласие" }).click();
     const dialog = page.getByRole("dialog");
     await expect(dialog).toBeVisible();

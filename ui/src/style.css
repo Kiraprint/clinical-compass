@@ -661,7 +661,7 @@ small { color: #8a94a8; }
 }
 .dosage-hint button { padding: 2px 8px; font-size: 12px; }
 
-/* Отзыв согласия: спрятан в «опасной зоне», подтверждение — модальным диалогом */
+/* Отзыв согласия: свёрнут в блоке «Отзыв согласия», подтверждение — модальным диалогом */
 .danger-zone {
   margin-top: 24px;
   border-top: 1px solid #e2e6ee;
