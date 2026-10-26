@@ -328,35 +328,81 @@ def test_insights_timeout_twice_raises_503(monkeypatch):
 
 # --------------------------------------------------------- assistant_chat egress
 
-def test_assistant_chat_history_uses_hardened_scrub(monkeypatch):
+class _FakeHistoryDB:
+    """Минимальный AsyncSession для _history_for_llm: реплики newest-first."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def scalars(self, _q):
+        class _Rows:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def all(self):
+                return self._rows
+
+        return _Rows(self._rows)
+
+
+def _history_db():
+    return _FakeHistoryDB([
+        types.SimpleNamespace(role="ASSISTANT", content="ответ"),
+        types.SimpleNamespace(role="CLINICIAN", content="Иванов Пётр Сергеевич, жалобы"),
+    ])
+
+
+def test_assistant_chat_history_scrubbed_in_one_batch(monkeypatch):
+    """История уходит в скраб одной пачкой, но маскируется целиком."""
+    import asyncio
+
     from app.services import assistant_chat
-
-    class _Rows:
-        def __init__(self, rows):
-            self._rows = rows
-
-        def all(self):
-            return self._rows
-
-    class _DB:
-        async def scalars(self, _q):
-            return _Rows([
-                types.SimpleNamespace(role="assistant", content="ответ"),
-                types.SimpleNamespace(role="user", content="Иванов Пётр Сергеевич"),
-            ])
 
     seen = []
 
     def _fake_scrub(text, ctx, names):
         seen.append((text, names))
-        return ("[ФИО]", None, {})
+        return (text.replace("Иванов Пётр Сергеевич", FIO), None, {})
 
     monkeypatch.setattr(assistant_chat, "scrub_for_llm", _fake_scrub)
-    history = __import__("asyncio").run(
-        assistant_chat._history_for_llm(_DB(), "thread-id", ["Иванов"])
+    history = asyncio.run(
+        assistant_chat._history_for_llm(_history_db(), "thread-id", ["Иванов"])
     )
+
+    assert len(seen) == 1, seen  # на родительском коде — вызов на реплику
+    batch, names = seen[0]
+    assert assistant_chat.HISTORY_SEP in batch
+    assert "жалобы" in batch and "ответ" in batch
+    assert names == ["Иванов"]  # deny-list доезжает до скраба
     assert history == [
-        {"role": "user", "content": "[ФИО]"},
-        {"role": "assistant", "content": "[ФИО]"},
+        {"role": "CLINICIAN", "content": f"{FIO}, жалобы"},
+        {"role": "ASSISTANT", "content": "ответ"},
     ]
-    assert [t for t, _ in seen] == ["Иванов Пётр Сергеевич", "ответ"]
+    assert all("Иванов" not in m["content"] for m in history)
+
+
+def test_assistant_chat_history_falls_back_per_message(monkeypatch):
+    """Если разделитель не выжил после скраба — реплики скрабятся поштучно."""
+    import asyncio
+
+    from app.services import assistant_chat
+
+    seen = []
+
+    def _fake_scrub(text, ctx, names):
+        seen.append((text, names))
+        # Бэкенд маскирования схлопывает разделитель — разрез невозможен.
+        collapsed = text.replace(assistant_chat.HISTORY_SEP, "\n")
+        return (collapsed.replace("Иванов Пётр Сергеевич", FIO), None, {})
+
+    monkeypatch.setattr(assistant_chat, "scrub_for_llm", _fake_scrub)
+    history = asyncio.run(
+        assistant_chat._history_for_llm(_history_db(), "thread-id", ["Иванов"])
+    )
+
+    assert len(seen) == 3, seen  # пачка + по вызову на реплику
+    assert history == [
+        {"role": "CLINICIAN", "content": f"{FIO}, жалобы"},
+        {"role": "ASSISTANT", "content": "ответ"},
+    ]
+    assert all("Иванов" not in m["content"] for m in history)

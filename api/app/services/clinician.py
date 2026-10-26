@@ -367,11 +367,12 @@ async def _patient_card(db: AsyncSession, patient_id, clinician_id=None) -> dict
     diary = (await db.scalars(
         select(DiaryEntry).where(DiaryEntry.patient_id == patient_id).order_by(DiaryEntry.created_at.desc()).limit(20)
     )).all()
+    # Открытых эскалаций на пациента — единицы, поэтому предел не ставим:
+    # карточка кормит триаж, молча скрытая эскалация = пропущенный риск.
     escalations = (await db.scalars(
         select(Escalation)
         .where(Escalation.patient_id == patient_id, Escalation.resolved_at.is_(None))
         .order_by(Escalation.notified_clinician_at.desc().nulls_last())
-        .limit(50)
     )).all()
     checkins = (await db.scalars(
         select(CheckinSession)

@@ -746,3 +746,22 @@ def test_omitted_suicidal_item_comes_from_last_suicidal_scale(client, db_session
     last = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=c).json()["last_assessment"]
     assert last["omitted_items"] == []
     assert last["omitted_scale"] is None
+
+
+def test_report_returns_all_open_escalations(client, db_session):
+    """Карточка не режет список безопасности: 60 открытых эскалаций — все в отчёте."""
+    _, pid = _with_patient(client, "escal@test.ru")
+    c, cid = clinician_ctx(client, "escalc@test.ru")
+    a, _ = admin_ctx(client, "escala@test.ru")
+    _grant(client, a, pid, cid)
+
+    base = datetime.now(timezone.utc)
+    for i in range(60):
+        db_session.add(Escalation(
+            patient_id=uuid.UUID(pid), kind="SEVERE", created_at=base - timedelta(minutes=i),
+        ))
+    db_session.commit()
+
+    report = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=c)
+    assert report.status_code == 200, report.text
+    assert len(report.json()["open_escalations"]) == 60

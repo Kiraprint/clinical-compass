@@ -449,7 +449,7 @@ async def _prepare_turn(
     corpus_drugs = await load_drug_docs(db)
     await db.commit()  # PDn-access audit + вопрос персистируются до вызова агента
 
-    scrubbed_query, _, report = await anyio.to_thread.run_sync(
+    scrubbed_query, _, _ = await anyio.to_thread.run_sync(
         scrub_for_llm, content, None, names
     )
     scrubbed_contexts, _ = await _scrub_patient_contexts(contexts, names)

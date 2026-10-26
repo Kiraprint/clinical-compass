@@ -6,7 +6,7 @@ import json
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Boolean, CHAR, CheckConstraint, Date, DateTime, ForeignKey, Float, Identity, Index, Integer, LargeBinary, String, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, Boolean, CHAR, CheckConstraint, Date, DateTime, ForeignKey, Float, Identity, Index, Integer, LargeBinary, String, Text, UniqueConstraint, desc, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -316,6 +316,8 @@ class Notification(Base):
         # ADVERSE_EVENT — FR-28: серьёзное НЯ, о котором сообщил пациент.
         CheckConstraint("kind in ('RED_ESCALATION','REMINDER','ADVERSE_EVENT')", name="notifications_kind"),
         Index("notifications_user_read", "user_id", "read_at"),
+        # Лента уведомлений: user_id + свежие сверху (id — тай-брейк без Sort).
+        Index("ix_notifications_user_created", "user_id", desc("created_at"), desc("id")),
     )
 
 class DeviceToken(Base):
@@ -467,7 +469,7 @@ class Visit(Base):
     __tablename__ = "visits"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
     clinician_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     visited_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     visit_type: Mapped[str] = mapped_column(String(16))  # in_person | online | phone
@@ -780,6 +782,8 @@ class PatientMedication(Base):
             unique=True,
             postgresql_where=text("emias_id is not null"),
         ),
+        # Список назначений пациента с фильтром по статусу.
+        Index("ix_patient_medications_patient_status", "patient_id", "status"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
