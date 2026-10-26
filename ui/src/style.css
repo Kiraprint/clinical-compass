@@ -766,3 +766,19 @@ small { color: #8a94a8; }
   .cal-day { min-height: 60px; padding: 2px 3px; }
   .cal-item { font-size: 9px; }
 }
+
+/* FR-45/FR-46 (PatientUx): напоминания на главном экране пациента — строки с
+   переходом, кнопки не ниже 44px (тап на телефоне); баннер скрининга идёт ниже. */
+.patient-reminders li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 10px; }
+.patient-reminder-text { flex: 1 1 210px; min-width: 0; }
+.patient-reminder-kind {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: #eef1f6;
+  color: #5a6478;
+  font-size: 12px;
+}
+.patient-reminder-action { min-height: 44px; padding: 10px 14px; }
+.patient-banner { margin-top: 12px; }

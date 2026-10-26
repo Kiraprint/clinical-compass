@@ -19,12 +19,12 @@ test.describe("Пациент: первый запуск и ежедневные
     await expect(
       page.getByRole("heading", { name: "Согласие на обработку персональных данных" })
     ).toBeVisible();
-    await expect(page.getByText("Скрининг, назначенный врачом")).toBeHidden();
+    await expect(page.getByText(/Врач назначил скрининг/)).toBeHidden();
 
-    // После подписи — главный экран с баннером скрининга (FR-33 A).
+    // После подписи — главный экран: напоминания, ниже баннер скрининга (FR-33 A, FR-45).
     await page.getByRole("button", { name: "Даю согласие" }).click();
     await expect(page.getByText("Согласие активно")).toBeVisible();
-    await expect(page.getByText("Скрининг, назначенный врачом")).toBeVisible();
+    await expect(page.getByText(/Врач назначил скрининг/)).toBeVisible();
     await openScreening(page);
 
     // item 1: пациент не выбирает шкалу — селекта нет, назначена врачом (дефолт PHQ-9).

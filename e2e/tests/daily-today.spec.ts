@@ -98,7 +98,7 @@ test("«Сегодня»: первый шаг — 7 пунктов ядра; н�
   await expect(excellent).toHaveAttribute("aria-pressed", "false");
   await excellent.click();
   await expect(excellent).toHaveAttribute("aria-pressed", "true");
-  await page.getByRole("button", { name: "Принял", exact: true }).click();
+  await page.getByRole("button", { name: /^Принял\(а\) всё/ }).click();
   await page.getByPlaceholder("Препарат (напр. Авиандр) — необязательно").fill("Авиандр");
   await page.getByRole("button", { name: "Сохранить за сегодня" }).click();
 
@@ -110,7 +110,7 @@ test("«Сегодня»: первый шаг — 7 пунктов ядра; н�
   await expect(page.locator(".msg", { hasText: content }).getByText("😄 Отлично")).toBeVisible();
   // Режим не задан → одна отметка в день; в блоке «за сегодня» видно и счётчик,
   // и что именно отмечено.
-  await expect(page.getByText("За сегодня отмечено 1 из 1 приёма")).toBeVisible();
+  await expect(page.getByText("Сегодня всё отмечено: 1 из 1 приёма")).toBeVisible();
   await expect(page.getByText(/Принял \(Авиандр\)/)).toBeVisible();
   await expect(page.getByText("Чек-ин за сегодня выполнен")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Далее" })).toBeVisible();
@@ -171,22 +171,22 @@ test("2 приёма в день: обе отметки за сегодня со
   await page.locator("select").selectOption({ label: `${title} (2 раза в день)` });
 
   // Первый приём: форма остаётся на экране — второй приём ещё не отмечен.
-  await page.getByRole("button", { name: "Принял", exact: true }).click();
+  await page.getByRole("button", { name: "Принял(а) всё: 2 таблетки" }).click();
   await page.getByRole("button", { name: "Сохранить за сегодня" }).click();
   await expect(page.getByText("Сохранено: приём лекарств")).toBeVisible();
   await expect(page.getByText("Отмечено 1 из 2 приёмов за сегодня")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Принял", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Принял(а) всё: 2 таблетки" })).toBeVisible();
 
   // Второй приём — новая запись; первая не перезаписывается.
-  await page.getByRole("button", { name: "Принял", exact: true }).click();
+  await page.getByRole("button", { name: "Принял(а) всё: 2 таблетки" }).click();
   await page.getByRole("button", { name: "Сохранить за сегодня" }).click();
-  await expect(page.getByText("За сегодня отмечено 2 из 2 приёмов")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Принял", exact: true })).toHaveCount(0);
+  await expect(page.getByText("Сегодня всё отмечено: 2 из 2 приёмов")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Принял(а) всё: 2 таблетки" })).toHaveCount(0);
   // История приёма остаётся доступной: просмотр и исправление не блокируются.
   await expect(page.getByRole("button", { name: "История приёма" })).toBeVisible();
 
   await page.reload();
-  await expect(page.getByText("За сегодня отмечено 2 из 2 приёмов")).toBeVisible();
+  await expect(page.getByText("Сегодня всё отмечено: 2 из 2 приёмов")).toBeVisible();
 
   // В БД — две отдельные отметки по этому назначению.
   const patient = await loginApi("p3@compass.demo");
