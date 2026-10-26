@@ -238,6 +238,18 @@ class Settings(BaseSettings):
     # проверку (демо/локально), totp_secret всё равно хранится в БД — развернуть
     # версию с OTP можно одним флагом. prod_mode требует require_otp=true.
     require_otp: bool = True
+    # FR-48 (docs/03 §15): канал e-mail для кодов подтверждения. Пусто
+    # CC_SMTP_HOST/CC_SMTP_FROM → канал не настроен: демо-стенд с
+    # CC_ALLOW_DEMO_SECRETS отдаёт код в `demo_code`, прод (CC_PROD_MODE) — 503.
+    smtp_host: str = ""  # CC_SMTP_HOST
+    smtp_port: int = 587  # CC_SMTP_PORT
+    smtp_user: str = ""  # CC_SMTP_USER
+    smtp_password: str = ""  # CC_SMTP_PASSWORD — секрет, не логируется
+    smtp_from: str = ""  # CC_SMTP_FROM: адрес отправителя
+    smtp_tls: bool = True  # CC_SMTP_TLS: STARTTLS перед отправкой
+    # CC_EMAIL_OTP: подтверждать вход пациента кодом на e-mail. false — вход
+    # паролем как раньше; сотрудники всегда через TOTP.
+    email_otp: bool = False
     # FR-24: период тика воркера напоминаний (сек). Отдельного шедулера в MVP нет:
     # `python -m app.reminders_worker` — отдельный процесс, как kb-enrichment.
     reminder_tick_seconds: int = 60  # CC_REMINDER_TICK_SECONDS

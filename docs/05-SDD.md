@@ -177,6 +177,7 @@ def trends(runs: Sequence[ScaleResult]) -> Trend
 | FR-34 | E16 | `test_patient_ux.py`, `test_adverse_events.py` (`test_patient_report_has_no_severity_until_clinician_verifies`), `test_screening.py` (неполный набор → 422) + `pitch.spec.ts` (PHQ-8 → RED, автоответ один раз в сутки), `multi-scale-screening.spec.ts` |
 | FR-45 | E17 | `npm run build` (типы) + e2e `patient-home-priority.spec.ts` (напоминания выше баннера, кнопки ≥44px на 390×844, переходы «Отметить чек-ин»/«Отметить приём»/«Перейти к скринингу»); регрессия `patient-flows.spec.ts`, `consent-revoke.spec.ts`, `rbac-idor.spec.ts` (локаль баннера) |
 | FR-46 | E17 | e2e `patient-home-priority.spec.ts` (вопрос «Сколько таблеток вы приняли?», отметки taken/partial/missed проверены через `/me/adherence`, `partial_kind = half`) + `daily-today.spec.ts` (1 и 2 приёма в день, «Сегодня всё отмечено: N из M») |
+| FR-48 | E17 | `test_auth_email.py` (202 без перечисления, cooldown, e2e сброс по `demo_code`, 422 на неверный/истёкший/использованный код и 5 промахов, удаление refresh-токенов, хеш кода, вход по коду при `CC_EMAIL_OTP=true`, байт-в-байт прежний вход при false, 503 без SMTP в проде) + `npm run build` (формы входа, Enter, автофокус, шаги OTP и сброса) |
 
 ## 7. Границы инкремента
 

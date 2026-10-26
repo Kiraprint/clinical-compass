@@ -535,6 +535,31 @@ class RefreshToken(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class AuthCode(Base):
+    """FR-48: одноразовый код e-mail (сброс пароля, подтверждение входа).
+
+    Код живёт только в письме: в БД — SHA-256(code + CC_DATA_KEY), журнал не
+    видит ни кода, ни адреса. `attempts` ограничивает перебор, `consumed_at`
+    делает код одноразовым, `expires_at` — TTL 10 минут (docs/03 §15).
+    """
+    __tablename__ = "auth_codes"
+    __table_args__ = (
+        CheckConstraint("purpose in ('reset','login')", name="auth_codes_purpose"),
+        Index("auth_codes_user_purpose", "user_id", "purpose", text("created_at DESC")),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    purpose: Mapped[str] = mapped_column(String(16))  # reset | login
+    code_hash: Mapped[str] = mapped_column(String(64))  # sha256(code + pepper)
+    attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
+
 class KBWork(Base):
     """Единица внешнего корпуса (статья PubMed / гайдлайн ВОЗ) — реестр источников.
 

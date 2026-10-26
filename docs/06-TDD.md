@@ -116,6 +116,15 @@
 | auth_2fa_required | регистрация CLINICIAN → login без otp | 401; с корректным TOTP → 200 |
 | auth_otp_optional_flag | CC_REQUIRE_OTP=false → login CLINICIAN без otp → 200; секрет остаётся в БД; prod_mode+false → fail-fast |
 | auth_config_public | публичный GET /auth/config → {require_otp} по CC_REQUIRE_OTP (UI скрывает поле 2FA) |
+| auth_email_reset_request_unknown (`test_auth_email.py`, FR-48) | POST /auth/password/reset-request для несуществующего адреса → 202 `{sent:true}` | ни строки в `auth_codes`, ни `demo_code` — перечисления аккаунтов нет |
+| auth_email_reset_cooldown | повторный reset-request <60 с | 429 `CODE_COOLDOWN` |
+| auth_email_reset_e2e | reset-request (`demo_code`) → POST /auth/password/reset | 204 без тела; новый пароль входит, старый — 401; аудит `PASSWORD_RESET_REQUEST`/`PASSWORD_RESET` только с id |
+| auth_email_reset_invalid | неверный / истёкший / использованный код / 5 промахов | 422 `CODE_INVALID` во всех случаях (причина не раскрывается) |
+| auth_email_reset_kills_sessions | reset → POST /auth/refresh старым refresh-токеном | 401 (все `refresh_tokens` пользователя удалены) |
+| auth_email_reset_hash | код из `demo_code` vs `auth_codes.code_hash` | в БД 64-символьный SHA-256, открытого кода нет |
+| auth_email_otp_login (`CC_EMAIL_OTP=true`) | login пациента → 202 `{otp_required:"email", challenge}`; `/auth/login/otp` с неверным кодом → 422, с верным → 200 + cookies | токены только после кода; аудит `LOGIN_OTP_SENT`/`FAILED`/`OK` без e-mail |
+| auth_email_otp_off | `CC_EMAIL_OTP=false` → login пациента | ответ ровно `{access_token, refresh_token, role}`, `auth_codes` не пишется |
+| auth_email_prod_fail_closed | `CC_PROD_MODE=true` и SMTP не настроен → reset-request | 503 `MAIL_UNAVAILABLE`, без `demo_code` |
 | llm_router_* | LLM-роутер раздела: tool_call search_<раздел> → topic, off→None, ошибка/таймаут/неизвестная тулза/без тулзы → None (fallback все разделы) |
 | `rewrite_followup_*` (FR-21) | LLM-переформулировка уточняющего вопроса треда: первая строка ответа без кавычек/префикса, no URL → None без вызова, пустая история → None без вызова, ошибка/таймаут/пустой ответ → None, обрезка истории 8×800≤3000 с конца | самодостаточный запрос либо None (= поиск по исходному вопросу), ответ не ломается |
 | consent_gating | PATIENT без согласия → POST /screenings | 403 CONSENT_REQUIRED; после /consent → 201 |

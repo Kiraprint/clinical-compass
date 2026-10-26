@@ -150,6 +150,19 @@ export interface LoginResp {
   refresh_token: string;
   role: string;
 }
+/** FR-48: пароль верный, но нужен код из письма — токены выдаст /auth/login/otp.
+ *  `demo_code` приходит только с демо-стенда без SMTP (docs/03 §15). */
+export interface EmailOtpChallenge {
+  otp_required: "email";
+  challenge: string;
+  demo_code?: string;
+}
+export type LoginResult = LoginResp | EmailOtpChallenge;
+/** FR-48: ответ сброса пароля; наличие аккаунта не раскрывается. */
+export interface ResetRequestResp {
+  sent: boolean;
+  demo_code?: string;
+}
 /** Публичная конфигурация входа (CC_REQUIRE_OTP) — GET /auth/config. */
 export interface AuthConfig {
   require_otp: boolean;
@@ -404,7 +417,10 @@ export type AppointmentPatchBody = {
 
 export const api = {
   register: verb<RegisterResp>("POST")("/api/v1/auth/register"),
-  login: verb<LoginResp>("POST")("/api/v1/auth/login"),
+  login: verb<LoginResult>("POST")("/api/v1/auth/login"),
+  loginOtp: verb<LoginResp>("POST")("/api/v1/auth/login/otp"),
+  requestPasswordReset: verb<ResetRequestResp>("POST")("/api/v1/auth/password/reset-request"),
+  resetPassword: verb<void>("POST")("/api/v1/auth/password/reset"),
   authConfig: () => req<AuthConfig>("/api/v1/auth/config"),
   // F4: отзыв refresh-токена на сервере (best-effort, не блокирует UI).
   // F9: web-режим — refresh_token в cookie, body пустой; native — из localStorage.
