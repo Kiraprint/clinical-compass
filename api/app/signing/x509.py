@@ -31,7 +31,6 @@ from . import gost
 
 OID_SNILS = "1.2.643.100.3"  # СНИЛС в otherName (OID УЦ, не изобретённый)
 
-_DIGEST_ALG = algos.DigestAlgorithm({"algorithm": gost.OID_GOST3411_2012_256})
 _SIGN_ALG = algos.SignedDigestAlgorithm({"algorithm": gost.OID_GOST3410_2012_256_SIGN})
 
 
@@ -95,9 +94,8 @@ def subject_name(
     fio: str,
     organization: str,
     position: str | None,
-    snils: str | None = None,
 ) -> asn1x509.Name:
-    """Subject по образцу сертификатов УЦ: CN=ФИО, O=МО, T=должность, OU=СНИЛС."""
+    """Subject: CN=ФИО, O=МО, T=должность (СНИЛС — только в SAN, без дубля)."""
     values: dict[str, str] = {
         "common_name": fio,
         "organization_name": organization,
@@ -105,8 +103,6 @@ def subject_name(
     }
     if position:
         values["title"] = position
-    if snils:
-        values["organizational_unit_name"] = snils
     return asn1x509.Name.build(values)
 
 

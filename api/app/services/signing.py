@@ -252,6 +252,23 @@ async def sign(
     return payload
 
 
+async def _signed_protocol(db: AsyncSession, session_id) -> SessionProtocol | None:
+    """Последняя **подписанная** версия: признак — наличие строк подписи.
+
+    Правка после подписи делает старую версию `superseded`, но её подпись и
+    документ остаются: статус версии сам по себе не годится как признак.
+
+    Документ и подпись принадлежат версии, а не сессии: черновик v2 не должен
+    скрывать подписанный v1 — он остаётся проверяемым и печатаемым (§3.4, §7.4).
+    """
+    return await db.scalar(
+        select(SessionProtocol)
+        .join(ProtocolSignature, ProtocolSignature.protocol_id == SessionProtocol.id)
+        .where(SessionProtocol.session_id == session_id)
+        .order_by(SessionProtocol.version.desc())
+        .limit(1)
+    )
+
 async def _latest_artifact(db: AsyncSession, protocol_id, kind: str) -> DocumentArtifact | None:
     return await db.scalar(
         select(DocumentArtifact)
@@ -282,8 +299,8 @@ async def pdf(
     """Печатная форма подписанного протокола (кэш в артефактах)."""
     session = await require_session(db, clinician_id, session_id)
     await require_patient_access(db, clinician_id, session.patient_id)
-    protocol = await _active_protocol(db, session.id)
-    if protocol.status not in ("signed", "submitted"):
+    protocol = await _signed_protocol(db, session.id)
+    if protocol is None:
         raise Problem(409, "PROTOCOL_NOT_SIGNED", "Документ доступен после подписи")
     rows = await _signatures(db, protocol.id)
     if not rows:
@@ -291,6 +308,17 @@ async def pdf(
 
     cached = await _latest_artifact(db, protocol.id, "protocol_pdf")
     if cached is not None:
+        # Кэш отдаёт те же байты, но обращение к подписанному документу — тоже
+        # событие доступа: аудит пишется на каждый GET, а не только на рендер.
+        await audit.record(
+            db,
+            clinician_id,
+            "SESSION_PROTOCOL_PDF",
+            "session_protocol",
+            f"{session.id}:v{protocol.version}",
+            ip=ip,
+        )
+        await db.commit()
         return artifacts.get_bytes(cached), f"protocol-{protocol.version}.pdf"
 
     patient = await db.get(User, session.patient_id)
@@ -315,7 +343,7 @@ async def pdf(
         stamps=[_stamp(row) for row in rows],
     )
     if len(content) > MAX_PDF_BYTES:
-        raise Problem(500, "DOCUMENT_TOO_LARGE", "PDF протокола превысил потолок §4.6")
+        raise Problem(413, "DOCUMENT_TOO_LARGE", "PDF протокола превысил потолок §4.6")
 
     artifact = artifacts.put_bytes(
         "protocol_pdf",
@@ -387,7 +415,8 @@ async def _verify_one(
 
     try:
         certificate = x509.parse(row.cert_der)
-    except ValueError:
+        authority = ca.authority()
+    except Exception:  # noqa: BLE001 — битый сертификат/недоступный УЦ → статус
         return {**base, "status": "invalid", "reason": "сертификат подписи не разбирается"}
 
     authority = ca.authority()
@@ -419,14 +448,22 @@ async def verify(db: AsyncSession, clinician_id, session_id) -> dict:
     """Проверить обе подписи протокола; любая аномалия — статус, не исключение."""
     session = await require_session(db, clinician_id, session_id)
     await require_patient_access(db, clinician_id, session.patient_id)
-    protocol = await _active_protocol(db, session.id)
+    protocol = await _signed_protocol(db, session.id)
 
     payload: dict[str, Any] = {
         "status": "valid",
         "reason": None,
-        "document": {"id": str(protocol.id), "version": protocol.version, "sha256": None},
+        "document": {
+            "id": str(protocol.id) if protocol else None,
+            "version": protocol.version if protocol else None,
+            "digest": None,
+            # Не `sha256`: здесь Стрибог-256, проверять надо ГОСТ-хэшем.
+            "digest_algorithm": "GOST3411-2012-256",
+        },
         "signatures": [],
     }
+    if protocol is None:
+        return {**payload, "status": "invalid", "reason": "подписанный протокол не найден"}
 
     cda_artifact = await _latest_artifact(db, protocol.id, "protocol_cda")
     if cda_artifact is None:
@@ -436,7 +473,7 @@ async def verify(db: AsyncSession, clinician_id, session_id) -> dict:
     except Problem as exc:
         return {**payload, "status": "invalid", "reason": exc.detail}
     digest_hex = gost.digest(cda).hex()
-    payload["document"]["sha256"] = digest_hex
+    payload["document"]["digest"] = digest_hex
 
     rows = {row.role: row for row in await _signatures(db, protocol.id)}
     missing = [role for role in ("clinician", "mo") if role not in rows]

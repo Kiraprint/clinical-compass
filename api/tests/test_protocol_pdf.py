@@ -106,3 +106,18 @@ def test_pdf_audit_row(client, db_session):
     ).all()
     assert len(rows) == 1
     assert rows[0][0] == f"{session['id']}:v1"
+
+
+def test_cached_pdf_read_is_audited(client, db_session):
+    """Каждый GET подписанного документа — событие доступа, даже из кэша."""
+    context = ps.ctx(client, "pdf-audit-cache")
+    session = ps.approved(client, context)
+    _signed(client, context, session)
+    assert _pdf(client, context, session).status_code == 200
+    assert _pdf(client, context, session).status_code == 200
+
+    rows = db_session.execute(
+        text("select object_id from audit_log where action = 'SESSION_PROTOCOL_PDF'")
+    ).all()
+    assert len(rows) == 2
+    assert {row[0] for row in rows} == {f"{session['id']}:v1"}

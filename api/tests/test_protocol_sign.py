@@ -46,8 +46,7 @@ def test_sign_requires_approved(client):
     resp = _sign(client, context, session)
     assert resp.status_code == 409, resp.text
     assert resp.json()["code"] == "PROTOCOL_NOT_APPROVED"
-    # Отказ не должен оставить полусостояние: протокол остаётся подтверждённым... нет —
-    # здесь он был черновиком, и черновиком остаётся.
+    # Отказ не оставляет полусостояния: черновик остаётся черновиком, подписей нет.
     detail = client.get(f"{BASE}/sessions/{session['id']}", headers=context["doctor"])
     assert detail.json()["protocol"]["status"] == "draft"
     assert detail.json()["signature"] is None
@@ -133,7 +132,8 @@ def test_verify_valid(client):
     assert payload["status"] == "valid", payload
     assert payload["reason"] is None
     assert {item["status"] for item in payload["signatures"]} == {"valid"}
-    assert payload["document"]["sha256"]
+    assert payload["document"]["digest"]
+    assert payload["document"]["digest_algorithm"] == "GOST3411-2012-256"
 
 
 def test_tampered_cda_is_digest_mismatch(client, db_session):
@@ -220,3 +220,24 @@ def test_sign_requires_clinician(client):
         f"{BASE}/sessions/{session['id']}/protocol/sign", headers=context["patient"]
     )
     assert resp.status_code == 403
+
+
+def test_verify_after_edit_uses_signed_version(client):
+    """Правка после подписи создаёт v2, но подписанный v1 остаётся проверяемым."""
+    context = ps.ctx(client, "sg-superseded")
+    session = ps.approved(client, context)
+    assert _sign(client, context, session).status_code == 200
+
+    url = f"{BASE}/sessions/{session['id']}/protocol"
+    edited = dict(ps.FULL)
+    edited["recommendations"] = "КПТ, контроль через неделю"
+    resp = client.put(url, json={"sections": edited}, headers=context["doctor"])
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["version"] == 2
+    assert resp.json()["status"] == "draft"
+
+    verified = _verify(client, context, session)
+    assert verified.status_code == 200, verified.text
+    payload = verified.json()
+    assert payload["status"] == "valid", payload
+    assert payload["document"]["version"] == 1

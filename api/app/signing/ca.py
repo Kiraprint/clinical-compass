@@ -48,9 +48,22 @@ class Identity:
     organization: str
     snils: str | None = None
 
-    def cache_key(self, days: int) -> str:
+    def cache_key(self, days: int, ca_thumbprint: str) -> str:
+        """Ключ кэша листа: личность + срок + **отпечаток УЦ**.
+
+        Отпечаток обязателен: после смены УЦ (или удаления `_ca/`) старый лист
+        не должен переиспользоваться — иначе `sign` проходит, а `verify` навсегда
+        отдаёт `unknown_ca`.
+        """
         raw = "\x1f".join(
-            (self.fio, self.position, self.organization, self.snils or "", str(days))
+            (
+                ca_thumbprint,
+                self.fio,
+                self.position,
+                self.organization,
+                self.snils or "",
+                str(days),
+            )
         )
         return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
@@ -92,17 +105,20 @@ def _unpem(blob: bytes) -> bytes:
     return der
 
 
-def _secure_write(path: Path, data: bytes) -> None:
-    """Записать файл с правами 0600 (override существующего — тоже)."""
-    tmp = path.with_name(f"{path.name}.{secrets.token_hex(4)}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+def _create_exclusive(path: Path, data: bytes) -> bool:
+    """Создать файл 0600 ровно один раз. False — файл уже существует.
+
+    O_EXCL на **итоговом** имени (а не на временном): два процесса, стартующих
+    одновременно (`WEB_CONCURRENCY>1`), не могут перезаписать друг другу УЦ или
+    листовой ключ — проигравший гонку просто читает готовый файл.
+    """
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-        os.replace(tmp, path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+    return True
 
 
 def _load_external_ca() -> tuple[bytes, bytes] | None:
@@ -139,8 +155,14 @@ def _load_or_create_ca(root: Path) -> tuple[bytes, bytes]:
         ca=True,
     )
     _mkdir(root)
-    _secure_write(cert_path, _pem(der, "CERTIFICATE"))
-    _secure_write(key_path, _pem(private_key, "PRIVATE KEY"))
+    # Проигравший гонку процесс перечитывает созданную пару, а не перезаписывает.
+    created = _create_exclusive(cert_path, _pem(der, "CERTIFICATE"))
+    _create_exclusive(key_path, _pem(private_key, "PRIVATE KEY"))
+    if not created:
+        cert_blob, key_blob = _read(cert_path), _read(key_path)
+        if cert_blob is None or key_blob is None:
+            raise RuntimeError("демо-УЦ повреждён: нет пары ca.crt.pem/ca.key.pem")
+        return _unpem(cert_blob), _unpem(key_blob)
     return der, private_key
 
 
@@ -156,7 +178,7 @@ class Authority:
     def issue(self, role: str, identity: Identity, days: int) -> Signer:
         """Выпустить (или взять из кэша) листовой сертификат подписанта."""
         leaves = _mkdir(self.root / "leaves")
-        cached = identity.cache_key(days)
+        cached = identity.cache_key(days, self.certificate.thumbprint)
         cert_path, key_path = leaves / f"{cached}.crt.pem", leaves / f"{cached}.key.pem"
 
         cert_blob, key_blob = _read(cert_path), _read(key_path)
@@ -177,7 +199,6 @@ class Authority:
                 identity.fio,
                 identity.organization,
                 position=identity.position,
-                snils=identity.snils,
             ),
             issuer=self.certificate.parsed.subject,
             serial=secrets.randbits(63) or 1,
@@ -190,8 +211,15 @@ class Authority:
             ca=False,
             snils=identity.snils,
         )
-        _secure_write(cert_path, _pem(der, "CERTIFICATE"))
-        _secure_write(key_path, _pem(private_key, "PRIVATE KEY"))
+        # Проигравший гонку берёт готовую пару: сертификат и ключ всегда от одного УЦ.
+        created = _create_exclusive(cert_path, _pem(der, "CERTIFICATE"))
+        _create_exclusive(key_path, _pem(private_key, "PRIVATE KEY"))
+        if not created:
+            cert_blob, key_blob = _read(cert_path), _read(key_path)
+            if cert_blob is None or key_blob is None:
+                raise RuntimeError("кэш листового сертификата повреждён")
+            der = _unpem(cert_blob)
+            private_key = _unpem(key_blob)
         return Signer(
             role=role,
             identity=identity,

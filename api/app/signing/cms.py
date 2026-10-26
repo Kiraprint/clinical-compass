@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from asn1crypto import algos, cms as asn1cms, core
-from asn1crypto import x509 as asn1x509
 
 from . import ca, gost, x509
 
@@ -194,19 +193,10 @@ def chain_ok(certificate: x509.Certificate, authority_der: bytes) -> bool:
     return x509.verify_issued_by(certificate, issuer)
 
 
-def issued_by_subject(certificate: x509.Certificate, authority_der: bytes) -> bool:
-    """Издатель листа — именно наш УЦ (без проверки подписи)."""
-    try:
-        issuer = x509.parse(authority_der)
-    except ValueError:
-        return False
-    return certificate.parsed.issuer == issuer.parsed.subject
-
 
 __all__ = [
     "SignerInfo",
     "chain_ok",
-    "issued_by_subject",
     "sign",
     "verify_cms",
 ]

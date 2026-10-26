@@ -30,9 +30,7 @@ OID_GOST3410_2012_256_SIGN = "1.2.643.7.1.1.3.2"  # подпись с Стриб
 OID_CURVE_PARAMSET_B_256 = "1.2.643.7.1.2.1.1.2"  # id-tc26-gost-3410-2012-256-paramSetB
 
 KEY_BYTES = 32  # закрытый ключ
-PUBLIC_KEY_BYTES = 64  # X‖Y по 32 байта
 SIGNATURE_BYTES = 64  # r‖s по 32 байта
-HASH_BYTES = 32  # Стрибог-256
 
 _CURVE = CURVES_R_1323565_1_024_2019["id-tc26-gost-3410-2012-256-paramSetB"]
 _SIGNER = gostsignature.new(gostsignature.MODE_256, _CURVE)
