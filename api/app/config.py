@@ -239,8 +239,8 @@ class Settings(BaseSettings):
     # версию с OTP можно одним флагом. prod_mode требует require_otp=true.
     require_otp: bool = True
     # FR-48 (docs/03 §15): канал e-mail для кодов подтверждения. Пусто
-    # CC_SMTP_HOST/CC_SMTP_FROM → канал не настроен: демо-стенд с
-    # CC_ALLOW_DEMO_SECRETS отдаёт код в `demo_code`, прод (CC_PROD_MODE) — 503.
+    # CC_SMTP_HOST/CC_SMTP_FROM → канал не настроен: 503 всем адресам, кроме
+    # явно разрешённого демо-режима (см. `mail_demo_codes`).
     smtp_host: str = ""  # CC_SMTP_HOST
     smtp_port: int = 587  # CC_SMTP_PORT
     smtp_user: str = ""  # CC_SMTP_USER
@@ -250,6 +250,11 @@ class Settings(BaseSettings):
     # CC_EMAIL_OTP: подтверждать вход пациента кодом на e-mail. false — вход
     # паролем как раньше; сотрудники всегда через TOTP.
     email_otp: bool = False
+    # CC_MAIL_DEMO_CODES: отдавать код подтверждения прямо в ответе API, когда
+    # SMTP не настроен. Только для локальных стендов и e2e: включённый флаг в
+    # публичном контуре позволяет сбросить пароль чужого аккаунта, поэтому
+    # одной настройки `CC_ALLOW_DEMO_SECRETS` для этого недостаточно.
+    mail_demo_codes: bool = False
     # FR-24: период тика воркера напоминаний (сек). Отдельного шедулера в MVP нет:
     # `python -m app.reminders_worker` — отдельный процесс, как kb-enrichment.
     reminder_tick_seconds: int = 60  # CC_REMINDER_TICK_SECONDS
