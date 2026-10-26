@@ -33,7 +33,10 @@ if [ ! -x "$PY" ]; then
 fi
 export PYTHONPATH="$ROOT/api:$ROOT/core${PYTHONPATH:+:$PYTHONPATH}"
 STAGE="$ROOT/tools/dev-stage.sh"
-COMPOSE="docker compose -f infra/docker-compose.yml"
+# Свой проект и для config/build: `docker compose build` без `-p` пишет в
+# теги РАБОЧЕГО проекта (infra-api:latest), и следующий `up -d` на проде
+# поднял бы код ветки. Тома одноразового проекта здесь не создаются.
+COMPOSE="docker compose -f infra/docker-compose.yml -p cc-ci-build"
 
 WITH_E2E=0
 WITH_DOCKER=1

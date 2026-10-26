@@ -142,19 +142,27 @@ with psycopg.connect(admin, autocommit=True) as conn:
 PY
 }
 
-# Отпечаток входов: содержимое отслеживаемых файлов (ls-files -s — по блобам,
-# а не по времени) плюс незакоммиченные правки. HEAD в отпечаток НЕ входит:
-# иначе коммит, трогающий только docs/, заставлял бы пересобирать образы.
+# Отпечаток входов. ВАЖНО: берётся содержимое, а не имена — `git status` даёт
+# только список файлов, поэтому две разные правки одного файла давали бы один
+# хеш и образы не пересобирались бы (гейт зеленел бы на старом коде).
+#   ls-files -s      — блоб-хеши отслеживаемых файлов;
+#   diff HEAD        — содержимое незакоммиченных правок;
+#   hash-object      — содержимое новых untracked-файлов.
+# HEAD в отпечаток не входит: коммит, трогающий только docs/, не должен
+# заставлять пересобирать образы и переиндексировать КБ.
 fingerprint() {
-  { git ls-files -s "$@" 2>/dev/null; git status --porcelain -- "$@" 2>/dev/null; } \
-    | sha256sum | cut -d' ' -f1
+  {
+    git ls-files -s "$@" 2>/dev/null
+    git diff HEAD -- "$@" 2>/dev/null
+    git ls-files -o --exclude-standard -z -- "$@" 2>/dev/null \
+      | while IFS= read -r -d '' f; do git hash-object -- "$f"; done
+  } | sha256sum | cut -d' ' -f1
 }
 
 images_fp() { fingerprint api core ui ml pyproject.toml uv.lock infra; }
 kb_fp() {
-  { echo "$CC_EMBEDDER|$CC_KB_CHUNK_CHARS|$CC_KB_CHUNK_OVERLAP|$STACK_COLLECTION";
-    git ls-files -s api/app/kb_seed.py api/app/seed.py api/app/data api/app/enrichment core/compass 2>/dev/null;
-    git status --porcelain -- api/app/kb_seed.py api/app/seed.py api/app/data api/app/enrichment core/compass 2>/dev/null;
+  { echo "$CC_EMBEDDER|$CC_KB_CHUNK_CHARS|$CC_KB_CHUNK_OVERLAP|$STACK_COLLECTION"
+    fingerprint api/app/kb_seed.py api/app/seed.py api/app/data api/app/enrichment core/compass
   } | sha256sum | cut -d' ' -f1
 }
 
