@@ -110,6 +110,11 @@ class RAGChunk:
     guideline_id: str
     topic: str = ""
     score: float = 0.0
+    # id точки Qdrant — стабильный идентификатор чанка для ссылок на источник
+    # (docs/18 §5.4: sources[].id). Пусто, если стор его не отдал.
+    chunk_id: str = ""
+    # Провенанс источника (url гайдлайна/статьи); seed-чанки его не несут.
+    url: str = ""
 
 
 @dataclass(frozen=True)

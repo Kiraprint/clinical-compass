@@ -1,8 +1,10 @@
-"""FR-39: протокол приёма — структура §5, валидация §5.2, версии §3.4, approve §4.4.
+"""FR-39/FR-43: протокол приёма — структура §5, валидация §5.2, версии §3.4, approve §4.4.
 
 Протокол — юридически значимая запись приёма (docs/18 §1.1), а не заметка ИИ:
-черновик создаёт и подтверждает врач, ИИ (PR P3) заполняет только нарративные
-разделы и никогда — `diagnosis`/`treatment`.
+черновик создаёт и подтверждает врач. ИИ (PR P3) заполняет нарративные разделы,
+а `diagnosis`/`treatment` МОЖЕТ предложить только со ссылками на чанки KB
+(`sections.sources`, §5.3–5.4, FR-43): элемент без источника не переносится,
+спорные помечаются `needs_review`. Статус `approved` ставит исключительно врач.
 
 Инварианты версий (§3.4):
 - одновременно активна максимум одна версия из `draft|approved|signed|submitted`;
@@ -53,6 +55,11 @@ TREATMENT_MAX = 20  # позиций назначений
 LINE_CHARS = 500  # потолок одной строки (паспорт, назначение)
 PASSPORT_FIELDS = ("visit_at", "channel", "legal_basis")
 ICD10 = re.compile(r"^[A-Z]\d{2}(\.\d{1,2})?$")
+# §5.4 (FR-43): обоснования черновика. Потолки — чтобы документ не разросся
+# и подпись не считалась по мегабайту цитат.
+SOURCES_MAX = 50
+SOURCE_QUOTE_CHARS = 2000
+SOURCE_FIELDS = ("id", "ref", "section", "title", "url")
 
 # §5.2: обязательны для approve (пусто → 409 PROTOCOL_NOT_READY со списком).
 REQUIRED = (
@@ -155,6 +162,51 @@ def validate_sections(sections: dict) -> None:
                 raise Problem(422, "VALIDATION_ERROR", f"treatment[{i}]: ожидался объект")
             for field in ("drug", "dose", "schedule", "duration"):
                 _check_text(item.get(field), f"treatment[{i}].{field}", LINE_CHARS)
+
+    sources = sections.get("sources")
+    if sources is not None:
+        if not isinstance(sources, list):
+            raise Problem(422, "VALIDATION_ERROR", "sources: ожидался массив")
+        if len(sources) > SOURCES_MAX:
+            raise Problem(
+                422, "PROTOCOL_SECTION_TOO_LONG", f"sources: максимум {SOURCES_MAX} записей"
+            )
+        for i, item in enumerate(sources):
+            if not isinstance(item, dict):
+                raise Problem(422, "VALIDATION_ERROR", f"sources[{i}]: ожидался объект")
+            for field in SOURCE_FIELDS:
+                _check_text(item.get(field), f"sources[{i}].{field}", LINE_CHARS)
+            _check_text(item.get("quote"), f"sources[{i}].quote", SOURCE_QUOTE_CHARS)
+            used = item.get("used_by", [])
+            if not isinstance(used, list) or not all(isinstance(name, str) for name in used):
+                raise Problem(
+                    422, "VALIDATION_ERROR", f"sources[{i}].used_by: ожидался массив строк"
+                )
+
+
+
+    # FR-43/§5.4: ссылка диагноза и лечения обязана указывать на запись из
+    # `sources` этого же документа. Иначе подписанный документ несёт
+    # обоснование, которое не поддерживает его содержимое (UI мог слить
+    # старый черновик с новой выдачей источников).
+    known = {item.get("id") for item in (sources or [])}
+    refs: list[tuple[str, object]] = []
+    diagnosis = sections.get("diagnosis")
+    if isinstance(diagnosis, dict) and diagnosis.get("sources") is not None:
+        refs.append(("diagnosis.sources", diagnosis.get("sources")))
+    for i, item in enumerate(treatment or []):
+        if isinstance(item, dict) and item.get("sources") is not None:
+            refs.append((f"treatment[{i}].sources", item.get("sources")))
+    for label, value in refs:
+        if not isinstance(value, list) or not all(isinstance(ref, str) for ref in value):
+            raise Problem(422, "VALIDATION_ERROR", f"{label}: ожидался массив строк")
+        missing = [ref for ref in value if ref not in known]
+        if missing:
+            raise Problem(
+                422,
+                "PROTOCOL_SOURCE_UNKNOWN",
+                f"{label}: источника {missing[0]} нет в sources",
+            )
 
 
 def _value(sections: dict, path: tuple[str, ...]):

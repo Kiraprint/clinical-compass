@@ -278,6 +278,7 @@ class AgentFactory:
         allowed_work_ids: set[str] | None = None,
         redline_query: str | None = None,
         corpus_drugs: list[dict] | None = None,
+        allow_redline: bool = False,
     ) -> list[RAGChunk]:
         """Инструмент doctor-search: гибридный поиск по Qdrant (docs/07 §7).
 
@@ -291,8 +292,17 @@ class AgentFactory:
 
         allowed_work_ids (FR-36): статьи, которые врач одобрил лично; всё
         остальное из статей в выдачу не попадает (гайдлайны ВОЗ и seed — всегда).
+
+        allow_redline (FR-43): обход red-line гейта. Гейт запрещает ПОИСК по
+        запросу про диагноз/лечение, потому что публичный чат не должен
+        подсказывать терапию. Черновик протокола сессии — врач-в-петле: он и
+        так формирует диагноз/лечение, а источники нужны как обоснование
+        (docs/18 §5.3). Врач/пациентский чат этот параметр не передают —
+        гейт там остаётся включённым.
         """
-        if detect_redline(redline_query if redline_query is not None else query) is not None:
+        if not allow_redline and detect_redline(
+            redline_query if redline_query is not None else query
+        ) is not None:
             return []
         embedder = get_embedder()
         use_sparse = getattr(embedder, "use_sparse", True)
@@ -344,6 +354,8 @@ class AgentFactory:
                 guideline_id=h["guideline_id"],
                 topic=h["topic"],
                 score=h["score"],
+                chunk_id=h.get("id") or "",
+                url=h.get("url") or "",
             )
             for h in hits
         ]

@@ -549,6 +549,15 @@ export default function SessionAssistantCard({
     try {
       const draft = await api.draftProtocol(session.id);
       if (!alive.current) return;
+      // FR-43: врач сразу видит, чем модель обосновала черновик, — чипы и бейджи
+      // уже в редакторе панели, здесь короткая сводка к кнопке.
+      const grounded = draft.sections?.sources?.length ?? 0;
+      const flags = draft.needs_review?.length ?? 0;
+      setNote(
+        grounded > 0
+          ? `Черновик готов: обоснований из базы знаний — ${grounded}, отметок «проверить» — ${flags}.`
+          : "Черновик готов без обоснований: база знаний не дала источников — лечение проверьте вручную.",
+      );
       onDraft(draft);
     } catch (e: unknown) {
       setErr(aiErrorText(e, "Не удалось сформировать черновик"));

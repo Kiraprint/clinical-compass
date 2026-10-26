@@ -131,6 +131,10 @@ class Settings(BaseSettings):
     # `/v1/transcribe` (аудио приёма бывает на час) и черновик протокола в LLM.
     # Отдельно от CC_ML_TIMEOUT (5 с: маскирование ПДн ждёт короткий таймаут).
     session_ai_timeout: float = Field(default=600.0, gt=0)
+    # CC_SESSION_AI_SOURCES (FR-43): сколько чанков KB искать для обоснования
+    # черновика протокола (docs/18 §5.3–5.4). 0 — не ходить в KB вовсе
+    # (черновик без источников, needs_review sources_unavailable).
+    session_ai_sources: int = Field(default=12, ge=0, le=50)
     # CC_ARTIFACTS_DIR: каталог шифрованных артефактов (AES-256-GCM, docs/18 §4.6;
     # в compose — volume, в тестах — tmp-каталог).
     artifacts_dir: str = "/var/lib/compass/artifacts"

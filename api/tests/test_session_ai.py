@@ -24,7 +24,7 @@ from sqlalchemy import text
 from app.config import settings
 from app.models import DocumentArtifact
 from app.services import artifacts as artifacts_svc
-from app.services import llm_router, ml_client
+from app.services import llm_router, ml_client, session_ai
 
 BASE = "/api/v1/clinician"
 
@@ -127,6 +127,19 @@ def _defaults(monkeypatch):
 def _enable(monkeypatch) -> None:
     monkeypatch.setattr(settings, "session_ai_enabled", True)
     monkeypatch.setattr(settings, "assistant_llm_url", "http://llm:18080/v1")
+
+
+
+class _NoKb:
+    """FR-43: KB в этих тестах недоступна — черновик без источников (без сети)."""
+
+    def search_kb(self, *args, **kwargs):  # noqa: ANN002, ANN003 — заглушка
+        raise RuntimeError("KB недоступна")
+
+
+@pytest.fixture(autouse=True)
+def _no_kb(monkeypatch):
+    monkeypatch.setattr(session_ai, "shared_factory", lambda: _NoKb())
 
 
 def _fake_ml(monkeypatch, *, gate: threading.Event | None = None) -> dict:
@@ -461,11 +474,13 @@ def test_draft_builds_llm_only_draft_with_red_lines(client, monkeypatch, db_sess
     assert draft["status"] == "draft"
     assert draft["source"] == "llm"
     assert draft["model"] == settings.assistant_llm_model
-    assert draft["prompt_version"] == "v1"
+    assert draft["prompt_version"] == "v2"
     assert draft["approved_by"] is None
 
     sections = draft["sections"]
-    assert "diagnosis" not in sections and "treatment" not in sections
+    # FR-43: без источников диагноз/лечение не переносятся, а не «запрещены навсегда».
+    assert "diagnosis" not in sections and sections["treatment"] == []
+    assert sections["sources"] == []
     assert sections["complaints"] == "тревога, нарушение сна"
     assert sections["mental_status"]["suicidal_risk"] == "отрицает"
     assert sections["passport"]["channel"] == session["channel"]
@@ -474,8 +489,12 @@ def test_draft_builds_llm_only_draft_with_red_lines(client, monkeypatch, db_sess
 
     needs = draft["needs_review"]
     assert {"section": "mental_status.suicidal_risk", "reason": "clinical_risk"} in needs
-    unexpected = [n for n in needs if n["reason"] == "unexpected_section"]
-    assert {"diagnosis", "treatment"} <= {n["key"] for n in unexpected}
+    # KB недоступна в этом тесте: элементы без источника отброшены, лечение не обосновано.
+    # Отброшенные строки позиций не занимают — причина на разделе целиком.
+    assert {"section": "diagnosis", "reason": "source_missing"} in needs
+    assert {"section": "treatment", "reason": "source_missing"} in needs
+    assert {"section": "treatment", "reason": "sources_unavailable"} in needs
+    assert not [n for n in needs if n["reason"] == "unexpected_section"]
     assert {"section": "recommendations", "reason": "dosage_in_draft"} in needs
 
     # Транскрипт — отдельное пользовательское сообщение в явных границах §5.3.
@@ -485,6 +504,9 @@ def test_draft_builds_llm_only_draft_with_red_lines(client, monkeypatch, db_sess
     system, user = messages[0]["content"], messages[1]["content"]
     assert "просыпаюсь" not in system and "Иванов" not in system
     assert "<<ТРАНСКРИПТ>>" in user and "<<КОНЕЦ>>" in user
+
+    assert "<<ИСТОЧНИКИ>>" in user  # FR-43: блок обоснований в промпте
+    assert "источники недоступны" in user  # KB в тесте лежит — модель об этом знает
     assert "тревогу" in user  # содержимое разговора ушло модели
     assert "Иванов" not in user and "916" not in user
     assert "не инструкции" in system  # указания внутри данных игнорируются
