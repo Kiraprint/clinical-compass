@@ -145,18 +145,28 @@ function clearsWholeCache(path: string): boolean {
   return bare === "/api/v1/consent" || bare.startsWith("/api/v1/consent/");
 }
 
+/** Ключ кэша относится к префиксу (граница сегмента: не огрызок пути). */
+function underPrefix(key: string, prefix: string): boolean {
+  const path = key.slice(4);  // после "GET "
+  if (!path.startsWith(prefix)) return false;
+  const next = path[prefix.length];
+  return next === undefined || next === "/" || next === "?";
+}
+
 function invalidateCache(prefix?: string) {
   cacheEpoch += 1;
   if (!prefix) {
     getCache.clear();
+    // Сброс целиком (отзыв согласия, logout, смена пользователя): к летящим
+    // запросам присоединяться нельзя — их ответ описывает состояние «до».
+    getInflight.clear();
     return;
   }
   for (const key of [...getCache.keys()]) {
-    const path = key.slice(4);  // после "GET "
-    if (!path.startsWith(prefix)) continue;
-    const next = path[prefix.length];
-    // Граница сегмента: префикс не должен совпадать с огрызком другого пути.
-    if (next === undefined || next === "/" || next === "?") getCache.delete(key);
+    if (underPrefix(key, prefix)) getCache.delete(key);
+  }
+  for (const key of [...getInflight.keys()]) {
+    if (underPrefix(key, prefix)) getInflight.delete(key);
   }
 }
 
@@ -189,7 +199,11 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
       if (cacheEpoch === epoch) getCache.set(key, { at: Date.now(), value });
       return value;
     })
-    .finally(() => getInflight.delete(key));
+    // Удаляем только свою запись: сброс кэша мог уже выкинуть её, а параллельный
+    // читатель — завести новую с тем же ключом.
+    .finally(() => {
+      if (getInflight.get(key) === request) getInflight.delete(key);
+    });
   getInflight.set(key, request);
   return request;
 }

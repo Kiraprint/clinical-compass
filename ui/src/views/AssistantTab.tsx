@@ -78,7 +78,8 @@ export default function AssistantTab({ patients }: { patients: PatientCard[] }) 
     setBusy(true);
     setError("");
     // Явное «Обновить» — запрос за свежим состоянием, мимо кэша GET.
-    api.invalidate();
+    // Ассистент меняет только треды: остальной кэш кабинета не трогаем.
+    api.invalidate("/api/v1/assistant/threads");
     try {
       const list = await refreshThreads();
       if (activeId && list.some((t) => t.id === activeId)) await selectThread(activeId);

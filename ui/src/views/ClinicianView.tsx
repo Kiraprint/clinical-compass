@@ -142,6 +142,9 @@ function Collapsible({
   // введённое/загруженное состояние.
   const [everOpened, setEverOpened] = useState(open);
   const ref = useRef<HTMLDetailsElement>(null);
+  // Раскрытие из оглавления (jump) — программное: оно не должно переписывать
+  // пользовательскую настройку «свёрнут» в localStorage.
+  const ignoreToggle = useRef(false);
 
   const remember = (next: boolean) => {
     try {
@@ -155,9 +158,11 @@ function Collapsible({
     const el = ref.current;
     if (!el) return;
     detailOpeners.set(el, () => {
-      setOpen(true);
       setEverOpened(true);
-      remember(true);
+      if (!el.open) {
+        ignoreToggle.current = true;
+        setOpen(true);
+      }
     });
     return () => {
       detailOpeners.delete(el);
@@ -175,6 +180,11 @@ function Collapsible({
         const next = e.currentTarget.open;
         setOpen(next);
         if (next) setEverOpened(true);
+        // toggle от программного раскрытия: состояние применяем, настройку не трогаем.
+        if (ignoreToggle.current) {
+          ignoreToggle.current = false;
+          if (next) return;
+        }
         remember(next);
       }}
     >
@@ -965,6 +975,7 @@ export default function ClinicianView() {
   // Ростер без фильтра триажа: ассистенту, расписанию и распознаванию НЯ нужны все
   // свои пациенты, а `cards` — это реестр под выбранным фильтром.
   const [roster, setRoster] = useState<PatientCard[]>([]);
+  const [rosterError, setRosterError] = useState("");
   // Общая очередь эскалаций — не только свои пациенты (docs/16 §3).
   const [escalations, setEscalations] = useState<Escalation[]>([]);
   // FR-28: НЯ, сообщённые пациентами и ждущие проверки врача.
@@ -1005,6 +1016,8 @@ export default function ClinicianView() {
 
   useEffect(() => {
     let cancelled = false;
+    // Раздел «Напоминания» — явный запрос за актуальным «просрочено»: мимо кэша.
+    if (section === "reminders") api.invalidate("/api/v1/clinician/reminders");
     api
       .clinicianReminders()
       .then((r) => {
@@ -1019,7 +1032,7 @@ export default function ClinicianView() {
     return () => {
       cancelled = true;
     };
-  }, [reminderVersion]);
+  }, [section, reminderVersion]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1046,10 +1059,18 @@ export default function ClinicianView() {
     api
       .clinicianPatients()
       .then((data) => {
-        if (!cancelled) setRoster(data.items);
+        if (!cancelled) {
+          setRoster(data.items);
+          setRosterError("");
+        }
       })
-      .catch(() => {
-        if (!cancelled) setRoster([]);
+      .catch((e: unknown) => {
+        // Свой текст: ошибка фильтра реестра к выбору пациента в расписании
+        // отношения не имеет.
+        if (!cancelled) {
+          setRoster([]);
+          setRosterError(errText(e));
+        }
       });
     return () => {
       cancelled = true;
@@ -1076,7 +1097,8 @@ export default function ClinicianView() {
   }, [section, listsVersion]);
 
   useEffect(() => {
-    if (section !== "dashboard") return;
+    // Очередь и бейдж НЯ живут и на дашборде, и в реестре пациентов.
+    if (section !== "dashboard" && section !== "patients") return;
     let cancelled = false;
     api
       .adverseQueue("pending")
@@ -1304,7 +1326,7 @@ export default function ClinicianView() {
       return <RemindersView cards={cards} version={reminderVersion} onChanged={bump} />;
     }
     if (section === "schedule") {
-      return <ScheduleView roster={roster} rosterError={cardsError} />;
+      return <ScheduleView roster={roster} rosterError={rosterError} />;
     }
     if (section === "dashboard") {
       return (
@@ -3159,7 +3181,16 @@ function HistoryBlock({ patientId }: { patientId: string }) {
             >{chip.label}</button>
           );
         })}
-        <button className="link" style={{ fontSize: 13 }} onClick={() => load()} disabled={loading}>
+        <button
+          className="link"
+          style={{ fontSize: 13 }}
+          onClick={() => {
+            // Явное «Обновить» — мимо кэша GET (события истории могли добавиться).
+            api.invalidate("/api/v1/clinician/patients");
+            void load();
+          }}
+          disabled={loading}
+        >
           Обновить
         </button>
       </div>

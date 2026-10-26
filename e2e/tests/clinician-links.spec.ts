@@ -9,7 +9,7 @@ test("имя пациента в списке даёт ссылку #patient и 
   await openSection(page, "Пациенты");
   await expect(page.getByRole("button", { name: "Все" })).toBeVisible();
 
-  const link = page.locator('a[href^="#patient="]').first();
+  const link = page.locator('table.patients a[href^="#patient="]').first();
   const href = await link.getAttribute("href");
   expect(href).toMatch(/^#patient=[0-9a-f-]{36}$/);
   const name = (await link.innerText()).trim();
@@ -54,7 +54,7 @@ test("оглавление карточки: чип «Динамика» рас�
 }) => {
   await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
   await openSection(page, "Пациенты");
-  await page.locator('a[href^="#patient="]').first().click();
+  await page.locator('table.patients a[href^="#patient="]').first().click();
   await expect(page.getByText("← Назад к списку")).toBeVisible();
 
   const nav = page.getByRole("navigation", { name: "Разделы карточки пациента" });
@@ -96,7 +96,7 @@ test("оглавление карточки: на 390px чипы скролля�
   await page.setViewportSize({ width: 390, height: 780 });
   await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
   await openSection(page, "Пациенты");
-  await page.locator('a[href^="#patient="]').first().click();
+  await page.locator('table.patients a[href^="#patient="]').first().click();
   await expect(page.getByText("← Назад к списку")).toBeVisible();
 
   const nav = page.getByRole("navigation", { name: "Разделы карточки пациента" });
@@ -120,7 +120,7 @@ test("оглавление карточки: липкая кнопка «Мен�
 }) => {
   await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
   await openSection(page, "Пациенты");
-  await page.locator('a[href^="#patient="]').first().click();
+  await page.locator('table.patients a[href^="#patient="]').first().click();
   await expect(page.getByText("← Назад к списку")).toBeVisible();
   // openSection открывает меню кабинета: на узкой ширине это оверлей поверх
   // карточки. Закрываем, иначе меряем попадание в оверлей, а не в чипы.
