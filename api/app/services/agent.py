@@ -11,9 +11,11 @@
 from __future__ import annotations
 
 import logging
-from typing import Sequence, TypedDict
-
 import re
+from typing import AsyncIterator, Sequence, TypedDict
+
+import anyio
+
 from langgraph.graph import END, START, StateGraph
 
 from compass.agent import Citation, RAGAnswer, RAGChunk, build_rag_answer, detect_redline
@@ -180,8 +182,14 @@ def _compose_answer(
     """
     payload = [{"text": c.text, "source_title": c.source_title} for c in chunks]
     text = llm_router.compose_answer(history, query, payload)
+    return _finalize_llm_answer(text, chunks)
+
+
+def _finalize_llm_answer(text: str | None, chunks: list[RAGChunk]) -> RAGAnswer | None:
+    """Проверка ссылок модели и сборка citations; None — брать детерминированный."""
     if not text:
         return None
+    payload = [{"text": c.text, "source_title": c.source_title} for c in chunks]
     window = llm_router.answer_snippet_window(payload)
     picked: list[RAGChunk] = []
     positions: dict[int, int] = {}  # номер сниппета → номер в citations
@@ -233,6 +241,26 @@ class AgentState(TypedDict, total=False):
     patient_contexts: list[dict] | None
     corpus_drugs: list[dict] | None
     answer: dict
+
+
+def _answer_dict(state: AgentState, result: RAGAnswer) -> dict:
+    return {
+        "answer": result.answer,
+        "grounded": result.grounded,
+        "refused": result.refused,
+        "refusal_code": result.refusal_code,
+        "topic": state.get("topic"),
+        "citations": [
+            {
+                "source_title": c.source_title,
+                "guideline_id": c.guideline_id,
+                "topic": c.topic,
+                "score": c.score,
+            }
+            for c in result.citations
+        ],
+    }
+
 
 class AgentFactory:
     def __init__(self, client) -> None:
@@ -357,24 +385,7 @@ class AgentFactory:
                 patient_context=state.get("patient_context"),
                 patient_contexts=state.get("patient_contexts"),
             )
-        return {
-            "answer": {
-                "answer": result.answer,
-                "grounded": result.grounded,
-                "refused": result.refused,
-                "refusal_code": result.refusal_code,
-                "topic": state.get("topic"),
-                "citations": [
-                    {
-                        "source_title": c.source_title,
-                        "guideline_id": c.guideline_id,
-                        "topic": c.topic,
-                        "score": c.score,
-                    }
-                    for c in result.citations
-                ],
-            }
-        }
+        return {"answer": _answer_dict(state, result)}
 
     def build(self):
         if self._graph is None:
@@ -402,6 +413,37 @@ class AgentFactory:
         corpus_drugs: list[dict] | None = None,
         history: list[dict] | None = None,
     ) -> dict:
+        return self.build().invoke(
+            self._state(
+                query,
+                topic=topic,
+                topics=topics,
+                limit=limit,
+                patient_context=patient_context,
+                patient_contexts=patient_contexts,
+                exclude_ids=exclude_ids,
+                allowed_work_ids=allowed_work_ids,
+                retrieval_query=retrieval_query,
+                corpus_drugs=corpus_drugs,
+                history=history,
+            )
+        )["answer"]
+
+    def _state(
+        self,
+        query: str,
+        *,
+        topic: str | None = None,
+        topics: Sequence[str] | None = None,
+        limit: int = 5,
+        patient_context: dict | None = None,
+        patient_contexts: list[dict] | None = None,
+        exclude_ids: set[str] | None = None,
+        allowed_work_ids: set[str] | None = None,
+        retrieval_query: str | None = None,
+        corpus_drugs: list[dict] | None = None,
+        history: list[dict] | None = None,
+    ) -> AgentState:
         # Retrieval и роутинг раздела идут по retrieval_query (FR-21):
         # assistant_chat подставляет сюда LLM-переформулировку уточняющего
         # вопроса. Без неё (одиночный вопрос/LLM выключен) — сам query.
@@ -417,26 +459,61 @@ class AgentFactory:
         elif not topic_list and detect_redline(query) is None:
             topic_list = llm_router.route_topics(search_query)
         topic = topic_list[0] if topic_list else None
-        return self.build().invoke(
-            {
-                "query": query,
-                "retrieval_query": search_query,
-                "topic": topic,
-                "topics": topic_list,
-                "limit": limit,
-                "patient_context": patient_context,
-                "patient_contexts": patient_contexts,
-                "corpus_drugs": corpus_drugs,
-                # История треда (уже деперсонализированная) — контекст только
-                # для LLM-ответа; retrieval/red line её не видят.
-                "history": history or [],
-                "exclude_ids": exclude_ids or set(),
-                # FR-36: None — фильтр не нужен, set() (в т.ч. пустой) — статьи
-                # видны только из allow-list. Вызывающий клинический путь всегда
-                # передаёт множество (возможно пустое).
-                "allowed_work_ids": allowed_work_ids,
-            }
-        )["answer"]
+        return {
+            "query": query,
+            "retrieval_query": search_query,
+            "topic": topic,
+            "topics": topic_list,
+            "limit": limit,
+            "patient_context": patient_context,
+            "patient_contexts": patient_contexts,
+            "corpus_drugs": corpus_drugs,
+            # История треда (уже деперсонализированная) — контекст только
+            # для LLM-ответа; retrieval/red line её не видят.
+            "history": history or [],
+            "exclude_ids": exclude_ids or set(),
+            # FR-36: None — фильтр не нужен, set() (в т.ч. пустой) — статьи
+            # видны только из allow-list. Вызывающий клинический путь всегда
+            # передаёт множество (возможно пустое).
+            "allowed_work_ids": allowed_work_ids,
+        }
+
+    async def stream(self, query: str, **kwargs) -> AsyncIterator[dict]:
+        """Ответ по сниппетам токенами: retrieve, затем SSE-поток LLM.
+
+        Отдаёт `{"delta": str}` по мере генерации и последний `{"answer": dict}`
+        в формате invoke(). Любой сбой LLM после начала потока завершается
+        детерминированным build_rag_answer: UI заменит текст финальным.
+        """
+        state = await anyio.to_thread.run_sync(lambda: self._state(query, **kwargs))
+        state = {**state, **await anyio.to_thread.run_sync(self._retrieve, state)}
+        chunks = state.get("chunks") or []
+        payload = [{"text": c.text, "source_title": c.source_title} for c in chunks]
+        result: RAGAnswer | None = None
+        if chunks and detect_redline(query) is None:
+            parts: list[str] = []
+            try:
+                async for piece in llm_router.compose_answer_stream(
+                    state.get("history") or [], query, payload
+                ):
+                    parts.append(piece)
+                    yield {"delta": piece}
+                result = _finalize_llm_answer(llm_router.clean_answer("".join(parts)), chunks)
+            except Exception as exc:  # транспорт/SSE/парсер — не ломаем ответ
+                logger.warning(
+                    "assistant LLM-поток прервался (%s: %s) — детерминированный ответ",
+                    type(exc).__name__,
+                    exc,
+                )
+        if result is None:
+            result = build_rag_answer(
+                query,
+                chunks,
+                patient_context=state.get("patient_context"),
+                patient_contexts=state.get("patient_contexts"),
+            )
+        yield {"answer": _answer_dict(state, result)}
+
 
 # --- Разделяемые клиенты процесса -------------------------------------------
 # Один Qdrant-клиент и один скомпилированный граф на процесс: LangGraph

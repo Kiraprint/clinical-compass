@@ -18,6 +18,8 @@ Red line, отказ и цитаты считаются по исходному 
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
+from typing import AsyncIterator
 
 import anyio
 
@@ -84,6 +86,35 @@ async def _invoke_agent(query: str, **kwargs) -> dict:
     if scope.cancelled_caught:
         raise _timeout()
     return result
+
+
+@dataclass
+class _Turn:
+    """Всё, что подготовлено до вызова агента и нужно после него."""
+
+    thread: AssistantThread
+    ids: list[uuid.UUID]
+    history: list[dict]
+    question: AssistantMessage
+    skipped: list[str]
+    exclude_ids: set[str]
+    allowed_work_ids: set[str] | None
+    corpus_drugs: list[dict]
+    scrubbed_query: str
+    scrubbed_contexts: list[dict]
+    search_query: str
+    rewritten: bool
+
+
+async def _stream_agent(query: str, **kwargs) -> AsyncIterator[dict]:
+    """То же, что _invoke_agent, но токенами; лимитер держится весь поток."""
+    factory = shared_factory()
+    with anyio.move_on_after(settings.assistant_deadline_s) as scope:
+        async with AGENT_LIMITER:
+            async for item in factory.stream(query, **kwargs):
+                yield item
+    if scope.cancelled_caught:
+        raise _timeout()
 
 async def normalize_patient_ids(db: AsyncSession, clinician_id, patient_ids) -> list[uuid.UUID]:
     """Дедуп + лимит + roster-гейт. Возвращает id в порядке перечисления."""
@@ -318,7 +349,7 @@ async def answer_query(
     result["depersonalization"] = report
     return result
 
-async def post_message(
+async def _prepare_turn(
     db: AsyncSession,
     clinician_id,
     thread_id,
@@ -326,8 +357,8 @@ async def post_message(
     *,
     patient_ids=None,
     ip: str | None = None,
-) -> dict:
-    """Вопрос врача → ответ RAG с учётом истории треда и карт пациентов."""
+) -> _Turn:
+    """Тред, история, вопрос и очищенный поисковый запрос до вызова агента."""
     thread = await get_thread(db, clinician_id, thread_id)
     if patient_ids is not None:
         await _set_patients(db, thread.id, await normalize_patient_ids(db, clinician_id, patient_ids))
@@ -382,32 +413,39 @@ async def post_message(
         if candidate:
             search_query, rewritten = candidate, True
 
-    result = await _invoke_agent(
-        scrubbed_query,
-        retrieval_query=search_query if rewritten else None,
-        limit=5,
-        patient_contexts=scrubbed_contexts or None,
+    return _Turn(
+        thread=thread,
+        ids=ids,
+        history=history,
+        question=question,
+        skipped=skipped,
         exclude_ids=exclude_ids,
         allowed_work_ids=allowed_work_ids,
         corpus_drugs=corpus_drugs,
-        # История треда — контекст для LLM-ответа (FR-17); она уже прошла
-        # scrub_for_llm в _history_for_llm, карты пациентов сюда не входят.
-        history=history,
+        scrubbed_query=scrubbed_query,
+        scrubbed_contexts=scrubbed_contexts,
+        search_query=search_query,
+        rewritten=rewritten,
     )
 
+
+async def _store_answer(
+    db: AsyncSession, clinician_id, turn: _Turn, result: dict, *, ip: str | None
+) -> dict:
+    """Ответ агента → AssistantMessage + аудит; возвращает контракт ручки."""
     answer = AssistantMessage(
-        thread_id=thread.id,
+        thread_id=turn.thread.id,
         role="ASSISTANT",
         content=result["answer"],
         citations=result.get("citations") or [],
         topic=result.get("topic"),
     )
     db.add(answer)
-    if not ids:
+    if not turn.ids:
         await audit.record(
             db, uuid.UUID(str(clinician_id)), "ASK_ASSISTANT", "kb", None, ip=ip
         )
-    elif skipped:
+    elif turn.skipped:
         # Часть карт недоступна (roster/согласие), но расшифрованная история
         # треда всё равно читается → фиксируем PHI-доступ.
         await audit.record(
@@ -415,12 +453,12 @@ async def post_message(
             uuid.UUID(str(clinician_id)),
             "READ_ASSISTANT_THREAD",
             "assistant_thread",
-            str(thread.id),
+            str(turn.thread.id),
             ip=ip,
         )
-    thread.updated_at = func.now()
+    turn.thread.updated_at = func.now()
     await db.commit()
-    await db.refresh(question)
+    await db.refresh(turn.question)
     await db.refresh(answer)
     return {
         "answer": answer.content,
@@ -429,9 +467,83 @@ async def post_message(
         "grounded": result.get("grounded", False),
         "refused": result.get("refused", False),
         "refusal_code": result.get("refusal_code"),
-        "skipped_patient_ids": skipped,
-        "message_ids": [str(question.id), str(answer.id)],
+        "skipped_patient_ids": turn.skipped,
+        "message_ids": [str(turn.question.id), str(answer.id)],
         # Основание поиска для врача: что реально искали и была ли LLM-переформулировка.
-        "retrieval_query": search_query,
-        "rewritten": rewritten,
+        "retrieval_query": turn.search_query,
+        "rewritten": turn.rewritten,
     }
+
+
+async def post_message(
+    db: AsyncSession,
+    clinician_id,
+    thread_id,
+    content: str,
+    *,
+    patient_ids=None,
+    ip: str | None = None,
+) -> dict:
+    """Вопрос врача → ответ RAG с учётом истории треда и карт пациентов."""
+    turn = await _prepare_turn(
+        db, clinician_id, thread_id, content, patient_ids=patient_ids, ip=ip
+    )
+    result = await _invoke_agent(
+        turn.scrubbed_query,
+        retrieval_query=turn.search_query if turn.rewritten else None,
+        limit=5,
+        patient_contexts=turn.scrubbed_contexts or None,
+        exclude_ids=turn.exclude_ids,
+        allowed_work_ids=turn.allowed_work_ids,
+        corpus_drugs=turn.corpus_drugs,
+        # История треда — контекст для LLM-ответа (FR-17); она уже прошла
+        # scrub_for_llm в _history_for_llm, карты пациентов сюда не входят.
+        history=turn.history,
+    )
+    return await _store_answer(db, clinician_id, turn, result, ip=ip)
+
+
+async def post_message_stream(
+    db: AsyncSession,
+    clinician_id,
+    thread_id,
+    content: str,
+    *,
+    patient_ids=None,
+    ip: str | None = None,
+) -> AsyncIterator[dict]:
+    """То же, что post_message, но текст ответа идёт событиями SSE.
+
+    События: meta (что искали), token ({"t": дельта}), done (полный
+    AssistantThreadAnswer). Ошибка до/во время потока — событие error в ручке.
+    """
+    turn = await _prepare_turn(
+        db, clinician_id, thread_id, content, patient_ids=patient_ids, ip=ip
+    )
+    yield {
+        "event": "meta",
+        "data": {
+            "skipped_patient_ids": turn.skipped,
+            "retrieval_query": turn.search_query,
+            "rewritten": turn.rewritten,
+        },
+    }
+    result: dict | None = None
+    async for item in _stream_agent(
+        turn.scrubbed_query,
+        retrieval_query=turn.search_query if turn.rewritten else None,
+        limit=5,
+        patient_contexts=turn.scrubbed_contexts or None,
+        exclude_ids=turn.exclude_ids,
+        allowed_work_ids=turn.allowed_work_ids,
+        corpus_drugs=turn.corpus_drugs,
+        history=turn.history,
+    ):
+        if "delta" in item:
+            yield {"event": "token", "data": {"t": item["delta"]}}
+        else:
+            result = item["answer"]
+    if result is None:
+        raise RuntimeError("агент не вернул ответ")
+    payload = await _store_answer(db, clinician_id, turn, result, ip=ip)
+    yield {"event": "done", "data": payload}
