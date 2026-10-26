@@ -6,7 +6,7 @@
 
 ## 1. Стратегия
 
-- Пирамида (фактически достигнуто на 2026-10-25, см. `core/tests` + `api/tests` + `ml/tests` + `e2e/tests`): unit (ядро) 187, integration (API+БД) 773 (из них 78 — обогащение КБ, FR-20; 18 — rate limiter на общем Redis-счётчике, docs/03 §12; 43 — деперсонализация/NER/remote, docs/12; 9 — клиент ML-сайдкара, docs/08 §4; 10 — пациентский кабинет и FR-34 в `test_patient_ux.py`; 24 — retrieval: чанкер/окно реранка/remote-эмбеддер/порог пула, docs/08 §3-4; 8 — персональное ревью статей врачом, FR-36; 14 — анамнез и изоляция росписи, FR-37; 29 — календарь приёмов, сессии и протокол приёма, FR-38/39 (`test_sessions_*.py`); 4 — маршрутизация двух тем на вопрос (FR-14); 2 — риск-паттерн чек-ина self_harm/suicidal и risk_assessed (docs/16 §2); 1 — fulltext-ссылка в библиотеке врача (FR-36); 1 — идемпотентность сида и сохранность реестра КБ при деплое (docs/03 §13)), ML-сайдкар в stub-режиме (без БД/GPU/torch) 30, e2e (UI-флоу) 46.
+- Пирамида (фактически достигнуто на 2026-10-25, см. `core/tests` + `api/tests` + `ml/tests` + `e2e/tests`): unit (ядро) 187, integration (API+БД) 778 (из них 78 — обогащение КБ, FR-20; 18 — rate limiter на общем Redis-счётчике, docs/03 §12; 43 — деперсонализация/NER/remote, docs/12; 9 — клиент ML-сайдкара, docs/08 §4; 10 — пациентский кабинет и FR-34 в `test_patient_ux.py`; 24 — retrieval: чанкер/окно реранка/remote-эмбеддер/порог пула, docs/08 §3-4; 8 — персональное ревью статей врачом, FR-36; 14 — анамнез и изоляция росписи, FR-37; 34 — календарь приёмов, сессии и протокол приёма, FR-38/39 (`test_sessions_*.py`); 4 — маршрутизация двух тем на вопрос (FR-14); 2 — риск-паттерн чек-ина self_harm/suicidal и risk_assessed (docs/16 §2); 1 — fulltext-ссылка в библиотеке врача (FR-36); 1 — идемпотентность сида и сохранность реестра КБ при деплое (docs/03 §13)), ML-сайдкар в stub-режиме (без БД/GPU/torch) 30, e2e (UI-флоу) 46.
 - Ядро: 100% детерминированные чистые функции — табличные параметризованные тесты порогов.
 - Интеграция: реальные HTTP-запросы к тестовому Postgres (отдельная БД), не мок-эхо.
 - Запрещены тесты «на копирование»: только поведение контрактов (вход → выход/инвариант/ошибка).
@@ -351,6 +351,11 @@
 | `test_tampered_file_is_detected` | файл артефакта | подмена одного байта | 500 `ARTIFACT_CORRUPT` (не молчаливый мусор) |
 | `test_path_outside_root_rejected` / `test_missing_file_reported` | путь из БД / удалённый файл | `get_bytes` | `ARTIFACT_CORRUPT` / `ARTIFACT_MISSING` |
 | `test_session_detail_lists_artifacts` | артефакт сессии | `GET /sessions/{id}` | метаданные артефакта видны, в БД нет текста |
+| `test_calendar_pagination` | два приёма в окне | `limit=1` / `offset=1` / `limit=201` | страницы по одному, 422 на потолке 200 (§4) |
+| `test_consent_update_is_audited` | сессия врача | `PATCH {audio_consent:true}` | 200 и строка `SESSION_CONSENT_UPDATE` по `clinical_session` |
+| `test_naive_datetime_rejected` | `starts_at`/`from` без пояса | `POST /appointments`, `GET /appointments` | 422 `VALIDATION_ERROR` вместо `TypeError` |
+| `test_diagnosis_code_conflict_rejected` | `sections.diagnosis.icd10=F41.1` | PUT с `diagnosis_code=F41.0` | 422 `PROTOCOL_ICD10_CONFLICT` |
+| `test_diagnosis_code_follows_sections_icd10` | PUT без `diagnosis_code` | PUT, затем `approve` | код берётся из разделов и закрепляется в `session_protocols` |
 
 ### 3.2 Async-рантайм, пулы и кеш корпуса
 

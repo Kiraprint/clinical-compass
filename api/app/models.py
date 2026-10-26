@@ -6,7 +6,7 @@ import json
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Float, Identity, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, Boolean, CHAR, CheckConstraint, Date, DateTime, ForeignKey, Float, Identity, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -987,7 +987,7 @@ class SessionProtocol(Base):
     source: Mapped[str] = mapped_column(String(16), server_default=text("'manual'"))
     # Канонический JSON разделов §5.1; свободный текст → шифруется (F1).
     sections_cipher: Mapped[str] = mapped_column(EncryptedText())
-    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    content_sha256: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)  # hex sha256
     diagnosis_code: Mapped[str | None] = mapped_column(String(16), nullable=True)
     model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     prompt_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
@@ -1034,7 +1034,7 @@ class DocumentArtifact(Base):
         ForeignKey("session_protocols.id"), nullable=True
     )
     path: Mapped[str] = mapped_column(String(400))
-    sha256: Mapped[str] = mapped_column(String(64))
+    sha256: Mapped[str] = mapped_column(CHAR(64))  # §3.6: char(64), хэш шифротекста
     size_bytes: Mapped[int] = mapped_column(Integer)
     mime: Mapped[str] = mapped_column(String(128))
     encrypted: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))

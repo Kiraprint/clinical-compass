@@ -42,12 +42,27 @@ PROTOCOL_ACTIVE = ("draft", "approved", "signed", "submitted")
 CONFIRMED = ("approved", "signed", "submitted")
 
 
+def _page_limit(limit: int) -> int:
+    """Потолок пагинации §4: клиент может попросить меньше 200, но не больше."""
+    return PAGE_LIMIT if limit <= 0 or limit > PAGE_LIMIT else limit
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _aware(value: datetime, label: str) -> None:
+    """ISO-8601 без зоны неоднозначен: naive-время отвергаем, а не угадываем пояс."""
+    if value.tzinfo is None:
+        raise Problem(
+            422, "VALIDATION_ERROR", f"`{label}`: ожидается ISO-8601 с часовым поясом"
+        )
+
+
 def _window(from_: datetime, to: datetime) -> None:
-    """Окно выборки: `to >= from` и не шире 62 дней (иначе — тяжёлый запрос)."""
+    """Окно выборки: оба конца с поясом, `to >= from`, не шире 62 дней."""
+    _aware(from_, "from")
+    _aware(to, "to")
     if to < from_:
         raise Problem(422, "VALIDATION_ERROR", "`to` раньше `from`")
     if to - from_ > timedelta(days=MAX_WINDOW_DAYS):
@@ -137,7 +152,13 @@ def _appointment_dict(a: Appointment, fio: str | None, has_session: bool) -> dic
 
 
 async def list_appointments(
-    db: AsyncSession, clinician_id, from_: datetime, to: datetime, patient_id=None
+    db: AsyncSession,
+    clinician_id,
+    from_: datetime,
+    to: datetime,
+    patient_id=None,
+    limit: int = PAGE_LIMIT,
+    offset: int = 0,
 ) -> dict:
     """Календарь врача за окно (свой roster). `patient_id` — фильтр по пациенту."""
     _window(from_, to)
@@ -150,7 +171,8 @@ async def list_appointments(
     )
     if patient_id is not None:
         stmt = stmt.where(Appointment.patient_id == patient_id)
-    rows = (await db.scalars(stmt.order_by(Appointment.starts_at).limit(PAGE_LIMIT))).all()
+    stmt = stmt.order_by(Appointment.starts_at).limit(_page_limit(limit)).offset(max(offset, 0))
+    rows = (await db.scalars(stmt)).all()
     fio = await _patients_fio(db, [r.patient_id for r in rows])
     with_session = await _appointments_with_session(db, [r.id for r in rows])
     return {
@@ -183,6 +205,7 @@ async def create_appointment(
         raise Problem(422, "VALIDATION_ERROR", "Канал: in_person | online | phone")
     if not 10 <= duration_min <= 480:
         raise Problem(422, "VALIDATION_ERROR", "Длительность приёма: 10..480 минут")
+    _aware(starts_at, "starts_at")
     await _lock_clinician(db, clinician_id)
     if await _overlaps(db, clinician_id, starts_at, duration_min):
         raise Problem(409, "SLOT_CONFLICT", "У врача уже есть приём в это время")
@@ -225,6 +248,7 @@ async def update_appointment(
     if not 10 <= duration_min <= 480:
         raise Problem(422, "VALIDATION_ERROR", "Длительность приёма: 10..480 минут")
     starts_at = changes.get("starts_at", row.starts_at)
+    _aware(starts_at, "starts_at")
 
     if "starts_at" in changes or "duration_min" in changes:
         await _lock_clinician(db, clinician_id)
@@ -388,9 +412,9 @@ async def list_sessions(
     to: datetime,
     patient_id=None,
     status: str | None = None,
+    limit: int = PAGE_LIMIT,
+    offset: int = 0,
 ) -> dict:
-    """Сессии врача за окно; `status` — active | finished."""
-    _window(from_, to)
     if status is not None and status not in ("active", "finished"):
         raise Problem(422, "VALIDATION_ERROR", "Статус: active | finished")
     if patient_id is not None:
@@ -404,7 +428,9 @@ async def list_sessions(
         stmt = stmt.where(ClinicalSession.patient_id == patient_id)
     if status is not None:
         stmt = stmt.where(ClinicalSession.status == status)
-    rows = (await db.scalars(stmt.order_by(ClinicalSession.started_at).limit(PAGE_LIMIT))).all()
+    stmt = stmt.order_by(ClinicalSession.started_at).limit(_page_limit(limit))
+    stmt = stmt.offset(max(offset, 0))
+    rows = (await db.scalars(stmt)).all()
     fio = await _patients_fio(db, [r.patient_id for r in rows])
     return {"items": [await _session_dict(db, r, fio.get(r.patient_id)) for r in rows]}
 
@@ -457,12 +483,20 @@ async def get_session(db: AsyncSession, clinician_id, session_id) -> dict:
     return payload
 
 
-async def update_session(db: AsyncSession, clinician_id, session_id, changes: dict) -> dict:
+async def update_session(
+    db: AsyncSession, clinician_id, session_id, changes: dict, ip: str | None = None
+) -> dict:
     """PATCH сессии: на текущем PR — только `audio_consent` (docs/18 §4.2)."""
     session = await require_session(db, clinician_id, session_id)
     await require_patient_access(db, clinician_id, session.patient_id)
     if "audio_consent" in changes:
         session.audio_consent = bool(changes["audio_consent"])
+        # Согласие на запись — отдельное основание обработки спецкатегории (§1.3):
+        # каждое переключение фиксируется в append-only журнале (только id).
+        await audit.record(
+            db, clinician_id, "SESSION_CONSENT_UPDATE", "clinical_session", str(session.id),
+            ip=ip,
+        )
     await db.flush()
     payload = await _session_dict(db, session)
     await db.commit()
@@ -516,6 +550,7 @@ async def finish_session(
     if session.status == "finished":
         payload = await _session_dict(db, session)
         payload["visit_id"] = str(visit.id) if visit else None
+        payload["duration_min"] = visit.duration_min if visit else None
         return payload
 
     ended_at = _now()
@@ -526,18 +561,28 @@ async def finish_session(
     session.ended_at = ended_at
     session.status = "finished"
 
-    if visit is None:
-        visit = Visit(
-            patient_id=session.patient_id,
-            clinician_id=clinician_id,
-            visited_at=session.started_at,
-            visit_type=session.channel,
-            duration_min=minutes,
-            notes=await _summary(db, session.id),
-            session_id=session.id,
-        )
-        db.add(visit)
-        await db.flush()
+    try:
+        if visit is None:
+            visit = Visit(
+                patient_id=session.patient_id,
+                clinician_id=clinician_id,
+                visited_at=session.started_at,
+                visit_type=session.channel,
+                duration_min=minutes,
+                notes=await _summary(db, session.id),
+                session_id=session.id,
+            )
+            db.add(visit)
+        await db.flush()  # UNIQUE visits.session_id: гонку двух finish ловим ниже
+    except IntegrityError:
+        # Параллельный finish уже создал приём: отдаём его, второй не нужен.
+        await db.rollback()
+        session = await require_session(db, clinician_id, session_id)
+        visit = await db.scalar(select(Visit).where(Visit.session_id == session.id))
+        payload = await _session_dict(db, session)
+        payload["visit_id"] = str(visit.id) if visit else None
+        payload["duration_min"] = visit.duration_min if visit else None
+        return payload
 
     await audit.record(
         db, clinician_id, "SESSION_FINISH", "clinical_session", str(session.id), ip=ip

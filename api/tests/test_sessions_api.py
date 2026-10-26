@@ -104,6 +104,29 @@ def test_calendar_window_capped(client):
     assert resp.json()["code"] == "VALIDATION_ERROR"
 
 
+
+def test_calendar_pagination(client):
+    """§4: limit/offset с потолком 200 — не «всё за окно одной пачкой»."""
+    ctx = _setup(client)
+    first = _appointment(client, ctx, starts_at=_slot(hours=30))
+    second = _appointment(client, ctx, starts_at=_slot(hours=40))
+    params = {"from": _slot(), "to": _slot(hours=24 * 7)}
+
+    page = client.get(f"{BASE}/appointments", params={**params, "limit": 1}, headers=ctx["doctor"])
+    assert page.status_code == 200, page.text
+    assert [item["id"] for item in page.json()["items"]] == [first["id"]]
+
+    tail = client.get(
+        f"{BASE}/appointments", params={**params, "limit": 1, "offset": 1}, headers=ctx["doctor"]
+    )
+    assert [item["id"] for item in tail.json()["items"]] == [second["id"]]
+
+    too_big = client.get(
+        f"{BASE}/appointments", params={**params, "limit": 201}, headers=ctx["doctor"]
+    )
+    assert too_big.status_code == 422
+
+
 def test_roster_gate_and_consent(client):
     ctx = _setup(client)
     # Пациент второго врача вне roster → 403 NO_ROSTER (существующий код, docs/03 §5).
@@ -361,6 +384,11 @@ def test_audit_rows_written_for_write_paths(client, db_session):
         f"{BASE}/appointments/{appt['id']}", json={"location": "каб. 3"}, headers=ctx["doctor"]
     )
     client.post(f"{BASE}/sessions/{session['id']}/finish", json={}, headers=ctx["doctor"])
+    client.patch(
+        f"{BASE}/sessions/{session['id']}",
+        json={"audio_consent": True},
+        headers=ctx["doctor"],
+    )
 
     actions = {
         row.action
@@ -377,3 +405,46 @@ def test_audit_rows_written_for_write_paths(client, db_session):
         text("SELECT coalesce(string_agg(action, ' '), '') FROM audit_log")
     ).scalar_one()
     assert "тревога" not in blob
+
+
+def test_consent_update_is_audited(client, db_session):
+    """PATCH `audio_consent` — отдельное основание обработки, значит и отдельный аудит."""
+    ctx = _setup(client)
+    session = client.post(
+        f"{BASE}/sessions", json={"patient_id": ctx["patient_id"]}, headers=ctx["doctor"]
+    ).json()
+    resp = client.patch(
+        f"{BASE}/sessions/{session['id']}",
+        json={"audio_consent": True},
+        headers=ctx["doctor"],
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["audio_consent"] is True
+
+    row = db_session.execute(
+        text(
+            "SELECT object_type, object_id FROM audit_log "
+            "WHERE action = 'SESSION_CONSENT_UPDATE' AND actor_id = CAST(:a AS uuid)"
+        ).bindparams(a=ctx["doctor_id"])
+    ).one()
+    assert row[0] == "clinical_session"
+    assert str(row[1]) == session["id"]
+
+
+def test_naive_datetime_rejected(client):
+    """ISO-8601 без пояса неоднозначен — 422 вместо TypeError/сдвига времени."""
+    ctx = _setup(client)
+    naive = client.post(
+        f"{BASE}/appointments",
+        json={"patient_id": ctx["patient_id"], "starts_at": "2026-11-02T10:00:00"},
+        headers=ctx["doctor"],
+    )
+    assert naive.status_code == 422, naive.text
+    assert naive.json()["code"] == "VALIDATION_ERROR"
+
+    window = client.get(
+        f"{BASE}/appointments",
+        params={"from": "2026-11-01T00:00:00", "to": "2026-11-02T00:00:00+00:00"},
+        headers=ctx["doctor"],
+    )
+    assert window.status_code == 422, window.text

@@ -140,7 +140,7 @@ def upgrade() -> None:
         ),
         # bytea: DDL EncryptedText (pgp_sym_encrypt, ключ CC_DATA_KEY).
         sa.Column("sections_cipher", sa.LargeBinary(), nullable=False),
-        sa.Column("content_sha256", sa.String(length=64), nullable=True),
+        sa.Column("content_sha256", sa.CHAR(length=64), nullable=True),
         sa.Column("diagnosis_code", sa.String(length=16), nullable=True),
         sa.Column("model", sa.String(length=64), nullable=True),
         sa.Column("prompt_version", sa.String(length=16), nullable=True),
@@ -176,7 +176,7 @@ def upgrade() -> None:
             "protocol_id", sa.Uuid(), sa.ForeignKey("session_protocols.id"), nullable=True
         ),
         sa.Column("path", sa.String(length=400), nullable=False),
-        sa.Column("sha256", sa.String(length=64), nullable=False),
+        sa.Column("sha256", sa.CHAR(length=64), nullable=False),
         sa.Column("size_bytes", sa.Integer(), nullable=False),
         sa.Column("mime", sa.String(length=128), nullable=False),
         sa.Column("encrypted", sa.Boolean(), nullable=False, server_default=sa.text("true")),

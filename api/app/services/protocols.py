@@ -21,7 +21,7 @@ import json
 import re
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import Problem
@@ -30,7 +30,7 @@ from app.models import SessionProtocol
 from . import audit
 from .sessions import PROTOCOL_ACTIVE, require_patient_access, require_session
 
-# §5.2: потолки разделов. Ключ — путь раздела, значение — символов.
+# §5.2: потолки разделов. Ключ — имя раздела, значение — символов.
 LIMITS = {
     "complaints": 4000,
     "anamnesis_morbi": 8000,
@@ -83,6 +83,7 @@ def decode_sections(row: SessionProtocol) -> dict:
         return {}
     return value if isinstance(value, dict) else {}
 
+
 def content_sha256(sections: dict) -> str:
     return hashlib.sha256(canonical(sections).encode()).hexdigest()
 
@@ -92,9 +93,7 @@ def _now() -> datetime:
 
 
 def _too_long(path: str, limit: int) -> Problem:
-    return Problem(
-        422, "PROTOCOL_SECTION_TOO_LONG", f"{path}: максимум {limit} символов"
-    )
+    return Problem(422, "PROTOCOL_SECTION_TOO_LONG", f"{path}: максимум {limit} символов")
 
 
 def _check_text(value, path: str, limit: int) -> None:
@@ -135,12 +134,12 @@ def validate_sections(sections: dict) -> None:
         _check_text(diagnosis.get("syndrome"), "diagnosis.syndrome", LINE_CHARS)
         _check_text(diagnosis.get("rationale"), "diagnosis.rationale", RATIONALE_CHARS)
         code = diagnosis.get("icd10")
+        if code is not None and not isinstance(code, str):
+            raise Problem(422, "VALIDATION_ERROR", "diagnosis.icd10: ожидалась строка")
         if isinstance(code, str) and code.strip() and not ICD10.match(code.strip()):
             raise Problem(
                 422, "PROTOCOL_ICD10_INVALID", "diagnosis.icd10: ожидается код МКБ-10 (F41.1)"
             )
-        if code is not None and not isinstance(code, str):
-            raise Problem(422, "VALIDATION_ERROR", "diagnosis.icd10: ожидалась строка")
 
     treatment = sections.get("treatment")
     if treatment is not None:
@@ -174,21 +173,6 @@ def missing_required(sections: dict) -> list[str]:
         if not (isinstance(_value(sections, path), str) and _value(sections, path).strip())
     ]
 
-
-def changed_sections(old: dict, new: dict) -> list[str]:
-    """Имена изменённых разделов (без текста — только ключи §5.1)."""
-    keys = set(old) | set(new)
-    changed = []
-    for key in sorted(keys):
-        if key == "mental_status":
-            before = old.get(key) or {}
-            after = new.get(key) or {}
-            if {f for f in MENTAL_FIELDS if (before.get(f) or "") != (after.get(f) or "")}:
-                changed.append(key)
-            continue
-        if canonical({key: old.get(key)}) != canonical({key: new.get(key)}):
-            changed.append(key)
-    return changed
 
 
 def _payload(row: SessionProtocol) -> dict:
@@ -224,6 +208,16 @@ async def _active(db: AsyncSession, session_id) -> SessionProtocol | None:
     )
 
 
+async def _next_version(db: AsyncSession, session_id) -> int:
+    """Следующий номер версии — максимум по сессии, а не последняя активная."""
+    current = await db.scalar(
+        select(func.max(SessionProtocol.version)).where(
+            SessionProtocol.session_id == session_id
+        )
+    )
+    return (current or 0) + 1
+
+
 def _check_code(code: str | None) -> str | None:
     if code is None:
         return None
@@ -235,6 +229,19 @@ def _check_code(code: str | None) -> str | None:
             422, "PROTOCOL_ICD10_INVALID", "diagnosis_code: ожидается код МКБ-10 (F41.1)"
         )
     return cleaned
+
+
+def _resolve_code(code: str | None, sections: dict) -> str | None:
+    """`diagnosis_code` и `sections.diagnosis.icd10` — один и тот же диагноз (§3.4/§5.1)."""
+    raw = (sections.get("diagnosis") or {}).get("icd10")
+    section_code = raw.strip() if isinstance(raw, str) and raw.strip() else None
+    if code and section_code and code != section_code:
+        raise Problem(
+            422,
+            "PROTOCOL_ICD10_CONFLICT",
+            "diagnosis_code не совпадает с sections.diagnosis.icd10",
+        )
+    return code or section_code
 
 
 async def get(db: AsyncSession, clinician_id, session_id) -> dict:
@@ -259,7 +266,7 @@ async def put(
     session = await require_session(db, clinician_id, session_id)
     await require_patient_access(db, clinician_id, session.patient_id)
     validate_sections(sections)
-    code = _check_code(diagnosis_code)
+    code = _resolve_code(_check_code(diagnosis_code), sections)
 
     active = await _active(db, session.id)
     if active is None:
@@ -274,38 +281,33 @@ async def put(
         )
         db.add(row)
         await db.flush()
-        changed = sorted(sections)
-    else:
-        if active.status == "approved":
-            raise Problem(409, "PROTOCOL_LOCKED", "Протокол подтверждён — правка запрещена")
-        if active.status == "submitted":
-            raise Problem(409, "PROTOCOL_LOCKED", "Протокол передан в ЕМИАС — правка запрещена")
-        if active.status == "signed":
-            # Подпись не переносится на новые байты: новая версия + повторная подпись.
-            row = SessionProtocol(
-                session_id=session.id,
-                version=active.version + 1,
-                status="draft",
-                source="manual",
-                sections_cipher=encode_sections(sections),
-                diagnosis_code=code,
-                created_by=clinician_id,
-            )
-            active.status = "superseded"
-            db.add(row)
-            await db.flush()
-            changed = sorted(sections)
-        else:  # draft
-            previous = decode_sections(active)
-            changed = changed_sections(previous, sections)
-            active.sections_cipher = encode_sections(sections)
-            if code is not None:
-                active.diagnosis_code = code
-            active.content_sha256 = None  # approve пересчитает хэш новых байтов
-            row = active
+    elif active.status == "approved":
+        raise Problem(409, "PROTOCOL_LOCKED", "Протокол подтверждён — правка запрещена")
+    elif active.status == "submitted":
+        raise Problem(409, "PROTOCOL_LOCKED", "Протокол передан в ЕМИАС — правка запрещена")
+    elif active.status == "signed":
+        # Подпись не переносится на новые байты: новая версия + повторная подпись.
+        row = SessionProtocol(
+            session_id=session.id,
+            version=await _next_version(db, session.id),
+            status="draft",
+            source="manual",
+            sections_cipher=encode_sections(sections),
+            diagnosis_code=code,
+            created_by=clinician_id,
+        )
+        active.status = "superseded"
+        db.add(row)
+        await db.flush()
+    else:  # draft
+        active.sections_cipher = encode_sections(sections)
+        if code is not None:
+            active.diagnosis_code = code
+        active.content_sha256 = None  # approve пересчитает хэш новых байтов
+        row = active
 
-    # Метаданные аудита ограничены колонками audit_log: вид объекта + id версии
-    # (текст разделов в журнал не попадает — docs/18 §2).
+    # Аудит хранит только ids (`action`, `object_type`, `object_id`) — текст
+    # разделов в журнал не попадает (docs/18 §2).
     await audit.record(
         db,
         clinician_id,
@@ -338,9 +340,12 @@ async def approve(db: AsyncSession, clinician_id, session_id, ip: str | None = N
             "PROTOCOL_NOT_READY",
             "Не заполнены обязательные разделы: " + ", ".join(missing),
         )
+    # `diagnosis_code` досчитывается из разделов: подтверждённая запись не может
+    # расходиться с `sections.diagnosis.icd10` (расхождение — 422).
+    row.diagnosis_code = _resolve_code(row.diagnosis_code, sections)
     row.status = "approved"
     row.approved_by = clinician_id
-    row.approved_at = datetime.now(timezone.utc)
+    row.approved_at = _now()
     row.content_sha256 = content_sha256(sections)
     await audit.record(
         db,

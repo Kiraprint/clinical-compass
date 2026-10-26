@@ -268,3 +268,38 @@ def test_protocol_access_gates(client):
     after = client.get(url, headers=ctx["doctor"])
     assert after.status_code == 403
     assert after.json()["code"] == "CONSENT_REQUIRED"
+
+
+def test_diagnosis_code_conflict_rejected(client):
+    """`diagnosis_code` и `sections.diagnosis.icd10` — один диагноз, расхождение → 422."""
+    ctx = _ctx(client)
+    session = _session(client, ctx)
+    url = f"{BASE}/sessions/{session['id']}/protocol"
+    resp = client.put(
+        url,
+        json={"sections": FULL, "diagnosis_code": "F41.0"},
+        headers=ctx["doctor"],
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["code"] == "PROTOCOL_ICD10_CONFLICT"
+
+
+def test_diagnosis_code_follows_sections_icd10(client, db_session):
+    """Код МКБ берётся из разделов, если врач его не передал; approve закрепляет его."""
+    ctx = _ctx(client)
+    session = _session(client, ctx)
+    url = f"{BASE}/sessions/{session['id']}/protocol"
+    put = client.put(url, json={"sections": FULL}, headers=ctx["doctor"])
+    assert put.status_code == 200, put.text
+    assert put.json()["diagnosis_code"] == "F41.1"
+
+    approve = client.post(f"{url}/approve", json={}, headers=ctx["doctor"])
+    assert approve.status_code == 200, approve.text
+    assert approve.json()["diagnosis_code"] == "F41.1"
+    stored = db_session.execute(
+        text(
+            "SELECT diagnosis_code FROM session_protocols "
+            "WHERE session_id = CAST(:s AS uuid)"
+        ).bindparams(s=session["id"])
+    ).scalar_one()
+    assert stored == "F41.1"

@@ -58,12 +58,14 @@ async def list_appointments(
     from_: datetime = Query(alias="from"),
     to: datetime = Query(),
     patient_id: uuid.UUID | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     user: User = Depends(require_clinician),
     db: AsyncSession = Depends(get_db),
 ):
     """Календарь врача за окно (≤ 62 дней): свои записи, фильтр по пациенту roster."""
     return await services.sessions.list_appointments(
-        db, user.id, from_, to, patient_id=patient_id
+        db, user.id, from_, to, patient_id=patient_id, limit=limit, offset=offset
     )
 
 
@@ -164,12 +166,21 @@ async def list_sessions(
     to: datetime = Query(),
     patient_id: uuid.UUID | None = Query(default=None),
     status: Literal["active", "finished"] | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     user: User = Depends(require_clinician),
     db: AsyncSession = Depends(get_db),
 ):
     """Сессии врача за окно (≤ 62 дней)."""
     return await services.sessions.list_sessions(
-        db, user.id, from_, to, patient_id=patient_id, status=status
+        db,
+        user.id,
+        from_,
+        to,
+        patient_id=patient_id,
+        status=status,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -201,12 +212,17 @@ async def finish_session(
 async def update_session(
     session_id: uuid.UUID,
     body: SessionPatch,
+    request: Request,
     user: User = Depends(require_clinician),
     db: AsyncSession = Depends(get_db),
 ):
     """PATCH сессии: согласие на аудиозапись (docs/18 §1.3)."""
     return await services.sessions.update_session(
-        db, user.id, session_id, body.model_dump(exclude_unset=True)
+        db,
+        user.id,
+        session_id,
+        body.model_dump(exclude_unset=True),
+        ip=_ip(request),
     )
 
 
