@@ -116,10 +116,10 @@ function AssistantAnswerBody({ m }: { m: AssistantThreadMessage }) {
         <pre className="assistant-answer">{text}</pre>
       )}
       {extra.length > 0 && (
-        <div className="answer-extra">
-          <strong>
-            {patientCard ? "Карта пациента" : "Из ответа"} ({extra.length}):
-          </strong>
+        <details className="answer-extra">
+          <summary>
+            {patientCard ? "Карта пациента" : "Из ответа"} ({extra.length})
+          </summary>
           <ul>
             {extra.map((it) => (
               <li key={it.n}>
@@ -127,11 +127,11 @@ function AssistantAnswerBody({ m }: { m: AssistantThreadMessage }) {
               </li>
             ))}
           </ul>
-        </div>
+        </details>
       )}
       {m.citations.length > 0 && (
-        <div className="assistant-sources">
-          <strong>Источники:</strong>
+        <details className="assistant-sources">
+          <summary>Источники ({m.citations.length})</summary>
           <ul>
             {m.citations.map((c, i) => (
               // Номер совпадает с [n] в тексте ответа (порядок citations).
@@ -140,7 +140,7 @@ function AssistantAnswerBody({ m }: { m: AssistantThreadMessage }) {
               </li>
             ))}
           </ul>
-        </div>
+        </details>
       )}
     </>
   );

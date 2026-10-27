@@ -4,10 +4,20 @@ import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import { DEMO_PASSWORD, DEMO_TOTP, login } from "./helpers";
 
+/** «Чаты → Ассистент»: раздел может перерисоваться на позднем ответе уведомлений
+ *  и вернуть «Пациенты», поэтому доводим переключение до выбранного таба. */
+async function openAssistantTab(page: Page) {
+  const tab = page.getByRole("tab", { name: "Ассистент" });
+  await expect(async () => {
+    await tab.click();
+    await expect(tab).toHaveAttribute("aria-selected", "true", { timeout: 2000 });
+  }).toPass({ timeout: 15000 });
+}
+
 /** Открывает «Чаты → Ассистент» и заводит новый диалог (он выбирается сразу). */
 async function openNewThread(page: Page) {
   await page.getByRole("button", { name: "Чаты" }).click();
-  await page.getByRole("tab", { name: "Ассистент" }).click();
+  await openAssistantTab(page);
   await expect(page.getByRole("heading", { name: "Ассистент врача" })).toBeVisible();
   await page.locator('.icon-btn[title="Новый диалог"]').click();
   await expect(page.getByLabel("Вопрос")).toBeVisible();
@@ -72,7 +82,7 @@ async function openStubbedThread(
 
   await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
   await page.getByRole("button", { name: "Чаты" }).click();
-  await page.getByRole("tab", { name: "Ассистент" }).click();
+  await openAssistantTab(page);
 }
 
 test.describe("ИИ-ассистент врача", () => {
@@ -88,9 +98,11 @@ test.describe("ИИ-ассистент врача", () => {
     await expect(
       page.getByText(/По базе знаний найдено следующее:|ИИ-формулировка недоступна/),
     ).toBeVisible();
-    await expect(
-      page.locator(".assistant-sources").getByText("Источники:", { exact: true }),
-    ).toBeVisible();
+    // Блок «Источники» свёрнут: шапка со счётчиком видна, пункты — после клика.
+    const sources = page.locator(".assistant-sources").first();
+    await expect(sources.locator("summary")).toHaveText(/^Источники \(\d+\)$/);
+    await sources.locator("summary").click();
+    await expect(sources.locator("li").first()).toBeVisible();
 
     // Запрос на диагноз в том же треде → отказ (красная линия).
     await page.getByLabel("Вопрос").fill("Поставь диагноз депрессии");
@@ -107,8 +119,11 @@ test.describe("ИИ-ассистент врача", () => {
     await expect(
       page.getByText(/По базе знаний найдено следующее:|ИИ-формулировка недоступна/),
     ).toBeVisible({ timeout: 30000 });
-    // Цитата чанка препарата (АВИАНДР).
-    await expect(page.locator(".assistant-sources").getByText(/АВИАНДР/i).first()).toBeVisible();
+    // Источники свёрнуты по умолчанию — раскрываем кликом по шапке.
+    const sources = page.locator(".assistant-sources").first();
+    await expect(sources.locator("summary")).toHaveText(/^Источники \(\d+\)$/);
+    await sources.locator("summary").click();
+    await expect(sources.getByText(/АВИАНДР/i).first()).toBeVisible();
   });
 
   test("пациент в контексте треда подмешивает карту в ответ", async ({ page }) => {
@@ -122,9 +137,13 @@ test.describe("ИИ-ассистент врача", () => {
     await page.getByLabel("Вопрос").fill("Какая динамика пациента по шкале PHQ-9?");
     await page.getByRole("button", { name: "Спросить" }).click();
     // 30 с: ответ идёт через LLM-шлюз, 15 с не хватало на медленном ответе.
-    await expect(page.locator(".assistant-sources").getByText(/Карта пациента/)).toBeVisible({
+    const sources = page.locator(".assistant-sources").first();
+    await expect(sources.locator("summary")).toHaveText(/^Источники \(\d+\)$/, {
       timeout: 30000,
     });
+    // Цитата карты пациента лежит в свёрнутом блоке — раскрываем.
+    await sources.locator("summary").click();
+    await expect(sources.getByText(/Карта пациента/)).toBeVisible();
   });
 });
 
@@ -295,8 +314,10 @@ test("ответ без ИИ-формулировки: плашка, фрагм�
     await details.locator("ol").evaluate((el) => getComputedStyle(el).listStyleType),
   ).toBe("none");
 
-  // Хвост «Источники:» срезан из текста — источники ровно один раз, из цитат.
-  await expect(page.getByText("Источники:", { exact: true })).toHaveCount(1);
+  // Хвост «Источники:» срезан из текста — источники ровно один раз, из цитат,
+  // и блок свёрнут: видна только шапка со счётчиком.
+  await expect(page.locator(".assistant-sources summary")).toHaveText("Источники (2)");
+  await expect(page.locator(".assistant-sources li").first()).toBeHidden();
   await expect(page.getByText(/Источники: 1\./)).toHaveCount(0);
 });
 
@@ -332,15 +353,118 @@ test("карта пациента видна и в деградированно�
   const bubble = page.locator(".bubble", { hasText: "Ассистент" }).first();
   await expect(bubble.locator(".answer-degraded")).toBeVisible();
   const extra = bubble.locator(".answer-extra");
+  // Карта пациента — свёрнутый блок: шапка со счётчиком, пункты после клика.
+  await expect(extra.locator("summary")).toHaveText("Карта пациента (1)");
+  await expect(extra.locator("li")).toBeHidden();
+  await extra.locator("summary").click();
   await expect(extra).toContainText("КАРТА-МАРКЕР: динамика ухудшилась");
-  await expect(extra.locator("strong")).toHaveText("Карта пациента (1):");
   // Номер пункта — тот же, что номер цитаты карты пациента.
   await expect(extra.locator("li")).toContainText("2. КАРТА-МАРКЕР");
   // Пункт, у которого есть фрагмент, во втором списке не повторяется.
   await expect(extra.locator("li")).toHaveCount(1);
   // Текст с картой не сыплется в <pre> целиком.
   await expect(bubble.locator(".assistant-answer")).toHaveCount(0);
-  await expect(page.getByText("Источники:", { exact: true })).toHaveCount(1);
+  await expect(bubble.locator(".assistant-sources summary")).toHaveText("Источники (2)");
+});
+
+test("блоки под ответом свёрнуты: фрагменты, карта пациента и источники", async ({ page }) => {
+  // Все три блока под ответом — <details> без open: до клика пунктов не видно,
+  // после клика по summary они появляются, соседние блоки остаются свёрнутыми.
+  await openStubbedThread(page, "e2e-collapse", "Свёрнутые блоки", [
+    { id: "e2e-collapse-q", role: "CLINICIAN", content: "Что с динамикой?" },
+    {
+      id: "e2e-collapse-a",
+      role: "ASSISTANT",
+      content:
+        "По базе знаний и карте пациента найдено следующее:\n" +
+        "1. — Фрагмент про PHQ-9\n" +
+        "2. — КАРТА-МАРКЕР: динамика ухудшилась\n" +
+        '\n\nИсточники: «Гайд» (g1), «Карта пациента: Иванов Иван» (patient:p1).',
+      citations: [
+        { source_title: "Гайд", guideline_id: "g1", topic: "ШКАЛЫ", score: 0.8 },
+        {
+          source_title: "Карта пациента: Иванов Иван",
+          guideline_id: "patient:p1",
+          topic: "ПАЦИЕНТ",
+          score: 1,
+        },
+      ],
+      topic: "ПАЦИЕНТ",
+      answer_kind: "fragments",
+      llm_reason: "empty",
+      fragments: [{ n: 1, source_title: "Гайд", text: "ФРАГМЕНТ-МАРКЕР: порог PHQ-9" }],
+    },
+  ]);
+
+  const bubble = page.locator(".bubble", { hasText: "Ассистент" }).first();
+  const fragments = bubble.locator(".answer-fragments");
+  const extra = bubble.locator(".answer-extra");
+  const sources = bubble.locator(".assistant-sources");
+  await expect(fragments.locator("summary")).toHaveText("Фрагменты базы знаний (1)");
+  await expect(extra.locator("summary")).toHaveText("Карта пациента (1)");
+  await expect(sources.locator("summary")).toHaveText("Источники (2)");
+
+  // До клика контент лежит только в закрытом details — не виден.
+  await expect(fragments).toHaveJSProperty("open", false);
+  await expect(extra).toHaveJSProperty("open", false);
+  await expect(sources).toHaveJSProperty("open", false);
+  await expect(fragments.locator(".fragment-text")).toBeHidden();
+  await expect(extra.locator("li")).toBeHidden();
+  await expect(sources.locator("li").first()).toBeHidden();
+
+  // Клик по summary раскрывает свой блок и не трогает соседние.
+  await fragments.locator("summary").click();
+  await expect(fragments.locator(".fragment-text")).toBeVisible();
+  await expect(fragments.locator(".fragment-text")).toContainText("ФРАГМЕНТ-МАРКЕР");
+  await expect(extra.locator("li")).toBeHidden();
+  await expect(sources.locator("li").first()).toBeHidden();
+
+  await extra.locator("summary").click();
+  await expect(extra.locator("li")).toContainText("2. КАРТА-МАРКЕР");
+  await expect(sources.locator("li").first()).toBeHidden();
+
+  await sources.locator("summary").click();
+  await expect(sources.locator("li").first()).toBeVisible();
+  await expect(sources).toContainText("Карта пациента: Иванов Иван");
+
+  // Клавиатура: summary — нативная кнопка details, Enter и Space переключают.
+  await sources.locator("summary").press("Enter");
+  await expect(sources).toHaveJSProperty("open", false);
+  await expect(sources.locator("li").first()).toBeHidden();
+  await sources.locator("summary").press(" ");
+  await expect(sources).toHaveJSProperty("open", true);
+  await expect(sources.locator("li").first()).toBeVisible();
+});
+
+test("без цитаты пациента блок называется «Из ответа» и тоже свёрнут", async ({ page }) => {
+  await openStubbedThread(page, "e2e-from-answer", "Пункт из ответа", [
+    { id: "e2e-from-answer-q", role: "CLINICIAN", content: "Что с динамикой?" },
+    {
+      id: "e2e-from-answer-a",
+      role: "ASSISTANT",
+      content:
+        "По базе знаний найдено следующее:\n" +
+        "1. — Фрагмент про PHQ-9\n" +
+        "2. — ОТВЕТ-МАРКЕР: динамика ухудшилась\n" +
+        '\n\nИсточники: «Гайд» (g1).',
+      citations: [{ source_title: "Гайд", guideline_id: "g1", topic: "ШКАЛЫ", score: 0.8 }],
+      topic: "ШКАЛЫ",
+      answer_kind: "fragments",
+      llm_reason: "empty",
+      fragments: [{ n: 1, source_title: "Гайд", text: "Фрагмент про PHQ-9" }],
+    },
+  ]);
+
+  const extra = page
+    .locator(".bubble", { hasText: "Ассистент" })
+    .first()
+    .locator(".answer-extra");
+  // Пациента в цитатах нет (topic !== "ПАЦИЕНТ") → шапка «Из ответа (N)».
+  await expect(extra.locator("summary")).toHaveText("Из ответа (1)");
+  await expect(extra).toHaveJSProperty("open", false);
+  await expect(extra.locator("li")).toBeHidden();
+  await extra.locator("summary").click();
+  await expect(extra.locator("li")).toContainText("2. ОТВЕТ-МАРКЕР");
 });
 
 test("абзац «Источники:» в середине ответа не режет текст после него", async ({ page }) => {
@@ -551,9 +675,12 @@ test("FR-47: Ctrl+Enter в композере отправляет вопрос"
 
   await expect(page.locator(".chat-pane .compose-hint")).toHaveText("Ctrl+Enter — отправить");
   const question = "Поставь диагноз депрессии";
-  await page.getByLabel("Вопрос").fill(question);
-  // Кнопка активна ⇔ тред загружен и текст уже в состоянии React.
-  await expect(page.getByRole("button", { name: "Спросить" })).toBeEnabled();
+  // Поздний ответ создания треда может сбросить черновик — доводим ввод,
+  // пока кнопка не станет активной (значит текст уже в состоянии React).
+  await expect(async () => {
+    await page.getByLabel("Вопрос").fill(question);
+    await expect(page.getByRole("button", { name: "Спросить" })).toBeEnabled({ timeout: 2000 });
+  }).toPass({ timeout: 15000 });
   await page.getByLabel("Вопрос").press("Control+Enter");
 
   // Кнопку не нажимали: пузырь вопроса — доказательство отправки по хоткею.
@@ -590,5 +717,7 @@ test("ответ ИИ: хвост «Источники:» срезается, и
   const text = bubble.locator(".assistant-answer");
   await expect(text).toContainText("Порог тяжёлой депрессии");
   await expect(text).not.toContainText("Источники:");
-  await expect(page.getByText("Источники:", { exact: true })).toHaveCount(1);
+  // Блок источников один и свёрнут — текстового «Источники:» в ответе нет.
+  await expect(page.locator(".assistant-sources summary")).toHaveText("Источники (1)");
+  await expect(page.getByText("Источники:", { exact: true })).toHaveCount(0);
 });
