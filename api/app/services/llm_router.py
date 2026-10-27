@@ -159,17 +159,21 @@ def _request(payload: dict, *, timeout: float | None = None) -> dict:
 def chat_completion(
     messages: list[dict], *, temperature: float = 0.0, timeout: float | None = None
 ) -> dict:
-    """Сырой POST /chat/completions для других LLM-задач (FR-31, docs/17).
+    """Сырой POST /chat/completions для других LLM-задач (FR-31, FR-37, FR-44).
 
     Транспорт общий с роутером топиков: таймаут/ключ/URL берутся из settings.
-    Ошибки транспорта и невалидный JSON не ловим — их обрабатывает вызывающий.
+    Ключи отключения CoT (`_thinking`) сюда НЕ добавляются осознанно: это задачи
+    вне ассистента (анализ переписки, анамнез, диалог по сессии), и менять их
+    промпт-режим этим PR не нужно — иначе `reasoning_effort=none` молча меняет
+    поведение четырёх фич. Ошибки транспорта и невалидный JSON не ловим — их
+    обрабатывает вызывающий.
     """
     payload: dict = {
         "model": settings.assistant_llm_model,
         "messages": messages,
         "temperature": temperature,
     }
-    return _request(_thinking(payload), timeout=timeout)
+    return _request(payload, timeout=timeout)
 
 
 def chat_with_tools(
@@ -197,7 +201,7 @@ def chat_with_tools(
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
-    return _request(payload, timeout=timeout)
+    return _request(_thinking(payload), timeout=timeout)
 
 
 MAX_TOPICS = 2  # больше двух разделов на один вопрос — это уже «поиск по всем»
