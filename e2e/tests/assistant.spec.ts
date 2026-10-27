@@ -4,10 +4,20 @@ import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import { DEMO_PASSWORD, DEMO_TOTP, login } from "./helpers";
 
+/** «Чаты → Ассистент»: раздел может перерисоваться на позднем ответе уведомлений
+ *  и вернуть «Пациенты», поэтому доводим переключение до выбранного таба. */
+async function openAssistantTab(page: Page) {
+  const tab = page.getByRole("tab", { name: "Ассистент" });
+  await expect(async () => {
+    await tab.click();
+    await expect(tab).toHaveAttribute("aria-selected", "true", { timeout: 2000 });
+  }).toPass({ timeout: 15000 });
+}
+
 /** Открывает «Чаты → Ассистент» и заводит новый диалог (он выбирается сразу). */
 async function openNewThread(page: Page) {
   await page.getByRole("button", { name: "Чаты" }).click();
-  await page.getByRole("tab", { name: "Ассистент" }).click();
+  await openAssistantTab(page);
   await expect(page.getByRole("heading", { name: "Ассистент врача" })).toBeVisible();
   await page.locator('.icon-btn[title="Новый диалог"]').click();
   await expect(page.getByLabel("Вопрос")).toBeVisible();
@@ -72,7 +82,7 @@ async function openStubbedThread(
 
   await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
   await page.getByRole("button", { name: "Чаты" }).click();
-  await page.getByRole("tab", { name: "Ассистент" }).click();
+  await openAssistantTab(page);
 }
 
 test.describe("ИИ-ассистент врача", () => {
@@ -665,9 +675,12 @@ test("FR-47: Ctrl+Enter в композере отправляет вопрос"
 
   await expect(page.locator(".chat-pane .compose-hint")).toHaveText("Ctrl+Enter — отправить");
   const question = "Поставь диагноз депрессии";
-  await page.getByLabel("Вопрос").fill(question);
-  // Кнопка активна ⇔ тред загружен и текст уже в состоянии React.
-  await expect(page.getByRole("button", { name: "Спросить" })).toBeEnabled();
+  // Поздний ответ создания треда может сбросить черновик — доводим ввод,
+  // пока кнопка не станет активной (значит текст уже в состоянии React).
+  await expect(async () => {
+    await page.getByLabel("Вопрос").fill(question);
+    await expect(page.getByRole("button", { name: "Спросить" })).toBeEnabled({ timeout: 2000 });
+  }).toPass({ timeout: 15000 });
   await page.getByLabel("Вопрос").press("Control+Enter");
 
   // Кнопку не нажимали: пузырь вопроса — доказательство отправки по хоткею.
