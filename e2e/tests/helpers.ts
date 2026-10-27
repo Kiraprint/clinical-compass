@@ -38,7 +38,17 @@ export async function login(page, email: string, password: string, totpSecret?: 
   await page.getByRole("button", { name: "Вход" }).click();
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Пароль").fill(password);
-  if (totpSecret) await page.getByLabel("Код 2FA").fill(totp(totpSecret));
+  if (totpSecret) {
+    // Поле 2FA рендерится, только когда GET /auth/config вернул require_otp.
+    // На стендах с CC_REQUIRE_OTP=false его нет — входим без кода.
+    const field = page.getByLabel("Код 2FA");
+    try {
+      await field.waitFor({ state: "visible", timeout: 3000 });
+      await field.fill(totp(totpSecret));
+    } catch {
+      // 2FA на стенде отключён.
+    }
+  }
   await page.getByRole("button", { name: "Войти" }).click();
 }
 

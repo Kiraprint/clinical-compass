@@ -90,8 +90,6 @@ small { color: #8a94a8; }
   padding: 12px 14px;
   margin: 0;
 }
-.assistant-sources { margin-top: 10px; font-size: 13px; color: #3a4356; }
-.assistant-sources ul { margin: 6px 0 0; padding-left: 18px; }
 
 /* Ответ без ИИ-формулировки: плашка причины + фрагменты базы знаний. */
 .answer-degraded {
@@ -109,18 +107,24 @@ small { color: #8a94a8; }
 }
 .answer-degraded strong { color: #8a5a00; }
 .answer-degraded-hint { font-size: 12px; color: #7a5a12; }
-.answer-fragments { font-size: 13px; color: #3a4356; }
-.answer-fragments summary { cursor: pointer; color: #1b3a8a; }
+/* Свёрнутые блоки под ответом: фрагменты, пункты без фрагмента, источники. */
+.answer-fragments,
+.answer-extra,
+.assistant-sources { font-size: 13px; color: #3a4356; }
+.answer-extra,
+.assistant-sources { margin-top: 10px; }
+.answer-fragments summary,
+.answer-extra summary,
+.assistant-sources summary { cursor: pointer; color: #1b3a8a; }
 /* Свой номер «n ·» уже напечатан в .fragment-source: маркер <ol> не нужен
    (и разъезжается с n, когда в списке есть пропуски). */
 .answer-fragments ol { margin: 8px 0 0; padding-left: 0; list-style: none; }
 .answer-fragments li { margin-bottom: 10px; }
 .fragment-source { font-weight: 600; color: #1c2333; }
 .fragment-text { margin: 2px 0 0; white-space: pre-wrap; word-break: break-word; }
-/* Пункты ответа без своего фрагмента (карта пациента): видимы сразу. */
-.answer-extra { margin-top: 10px; font-size: 13px; color: #3a4356; }
-.answer-extra strong { color: #1c2333; }
-.answer-extra ul { margin: 6px 0 0; padding-left: 18px; }
+/* Пункты ответа без своего фрагмента (карта пациента) и источники. */
+.answer-extra ul,
+.assistant-sources ul { margin: 6px 0 0; padding-left: 18px; }
 .answer-extra li { margin-bottom: 6px; white-space: pre-wrap; word-break: break-word; }
 
 /* Пациенты треда: чипсы + typeahead по «@». */
