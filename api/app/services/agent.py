@@ -785,7 +785,13 @@ class AgentFactory:
             try:
                 # Бюджет прогона исчерпан — поток не открываем: TimeoutError из
                 # _budget_exhausted даёт ту же причину `timeout`, что и таймаут.
-                patient_contexts = _llm_patient_contexts(state)
+                # Guard карт делает синхронный scrub_for_llm (remote/hybrid
+                # ML-деперсонализация = блокирующий HTTP), поэтому только в
+                # рабочем потоке: в корутине он вешал бы event loop и все
+                # открытые SSE на время скраба каждой карты.
+                patient_contexts = await anyio.to_thread.run_sync(
+                    _llm_patient_contexts, state
+                )
                 source = (
                     llm_router.compose_answer_stream(
                         state.get("history") or [],
