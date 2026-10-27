@@ -57,7 +57,10 @@ log = logging.getLogger(__name__)
 
 TRANSCRIPT_MAX_BYTES = 5 * 1024 * 1024  # §4.6: потолок JSON расшифровки
 PART_HEAD_LIMIT = 16 * 1024  # заголовки одной части multipart: больше не бывает
-REAP_GRACE = 2  # запас реапера к CC_SESSION_AI_TIMEOUT: ASR + маски + запись
+# Запас реапера к CC_SESSION_AI_TIMEOUT: два запроса к сайдкару (ASR и диаризация)
+# плюс маскирование и запись артефакта — иначе живая длинная расшифровка
+# выглядела бы зависшей и попадала под реапер.
+REAP_GRACE = 3
 
 # FR-42: роли участников приёма. Метки кластеров (A/B) — от сайдкара, роли
 # назначает api: первый заговоривший = врач (врач обычно начинает приём),
@@ -659,11 +662,12 @@ def _on_done(session_id: uuid.UUID, lock_conn, task: asyncio.Task) -> None:
 
 
 async def reap_stale(db: AsyncSession) -> int:
-    """Вернуть в `failed` сессии, застрявшие в `transcribing` (docs/18 §4.3).
+    """Закрыть сессии, застрявшие в `transcribing`/`diarizing` (docs/18 §4.3).
 
     Задача живёт в процессе: рестарт/падение воркера оставляет статус навсегда.
     Реапер срабатывает при старте приложения и перед каждым запуском расшифровки;
-    порог — `CC_SESSION_AI_TIMEOUT × 2`, чтобы не тронуть живую длинную запись.
+    порог — `CC_SESSION_AI_TIMEOUT × REAP_GRACE` (сейчас 3: два запроса к
+    сайдкару плюс маски и запись), чтобы не тронуть живую длинную запись.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(
         seconds=settings.session_ai_timeout * REAP_GRACE
@@ -688,10 +692,34 @@ async def reap_stale(db: AsyncSession) -> int:
         await audit.record(
             db, clinician_id, "SESSION_TRANSCRIBE", "clinical_session", str(session_id)
         )
-    if stale:
-        log.warning("Реапер вернул в failed %d зависших расшифровок", len(stale))
+    # `diarizing` — текст уже сохранён: падение на этом этапе не делает
+    # расшифровку недействительной, врач остаётся с текстом без меток спикеров.
+    stuck = (
+        await db.execute(
+            text(
+                "update clinical_sessions "
+                "set ai_status = 'transcribed', ai_error = 'DIARIZATION_INTERRUPTED', "
+                "    ai_started_at = null "
+                "where ai_status = 'diarizing' "
+                "  and ai_started_at is not null "
+                "  and ai_started_at < :cutoff "
+                "returning id, clinician_id"
+            ),
+            {"cutoff": cutoff},
+        )
+    ).all()
+    for session_id, clinician_id in stuck:
+        await audit.record(
+            db, clinician_id, "SESSION_TRANSCRIBE", "clinical_session", str(session_id)
+        )
+    if stale or stuck:
+        log.warning(
+            "Реапер закрыл зависшие расшифровки: failed=%d, без спикеров=%d",
+            len(stale),
+            len(stuck),
+        )
         await db.commit()
-    return len(stale)
+    return len(stale) + len(stuck)
 
 
 async def transcribe(
@@ -863,8 +891,138 @@ def _mask_segments(
     return masked, counts, real
 
 
+async def _save_transcript(
+    factory,
+    session_id: uuid.UUID,
+    audio_id,
+    segments: list[dict],
+    *,
+    result: dict,
+    counts: dict[str, int],
+    depersonalized: bool,
+    diarized: bool,
+    speaker_roles: dict[str, str],
+    roles_assumed: bool,
+    status: str,
+) -> uuid.UUID | None:
+    """Записать текущую версию расшифровки и статус сессии одной транзакцией.
+
+    Возвращает id артефакта; `None` — аудио перезаписали и результат устарел
+    (артефакт уже удалён, статус новой записи не трогаем).
+    """
+    payload = json.dumps(segments, ensure_ascii=False).encode("utf-8")
+    if len(payload) > TRANSCRIPT_MAX_BYTES:
+        raise Problem(413, "TRANSCRIPT_TOO_LARGE", "Расшифровка больше 5 МБ")
+    transcript = await anyio.to_thread.run_sync(
+        lambda: artifacts.put_bytes(
+            "transcript", payload, session_id=session_id, mime="application/json"
+        )
+    )
+    previous_id = None
+    async with factory() as db:
+        session = await db.get(ClinicalSession, session_id)
+        if session is None:
+            await anyio.to_thread.run_sync(artifacts.remove, transcript)
+            return None
+        latest = await _audio_artifact(db, session.id)
+        if latest is None or latest.id != audio_id:
+            # Пока шла расшифровка, аудио перезаписали: результат устарел, статус
+            # новой записи не трогаем (её расшифровка запускается отдельно).
+            log.info("Расшифровка сессии %s устарела: аудио перезаписано", session_id)
+            await anyio.to_thread.run_sync(artifacts.remove, transcript)
+            return None
+
+        db.add(transcript)
+        await db.flush()
+        row = await _transcript_row(db, session.id)
+        if row is not None:
+            # Артефакт прошлой расшифровки остался бы сиротой в списке сессии.
+            previous_id = row.segments_artifact_id
+        if row is None:
+            row = SessionTranscript(session_id=session.id)
+            db.add(row)
+        duration = result.get("duration_s")
+        model = result.get("model")
+        row.model = (str(model) if model else None) or None
+        row.language = (str(result.get("language") or "ru"))[:2]
+        row.duration_sec = int(round(float(duration))) if duration is not None else None
+        row.segments_artifact_id = transcript.id
+        row.mask_categories = counts
+        # Флаг честный: true только если маскировал ML-детектор, а не regex.
+        row.depersonalized = depersonalized
+        # FR-42: диаризация. `assumed` — роли назначены по умолчанию; PATCH
+        # врача сбрасывает флаг. Пустые роли храним как NULL, а не {}.
+        row.diarized = diarized
+        row.speaker_roles = dict(speaker_roles) or None
+        row.speaker_roles_assumed = bool(roles_assumed)
+
+        session.ai_status = status
+        if status == "transcribed":
+            session.ai_error = None
+            session.ai_started_at = None
+            # §2: только ids; категории масок и длительность — в ответах API,
+            # не в журнале. Пишем один раз — когда расшифровка действительно
+            # готова (текст есть уже на этапе `diarizing`).
+            await audit.record(
+                db,
+                session.clinician_id,
+                "SESSION_TRANSCRIBE",
+                "clinical_session",
+                str(session.id),
+            )
+        await db.commit()
+
+    if previous_id and previous_id != transcript.id:
+        async with factory() as db:
+            old = await db.get(DocumentArtifact, previous_id)
+            if old is not None:
+                path = old.path
+                await db.delete(old)
+                await db.commit()
+                await anyio.to_thread.run_sync(
+                    lambda: artifacts.remove(SimpleNamespace(path=path, id=previous_id))
+                )
+    return transcript.id
+
+
+async def _finish_transcription(
+    factory, session_id: uuid.UUID, audio_id, *, error: str | None = None
+) -> bool:
+    """Закрыть расшифровку без меток спикеров (диаризация выключена/упала).
+
+    `False` — аудио успели перезаписать: расшифровка устарела, статус не трогаем
+    и автодрафт по ней запускать нельзя.
+    """
+    async with factory() as db:
+        session = await db.get(ClinicalSession, session_id)
+        if session is None:
+            return False
+        latest = await _audio_artifact(db, session.id)
+        if latest is None or latest.id != audio_id:
+            log.info("Расшифровка сессии %s устарела: аудио перезаписано", session_id)
+            return False
+        session.ai_status = "transcribed"
+        session.ai_error = error
+        session.ai_started_at = None
+        await audit.record(
+            db,
+            session.clinician_id,
+            "SESSION_TRANSCRIBE",
+            "clinical_session",
+            str(session.id),
+        )
+        await db.commit()
+        return True
+
+
 async def _pipeline(session_id: uuid.UUID) -> None:
-    """Аудио → ML `/v1/transcribe` → маски → артефакт + метаданные → transcribed.
+    """Аудио → ASR → текст врачу → диаризация → `transcribed` (docs/18 §4.3).
+
+    Два запроса к сайдкару вместо одного: расшифровка (`/v1/transcribe`,
+    `diarize=false`) и метки спикеров (`/v1/diarize`). Между ними текст уже
+    сохранён и статус — `diarizing`, поэтому врач читает расшифровку через
+    ASR-время, а не после диаризации (замер 2026-10-27: ASR rtf 0.08,
+    диаризация rtf 0.10–0.18 — врач ждал их сумму).
 
     Соединение БД не держим ни во время ASR (минуты), ни во время маскирования:
     пул из 20 соединений иначе выедят несколько параллельных расшифровок.
@@ -890,94 +1048,112 @@ async def _pipeline(session_id: uuid.UUID) -> None:
 
     plain_path = await anyio.to_thread.run_sync(artifacts.decrypt_to_temp, audio)
     try:
+        # --- этап 1: ASR (GPU) -------------------------------------------------
         result = await anyio.to_thread.run_sync(
             lambda: ml_client.transcribe_file(
-                plain_path, filename=f"session{_ext_for(audio_mime)}", mime=audio_mime
+                plain_path,
+                filename=f"session{_ext_for(audio_mime)}",
+                mime=audio_mime,
+                diarize=False,
             )
         )
-    finally:
-        # Открытый текст аудио живёт только на время запроса к сайдкару.
-        await anyio.to_thread.run_sync(lambda: plain_path.unlink(missing_ok=True))
-
-    segments = _normalize_segments(result)
-    # FR-42: роли считаем ДО маскирования и пишем в артефакт вместе с метками
-    # кластеров — расшифровка без ролей бесполезна для чтения и для LLM.
-    speaker_roles, roles_assumed = _default_speaker_roles(result, segments)
-    _apply_roles(segments, speaker_roles)
-    masked, counts, depersonalized = await anyio.to_thread.run_sync(
-        lambda: _mask_segments(segments, names)
-    )
-
-    payload = json.dumps(masked, ensure_ascii=False).encode("utf-8")
-    if len(payload) > TRANSCRIPT_MAX_BYTES:
-        raise Problem(413, "TRANSCRIPT_TOO_LARGE", "Расшифровка больше 5 МБ")
-    transcript = await anyio.to_thread.run_sync(
-        lambda: artifacts.put_bytes(
-            "transcript", payload, session_id=session_id, mime="application/json"
+        segments = _normalize_segments(result)
+        # Спикеров ещё нет: роли назначит этап 2 (или врач — PATCH'ем).
+        _apply_roles(segments, {})
+        masked, counts, depersonalized = await anyio.to_thread.run_sync(
+            lambda: _mask_segments(segments, names)
         )
-    )
-
-    previous_id = None
-    async with factory() as db:
-        session = await db.get(ClinicalSession, session_id)
-        if session is None:
-            await anyio.to_thread.run_sync(artifacts.remove, transcript)
-            return
-        latest = await _audio_artifact(db, session.id)
-        if latest is None or latest.id != audio_id:
-            # Пока шла расшифровка, аудио перезаписали: результат устарел, статус
-            # новой записи не трогаем (её расшифровка запускается отдельно).
-            log.info("Расшифровка сессии %s устарела: аудио перезаписано", session_id)
-            await anyio.to_thread.run_sync(artifacts.remove, transcript)
+        saved = await _save_transcript(
+            factory,
+            session_id,
+            audio_id,
+            masked,
+            result=result,
+            counts=counts,
+            depersonalized=depersonalized,
+            diarized=False,
+            speaker_roles={},
+            roles_assumed=False,
+            status="diarizing",
+        )
+        if saved is None:
             return
 
-        db.add(transcript)
-        await db.flush()
-        row = await _transcript_row(db, session.id)
-        if row is not None:
-            # Артефакт прошлой расшифровки остался бы сиротой в списке сессии.
-            previous_id = row.segments_artifact_id
-        if row is None:
-            row = SessionTranscript(session_id=session.id)
-            db.add(row)
-        duration = result.get("duration_s")
-        model = result.get("model")
-        row.model = (str(model) if model else None) or None
-        row.language = (str(result.get("language") or "ru"))[:2]
-        row.duration_sec = int(round(float(duration))) if duration is not None else None
-        row.segments_artifact_id = transcript.id
-        row.mask_categories = counts
-        # Флаг честный: true только если маскировал ML-детектор, а не regex.
-        row.depersonalized = depersonalized
-        # FR-42: диаризация. `assumed` — роли назначены по умолчанию; PATCH
-        # врача сбрасывает флаг. Пустые роли храним как NULL, а не {}.
-        row.diarized = bool(result.get("diarized"))
-        row.speaker_roles = dict(speaker_roles) or None
-        row.speaker_roles_assumed = bool(roles_assumed)
-
-        session.ai_status = "transcribed"
-        session.ai_error = None
-        session.ai_started_at = None
-        # §2: только ids; категории масок и длительность — в ответах API, не в журнале.
-        await audit.record(
-            db,
-            session.clinician_id,
-            "SESSION_TRANSCRIBE",
-            "clinical_session",
-            str(session.id),
-        )
-        await db.commit()
-
-    if previous_id and previous_id != transcript.id:
-        async with factory() as db:
-            old = await db.get(DocumentArtifact, previous_id)
-            if old is not None:
-                path = old.path
-                await db.delete(old)
-                await db.commit()
-                await anyio.to_thread.run_sync(
-                    lambda: artifacts.remove(SimpleNamespace(path=path, id=previous_id))
+        # --- этап 2: диаризация (CPU) ----------------------------------------
+        # Сбой второго этапа не отменяет текст: врач получает расшифровку без
+        # меток, а не ошибку.
+        diarization: dict | None = None
+        try:
+            duration = float(result.get("duration_s") or 0.0)
+            if duration < 0 or duration != duration:  # NaN/отрицательное — мусор
+                duration = 0.0
+        except (TypeError, ValueError):
+            duration = 0.0
+        try:
+            diarization = await anyio.to_thread.run_sync(
+                lambda: ml_client.diarize_file(
+                    plain_path,
+                    segments=[{"start": s["start"], "end": s["end"]} for s in segments],
+                    duration_s=duration,
+                    filename=f"session{_ext_for(audio_mime)}",
+                    mime=audio_mime,
                 )
+            )
+        except Exception:  # noqa: BLE001 — текст уже сохранён
+            log.warning(
+                "Диаризация сессии %s не удалась: расшифровка остаётся без спикеров",
+                session_id,
+                exc_info=True,
+            )
+
+        labels = [
+            item.get("speaker") if isinstance(item, dict) else None
+            for item in (diarization or {}).get("segments") or []
+        ]
+        if diarization and diarization.get("diarized") and len(labels) == len(masked):
+            for segment, label in zip(masked, labels):
+                segment["speaker"] = label
+            # Роли по умолчанию: врач переставит их PATCH'ем, когда увидит метки.
+            roles, assumed = _default_speaker_roles(diarization, masked)
+            _apply_roles(masked, roles)
+            saved = await _save_transcript(
+                factory,
+                session_id,
+                audio_id,
+                masked,
+                result=result,
+                counts=counts,
+                depersonalized=depersonalized,
+                diarized=True,
+                speaker_roles=roles,
+                roles_assumed=assumed,
+                status="transcribed",
+            )
+            # Аудио перезаписали, пока считались спикеры: результат устарел,
+            # автодрафт по нему запускать нельзя.
+            if saved is None:
+                return
+        else:
+            if diarization and diarization.get("diarized"):
+                log.warning(
+                    "Диаризация сессии %s вернула %d меток на %d сегментов — метки отброшены",
+                    session_id,
+                    len(labels),
+                    len(masked),
+                )
+            finished = await _finish_transcription(
+                factory,
+                session_id,
+                audio_id,
+                # Сбой запроса к сайдкару — «спикеры не определены» честно; простое
+                # отсутствие весов (diarize=false) ошибкой не считается.
+                error="DIARIZATION_INTERRUPTED" if diarization is None else None,
+            )
+            if not finished:
+                return
+    finally:
+        # Открытый текст аудио живёт только на время работы с сайдкаром.
+        await anyio.to_thread.run_sync(lambda: plain_path.unlink(missing_ok=True))
 
     # FR-44: конвейер доводит приём до черновика сам. Сбой автодрафта уже
     # поглощён внутри: расшифровка к этому моменту закоммичена.

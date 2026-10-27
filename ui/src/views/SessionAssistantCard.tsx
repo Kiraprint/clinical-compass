@@ -41,6 +41,8 @@ const AI_ERRORS: Record<string, string> = {
   AUDIO_UNSUPPORTED: "Формат записи не поддерживается",
   PROTOCOL_LOCKED: "Протокол подтверждён — ИИ его не перезаписывает (правка создаст новую версию)",
   DRAFT_FAILED: "Модель не вернула корректный черновик — попробуйте ещё раз",
+  DIARIZATION_INTERRUPTED:
+    "Спикеры не определены: текст расшифровки готов, метки A/B можно расставить вручную",
   AUTODRAFT_FAILED: "Черновик не создался автоматически — нажмите «Сформировать черновик»",
   TRANSCRIBE_FAILED: "Расшифровка не удалась",
   TRANSCRIPT_TOO_LARGE: "Запись слишком длинная для расшифровки",
@@ -69,6 +71,8 @@ const AI_STATUS_LABELS: Record<string, string> = {
   none: "запись ещё не загружена",
   recording: "идёт запись",
   transcribing: "расшифровка идёт",
+  // Текст уже сохранён, догоняют только метки спикеров (docs/18 §4.3).
+  diarizing: "текст готов, определяем спикеров",
   transcribed: "расшифровка готова",
   failed: "расшифровка не удалась",
 };
@@ -583,7 +587,12 @@ export default function SessionAssistantCard({
   // Расшифровку могли запустить до перезагрузки панели: продолжаем опрос, а не висим
   // с надписью «идёт» без единого запроса.
   useEffect(() => {
-    if (session.ai_status === "transcribing" && !chain.current) startPoll();
+    if (
+      (session.ai_status === "transcribing" || session.ai_status === "diarizing") &&
+      !chain.current
+    ) {
+      startPoll();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps — startPoll стабилен по refs
   }, [session.ai_status]);
 
@@ -769,6 +778,13 @@ export default function SessionAssistantCard({
         );
         return;
       }
+      if (detail.ai_status === "diarizing") {
+        // Текст уже есть: показываем его сразу, спикеры догоняют — опрос идёт.
+        if (!transcript) {
+          await loadTranscript();
+          toast("Текст расшифровки готов — определяем спикеров.");
+        }
+      }
     }
     pollTimer.current = window.setTimeout(() => void pollTick(), POLL_MS);
   };
@@ -820,7 +836,7 @@ export default function SessionAssistantCard({
       } else if (detail.ai_status === "failed") {
         setAiError(detail.ai_error ?? "TRANSCRIBE_FAILED");
         setErr(`Расшифровка не удалась: ${AI_ERRORS[detail.ai_error ?? ""] ?? "сервер сообщил об ошибке"}`);
-      } else if (detail.ai_status === "transcribing") {
+      } else if (detail.ai_status === "transcribing" || detail.ai_status === "diarizing") {
         // После дедлайна опрос остановлен: ручное обновление снова его включает.
         setAiError(detail.ai_error ?? null);
         toast("Расшифровка идёт — опрос продолжен.");
@@ -903,7 +919,8 @@ export default function SessionAssistantCard({
   const consent = session.audio_consent;
   const finished = sessionFinished;
   const audioReady = !!uploaded || hasAudio;
-  const canTranscribe = audioReady && !polling && !finished && aiStatus !== "transcribing";
+  const canTranscribe =
+    audioReady && !polling && !finished && aiStatus !== "transcribing" && aiStatus !== "diarizing";
   const transcribeLabel =
     aiStatus === "transcribing"
       ? "Расшифровка идёт…"
@@ -1040,7 +1057,10 @@ export default function SessionAssistantCard({
             Показать расшифровку
           </button>
         )}
-        {(aiError || err || (aiStatus === "transcribing" && !polling)) && (
+        {(aiError ||
+          err ||
+          (aiStatus === "transcribing" && !polling) ||
+          (aiStatus === "diarizing" && !polling)) && (
           <button type="button" className="ghost" onClick={() => void refreshState()} disabled={busy !== ""}>
             Обновить состояние
           </button>
@@ -1051,9 +1071,11 @@ export default function SessionAssistantCard({
         <p className="small muted">
           {aiStatus === "transcribed"
             ? "Запись загружена, расшифровка готова."
-            : aiStatus === "transcribing"
-              ? "Запись загружена, идёт расшифровка."
-              : "Запись загружена — расшифровка запускается автоматически."}
+            : aiStatus === "diarizing"
+              ? "Запись загружена, текст расшифровки готов — определяем спикеров."
+              : aiStatus === "transcribing"
+                ? "Запись загружена, идёт расшифровка."
+                : "Запись загружена — расшифровка запускается автоматически."}
         </p>
       )}
 

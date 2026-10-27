@@ -93,11 +93,13 @@ async def _sweep_orphan_artifacts() -> None:
 
 async def _purge_artifacts_tmp() -> None:
     """Старт приложения: убрать осиротевшие расшифрованные файлы из `tmp`."""
-    from .services import artifacts
+    from .services import artifacts, session_ai
 
     # Только заведомо брошенные файлы: чужой воркер может прямо сейчас кормить
-    # сайдкар из своего (§4.6), поэтому порог — как у реапера расшифровок.
-    max_age = settings.session_ai_timeout * 2
+    # сайдкар из своего (§4.6), поэтому порог — тот же, что у реапера расшифровок
+    # (сейчас три таймаута: ASR + диаризация + маски и запись). Один источник
+    # правды, иначе уборка начнёт удалять файлы живой двухэтапной расшифровки.
+    max_age = settings.session_ai_timeout * session_ai.REAP_GRACE
     try:
         removed = await asyncio.to_thread(artifacts.purge_temp, max_age_sec=max_age)
     except OSError:  # noqa: BLE001 — уборка не должна блокировать старт

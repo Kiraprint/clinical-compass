@@ -9,6 +9,7 @@ GPU-сервис с моделями, которые нельзя держать
 | `POST /v1/rerank` | `BAAI/bge-reranker-v2-m3` (CrossEncoder) | cross-encoder реранк, сырые логиты |
 | `POST /v1/mask` | `compass.depersonalize` + `redmadrobot-rnd/rubert-base-pii-ner` | маскирование ПДн; `model: hybrid\|regex`, `degraded: bool` |
 | `POST /v1/transcribe` | `dropbox-dash/faster-whisper-large-v3-turbo` (faster-whisper, CT2) + диаризация sherpa-onnx | расшифровка аудио сессии на русском; `diarized/degraded: bool`, реплики с метками спикеров `A`/`B` |
+| `POST /v1/diarize` | sherpa-onnx (тот же диаризатор) | метки `A`/`B` для уже готовых сегментов ASR: второй этап расшифровки, текст врач получает раньше |
 | `GET /health` | — | `status` (`loading`/`ready`/`error`), `device`, `models`, `error: bool` |
 
 Контракт заморожен в `api/app/services/ml_client.py`; конфигурация и
@@ -259,6 +260,32 @@ Golos/Natural Speech/Callcenter, а не на клиническом диало�
 3. стабильный релиз `gigaam`/`onnx-asr` с сегментами и VAD, совместимый с MIT.
 
 До этого в проде один бэкенд: два полурабочих ASR дороже, чем один честный.
+
+## Диаризация готовой расшифровки (`POST /v1/diarize`)
+
+Второй этап расшифровки (docs/18 §4.3). api сначала зовёт `/v1/transcribe`
+с `diarize=false`, сохраняет текст и отдаёт его врачу, а затем просит только
+метки — поэтому ожидание врача равно времени ASR, а не ASR + диаризация
+(замер 2026-10-27: RTF ASR 0.08, диаризации 0.10–0.18).
+
+Запрос — multipart: `file` (то же аудио, что ушло в `/v1/transcribe`),
+`segments` — JSON-массив `[{start, end, …}]` (текст не нужен, лишние поля
+игнорируются), `duration_s` — длительность из ответа ASR. Пределы:
+`CC_ML_ASR_MAX_MB` для файла и `MAX_SEGMENTS = 8000` для массива, иначе 413.
+
+```bash
+curl -s -X POST http://ml:8080/v1/diarize \
+  -H "X-CC-ML-Token: $CC_ML_TOKEN" \
+  -F file=@session.webm \
+  -F 'segments=[{"start":0,"end":5.2},{"start":5.2,"end":9.8}]' \
+  -F duration_s=9.8 | jq '.diarized, .segments[].speaker'
+```
+
+Ответ: `{segments (с `speaker`), speakers [{id, label, seconds, segments}],
+diarized, degraded, reason}`. Текст сегментов не переписывается — api хранит
+уже деперсонализированный текст и берёт отсюда только метки. Ошибки: 400
+`invalid_request` (не JSON, не массив, нет `start`/`end`, `start >= end`), 413
+`payload_too_large`, 415 `unsupported_media`, 503 `busy` (занят слот ASR/диаризации).
 
 ## Модели и память
 

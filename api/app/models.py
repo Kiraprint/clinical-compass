@@ -977,7 +977,7 @@ class ClinicalSession(Base):
         ),
         CheckConstraint("status in ('active','finished')", name="clinical_sessions_status"),
         CheckConstraint(
-            "ai_status in ('off','recording','transcribing','transcribed','failed')",
+            "ai_status in ('off','recording','transcribing','diarizing','transcribed','failed')",
             name="clinical_sessions_ai_status",
         ),
         CheckConstraint(

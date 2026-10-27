@@ -34,6 +34,7 @@ models.py), а тело запроса — по Content-Length до парсин
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
@@ -53,6 +54,8 @@ from models import (
     MAX_CHARS,
     MAX_DOCUMENTS,
     MAX_NAMES,
+    MAX_SEGMENTS,
+    MAX_SEGMENTS_CHARS,
     ASRBusy,
     MAX_TEXTS,
     ASRDisabled,
@@ -260,6 +263,10 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
     # asr_max_mb() не бросает — кривой env даёт дефолт с предупреждением.
     limits = dict(_BODY_LIMITS)
     limits["/v1/transcribe"] = asr_max_mb() * 1024 * 1024 + 64 * 1024
+    # Диаризация получает то же аудио и JSON-массив сегментов: без своего лимита
+    # multipart-парсер материализовал бы `segments` целиком до проверки
+    # MAX_SEGMENTS. 4 МиБ хватает на 8000 сегментов с запасом.
+    limits["/v1/diarize"] = asr_max_mb() * 1024 * 1024 + 4 * 1024 * 1024
 
     @app.middleware("http")
     async def _limit_body(request: Request, call_next):  # noqa: ANN001 — сигнатура Starlette
@@ -385,6 +392,67 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
                 "asr_failed",
                 "аудио не удалось обработать (декодирование/распознавание), "
                 "подробности — в логах сайдкара",
+            ) from exc
+
+    @app.post("/v1/diarize", dependencies=[Depends(require_token)])
+    def diarize(
+        file: UploadFile = File(..., description="то же аудио, что ушло в /v1/transcribe"),
+        segments: str = Form(..., description="JSON-массив сегментов ASR: start/end/text"),
+        duration_s: float = Form(default=0.0),
+    ) -> dict:
+        """Метки спикеров для уже расшифрованного аудио (docs/18 §4.3, этап 2).
+
+        ASR и диаризация разделены: api пишет текст расшифровки сразу после
+        первого запроса и показывает его врачу, а метки A/B догоняют вторым
+        запросом. Аудио нужно то же самое — диаризация кластеризует голоса по
+        всей записи, по кускам метки перескакивали бы.
+        """
+        media_type = (file.content_type or "").split(";")[0].strip().lower()
+        if media_type not in ASR_MEDIA_TYPES:
+            raise ApiError(
+                415,
+                "unsupported_media",
+                f"тип {media_type or 'unknown'!r} не поддерживается: "
+                "нужен audio/webm|ogg|wav|mpeg|mp4|m4a",
+            )
+        if len(segments) > MAX_SEGMENTS_CHARS:
+            raise ApiError(413, "payload_too_large", "segments: слишком длинный JSON")
+        try:
+            parsed = json.loads(segments)
+        except ValueError as exc:
+            raise ApiError(400, "invalid_request", "segments: ожидается JSON-массив") from exc
+        if not isinstance(parsed, list):
+            raise ApiError(400, "invalid_request", "segments: ожидается JSON-массив")
+        if len(parsed) > MAX_SEGMENTS:
+            raise ApiError(413, "payload_too_large", f"сегментов больше {MAX_SEGMENTS}")
+        clean: list[dict] = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                raise ApiError(400, "invalid_request", "segments: элемент не объект")
+            try:
+                start = float(item["start"])
+                end = float(item["end"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ApiError(
+                    400, "invalid_request", "segments: у элемента нет start/end"
+                ) from exc
+            if not (0.0 <= start < end):
+                raise ApiError(400, "invalid_request", "segments: start/end вне диапазона")
+            clean.append({"start": start, "end": end, "text": str(item.get("text") or "")})
+        file.file.seek(0, os.SEEK_END)
+        size = file.file.tell()
+        file.file.seek(0)
+        if size > asr_max_mb() * 1024 * 1024:
+            raise ApiError(413, "payload_too_large", "аудио больше предела")
+        if not size:
+            raise ApiError(400, "invalid_request", "пустой файл")
+        try:
+            return registry.diarize(file.file, clean, duration_s=duration_s)
+        except ASRBusy as exc:
+            raise ApiError(
+                503,
+                "busy",
+                "расшифровка занята другим запросом, повторите через несколько секунд",
             ) from exc
 
     @app.get("/v1/profiles", dependencies=[Depends(require_token)])
