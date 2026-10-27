@@ -1,7 +1,8 @@
 """Миграции: композитные индексы списков откатываются и накатываются обратно.
 
-Контракт docs/06 §3. Проверяем на реальном Postgres: upgrade → downgrade -1 →
-upgrade не ломает схему, единственный head и ровно один вариант каждого индекса.
+Контракт docs/06 §3. Проверяем на реальном Postgres: upgrade → downgrade до
+родителя FR-10-ревизии → upgrade не ломает схему, единственный head и ровно один
+вариант каждого индекса.
 """
 
 from __future__ import annotations
@@ -50,8 +51,10 @@ def test_index_migration_roundtrip(engine):
     # FR-10: частичный уникальный индекс непрочитанных сообщений.
     assert "notifications_chat_unread" in up
 
-    # Откат последней ревизии (PATIENT_MESSAGE) не трогает индексы b7c9.
-    command.downgrade(cfg, "-1")
+    # Откат именно FR-10-ревизии (c1a2b3d4e5f6), а не «-1»: после неё появились
+    # другие ревизии (assistant answer_meta), и «-1» откатывал бы чужую, оставляя
+    # индекс на месте.
+    command.downgrade(cfg, "b7c9d1e3f5a2")
     down = _indexes()
     assert "notifications_chat_unread" not in down
     assert {"ix_notifications_user_created", "ix_patient_medications_patient_status"} <= down
