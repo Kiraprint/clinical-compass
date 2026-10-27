@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Тематическая иконка Android 13+: силуэт знака без подложки. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="0.11702128"
+        android:scaleY="0.11702128"
+        android:translateX="-19.7234"
+        android:translateY="-5.9157">
+        <path
+            android:fillColor="#FF000000"
+            android:pathData="M628,254 A73,73 0 1,1 628,400 A73,73 0 1,1 628,254 Z" />
+        <path
+            android:fillColor="#FF000000"
+            android:pathData="M437,308 C446,303 452,314 458,326 C480,372 520,396 560,418 C603,442 621,482 621,530 V770 C520,755 372,680 372,505 C372,430 405,365 432,314 C433,310 435,309 437,308 Z" />
+        <path
+            android:fillColor="#FF000000"
+            android:pathData="M815,308 C806,303 800,314 795,324 C772,370 735,392 700,412 C655,438 634,478 634,530 V770 C668,770 886,700 888,510 C888,440 855,370 823,314 C821,310 818,309 815,308 Z" />
+    </group>
+</vector>
