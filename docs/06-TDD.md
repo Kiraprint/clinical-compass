@@ -138,7 +138,7 @@
 | checkin_start_idempotent | повторный POST /checkins в тот же день | `200`, тот же `session_id`, одна строка `checkin_sessions`, один `CHECKIN_START` в аудите |
 | checkin_once_per_day | POST /checkins и answers после завершения дня | `409 CHECKIN_ALREADY_DONE` |
 | roster_enforcement | врач без roster → GET patients/{id} | 403 NO_ROSTER; после /admin/roster → 200 |
-| test_report_exposes_scale_anchors | GET report при roster | карточка | `available_scales[].items[].anchors` длиной `max_value+1`, HDRS-17: h1 — 5 якорей, h4 — 3 |
+| test_scales_catalog_exposes_anchors | GET /clinician/scales | каталог шкал | `scales[].items[].anchors` длиной `max_value+1`, HDRS-17: h1 — 5 якорей, h4 — 3 (каталог больше не едет в `report`) |
 | patient_cannot_read_others | PATIENT → GET diary другого пациента / report | 403 |
 | diary_mood_scale | POST /diary с mood 0 и 5 | 0 → 201 (5-точечная шкала), 5 → 422 VALIDATION |
 | audit_append_only | прямой UPDATE/DELETE audit_log на уровне БД | ошибка БД-триггера (исключение) — отдельный БД-тест, вне HTTP-слоя (API не предоставляет UPDATE/DELETE-эндпоинтов для audit_log) |
