@@ -340,6 +340,8 @@ GitHub Actions остаются резервным путём, основной 
 - **Firebase**: для реальной доставки пушей нужен Firebase-проект (`google-services.json` в `mobile/android/app/`); без файла APK собирается, но пуши не работают. Серверная отправка — FCM HTTP v1 по `CC_FCM_SERVICE_ACCOUNT_B64` (base64 service-account JSON); без неё сервер шлёт только Web Push.
 - **Подпись**: `tools/build-apk.sh` генерирует персистентный demo-keystore (`mobile/android/app/release.keystore`, `CN=Compass Demo`) и подписывает release-APK; этот же сертификат у APK из GitHub Release, поэтому обновления ставятся поверх.
 - **Локальная сборка** (без локальных Java/SDK): `tools/build-apk.sh` работает в образе `compass-android-builder` (JDK 21 + Android SDK 36), сам собирает SPA, делает `npx cap sync android`, запускает `gradlew assembleRelease` с `-PccVersionName/-PccVersionCode` и кладёт APK в `dist/compass-<версия>-release.apk`, печатая `package:` из `aapt2`.
+- **Иконки и splash**: исходник — `mobile/assets/icon-mark.svg` (знак из `ui/public/favicon.svg` без белой подложки); `./mobile/assets/generate-android-assets.sh` пересобирает adaptive/legacy/round иконки и splash во всех плотностях (нужны `rsvg-convert` и ImageMagick 7).
+- **Разрешения**: микрофон (`RECORD_AUDIO`, `MODIFY_AUDIO_SETTINGS`) объявлен для записи приёма (FR-39, `MediaRecorder` в WebView); `POST_NOTIFICATIONS` — для FCM на Android 13+.
 
 ## ИИ-ассистент врача: LLM роутит раздел и пишет ответ по сниппетам
 
