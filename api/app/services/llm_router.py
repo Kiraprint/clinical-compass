@@ -114,6 +114,23 @@ def _enabled() -> bool:
     return bool(settings.assistant_llm_url.strip())
 
 
+
+def _thinking_kwargs() -> dict:
+    """Отключение «размышлений» модели — для llama.cpp и для шлюзов.
+
+    llama.cpp понимает `chat_template_kwargs.enable_thinking`, а OpenAI-совместимые
+    шлюзы (omniroute и прочие) — `reasoning_effort`. Замер на `home-stable`
+    (роутится в `ds/deepseek-v4-flash`), поток по реальным сниппетам:
+    без ключей — первый токен через 15.3 с и 353 reasoning-токена;
+    `reasoning_effort=low` — ХУЖЕ (26.8 с); `reasoning_effort=none` — 7.2 с и
+    полное отсутствие reasoning-токенов. Поэтому дефолт — `none` (docs/17 §8).
+    """
+    kwargs: dict = {"enable_thinking": False}
+    effort = settings.assistant_llm_reasoning_effort.strip()
+    if effort:
+        kwargs["reasoning_effort"] = effort
+    return kwargs
+
 def _request(payload: dict, *, timeout: float | None = None) -> dict:
     """POST /chat/completions к OpenAI-совместимому шлюзу.
 
@@ -172,7 +189,7 @@ def chat_with_tools(
         "model": settings.assistant_llm_model,
         "messages": messages,
         "temperature": temperature,
-        "chat_template_kwargs": {"enable_thinking": False},
+        "chat_template_kwargs": _thinking_kwargs(),
     }
     if tools:
         payload["tools"] = tools
@@ -211,8 +228,9 @@ def route_topics(query: str, *, timeout: float | None = None) -> tuple[str, ...]
             # max_tokens не передаём: reasoning-модели тратят бюджет на thinking
             # до tool_call, и любой наш лимит возвращал finish_reason=length без
             # выбора раздела. Потолок задаёт сам сервер/шлюз по модели.
-            # chat_template_kwargs: llama.cpp понимает флаг, прочие шлюзы игнорируют.
-            "chat_template_kwargs": {"enable_thinking": False},
+            # llama.cpp понимает enable_thinking, OpenAI-совместимые шлюзы —
+            # reasoning_effort: _thinking_kwargs отдаёт оба ключа (docs/17 §8).
+            "chat_template_kwargs": _thinking_kwargs(),
         }
         body = _request(payload, timeout=timeout)
         msg = body["choices"][0]["message"]
@@ -347,7 +365,7 @@ def rewrite_followup(history: list[dict], query: str) -> str | None:
                     },
                 ],
                 "temperature": 0.0,
-                "chat_template_kwargs": {"enable_thinking": False},
+                "chat_template_kwargs": _thinking_kwargs(),
             }
         )
         rewritten = _clean_rewrite(body["choices"][0]["message"].get("content") or "")
@@ -435,7 +453,7 @@ def _answer_body(history: list[dict], query: str, chunks: list[dict]) -> dict | 
         # Бюджет обязателен: reasoning-модель иначе тратит его на «размышления»
         # и возвращает finish_reason=length с пустым content (см. config).
         "max_tokens": settings.assistant_llm_answer_max_tokens,
-        "chat_template_kwargs": {"enable_thinking": False},
+        "chat_template_kwargs": _thinking_kwargs(),
     }
 
 

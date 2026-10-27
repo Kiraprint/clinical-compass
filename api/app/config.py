@@ -106,6 +106,11 @@ class Settings(BaseSettings):
     # «на размышления»: без явного max_tokens ответ приходит с
     # finish_reason=length и пустым content. 700 хватает на 3–5 фрагментов.
     assistant_llm_answer_max_tokens: int = Field(default=700, ge=64)
+    # CC_ASSISTANT_LLM_REASONING_EFFORT: `reasoning_effort` для шлюзов, которые
+    # игнорируют `enable_thinking`. `none` — не думать: поток по реальным
+    # сниппетам даёт первый токен через 7.2 с и ноль reasoning-токенов против
+    # 15.3 с и 353 токенов без ключа; `low` оказался ХУЖЕ (26.8 с) — docs/17 §8.
+    assistant_llm_reasoning_effort: str = "none"
     # CC_ASSISTANT_LLM_API_KEY: Bearer-токен OpenAI-совместимого шлюза (omniroute).
     # Пусто → заголовок Authorization не отправляется (llama-server без ключа).
     assistant_llm_api_key: str = ""

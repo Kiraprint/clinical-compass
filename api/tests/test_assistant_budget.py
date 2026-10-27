@@ -28,6 +28,12 @@ CHUNKS = [
     ),
 ]
 
+
+@pytest.fixture(autouse=True)
+def _llm_on(monkeypatch):
+    """LLM считается настроенным: иначе тело запроса не собирается вовсе."""
+    monkeypatch.setattr(settings, "assistant_llm_url", "http://llm.test/v1")
+
 QUERY = "Какой порог тяжести у шкалы PHQ-9?"
 
 
@@ -150,3 +156,35 @@ async def test_stream_skips_llm_when_budget_spent(monkeypatch):
     assert final is not None
     assert final["answer_kind"] == "fragments"
     assert final["llm_reason"] == "timeout"
+
+
+def test_thinking_kwargs_default_disable_reasoning(monkeypatch):
+    """Ответ уходит с reasoning_effort=none: без него reasoning-модель думает 15 с."""
+    monkeypatch.setattr(settings, "assistant_llm_reasoning_effort", "none")
+    body = llm_router._answer_body([], QUERY, [{"text": "т", "source_title": "s"}])
+    assert body is not None
+    assert body["chat_template_kwargs"] == {
+        "enable_thinking": False,
+        "reasoning_effort": "none",
+    }
+
+
+def test_thinking_kwargs_empty_effort_keeps_only_enable_thinking(monkeypatch):
+    """llama.cpp не знает reasoning_effort: пустое значение не отправляем вовсе."""
+    monkeypatch.setattr(settings, "assistant_llm_reasoning_effort", "")
+    assert llm_router._thinking_kwargs() == {"enable_thinking": False}
+
+
+def test_routing_payload_carries_reasoning_effort(monkeypatch):
+    """Роутинг разделов тоже не должен «думать»: ключ в теле тул-колла."""
+    seen: list[dict] = []
+
+    def _capture(payload, *, timeout=None):
+        seen.append(payload)
+        return {"choices": [{"message": {"tool_calls": []}}]}
+
+    monkeypatch.setattr(settings, "assistant_llm_reasoning_effort", "none")
+    monkeypatch.setattr(llm_router, "_request", _capture)
+    llm_router.route_topics(QUERY)
+    assert seen and seen[0]["chat_template_kwargs"]["reasoning_effort"] == "none"
+    assert seen[0]["chat_template_kwargs"]["enable_thinking"] is False

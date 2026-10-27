@@ -80,11 +80,12 @@ async def _invoke_agent(query: str, **kwargs) -> dict:
     result: dict | None = None
     # budget — тот же дедлайн, что ограничивает прогон: agent берёт его для
     # таймаутов LLM (роутер и ответ идут последовательно внутри прогона).
+    # Считаем ДО захвата лимитера: иначе время в очереди не входит в бюджет и
+    # прогон упирается во внешний move_on_after → 503 вместо фрагментов.
+    deadline_at = time.monotonic() + settings.assistant_deadline_s
     with anyio.move_on_after(settings.assistant_deadline_s) as scope:
         result = await anyio.to_thread.run_sync(
-            lambda: factory.invoke(
-                query, deadline_at=time.monotonic() + settings.assistant_deadline_s, **kwargs
-            ),
+            lambda: factory.invoke(query, deadline_at=deadline_at, **kwargs),
             abandon_on_cancel=True,
             limiter=AGENT_LIMITER,
         )
