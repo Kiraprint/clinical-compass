@@ -114,7 +114,9 @@ test("врач записывает приём, ведёт протокол и �
   await openSection(page, "Расписание");
   await expect(page.getByRole("heading", { name: "Расписание" })).toBeVisible();
   await page.getByRole("row", { name: /10:00/ }).getByRole("button", { name: "Открыть приём" }).click();
-  await expect(page.getByText("протокол подтверждён")).toBeVisible();
+  // Статус в шапке панели — устойчивый признак: заметка ниже может совпасть по
+  // тексту с сообщением карточки ИИ и дать strict-mode сразу на два элемента.
+  await expect(page.getByText(/протокол подтверждён \(v\d\)/)).toBeVisible();
   await expect(page.getByText("Тревога, нарушения сна")).toBeVisible();
   await expect(page.getByRole("button", { name: "Подтвердить протокол" })).toHaveCount(0);
 });
@@ -153,7 +155,7 @@ test("приём без записи находится после переза�
 
   // Завершение приёма убирает его из активных.
   await page.getByRole("button", { name: "Завершить приём" }).click();
-  await expect(page.getByText(/Приём завершён/)).toBeVisible();
+  await expect(page.getByText("Приём завершён, запись добавлена в карточку пациента")).toBeVisible();
   await page.getByRole("button", { name: "К расписанию" }).click();
   await expect(page.getByRole("heading", { name: "Приёмы без записи" })).toHaveCount(0);
 

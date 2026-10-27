@@ -576,6 +576,8 @@ def test_draft_through_api_stores_sources_and_hashes_them(client, monkeypatch, d
     )
     assert bad.status_code == 422, bad.text
     assert bad.json()["code"] == "PROTOCOL_ICD10_INVALID"
+    # Ошибка адресована полю: UI рисует её у самого поля, а не плашкой сверху.
+    assert bad.json()["fields"] == {"diagnosis.icd10": "ожидается код МКБ-10, например F41.1"}
 
     # Без обязательного кода approve не проходит — черновик сам себя не утверждает.
     cleared = {**sections, "diagnosis": {**sections["diagnosis"], "icd10": ""}}
@@ -587,7 +589,11 @@ def test_draft_through_api_stores_sources_and_hashes_them(client, monkeypatch, d
     not_ready = client.post(f"{BASE}/sessions/{sid}/protocol/approve", headers=ctx["doctor"])
     assert not_ready.status_code == 409
     assert not_ready.json()["code"] == "PROTOCOL_NOT_READY"
-    assert "diagnosis.icd10" in not_ready.json()["detail"]
+    # detail читает человек (русские названия), fields — машиночитаемые пути полей.
+    assert "код МКБ-10" in not_ready.json()["detail"]
+    assert not_ready.json()["fields"] == {
+        "diagnosis.icd10": "обязательный раздел не заполнен"
+    }
 
     # Врач дописал код и утвердил: хэш считается по каноническому JSON, и sources
     # входят в него — обоснование подписывается вместе с документом (§5.4).

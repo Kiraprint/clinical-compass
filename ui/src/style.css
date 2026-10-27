@@ -1006,3 +1006,25 @@ small { color: #8a94a8; }
   .invite-card input { font-size: 16px; }
   .invite-pending-actions button { min-height: 40px; }
 }
+
+/* Ошибки полей протокола — у самого поля, а не одной плашкой в начале формы:
+   врач должен видеть, что именно не заполнено, после неудачного сохранения. */
+.field-error {
+  margin: 4px 0 10px;
+  padding: 6px 8px;
+  border-left: 3px solid var(--red, #c0392b);
+  border-radius: 4px;
+  background: rgba(192, 57, 43, 0.08);
+  color: var(--red, #c0392b);
+  font-size: 13px;
+}
+textarea[aria-invalid="true"],
+input[aria-invalid="true"] {
+  border-color: var(--red, #c0392b);
+  outline: 1px solid var(--red, #c0392b);
+}
+@media (max-width: 700px) {
+  .field-error {
+    font-size: 14px;
+  }
+}

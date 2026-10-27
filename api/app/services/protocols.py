@@ -71,6 +71,14 @@ REQUIRED = (
     ("mental_status.suicidal_risk", ("mental_status", "suicidal_risk")),
     ("diagnosis.icd10", ("diagnosis", "icd10")),
 )
+# Человеческие названия для detail: путь поля нужен клиенту, а текст читает врач.
+REQUIRED_LABELS = {
+    "passport.visit_at": "дата и время приёма",
+    "passport.legal_basis": "правовое основание (ИДС)",
+    "complaints": "жалобы",
+    "mental_status.suicidal_risk": "суицидальный риск",
+    "diagnosis.icd10": "код МКБ-10",
+}
 
 
 def canonical(sections: dict) -> str:
@@ -103,7 +111,12 @@ def _now() -> datetime:
 
 
 def _too_long(path: str, limit: int) -> Problem:
-    return Problem(422, "PROTOCOL_SECTION_TOO_LONG", f"{path}: максимум {limit} символов")
+    return Problem(
+        422,
+        "PROTOCOL_SECTION_TOO_LONG",
+        f"{path}: максимум {limit} символов",
+        fields={path: f"максимум {limit} символов"},
+    )
 
 
 def _check_text(value, path: str, limit: int) -> None:
@@ -145,10 +158,18 @@ def validate_sections(sections: dict) -> None:
         _check_text(diagnosis.get("rationale"), "diagnosis.rationale", RATIONALE_CHARS)
         code = diagnosis.get("icd10")
         if code is not None and not isinstance(code, str):
-            raise Problem(422, "VALIDATION_ERROR", "diagnosis.icd10: ожидалась строка")
+            raise Problem(
+                422,
+                "VALIDATION_ERROR",
+                "diagnosis.icd10: ожидалась строка",
+                fields={"diagnosis.icd10": "ожидалась строка"},
+            )
         if isinstance(code, str) and code.strip() and not ICD10.match(code.strip()):
             raise Problem(
-                422, "PROTOCOL_ICD10_INVALID", "diagnosis.icd10: ожидается код МКБ-10 (F41.1)"
+                422,
+                "PROTOCOL_ICD10_INVALID",
+                "diagnosis.icd10: ожидается код МКБ-10 (F41.1)",
+                fields={"diagnosis.icd10": "ожидается код МКБ-10, например F41.1"},
             )
 
     treatment = sections.get("treatment")
@@ -157,7 +178,10 @@ def validate_sections(sections: dict) -> None:
             raise Problem(422, "VALIDATION_ERROR", "treatment: ожидался список")
         if len(treatment) > TREATMENT_MAX:
             raise Problem(
-                422, "PROTOCOL_SECTION_TOO_LONG", f"treatment: максимум {TREATMENT_MAX} позиций"
+                422,
+                "PROTOCOL_SECTION_TOO_LONG",
+                f"treatment: максимум {TREATMENT_MAX} позиций",
+                fields={"treatment": f"максимум {TREATMENT_MAX} позиций"},
             )
         for i, item in enumerate(treatment):
             if not isinstance(item, dict):
@@ -171,7 +195,10 @@ def validate_sections(sections: dict) -> None:
             raise Problem(422, "VALIDATION_ERROR", "sources: ожидался массив")
         if len(sources) > SOURCES_MAX:
             raise Problem(
-                422, "PROTOCOL_SECTION_TOO_LONG", f"sources: максимум {SOURCES_MAX} записей"
+                422,
+                "PROTOCOL_SECTION_TOO_LONG",
+                f"sources: максимум {SOURCES_MAX} записей",
+                fields={"sources": f"максимум {SOURCES_MAX} записей"},
             )
         for i, item in enumerate(sources):
             if not isinstance(item, dict):
@@ -208,6 +235,7 @@ def validate_sections(sections: dict) -> None:
                 422,
                 "PROTOCOL_SOURCE_UNKNOWN",
                 f"{label}: источника {missing[0]} нет в sources",
+                fields={label: f"источника {missing[0]} нет в списке источников"},
             )
 
 
@@ -489,7 +517,12 @@ async def approve(db: AsyncSession, clinician_id, session_id, ip: str | None = N
     await require_patient_access(db, clinician_id, session.patient_id)
     row = await _active(db, session.id)
     if row is None:
-        raise Problem(409, "PROTOCOL_NOT_READY", "Протокол не заполнен")
+        raise Problem(
+            409,
+            "PROTOCOL_NOT_READY",
+            "Протокол не заполнен",
+            fields={path: "раздел не заполнен" for path, _ in REQUIRED},
+        )
     if row.status in ("approved", "signed", "submitted"):
         return _payload(row)  # идемпотентно: повторный approve не меняет документ
     sections = decode_sections(row)
@@ -498,7 +531,9 @@ async def approve(db: AsyncSession, clinician_id, session_id, ip: str | None = N
         raise Problem(
             409,
             "PROTOCOL_NOT_READY",
-            "Не заполнены обязательные разделы: " + ", ".join(missing),
+            "Не заполнены обязательные разделы: "
+            + ", ".join(REQUIRED_LABELS.get(path, path) for path in missing),
+            fields={path: "обязательный раздел не заполнен" for path in missing},
         )
     # `diagnosis_code` досчитывается из разделов: подтверждённая запись не может
     # расходиться с `sections.diagnosis.icd10` (расхождение — 422).

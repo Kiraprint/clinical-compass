@@ -69,6 +69,28 @@ const START_FMT = new Intl.DateTimeFormat("ru-RU", {
 
 const errText = (e: unknown): string =>
   e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e);
+
+/**
+ * Путь поля из Problem `fields` → якорь в редакторе. Ошибка обязана стоять у
+ * самого поля: одна плашка в начале длинной формы не объясняет, что не так, и
+ * врач видит «нажал — ничего не произошло» (жалоба с приёмки).
+ */
+export function fieldAnchorId(path: string): string {
+  const row = /^(treatment|sources)\[(\d+)\]/.exec(path);
+  if (row) return `pf-${row[1]}-${row[2]}`;
+  if (path.startsWith("treatment")) return "pf-treatment";
+  if (path === "sources" || path.startsWith("diagnosis.sources")) return "pf-sources";
+  return `pf-${path.replace(/\./g, "-")}`;
+}
+
+/** Текст ошибки для поля: точный путь или любой вложенный в него. */
+function errorFor(fieldErrors: Record<string, string>, path: string): string {
+  if (fieldErrors[path]) return fieldErrors[path];
+  const nested = Object.entries(fieldErrors).find(
+    ([key]) => key.startsWith(`${path}.`) || key.startsWith(`${path}[`),
+  );
+  return nested ? nested[1] : "";
+}
 /** §4.3: причины `needs_review` → подсказки врачу (код модели не показываем). */
 const REVIEW_REASONS: Record<string, string> = {
   dosage_in_draft: "похоже на дозировку — проверьте вручную",
@@ -208,13 +230,26 @@ function Counter({ value, max }: { value: string; max: number }) {
   );
 }
 
+/** Текст серверной ошибки у конкретного поля (пусто — ничего не рисуем). */
+function FieldError({ text }: { text?: string }) {
+  if (!text) return null;
+  return (
+    <p className="field-error" role="alert">
+      {text}
+    </p>
+  );
+}
+
 function NarrativeField({
   label,
   value,
   max,
   rows = 3,
   review,
+  path,
+  error,
   onChange,
+  onTyped,
 }: {
   label: string;
   value: string;
@@ -222,19 +257,34 @@ function NarrativeField({
   rows?: number;
   /** Причины из `needs_review` черновика ИИ: раздел проверяет врач (§4.3). */
   review?: string[];
+  /** Путь поля в документе (`mental_status.criticism`) — для якоря и ошибки. */
+  path?: string;
+  /** Ошибка сервера, относящаяся именно к этому полю. */
+  error?: string;
   onChange: (value: string) => void;
+  /** Врач начал править поле — подсказку снимаем, она уже неактуальна. */
+  onTyped?: () => void;
 }) {
   return (
-    <div>
+    <div id={path ? fieldAnchorId(path) : undefined}>
       <label>
         {label}
         <textarea
           rows={rows}
           value={value}
           maxLength={max}
-          onChange={(e) => onChange(e.target.value)}
+          aria-invalid={error ? true : undefined}
+          onChange={(e) => {
+            if (error && onTyped) onTyped();
+            onChange(e.target.value);
+          }}
         />
       </label>
+      {error && (
+        <p className="field-error" role="alert">
+          {error}
+        </p>
+      )}
       <Counter value={value} max={max} />
       {review && review.length > 0 && (
         <p className="hint">
@@ -321,7 +371,54 @@ export default function SessionPanel({
   const base = useMemo(() => emptySections(initial), [initial]);
   const [sections, setSections] = useState<ProtocolSections>(base);
   const [err, setErr] = useState("");
+  // Ошибки, привязанные к полям (Problem `fields`): текст рисуется у самого поля,
+  // общий `err` остаётся только для сбоев без адреса (сеть, 500, чужая сессия).
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [note, setNote] = useState("");
+
+  /**
+   * Показать сбой так, чтобы было видно, к какому полю он относится: подсказки —
+   * у полей, первое проблемное поле — в зону видимости и с фокусом. Иначе после
+   * «Подтвердить протокол» экран просто не менялся, а причина висела выше.
+   */
+  const showFailure = (e: unknown, what: string) => {
+    const fields = e instanceof ApiError ? e.fields : {};
+    const paths = Object.keys(fields);
+    if (paths.length === 0) {
+      setFieldErrors({});
+      setErr(errText(e));
+      return;
+    }
+    setFieldErrors(fields);
+    setErr("");
+    const detail = e instanceof ApiError ? e.detail.trim() : "";
+    const where = `${paths.length} ${paths.length === 1 ? "поле" : "полей"}`;
+    setNote(
+      `${what}: ${detail || "проверьте выделенные поля"} (${where}) — подсказки у самих полей.`,
+    );
+    const first = paths[0];
+    requestAnimationFrame(() => {
+      const node = document.getElementById(fieldAnchorId(first));
+      node?.scrollIntoView({ block: "center", behavior: "smooth" });
+      node
+        ?.querySelector<HTMLElement>("textarea, input, select")
+        ?.focus({ preventScroll: true });
+    });
+  };
+
+  const clearFieldErrors = () => {
+    setFieldErrors((prev) => (Object.keys(prev).length ? {} : prev));
+  };
+
+  /** Врач правит поле — его подсказка больше не актуальна. */
+  const clearFieldError = useCallback((path: string) => {
+    setFieldErrors((prev) => {
+      if (!prev[path]) return prev;
+      const next = { ...prev };
+      delete next[path];
+      return next;
+    });
+  }, []);
   const [busy, setBusy] = useState(false);
   // Ключи строк лечения: `key={i}` после удаления из середины переиспользует DOM строки.
   const [rowKeys, setRowKeys] = useState<string[]>([]);
@@ -434,6 +531,7 @@ export default function SessionPanel({
   const save = async () => {
     setBusy(true);
     setErr("");
+    clearFieldErrors();
     setNote("");
     try {
       // Отправляем ровно то, что видит врач на момент клика.
@@ -457,7 +555,7 @@ export default function SessionPanel({
           : `Черновик сохранён (версия ${p.version}).`,
       );
     } catch (e: unknown) {
-      setErr(errText(e));
+      showFailure(e, "Сохранение не прошло");
     } finally {
       setBusy(false);
     }
@@ -493,6 +591,7 @@ export default function SessionPanel({
   const approve = async () => {
     setBusy(true);
     setErr("");
+    clearFieldErrors();
     setNote("");
     try {
       // Подтверждаем ровно то, что видит врач: approve уходит по последнему черновику,
@@ -527,7 +626,7 @@ export default function SessionPanel({
       );
     } catch (e: unknown) {
       // 409 PROTOCOL_NOT_READY — список незаполненных разделов в detail.
-      setErr(errText(e));
+      showFailure(e, "Подтверждение не прошло");
     } finally {
       setBusy(false);
     }
@@ -799,6 +898,9 @@ export default function SessionPanel({
               value={sections.passport.legal_basis}
               max={LIMIT.line}
               rows={1}
+              path="passport.legal_basis"
+              error={fieldErrors["passport.legal_basis"]}
+              onTyped={() => clearFieldError("passport.legal_basis")}
               onChange={(v) => setSections((s) => ({ ...s, passport: { ...s.passport, legal_basis: v } }))}
             />
 
@@ -808,6 +910,9 @@ export default function SessionPanel({
               value={sections.complaints}
               max={LIMIT.complaints}
               review={review["complaints"]}
+              path="complaints"
+              error={fieldErrors["complaints"]}
+              onTyped={() => clearFieldError("complaints")}
               onChange={(v) => setSections((s) => ({ ...s, complaints: v }))}
             />
 
@@ -818,6 +923,9 @@ export default function SessionPanel({
               max={LIMIT.anamnesis_morbi}
               rows={4}
               review={review["anamnesis_morbi"]}
+              path="anamnesis_morbi"
+              error={fieldErrors["anamnesis_morbi"]}
+              onTyped={() => clearFieldError("anamnesis_morbi")}
               onChange={(v) => setSections((s) => ({ ...s, anamnesis_morbi: v }))}
             />
 
@@ -829,6 +937,9 @@ export default function SessionPanel({
                 value={sections.mental_status[f.key]}
                 max={LIMIT.mental}
                 review={review[`mental_status.${String(f.key)}`]}
+                path={`mental_status.${String(f.key)}`}
+                error={fieldErrors[`mental_status.${String(f.key)}`]}
+                onTyped={() => clearFieldError(`mental_status.${String(f.key)}`)}
                 onChange={(v) =>
                   setSections((s) => ({ ...s, mental_status: { ...s.mental_status, [f.key]: v } }))
                 }
@@ -841,37 +952,46 @@ export default function SessionPanel({
               value={sections.somatic_status}
               max={LIMIT.somatic_status}
               review={review["somatic_status"]}
+              path="somatic_status"
+              error={fieldErrors["somatic_status"]}
+              onTyped={() => clearFieldError("somatic_status")}
               onChange={(v) => setSections((s) => ({ ...s, somatic_status: v }))}
             />
 
             <h3>Диагноз</h3>
             <div className="row">
-              <label>
+              <label id="pf-diagnosis-syndrome">
                 Синдром
                 <input
                   value={sections.diagnosis.syndrome}
                   maxLength={LIMIT.line}
-                  onChange={(e) =>
+                  aria-invalid={fieldErrors["diagnosis.syndrome"] ? true : undefined}
+                  onChange={(e) => {
+                    clearFieldError("diagnosis.syndrome");
                     setSections((s) => ({
                       ...s,
                       diagnosis: { ...s.diagnosis, syndrome: e.target.value },
-                    }))
-                  }
+                    }));
+                  }}
                 />
+                <FieldError text={fieldErrors["diagnosis.syndrome"]} />
               </label>
-              <label>
+              <label id="pf-diagnosis-icd10">
                 МКБ-10
                 <input
                   value={sections.diagnosis.icd10}
                   maxLength={10}
                   placeholder="F41.1"
-                  onChange={(e) =>
+                  aria-invalid={fieldErrors["diagnosis.icd10"] ? true : undefined}
+                  onChange={(e) => {
+                    clearFieldError("diagnosis.icd10");
                     setSections((s) => ({
                       ...s,
                       diagnosis: { ...s.diagnosis, icd10: e.target.value.toUpperCase() },
-                    }))
-                  }
+                    }));
+                  }}
                 />
+                <FieldError text={fieldErrors["diagnosis.icd10"]} />
               </label>
             </div>
             <NarrativeField
@@ -879,23 +999,30 @@ export default function SessionPanel({
               value={sections.diagnosis.rationale}
               max={LIMIT.rationale}
               review={review["diagnosis.rationale"]}
+              path="diagnosis.rationale"
+              error={fieldErrors["diagnosis.rationale"]}
+              onTyped={() => clearFieldError("diagnosis.rationale")}
               onChange={(v) => setSections((s) => ({ ...s, diagnosis: { ...s.diagnosis, rationale: v } }))}
             />
-            <SourceChips
-              sources={sections.sources ?? []}
-              ids={sections.diagnosis.sources}
-              review={[
-                ...(review["diagnosis"] ?? []),
-                ...(review["diagnosis.icd10"] ?? []),
-                ...(review["diagnosis.syndrome"] ?? []),
-              ]}
-            />
+            <div id="pf-sources">
+              <SourceChips
+                sources={sections.sources ?? []}
+                ids={sections.diagnosis.sources}
+                review={[
+                  ...(review["diagnosis"] ?? []),
+                  ...(review["diagnosis.icd10"] ?? []),
+                  ...(review["diagnosis.syndrome"] ?? []),
+                ]}
+              />
+              <FieldError text={errorFor(fieldErrors, "sources")} />
+            </div>
 
-            <h3>Лечение</h3>
+            <h3 id="pf-treatment">Лечение</h3>
             <ReviewHint reasons={review["treatment"]} />
+            <FieldError text={fieldErrors["treatment"]} />
             {sections.treatment.length === 0 && <p className="small muted">Позиций нет.</p>}
             {sections.treatment.map((row, i) => (
-              <div className="treatment-row" key={rowKeys[i] ?? `t${i}`}>
+              <div className="treatment-row" id={`pf-treatment-${i}`} key={rowKeys[i] ?? `t${i}`}>
                 <div className="row">
                   <label>
                     Препарат
@@ -943,6 +1070,7 @@ export default function SessionPanel({
                     Убрать
                   </button>
                 </div>
+                <FieldError text={errorFor(fieldErrors, `treatment[${i}]`)} />
                 <div className="row">
                   {row.edited && <span className="badge YELLOW">изменено врачом</span>}
                   <SourceChips
@@ -974,6 +1102,9 @@ export default function SessionPanel({
               value={sections.recommendations}
               max={LIMIT.recommendations}
               review={review["recommendations"]}
+              path="recommendations"
+              error={fieldErrors["recommendations"]}
+              onTyped={() => clearFieldError("recommendations")}
               onChange={(v) => setSections((s) => ({ ...s, recommendations: v }))}
             />
             <SourceChips sources={sections.sources ?? []} usedBy="recommendations" />

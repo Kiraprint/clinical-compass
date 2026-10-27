@@ -374,8 +374,8 @@
 | `test_session_detail_contains_protocol_and_artifacts` | сессия с протоколом | `GET /sessions/{id}` | `protocol {version,status}`, `artifacts=[]`, `signature/delivery=null` |
 | `test_audit_rows_written_for_write_paths` | запись/старт/правка/finish | — | в `audit_log` есть `APPOINTMENT_CREATE/UPDATE`, `SESSION_START/FINISH`; текста нет |
 | `test_put_creates_draft_and_stores_ciphertext` | `PUT …/protocol` | сырой `SELECT sections_cipher` | `version=1`, `draft`, в БД bytea без plaintext и имени раздела |
-| `test_section_limits_and_icd10` | разделы сверх §5.2 | `PUT …/protocol` | 422 `PROTOCOL_SECTION_TOO_LONG` / `PROTOCOL_ICD10_INVALID` |
-| `test_approve_requires_mandatory_sections` | заполнены только жалобы | `approve` | 409 `PROTOCOL_NOT_READY` со списком пустых разделов |
+| `test_section_limits_and_icd10` | разделы сверх §5.2 | `PUT …/protocol` | 422 `PROTOCOL_SECTION_TOO_LONG` / `PROTOCOL_ICD10_INVALID`, в теле `fields` с путём поля |
+| `test_approve_requires_mandatory_sections` | заполнены только жалобы | `approve` | 409 `PROTOCOL_NOT_READY` со списком пустых разделов; `fields` = пути незаполненных граф (проверка в `test_session_ai_grounding.py`) |
 | `test_approve_hashes_canonical_json_and_locks` | полный протокол | `approve`, затем `PUT` | `content_sha256` = sha256 канонического JSON; 409 `PROTOCOL_LOCKED` |
 | `test_edit_after_signed_creates_new_version` | версия 1 в статусе `signed` | `PUT…/protocol` | версия 2 `draft`, версия 1 `superseded`, approve новой версии |
 | `test_protocol_access_gates` | чужая сессия; отзыв согласия | `GET/PUT/approve` | 404 `SESSION_NOT_FOUND`; после отзыва 403 `CONSENT_REQUIRED` |
@@ -506,6 +506,7 @@
 `clinician-visit.spec.ts` — запись приёма: сохранение, формат/длительность, запись видна после перезагрузки.
 `clinician-schedule.spec.ts` — календарь приёмов и ручной протокол: запись/правка/отмена, старт приёма, протокол с подтверждением и persist, приём без записи после перезагрузки.
 `clinician-session-documents.spec.ts` — документ приёма (FR-39/40/41): подпись СЭМД и проверка («подпись действительна»), PDF протокола непустой, передача в РЭМД через мок до бейджа «зарегистрирован в РЭМД» (кнопка гаснет); допечатанный во время сохранения/генерации текст врача не выбрасывается.
+`session-audio-autosend.spec.ts` — запись приёма уходит без нажатий: врач останавливает запись, и запись сама доходит до сервера (`artifacts: audio`), а статус уходит с «off» (расшифровка стартует сама; при выключенном ML — честная ошибка, а не «ничего не произошло»). Требует `CC_SESSION_AI_ENABLED=true` (на CI-стенде флаг выключен → спек делает skip с причиной), запускается с фейковым микрофоном Chromium.
 
 `patient-home-priority.spec.ts` — главный экран пациента (FR-45/FR-46): напоминания стоят выше баннера скрининга, их кнопки ≥44px и баннер ниже них на 390×844 (замер `boundingBox`, без скриншотов); «Отметить чек-ин»/«Отметить приём» открывают «Сегодня» с прокруткой к блоку и фокусом на первом ответе, «Перейти к скринингу» — скрининг; вопрос приёма читается как «Сколько таблеток вы приняли?», отметки taken/partial(`half`)/missed сохраняются как выбраны (проверка через `/me/adherence`). Копирайт баннера («Врач назначил скрининг: …») и кнопок приёма затронул локаторы `patient-flows.spec.ts`, `consent-revoke.spec.ts`, `rbac-idor.spec.ts`, `daily-today.spec.ts` — они обновлены вместе со спекой.
 
