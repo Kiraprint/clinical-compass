@@ -185,6 +185,23 @@ def _compose_answer(
     return _finalize_llm_answer(text, chunks)
 
 
+def _compose_answer_result(
+    query: str, history: list[dict], chunks: list[RAGChunk]
+) -> tuple[RAGAnswer | None, str]:
+    """То же, что _compose_answer, плюс причина отказа для UI.
+
+    Причина — `llm_reason` контракта ответа: disabled|timeout|empty|http_error
+    от llm_router; ответ модели без единой валидной ссылки [n] тоже `empty`
+    (связного проверенного текста нет — берём детерминированный).
+    """
+    payload = [{"text": c.text, "source_title": c.source_title} for c in chunks]
+    text, reason = llm_router.compose_answer_result(history, query, payload)
+    if text is None:
+        return None, reason
+    answer = _finalize_llm_answer(text, chunks)
+    return answer, ("ok" if answer is not None else "empty")
+
+
 def compose_grounded_answer(
     query: str, history: list[dict], chunks: list[RAGChunk]
 ) -> RAGAnswer | None:
@@ -255,13 +272,51 @@ class AgentState(TypedDict, total=False):
     answer: dict
 
 
-def _answer_dict(state: AgentState, result: RAGAnswer) -> dict:
+def _fragments(chunks: list[RAGChunk], citations) -> list[dict]:
+    """Фрагменты КБ, попавшие в citations детерминированного ответа.
+
+    Номера, порядок и source_title — ровно как в citations: UI не ищет
+    соответствие сам. Карта пациента в citations есть, но фрагментом КБ не
+    является — её индекса в списке не будет.
+    """
+    by_guideline: dict[str, RAGChunk] = {}
+    for chunk in chunks:
+        by_guideline.setdefault(chunk.guideline_id, chunk)
+    out: list[dict] = []
+    for n, cite in enumerate(citations, start=1):
+        chunk = by_guideline.get(cite.guideline_id)
+        if chunk is None:
+            continue
+        out.append({"n": n, "source_title": cite.source_title, "text": chunk.text})
+    return out
+
+
+def _answer_dict(
+    state: AgentState,
+    result: RAGAnswer,
+    *,
+    answer_kind: str,
+    llm_reason: str | None,
+    fragments: list[dict] | None = None,
+) -> dict:
+    """Контракт ответа ассистента: текст, цитаты и признак «ИИ не сработал».
+
+    answer_kind="llm" — текст написан моделью; "fragments" — детерминированная
+    выдача фрагментов, llm_reason объясняет, почему (disabled|timeout|
+    truncated|empty|http_error); "refusal" — прямой отказ (red line / нет
+    данных), llm_reason=None: плашка «ИИ-формулировка недоступна» над отказом
+    врёт, а фрагментов у отказа нет. fragments заполняются только для
+    "fragments" и совпадают с citations по номерам.
+    """
     return {
         "answer": result.answer,
         "grounded": result.grounded,
         "refused": result.refused,
         "refusal_code": result.refusal_code,
         "topic": state.get("topic"),
+        "answer_kind": answer_kind,
+        "llm_reason": llm_reason,
+        "fragments": (fragments or []) if answer_kind == "fragments" else [],
         "citations": [
             {
                 "source_title": c.source_title,
@@ -272,6 +327,26 @@ def _answer_dict(state: AgentState, result: RAGAnswer) -> dict:
             for c in result.citations
         ],
     }
+
+
+def _fallback_answer(
+    state: AgentState, chunks: list[RAGChunk], result: RAGAnswer, reason: str
+) -> dict:
+    """Детерминированный ответ: отказ без плашки ИИ, иначе выдача фрагментов.
+
+    Отказ — это red line (`refused`) ИЛИ «в КБ нет данных» (`refusal_code`, у
+    которого исторически `refused=False`, чтобы не путать с красной линией).
+    У отказа фрагментов нет и причины отказа LLM нет: модели не звали.
+    """
+    if result.refused or result.refusal_code:
+        return _answer_dict(state, result, answer_kind="refusal", llm_reason=None)
+    return _answer_dict(
+        state,
+        result,
+        answer_kind="fragments",
+        llm_reason=reason,
+        fragments=_fragments(chunks, result.citations),
+    )
 
 
 class AgentFactory:
@@ -397,19 +472,28 @@ class AgentFactory:
         # диагноз/терапию (red line), а также случаи «фрагментов нет» и «есть
         # только карта пациента» остаются детерминированными: карта и ПДн в
         # промпт не уходят, а отказ обязан быть воспроизводимым.
-        result = None
+        result: RAGAnswer | None = None
+        # LLM не зовём для red line и пустых находок: отказ обязан быть
+        # воспроизводимым. Такой ответ уходит как answer_kind="refusal",
+        # llm_reason=None — UI не рисует над отказом плашку «ИИ недоступен».
+        reason = "disabled"
         if chunks and detect_redline(state["query"]) is None:
-            result = _compose_answer(
+            result, reason = _compose_answer_result(
                 state["query"], state.get("history") or [], chunks
             )
-        if result is None:
-            result = build_rag_answer(
-                state["query"],
-                chunks,
-                patient_context=state.get("patient_context"),
-                patient_contexts=state.get("patient_contexts"),
-            )
-        return {"answer": _answer_dict(state, result)}
+        if result is not None:
+            return {
+                "answer": _answer_dict(
+                    state, result, answer_kind="llm", llm_reason=reason
+                )
+            }
+        fallback = build_rag_answer(
+            state["query"],
+            chunks,
+            patient_context=state.get("patient_context"),
+            patient_contexts=state.get("patient_contexts"),
+        )
+        return {"answer": _fallback_answer(state, chunks, fallback, reason)}
 
     def build(self):
         """Граф retrieve → answer.
@@ -519,6 +603,10 @@ class AgentFactory:
         chunks = state.get("chunks") or []
         payload = [{"text": c.text, "source_title": c.source_title} for c in chunks]
         result: RAGAnswer | None = None
+        # Отказной ветки у потока нет: red line и пустые находки до LLM не
+        # доходят (chunks пуст ⇒ не зовём), а отказ при неудаче LLM собирает
+        # тот же _fallback_answer, что и batch.
+        reason = "disabled"
         if chunks and detect_redline(query) is None:
             parts: list[str] = []
             try:
@@ -528,20 +616,30 @@ class AgentFactory:
                     parts.append(piece)
                     yield {"delta": piece}
                 result = _finalize_llm_answer(llm_router.clean_answer("".join(parts)), chunks)
+                # Пустой поток или ответ модели без валидных ссылок — тоже `empty`:
+                # UI обязан отличить это от честного ответа ИИ.
+                reason = "ok" if result is not None else "empty"
             except Exception as exc:  # транспорт/SSE/парсер — не ломаем ответ
+                reason = llm_router.stream_error_reason(exc)
                 logger.warning(
                     "assistant LLM-поток прервался (%s: %s) — детерминированный ответ",
                     type(exc).__name__,
                     exc,
                 )
-        if result is None:
-            result = build_rag_answer(
-                query,
-                chunks,
-                patient_context=state.get("patient_context"),
-                patient_contexts=state.get("patient_contexts"),
-            )
-        yield {"answer": _answer_dict(state, result)}
+        if result is not None:
+            yield {
+                "answer": _answer_dict(
+                    state, result, answer_kind="llm", llm_reason=reason
+                )
+            }
+            return
+        fallback = build_rag_answer(
+            query,
+            chunks,
+            patient_context=state.get("patient_context"),
+            patient_contexts=state.get("patient_contexts"),
+        )
+        yield {"answer": _fallback_answer(state, chunks, fallback, reason)}
 
 
 # --- Разделяемые клиенты процесса -------------------------------------------

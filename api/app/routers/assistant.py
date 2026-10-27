@@ -195,8 +195,14 @@ async def post_message_stream(
         events(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            # SSE не должен буферизоваться прокси: без X-Accel-Buffering: no
+            # nginx копит поток и UI видит «Думаю…» до конца генерации, а при
+            # обрыве — «Failed to fetch». Заголовок — гарантия api; со
+            # стороны ui требуется proxy_buffering off на /api/
+            # (ui/nginx.conf, PR #116), docs/03 §12.
             "X-Accel-Buffering": "no",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
             # GZipMiddleware иначе копит SSE до 1 КБ и убивает поток.
             "Content-Encoding": "identity",
         },

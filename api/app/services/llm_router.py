@@ -429,6 +429,9 @@ def _answer_body(history: list[dict], query: str, chunks: list[dict]) -> dict | 
         # 0.2 — связная формулировка, но без «творчества»: факты и
         # ссылки берутся из сниппетов, повторяемость важна для тестов.
         "temperature": 0.2,
+        # Бюджет обязателен: reasoning-модель иначе тратит его на «размышления»
+        # и возвращает finish_reason=length с пустым content (см. config).
+        "max_tokens": settings.assistant_llm_answer_max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
     }
 
@@ -441,7 +444,17 @@ def _llm_headers() -> dict[str, str]:
     return headers
 
 
-def compose_answer(history: list[dict], query: str, chunks: list[dict]) -> str | None:
+class TruncatedAnswer(Exception):
+    """Модель упёрлась в max_tokens: текст оборван на середине.
+
+    Усечённый клинический ответ нельзя отдавать как ответ ИИ — вызывающий
+    деградирует до детерминированной выдачи фрагментов (reason "truncated").
+    """
+
+
+def compose_answer_result(
+    history: list[dict], query: str, chunks: list[dict]
+) -> tuple[str | None, str]:
     """Ответ ассистента по найденным фрагментам и истории диалога (FR-17).
 
     history — предыдущие реплики треда, query — текущий вопрос (оба уже
@@ -450,26 +463,97 @@ def compose_answer(history: list[dict], query: str, chunks: list[dict]) -> str |
     остаётся локальной; запрос «только по карте» (без находок в КБ) до модели
     не доходит и отвечается детерминированным build_rag_answer.
 
-    None = LLM выключен/недоступен/вернул пусто → детерминированный ответ.
-    Проверку ссылок [n] и сборку citations делает вызывающий (services.agent):
-    здесь только текст; границу номеров даёт answer_snippet_window(chunks).
+    Второй элемент пары — причина для UI (`answer_kind`/`llm_reason` в
+    services.agent): ok — текст от модели; disabled — LLM выключен/нет
+    сниппетов; timeout — не уложились в assistant_llm_answer_timeout (включая
+    connect-timeout шлюза); http_error — шлюз ответил ошибкой/мусором;
+    truncated — модель упёрлась в max_tokens, текст оборван на середине;
+    empty — модель вернула пустой текст, в том числе finish_reason=length с
+    пустым content (reasoning-модель съела бюджет на «размышления»). Проверку
+    ссылок [n] и сборку citations делает вызывающий: здесь только текст;
+    границу номеров даёт answer_snippet_window(chunks).
     """
     body = _answer_body(history, query, chunks)
     if body is None:
-        return None
+        return None, "disabled"
     try:
         response = _request(body, timeout=settings.assistant_llm_answer_timeout)
-        answer = clean_answer(response["choices"][0]["message"].get("content") or "")
-        if answer is None:
-            logger.warning("assistant LLM вернул пустой ответ — детерминированный ответ")
-        return answer
-    except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError, ValueError, TypeError) as exc:
+    except TimeoutError as exc:
+        logger.warning(
+            "assistant LLM-ответ недоступен (TimeoutError: %s) — детерминированный ответ",
+            exc,
+        )
+        return None, "timeout"
+    except urllib.error.URLError as exc:
+        # connect-timeout urllib заворачивает в URLError(reason=TimeoutError),
+        # read-timeout приходит голым TimeoutError (ветка выше): для UI это
+        # одна причина — "timeout", а не http_error.
+        reason = stream_error_reason(exc)
+        logger.warning(
+            "assistant LLM-ответ недоступен (URLError: %s) — детерминированный ответ",
+            exc.reason,
+        )
+        return None, reason
+    except (json.JSONDecodeError, ValueError, TypeError) as exc:
         logger.warning(
             "assistant LLM-ответ недоступен (%s: %s) — детерминированный ответ",
             type(exc).__name__,
             exc,
         )
-        return None
+        return None, "http_error"
+    try:
+        choice = response["choices"][0]
+        content = choice["message"].get("content") or ""
+        finish_reason = choice.get("finish_reason")
+    except (KeyError, IndexError, TypeError, AttributeError) as exc:
+        logger.warning(
+            "assistant LLM вернул неожиданный формат ответа (%s) — детерминированный ответ",
+            type(exc).__name__,
+        )
+        return None, "http_error"
+    answer = clean_answer(content)
+    if answer is None:
+        logger.warning(
+            "assistant LLM вернул пустой ответ (finish_reason=%s) — детерминированный ответ",
+            finish_reason,
+        )
+        return None, "empty"
+    if finish_reason == "length":
+        # Усечённый клинический текст нельзя отдавать как ответ ИИ: обрыв на
+        # полуслове врёт о полноте рекомендации. Показываем фрагменты.
+        logger.warning(
+            "assistant LLM упёрся в max_tokens=%d (finish_reason=length, %d симв.)"
+            " — детерминированный ответ",
+            settings.assistant_llm_answer_max_tokens,
+            len(answer),
+        )
+        return None, "truncated"
+    return answer, "ok"
+
+
+def compose_answer(history: list[dict], query: str, chunks: list[dict]) -> str | None:
+    """Текст ответа модели или None (обёртка над compose_answer_result)."""
+    return compose_answer_result(history, query, chunks)[0]
+
+
+def stream_error_reason(exc: BaseException) -> str:
+    """Причина отказа LLM — тот же словарь, что у compose_answer_result.
+
+    timeout|truncated|http_error. urllib прячет таймауты в
+    `URLError.reason` (connect-timeout) — разворачиваем вложенную причину,
+    иначе в логах и UI такой отказ выглядел бы как ошибка шлюза.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, TruncatedAnswer):
+            return "truncated"
+        if isinstance(cur, (TimeoutError, httpx.TimeoutException)):
+            return "timeout"
+        nested = cur.reason if isinstance(cur, urllib.error.URLError) else None
+        cur = nested if isinstance(nested, BaseException) else None
+    return "http_error"
 
 
 async def compose_answer_stream(
@@ -480,7 +564,13 @@ async def compose_answer_stream(
     Отдаёт только `delta.content`; пустые служебные чанки пропускает. Ошибка
     транспорта или невалидный SSE пробрасываются вызывающему: `services.agent`
     тогда отдаёт детерминированный build_rag_answer целиком.
+
+    Обрыв потока без терминального чанка (`finish_reason`/`[DONE]`) — это не
+    завершённый ответ: шлюз или прокси мог закрыть соединение посреди
+    генерации, и частичный текст нельзя отдавать как ответ ИИ. Такой EOF
+    поднимает `TruncatedAnswer`, как и упор в `max_tokens`.
     """
+    finished = False
     body = _answer_body(history, query, chunks)
     if body is None:
         return
@@ -497,6 +587,7 @@ async def compose_answer_stream(
                         continue
                     data = line[5:].strip()
                     if data == "[DONE]":
+                        finished = True
                         break
                     payload = json.loads(data)
                     # Финальный usage-чанк приходит с choices: [] — не ошибка.
@@ -508,7 +599,15 @@ async def compose_answer_stream(
                     if piece:
                         yield piece
                     # Не ждём TCP-закрытия/шлюзового [DONE]: модель уже закончила.
-                    if choice.get("finish_reason"):
+                    finish_reason = choice.get("finish_reason")
+                    if finish_reason == "length":
+                        # Бюджет кончился посреди текста: обрыв отдавать как
+                        # ответ ИИ нельзя, вызывающий уйдёт на фрагменты.
+                        raise TruncatedAnswer(f"LLM stream hit max_tokens={body['max_tokens']}")
+                    if finish_reason:
+                        finished = True
                         break
     if scope.cancelled_caught:
         raise TimeoutError("LLM stream timed out")
+    if not finished:
+        raise TruncatedAnswer("LLM stream ended without finish_reason/[DONE]")

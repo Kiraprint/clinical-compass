@@ -183,12 +183,19 @@ def _serialize(thread: AssistantThread, patient_ids, message_count: int = 0) -> 
     }
 
 def _serialize_message(m: AssistantMessage) -> dict:
+    # answer_meta хранит тот же контракт, что ушёл клиенту в свежем ответе:
+    # после перезагрузки треда UI не выдаёт детерминированные фрагменты за
+    # ответ ИИ. У сообщений врача и у старых ответов meta пуста → None/[].
+    meta = m.answer_meta or {}
     return {
         "id": str(m.id),
         "role": m.role,
         "content": m.content,
         "citations": list(m.citations or []),
         "topic": m.topic,
+        "answer_kind": meta.get("answer_kind"),
+        "llm_reason": meta.get("llm_reason"),
+        "fragments": list(meta.get("fragments") or []),
         "created_at": m.created_at.isoformat() if m.created_at else None,
     }
 
@@ -486,12 +493,18 @@ async def _store_answer(
     db: AsyncSession, clinician_id, turn: _Turn, result: dict, *, ip: str | None
 ) -> dict:
     """Ответ агента → AssistantMessage + аудит; возвращает контракт ручки."""
+    answer_meta = {
+        "answer_kind": result.get("answer_kind"),
+        "llm_reason": result.get("llm_reason"),
+        "fragments": result.get("fragments") or [],
+    }
     answer = AssistantMessage(
         thread_id=turn.thread.id,
         role="ASSISTANT",
         content=result["answer"],
         citations=result.get("citations") or [],
         topic=result.get("topic"),
+        answer_meta=answer_meta,
     )
     db.add(answer)
     if not turn.ids:
@@ -517,6 +530,11 @@ async def _store_answer(
         "answer": answer.content,
         "citations": list(answer.citations or []),
         "topic": answer.topic,
+        # Признак «ответ ИИ / детерминированные фрагменты»: UI не выдаёт
+        # сырую выдачу сниппетов за ответ модели (docs/03 §12).
+        "answer_kind": answer_meta["answer_kind"],
+        "llm_reason": answer_meta["llm_reason"],
+        "fragments": answer_meta["fragments"],
         "grounded": result.get("grounded", False),
         "refused": result.get("refused", False),
         "refusal_code": result.get("refusal_code"),
