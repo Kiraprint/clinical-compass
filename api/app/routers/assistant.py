@@ -197,8 +197,9 @@ async def post_message_stream(
         headers={
             # SSE не должен буферизоваться прокси: без X-Accel-Buffering: no
             # nginx копит поток и UI видит «Думаю…» до конца генерации, а при
-            # обрыве — «Failed to fetch». Своя пара к proxy_buffering off в
-            # ui/nginx.conf (docs/03 §12).
+            # обрыве — «Failed to fetch». Заголовок — гарантия api;
+            # proxy_buffering off в ui/nginx.conf — страховка на стороне UI
+            # (docs/03 §12).
             "X-Accel-Buffering": "no",
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",

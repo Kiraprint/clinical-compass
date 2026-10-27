@@ -362,3 +362,33 @@ def test_stream_done_event_carries_answer_meta(client, monkeypatch):
     )
     assert (done["answer_kind"], done["llm_reason"]) == ("fragments", "timeout")
     assert done["fragments"] == _fake_result()["fragments"]
+
+
+def test_fragments_align_with_citations_for_duplicates_and_patient_card(monkeypatch):
+    """Дубль guideline_id и карта пациента в citations не сдвигают номера фрагментов."""
+    dup = RAGChunk(
+        text="PHQ-9 (повтор): 10–14 умеренная.",
+        source_title="Гайдлайн PHQ-9",
+        guideline_id="who-mhgap-phq9",
+        topic="ШКАЛЫ",
+        score=0.75,
+    )
+    _fake_chat(monkeypatch, raise_exc=TimeoutError("timed out"))
+    out = _answer(
+        chunks=[CHUNKS[0], dup, CHUNKS[1]],
+        patient_contexts=[{"patient_id": "p-1", "fio": "Иванов"}],
+    )
+
+    assert [c["guideline_id"] for c in out["citations"]] == [
+        "who-mhgap-phq9",
+        "who-mhgap-gad7",
+        "patient:p-1",
+    ]
+    # Карта пациента — не фрагмент КБ; номера первых двух остаются 1 и 2.
+    assert out["fragments"] == [
+        {"n": 1, "source_title": "Гайдлайн PHQ-9", "text": CHUNKS[0].text},
+        {"n": 2, "source_title": "Гайдлайн GAD-7", "text": CHUNKS[1].text},
+    ]
+    assert [c["source_title"] for c in out["citations"][:2]] == [
+        f["source_title"] for f in out["fragments"]
+    ]
