@@ -86,6 +86,21 @@ const fmtSize = (bytes: number) =>
 const POLL_MS = 2000;
 const POLL_LIMIT_MS = 15 * 60 * 1000;
 
+// Сколько ждём ответа браузера на запрос микрофона. Дольше — считаем, что запрос
+// не показан (или закрыт без ответа), и возвращаем кнопку в рабочее состояние.
+const MIC_REQUEST_TIMEOUT_MS = 20_000;
+
+// `Promise.withResolvers` не входит в lib этого проекта (tsconfig target ниже ES2024),
+// поэтому таймаут собирается исполнителем промиса.
+function microphoneTimeout(ms: number): Promise<never> {
+  return new Promise<never>((_, reject) => {
+    window.setTimeout(
+      () => reject(new DOMException("Запрос доступа к микрофону не завершился", "TimeoutError")),
+      ms,
+    );
+  });
+}
+
 /** Кодек записи: webm есть не везде (Safari), поэтому первый поддерживаемый. */
 const RECORDER_MIMES = ["audio/webm", "audio/mp4", "audio/ogg"];
 function pickRecorderMime(): string | null {
@@ -612,7 +627,15 @@ export default function SessionAssistantCard({
     let granted = false;
     setMic("requesting");
     try {
-      const media = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Если браузер так и не показал запрос (или его закрыли без ответа), промис
+      // не завершается — состояние «Запрашиваем доступ» зависло бы навсегда.
+      const pending = navigator.mediaDevices.getUserMedia({ audio: true });
+      // Разрешение могли выдать уже после таймаута: поток в этом случае не нужен,
+      // но tracks надо освободить, иначе микрофон останется занятым.
+      pending.then((late) => {
+        if (stream.current !== late) late.getTracks().forEach((track) => track.stop());
+      }, () => undefined);
+      const media = await Promise.race([pending, microphoneTimeout(MIC_REQUEST_TIMEOUT_MS)]);
       granted = true;
       setMic("granted");
       stream.current = media;
@@ -659,11 +682,13 @@ export default function SessionAssistantCard({
       }
       setMic("idle");
       setErr(
-        name === "NotFoundError" || name === "DevicesNotFoundError"
-          ? "Микрофон не найден — подключите его или загрузите файл записи."
-          : name === "NotReadableError" || name === "TrackStartError"
-            ? "Микрофон занят другим приложением — освободите его или загрузите файл записи."
-            : "Не удалось включить микрофон — загрузите файл записи.",
+        name === "TimeoutError"
+          ? "Браузер не показал запрос доступа к микрофону. Проверьте разрешения сайта или загрузите файл записи."
+          : name === "NotFoundError" || name === "DevicesNotFoundError"
+            ? "Микрофон не найден — подключите его или загрузите файл записи."
+            : name === "NotReadableError" || name === "TrackStartError"
+              ? "Микрофон занят другим приложением — освободите его или загрузите файл записи."
+              : "Не удалось включить микрофон — загрузите файл записи.",
       );
     }
   };
