@@ -86,8 +86,12 @@ export default function NotificationsBell() {
   // Жест пользователя: браузер спрашивает разрешение только отсюда.
   const onEnablePush = async () => {
     setPushBusy(true);
+    setError("");
     try {
       setPush(await enableWebPush());
+    } catch (e) {
+      // Отказ пользователя не ошибка: состояние канала ниже покажет «разрешение не выдано».
+      setError(e instanceof Error ? e.message : "Не удалось включить уведомления");
     } finally {
       setPushBusy(false);
     }

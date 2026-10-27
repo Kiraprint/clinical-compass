@@ -636,7 +636,7 @@ export default function SessionAssistantCard({
       recorder.current = recorderInstance;
       setRecSec(0);
       setRecording(true);
-    } catch {
+    } catch (e: unknown) {
       // Микрофон могли отдать, а рекордер (кодек) — нет: поток всё равно отпускаем,
       // иначе индикатор записи горит, а следующий `getUserMedia` теряет первый поток.
       releaseStream();
@@ -644,13 +644,27 @@ export default function SessionAssistantCard({
       setRecording(false);
       if (granted) {
         setErr("Браузер не смог начать запись — загрузите файл записи.");
-      } else {
+        return;
+      }
+      // `denied` — только реальный запрет. Отсутствие устройства или занятый
+      // микрофон не должны показывать «разрешите доступ»: инструкция была бы ложной.
+      const name = e instanceof DOMException ? e.name : "";
+      if (name === "NotAllowedError" || name === "PermissionDeniedError" || name === "SecurityError") {
         setMic("denied");
         setErr(
           "Микрофон запрещён. Разрешите доступ к нему в настройках сайта " +
             "(значок замка в адресной строке) или загрузите файл записи.",
         );
+        return;
       }
+      setMic("idle");
+      setErr(
+        name === "NotFoundError" || name === "DevicesNotFoundError"
+          ? "Микрофон не найден — подключите его или загрузите файл записи."
+          : name === "NotReadableError" || name === "TrackStartError"
+            ? "Микрофон занят другим приложением — освободите его или загрузите файл записи."
+            : "Не удалось включить микрофон — загрузите файл записи.",
+      );
     }
   };
 

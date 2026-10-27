@@ -252,8 +252,10 @@ async def notify_patient_message(db: AsyncSession, patient_id: uuid.UUID) -> lis
     if not recipients:
         return []
     patient = await db.get(User, patient_id)
-    patient_name = (patient.fio or patient.email) if patient else "пациент"
-    title = f"Новое сообщение от {patient_name}"
+    # Только ФИО: логин (e-mail) — тоже идентификатор и попал бы в превью на
+    # заблокированном экране. Пациент без ФИО обозначается нейтрально.
+    patient_name = (patient.fio or "").strip() if patient else ""
+    title = f"Новое сообщение от {patient_name}" if patient_name else "Новое сообщение в чате"
     body = "Сообщение в чате — откройте переписку"
     stmt = pg_insert(Notification).values([
         {
