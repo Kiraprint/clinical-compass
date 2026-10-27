@@ -9,19 +9,36 @@ from fastapi.responses import JSONResponse
 
 
 class Problem(Exception):
-    """RFC 7807-ошибка домена. `headers` — для 503 (Retry-After) и подобных."""
+    """RFC 7807-ошибка домена. `headers` — для 503 (Retry-After) и подобных.
+
+    `fields` — привязка ошибки к полю ввода (`{"diagnosis.icd10": "…"}`): клиент
+    показывает текст рядом с самим полем, а не одной плашкой в начале страницы.
+    Ключ — путь поля в документе, значение — короткая причина без префикса пути.
+    """
 
     def __init__(
-        self, status: int, code: str, detail: str, headers: dict[str, str] | None = None
+        self,
+        status: int,
+        code: str,
+        detail: str,
+        headers: dict[str, str] | None = None,
+        fields: dict[str, str] | None = None,
     ):
         self.status = status
         self.code = code
         self.detail = detail
         self.headers = headers or {}
+        self.fields = fields or {}
         super().__init__(detail)
 
 
-def _problem(status: int, code: str, detail: str, instance: str | None = None) -> dict:
+def _problem(
+    status: int,
+    code: str,
+    detail: str,
+    instance: str | None = None,
+    fields: dict[str, str] | None = None,
+) -> dict:
     body = {
         "type": "about:blank",
         "title": code,
@@ -31,13 +48,17 @@ def _problem(status: int, code: str, detail: str, instance: str | None = None) -
     }
     if instance:
         body["instance"] = instance
+    if fields:
+        body["fields"] = dict(fields)
     return body
 
 
 async def problem_handler(request: Request, exc: Problem) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status,
-        content=_problem(exc.status, exc.code, exc.detail, str(request.url.path)),
+        content=_problem(
+            exc.status, exc.code, exc.detail, str(request.url.path), exc.fields
+        ),
         headers=exc.headers or None,
     )
 

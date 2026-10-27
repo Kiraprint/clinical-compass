@@ -14,11 +14,20 @@ export class ApiError extends Error {
   status: number;
   code: string;
   detail: string;
-  constructor(status: number, code: string, detail: string) {
+  /** Привязка ошибки к полям ввода (RFC 7807 `fields`): путь поля → причина.
+   *  UI показывает текст рядом с самим полем, а не одной плашкой сверху. */
+  fields: Record<string, string>;
+  constructor(
+    status: number,
+    code: string,
+    detail: string,
+    fields: Record<string, string> = {},
+  ) {
     super(detail);
     this.status = status;
     this.code = code;
     this.detail = detail;
+    this.fields = fields;
   }
 }
 
@@ -109,10 +118,19 @@ async function rawReq(path: string, init: RequestInit = {}): Promise<Response> {
 /** Тело ошибки (Problem `{code, detail}`): наружу — ApiError, не сырой JSON. */
 async function throwApiError(resp: Response): Promise<never> {
   const body = await resp.json().catch(() => ({}));
+  // `fields` приходит от сервера как путь поля → причина; мусор отбрасываем,
+  // чтобы не рендерить в подсказках произвольные объекты.
+  const fields: Record<string, string> = {};
+  if (body.fields && typeof body.fields === "object") {
+    for (const [key, value] of Object.entries(body.fields)) {
+      if (typeof value === "string" && value.trim()) fields[key] = value;
+    }
+  }
   throw new ApiError(
     resp.status,
     typeof body.code === "string" ? body.code : "UNKNOWN",
     typeof body.detail === "string" ? body.detail : resp.statusText,
+    fields,
   );
 }
 // --- Кэш GET -----------------------------------------------------------------

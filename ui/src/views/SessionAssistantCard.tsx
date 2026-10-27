@@ -34,7 +34,7 @@ const AI_ERRORS: Record<string, string> = {
   DEPERSONALIZATION_UNAVAILABLE:
     "Деперсонализация недоступна: отправлять текст беседы модели запрещено",
   AI_BUSY: "Расшифровка этой сессии уже идёт — дождитесь результата",
-  TRANSCRIPT_MISSING: "Расшифровки ещё нет: загрузите запись и запустите расшифровку",
+  TRANSCRIPT_MISSING: "Расшифровки ещё нет: запишите приём или загрузите файл записи",
   SESSION_FINISHED: "Приём завершён — запись и расшифровка недоступны",
   AUDIO_CONSENT_REQUIRED: "Нужно отдельное согласие пациента на аудиозапись",
   AUDIO_TOO_LARGE: "Файл записи слишком большой",
@@ -445,6 +445,8 @@ export default function SessionAssistantCard({
   // Кодек выбираем по возможностям браузера (Safari не умеет audio/webm).
   const mime = useRef("audio/webm");
   const chunks = useRef<Blob[]>([]);
+  /** Blob, уже отправленный автозапуском: повторный рендер не должен слать его снова. */
+  const autoSent = useRef<Blob | null>(null);
   const stream = useRef<MediaStream | null>(null);
   const alive = useRef(true);
   // Опрос расшифровки — цепочкой setTimeout: снимается на размонтировании, без утечки.
@@ -705,23 +707,26 @@ export default function SessionAssistantCard({
     recorder.current = null;
   };
 
-  const upload = async () => {
-    if (!audio) return;
+  /** true — запись на сервере, можно сразу запускать расшифровку. */
+  const upload = async (): Promise<boolean> => {
+    if (!audio) return false;
     setBusy("upload");
     setErr("");
     setNote("");
     try {
       const result = await api.uploadAudio(session.id, audio.blob, audio.name);
-      if (!alive.current) return;
+      if (!alive.current) return false;
       setUploaded(result.artifact_id);
       setAudio(null);
       // Свежая запись обесценивает прошлую расшифровку (даже если сервер ещё не ответил).
       setTranscript(null);
       const detail = await onRefresh().catch(() => null);
       if (detail) setAiStatus(detail.ai_status);
-      toast(`Запись загружена (${fmtSize(result.size_bytes)}).`);
+      toast(`Запись отправлена (${fmtSize(result.size_bytes)}) — расшифровываем.`);
+      return true;
     } catch (e: unknown) {
-      setErr(aiErrorText(e, "Не удалось загрузить запись"));
+      setErr(aiErrorText(e, "Не удалось отправить запись"));
+      return false;
     } finally {
       setBusy("");
     }
@@ -864,6 +869,23 @@ export default function SessionAssistantCard({
     recorder.current = null;
   }, [sessionFinished]);
 
+  /**
+   * Кнопок «Загрузить» и «Отправить» больше нет в сценарии: врач остановил запись
+   * (или выбрал файл) — запись уходит на сервер и расшифровка стартует сама.
+   * Ручные кнопки остаются только как повтор после сбоя, поэтому автозапуск
+   * защищён ссылкой на уже отправленный Blob: повторный рендер его не дублирует.
+   */
+  useEffect(() => {
+    if (!audio || !session.audio_consent || sessionFinished || busy !== "" || polling) return;
+    if (autoSent.current === audio.blob) return;
+    autoSent.current = audio.blob;
+    void (async () => {
+      const sent = await upload();
+      if (sent && alive.current) await transcribe();
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [audio, session.audio_consent, sessionFinished, busy, polling]);
+
   if (available === null) return null;
 
   if (!available) {
@@ -976,13 +998,30 @@ export default function SessionAssistantCard({
       )}
 
       {audio && (
-        <div className="row" style={{ marginTop: 8 }}>
-          <span className="small muted">
-            {audio.name} · {fmtSize(audio.blob.size)}
-          </span>
-          <button type="button" onClick={() => void upload()} disabled={busy !== "" || !consent}>
-            {busy === "upload" ? "Загрузка…" : "Загрузить запись"}
-          </button>
+        <div style={{ marginTop: 8 }}>
+          <div className="row">
+            <span className="small muted">
+              {audio.name} · {fmtSize(audio.blob.size)}
+            </span>
+            {/* Отправка идёт сама; кнопка нужна только если автозапуск сорвался. */}
+            <button
+              type="button"
+              onClick={() => {
+                void (async () => {
+                  // Повтор — тот же путь, что у автозапуска: загрузили → расшифровываем,
+                  // иначе врач остаётся без расшифровки и ищет вторую кнопку.
+                  if (await upload()) await transcribe();
+                })();
+              }}
+              disabled={busy !== "" || !consent}
+            >
+              {busy === "upload" ? "Отправляем…" : "Отправить ещё раз"}
+            </button>
+          </div>
+          <p className="small muted">
+            Запись уходит на сервер сразу после остановки, расшифровка стартует сама —
+            нажимать ничего не нужно. Кнопка выше — для повтора, если отправка не прошла.
+          </p>
         </div>
       )}
 
@@ -1010,7 +1049,11 @@ export default function SessionAssistantCard({
 
       {audioReady && (
         <p className="small muted">
-          Запись загружена{aiStatus === "transcribed" ? ", расшифровка готова" : "; запустите расшифровку"}.
+          {aiStatus === "transcribed"
+            ? "Запись загружена, расшифровка готова."
+            : aiStatus === "transcribing"
+              ? "Запись загружена, идёт расшифровка."
+              : "Запись загружена — расшифровка запускается автоматически."}
         </p>
       )}
 

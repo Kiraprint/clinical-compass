@@ -166,11 +166,18 @@ def test_approve_requires_mandatory_sections(client):
     resp = client.post(f"{url}/approve", json={}, headers=ctx["doctor"])
     assert resp.status_code == 409
     assert resp.json()["code"] == "PROTOCOL_NOT_READY"
-    detail = resp.json()["detail"]
-    for name in ("passport.visit_at", "passport.legal_basis", "mental_status.suicidal_risk", "diagnosis.icd10"):
-        assert name in detail
-    missing = detail.split(": ", 1)[1].split(", ")
-    assert "complaints" not in missing  # жалобы заполнены
+    body = resp.json()
+    detail = body["detail"]
+    # detail читает человек: названия разделов, а не пути полей.
+    for label in ("правовое основание", "суицидальный риск", "код МКБ-10"):
+        assert label in detail
+    assert "жалобы" not in detail  # жалобы заполнены
+    # fields — машиночитаемая привязка к полям редактора (docs/03 §5).
+    assert body["fields"] == {
+        "passport.legal_basis": "обязательный раздел не заполнен",
+        "mental_status.suicidal_risk": "обязательный раздел не заполнен",
+        "diagnosis.icd10": "обязательный раздел не заполнен",
+    }
 
 
 def test_approve_hashes_canonical_json_and_locks(client, db_session):
@@ -353,7 +360,9 @@ def test_diagnosis_code_cleared_with_sections(client, db_session):
     assert stored is None
     # Без диагноза подтверждение невозможно — обязательный раздел §5.2.
     approve = client.post(f"{url}/approve", json={}, headers=ctx["doctor"])
-    assert approve.status_code == 409 and "diagnosis.icd10" in approve.json()["detail"]
+    assert approve.status_code == 409
+    assert approve.json()["fields"] == {"diagnosis.icd10": "обязательный раздел не заполнен"}
+    assert "код МКБ-10" in approve.json()["detail"]
 
 
 def test_version_race_leaves_single_active(client, db_session, monkeypatch):
