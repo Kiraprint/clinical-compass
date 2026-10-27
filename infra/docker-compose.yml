@@ -107,6 +107,15 @@ services:
       CC_CHAT_INSIGHTS_ENABLED: "${CC_CHAT_INSIGHTS_ENABLED:-false}"
       # FR-37: анамнез пациента. Выключен — 503 ANAMNESIS_DISABLED (docs/10 R27).
       CC_ANAMNESIS_ENABLED: "${CC_ANAMNESIS_ENABLED:-false}"
+      # FR-38…FR-44 (docs/18): ИИ-блок приёма — запись, расшифровка (сайдкар
+      # `/v1/transcribe`), черновик протокола и диалог по сессии. По умолчанию
+      # выключен: карточка честно пишет «выключен администратором», а не рисует
+      # мёртвые кнопки. Включение требует CC_ML_URL (сайдкар) и CC_ASSISTANT_LLM_URL.
+      CC_SESSION_AI_ENABLED: "${CC_SESSION_AI_ENABLED:-false}"
+      CC_SESSION_AI_AUTODRAFT: "${CC_SESSION_AI_AUTODRAFT:-true}"
+      CC_SESSION_AI_TIMEOUT: "${CC_SESSION_AI_TIMEOUT:-600}"
+      CC_SESSION_AI_SOURCES: "${CC_SESSION_AI_SOURCES:-12}"
+      CC_SESSION_AUDIO_MAX_MB: "${CC_SESSION_AUDIO_MAX_MB:-200}"
       <<: *vapid
       CC_QDRANT_URL: http://qdrant:6333
       # ML-сайдкар (docs/08 §4): GPU-профиль, http://ml:8080 во внутренней
