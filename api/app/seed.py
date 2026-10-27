@@ -165,6 +165,9 @@ async def _ensure_user(s, email: str, *, fio: str, role: str, totp_secret: str):
         password_hash=security.hash_password("Demo-Pass-1"),
         role=role,
         totp_secret=totp_secret,
+        # Демо-учётки заведены фикстурой: подтверждать их адреса некому и
+        # незачем — иначе у каждого врача в кабинете висит баннер.
+        email_verified_at=datetime.now(timezone.utc),
     )
     s.add(user)
     await s.flush()
@@ -225,7 +228,7 @@ async def seed(database_url: str, n_patients: int = 12, days: int = 14, reset: b
                 continue
             patient = User(
                 email=email, fio=fio, password_hash=security.hash_password("Demo-Pass-1"),
-                role="PATIENT",
+                role="PATIENT", email_verified_at=datetime.now(timezone.utc),
             )
             s.add(patient)
             await s.flush()

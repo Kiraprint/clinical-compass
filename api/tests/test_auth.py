@@ -278,7 +278,13 @@ def test_auth_config_reports_require_otp(client, monkeypatch):
     from app.config import settings
 
     r = client.get("/api/v1/auth/config")
-    assert r.status_code == 200 and r.json() == {"require_otp": True}
+    # `mail` (FR-48 v2) сообщает UI, настроен ли канал почты: без него баннер
+    # «подтвердите адрес» показывать нечем.
+    body = r.json()
+    assert r.status_code == 200 and body["require_otp"] is True
+    assert body["mail"] is False
     monkeypatch.setattr(settings, "require_otp", False)
     r = client.get("/api/v1/auth/config")
-    assert r.status_code == 200 and r.json() == {"require_otp": False}
+    body = r.json()
+    assert r.status_code == 200 and body["require_otp"] is False
+    assert body["mail"] is False

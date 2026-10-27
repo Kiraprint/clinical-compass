@@ -126,6 +126,11 @@
 | auth_email_otp_off | `CC_EMAIL_OTP=false` → login пациента | ответ ровно `{access_token, refresh_token, role}`, `auth_codes` не пишется |
 | auth_email_prod_fail_closed | `CC_PROD_MODE=true` и SMTP не настроен → reset-request | 503 `MAIL_UNAVAILABLE`, без `demo_code` |
 | auth_email_demo_code_flag | `CC_ALLOW_DEMO_SECRETS=true`, `CC_MAIL_DEMO_CODES=false`, SMTP пуст → reset-request и login пациента (`CC_EMAIL_OTP=true`) | 503 `MAIL_UNAVAILABLE` одинаково для существующего и несуществующего адреса, `demo_code` нет, `auth_codes` пуст; с флагом `true` — 202 и 6-значный `demo_code` |
+| email_verify_register_sends | SMTP настроен → POST /auth/register (`test_auth_email.py`) | письмо «Подтверждение адреса» уходит (BackgroundTasks), строка `purpose='verify'` есть, в БД хеш на 64 символа, а не код; `email_verified=false` в ответе |
+| email_verify_no_channel | SMTP пуст → регистрация и `/auth/config` | `auth_codes` пуст (код не выпускается), `/auth/config.mail=false` — баннер на стенде не показывается |
+| email_verify_confirm | `demo_code` → POST /auth/email/verify | 200 `{email_verified:true}`, `/auth/me` подтверждает; повтор → 409 `EMAIL_ALREADY_VERIFIED`; неверный код → 422 `CODE_INVALID`; израсходованный код после сброса метки → 422 |
+| email_verify_cooldown | два вызова `/auth/email/verify/request` подряд | второй — 429 `CODE_COOLDOWN`; без канала и без демо-флага — 202 `{sent:false}` без строки в `auth_codes` |
+| auth_me_requires_token | GET /auth/me без токена / с токеном | 401 без токена; `{id, email, role, email_verified:false}` у свежей учётки |
 | llm_router_* | LLM-роутер раздела: tool_call search_<раздел> → topic, off→None, ошибка/таймаут/неизвестная тулза/без тулзы → None (fallback все разделы) |
 | `rewrite_followup_*` (FR-21) | LLM-переформулировка уточняющего вопроса треда: первая строка ответа без кавычек/префикса, no URL → None без вызова, пустая история → None без вызова, ошибка/таймаут/пустой ответ → None, обрезка истории 8×800≤3000 с конца | самодостаточный запрос либо None (= поиск по исходному вопросу), ответ не ломается |
 | consent_gating | PATIENT без согласия → POST /screenings | 403 CONSENT_REQUIRED; после /consent → 201 |
