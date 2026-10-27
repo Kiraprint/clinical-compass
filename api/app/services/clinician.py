@@ -522,6 +522,9 @@ async def patient_context(db: AsyncSession, clinician_id, patient_id, ip: str | 
     return {
         "patient_id": card["patient_id"],
         "fio": card["fio"],
+        # docs/07 §7: возраст — единственный демографический факт карты; пола в
+        # модели данных нет (нет колонки), поэтому в промпт он не попадает.
+        "age": (card.get("contacts") or {}).get("age"),
         "prescribed_scales": card["prescribed_scales"],
         "last_assessment": card["last_assessment"],
         "trend": card["trend"],

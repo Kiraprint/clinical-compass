@@ -49,6 +49,16 @@ REWRITE_QUERY_CHARS = 800         # обрезка текущего вопрос
 ANSWER_SNIPPETS = 5               # не больше, чем отдаёт поиск (limit=5)
 ANSWER_SNIPPET_CHARS = 700        # обрезка одного сниппета
 ANSWER_SNIPPETS_CHARS = 3500      # обрезка всех сниппетов разом
+# Карта пациента в промпте ответа (FR-17, docs/07 §7): модель видит ТОЛЬКО
+# маскированную карту (fio → [ПАЦИЕНТ], дневник прошёл scrub_for_llm) и
+# ссылается на неё как [П1]. patient_id и ФИО в текст карты не попадают.
+ANSWER_PATIENTS = 3                # не больше карт в промпте (обычно одна)
+PATIENT_CARD_CHARS = 700           # обрезка одной карты
+PATIENT_CARDS_CHARS = 2100         # обрезка всех карт разом
+PATIENT_DIARY_ENTRIES = 3          # последних записей дневника на пациента
+PATIENT_CARD_HEADER = "Карта пациента (обезлично):"
+# Маска ФИО: то же значение, что кладёт scrub_for_llm (services.agent).
+PATIENT_MASK = "[ПАЦИЕНТ]"
 
 
 # Топики корпуса БЗ (docs/08): ключ = имя тулзы, значение = topic в Qdrant.
@@ -277,9 +287,10 @@ _ROLE_LABELS = {"CLINICIAN": "Врач", "ASSISTANT": "Ассистент"}
 # Модель иногда всё же префиксует ответ («Вопрос: …») — снимаем.
 _REWRITE_PREFIX = re.compile(r"^(?:переформулированн\w+ вопрос|вопрос|запрос|ответ)\s*:\s*", re.I)
 
-# FR-17: клинический ответ пишет модель, но только по найденным сниппетам.
-# Запреты продублированы в коде (red line считается ДО вызова LLM): промпт —
-# не единственный барьер, а модель не видит ни карты пациента, ни ПДн.
+# FR-17: клинический ответ пишет модель, но только по найденным сниппетам и
+# обезличенной карте пациента. Запреты продублированы в коде (red line
+# считается ДО вызова LLM): промпт — не единственный барьер, а ПДн в промпт
+# не попадают: карта уходит уже после scrub_for_llm (fio → [ПАЦИЕНТ]).
 _ANSWER_SYSTEM_PROMPT = (
     "Ты — справочный ассистент врача. Отвечай по-русски, связно и по делу, "
     "только на основе пронумерованных сниппетов базы знаний из сообщения "
@@ -287,17 +298,26 @@ _ANSWER_SYSTEM_PROMPT = (
     "Правила:\n"
     "1. Не ставь диагноз, не назначай лечение, не подбирай дозы и схемы приёма — "
     "это функция врача.\n"
-    "2. Не добавляй факты, которых нет в сниппетах: не выдумывай числа, названия "
-    "препаратов, шкал и источников.\n"
+    "2. Не добавляй факты, которых нет в сниппетах или в карте пациента: не "
+    "выдумывай числа, названия препаратов, шкал и источников.\n"
     "3. Каждое утверждение подкрепляй ссылкой на сниппет в виде [n], где n — "
     "номер сниппета; допустимо несколько ссылок подряд: [1][2].\n"
     "4. Если сниппетов не хватает для ответа, прямо скажи, что в базе знаний нет "
     "нужных данных, и перечисли, что удалось найти.\n"
-    "5. Не упоминай персональные данные пациентов — их тебе не передают.\n"
+    "5. В карте пациента персональные данные обезличены (ФИО заменено на "
+    "[ПАЦИЕНТ]) — не пытайся их восстановить, не упоминай и не запрашивай.\n"
     "6. Верни только текст ответа: без markdown-заголовков и служебных "
     "комментариев.\n"
     "7. Отвечай кратко: обычно 3–6 предложений; перечисление — только если "
-    "вопрос просит список. Не повторяй сниппеты целиком."
+    "вопрос просит список. Не повторяй сниппеты целиком.\n"
+    "8. Если в сообщении есть блок «Карта пациента (обезлично)», используй её "
+    "факты вместе со сниппетами: баллы, тяжесть, триаж, тренд, эскалации и "
+    "дневник — это данные пациента врача, вопрос обычно про них.\n"
+    "9. На карту ссылайся как [П1], [П2] — номер карты в том же блоке (П1 — "
+    "первый пациент). Ссылку ставь в конце утверждения, взятого из карты.\n"
+    "10. Поля, которых нет в карте, не выдумывай: если нужного числа (пол, "
+    "возраст, балл, дата) в карте нет, так и скажи; диагноз и дозы не "
+    "назначай даже при наличии карты."
 )
 
 
@@ -423,6 +443,89 @@ def answer_snippet_window(chunks: list[dict]) -> int:
     return _format_snippets(chunks)[1]
 
 
+def _patient_line(index: int, ctx: dict) -> str:
+    """Одна карта пациента строкой `П<n>: пациент: [ПАЦИЕНТ]; ...`.
+
+    ФИО в строку не переносится никогда: если карта пришла уже скрабленной
+    (scrub_for_llm → [ПАЦИЕНТ]), печатается маска; если в fio пришло что-то
+    другое, это тоже маска — сырое имя в промпт не уходит ни при каком
+    вызывающем. patient_id также не печатается (он есть только в citation).
+    Числа (баллы, тренд, даты) идут как есть: модель обязана опираться на них,
+    а не пересчитывать. Отсутствующие значения — `—`, а не выдуманные.
+    """
+    last = ctx.get("last_assessment") or {}
+    trend = ctx.get("trend") or {}
+    esc = ctx.get("open_escalations") or []
+    diary = (ctx.get("recent_diary") or [])[:PATIENT_DIARY_ENTRIES]
+    scales = ctx.get("prescribed_scales") or ctx.get("prescribed_scale") or []
+    if isinstance(scales, str):
+        scales = [scales]
+    bits = [
+        f"пациент: {PATIENT_MASK if str(ctx.get('fio') or '').strip() else 'без ФИО'}",
+        f"пол: {ctx.get('sex') or '—'}",
+        f"возраст: {ctx.get('age') if ctx.get('age') is not None else '—'}",
+        f"шкалы: {', '.join(str(s) for s in scales) or '—'}",
+    ]
+    if last:
+        bits.append(
+            f"последняя оценка: {last.get('total_score')} ({last.get('severity')})"
+            + (f" от {str(last['computed_at'])[:10]}" if last.get("computed_at") else "")
+        )
+        bits.append(f"триаж: {last.get('triage') or '—'}")
+    else:
+        bits.append("последняя оценка: нет; триаж: —")
+    avg = trend.get("moving_avg") or []
+    trend_bits: list[str] = []
+    if avg:
+        trend_bits.append(f"среднее {round(float(avg[-1]), 1)}")
+    if trend.get("delta_7") is not None:
+        trend_bits.append(f"дельта 7д {trend['delta_7']}")
+    if trend.get("delta_30") is not None:
+        trend_bits.append(f"дельта 30д {trend['delta_30']}")
+    if trend.get("slope") is not None:
+        trend_bits.append(f"наклон {round(float(trend['slope']), 2)}")
+    bits.append(f"тренд: {', '.join(trend_bits) or '—'}")
+    bits.append(
+        f"открытые эскалации: {len(esc)}"
+        + (f" ({', '.join(str(e.get('kind') or '?') for e in esc)})" if esc else "")
+    )
+    entries = [
+        _clip(" ".join(str(d.get("content") or "").split()), 120)
+        for d in diary
+        if str(d.get("content") or "").strip()
+    ]
+    bits.append(f"дневник: {' | '.join(entries) if entries else '—'}")
+    return f"П{index}: " + "; ".join(bits)
+
+
+def _format_patients(contexts: list[dict] | None) -> tuple[str, int]:
+    """Карты пациентов блоком для промпта; (текст, сколько карт реально ушло).
+
+    Возвращает ("", 0), если карт нет — тогда тело запроса байт-в-байт такое же,
+    как без этой фичи. Второй элемент — верхняя граница для ссылок [П<n>]:
+    карта, не влезшая в ANSWER_PATIENTS/бюджет символов, модели не видна, и
+    ссылка на неё — выдумка (её citation не собирается).
+    """
+    lines: list[str] = []
+    used = 0
+    sent = 0
+    for ctx in (contexts or [])[:ANSWER_PATIENTS]:
+        if not ctx:
+            continue
+        line = _clip(_patient_line(sent + 1, ctx), PATIENT_CARD_CHARS)
+        if used + len(line) > PATIENT_CARDS_CHARS:
+            break
+        lines.append(line)
+        used += len(line) + 1
+        sent += 1
+    return "\n".join(lines), sent
+
+
+def answer_patient_window(contexts: list[dict] | None) -> int:
+    """Сколько карт пациентов реально видит модель — граница ссылок [П<n>]."""
+    return _format_patients(contexts)[1]
+
+
 def clean_answer(text: str) -> str | None:
     """Ответ модели → текст без markdown-обёртки. None = пусто/мусор."""
     text = text.strip()
@@ -432,8 +535,19 @@ def clean_answer(text: str) -> str | None:
     return text or None
 
 
-def _answer_body(history: list[dict], query: str, chunks: list[dict]) -> dict | None:
-    """Тело /chat/completions для ответа по сниппетам (общее с потоком)."""
+def _answer_body(
+    history: list[dict],
+    query: str,
+    chunks: list[dict],
+    patient_contexts: list[dict] | None = None,
+) -> dict | None:
+    """Тело /chat/completions для ответа по сниппетам (общее с потоком).
+
+    patient_contexts — уже деперсонализированные карты (assistant_chat зовёт
+    scrub_for_llm выше по стеку). Блок карты идёт ПОСЛЕ сниппетов: модель
+    видит, что первичный корпус — база знаний, а карта лишь уточняет контекст
+    вопроса. Без карт блок не добавляется вовсе — тело прежнее байт-в-байт.
+    """
     if not _enabled() or not query.strip() or not chunks:
         return None
     snippets, _window = _format_snippets(chunks)
@@ -445,6 +559,9 @@ def _answer_body(history: list[dict], query: str, chunks: list[dict]) -> dict | 
         parts.append(f"История диалога:\n{formatted}")
     parts.append(f"Вопрос врача: {_clip(query, REWRITE_QUERY_CHARS)}")
     parts.append(f"Сниппеты базы знаний:\n{snippets}")
+    cards, _sent = _format_patients(patient_contexts)
+    if cards:
+        parts.append(f"{PATIENT_CARD_HEADER}\n{cards}")
     payload: dict = {
         "model": settings.assistant_llm_model,
         "messages": [
@@ -476,16 +593,22 @@ class TruncatedAnswer(Exception):
 
 
 def compose_answer_result(
-    history: list[dict], query: str, chunks: list[dict], *, timeout: float | None = None
+    history: list[dict],
+    query: str,
+    chunks: list[dict],
+    *,
+    timeout: float | None = None,
+    patient_contexts: list[dict] | None = None,
 ) -> tuple[str | None, str]:
     """Ответ ассистента по найденным фрагментам и истории диалога (FR-17).
 
     history — предыдущие реплики треда, query — текущий вопрос (оба уже
     деперсонализированы scrub_for_llm), chunks — найденные фрагменты КБ
-    [{"text", "source_title"}]. Карта пациента не передаётся никогда — она
-    остаётся локальной; запрос «только по карте» (без находок в КБ) до модели
-    не доходит и отвечается детерминированным build_rag_answer.
-
+    [{"text", "source_title"}]. patient_contexts — карты пациентов треда,
+    ОБЯЗАТЕЛЬНО уже маскированные (services.assistant_chat._scrub_patient_contexts):
+    в промпт идёт только обезличенная карта, ФИО и patient_id не переносятся.
+    Карта не заменяет сниппеты: запрос «только по карте» (без находок в КБ)
+    до модели не доходит и отвечается детерминированным build_rag_answer.
     Второй элемент пары — причина для UI (`answer_kind`/`llm_reason` в
     services.agent): ok — текст от модели; disabled — LLM выключен/нет
     сниппетов; timeout — не уложились в assistant_llm_answer_timeout (включая
@@ -498,7 +621,7 @@ def compose_answer_result(
     ссылок [n] и сборку citations делает вызывающий: здесь только текст;
     границу номеров даёт answer_snippet_window(chunks).
     """
-    body = _answer_body(history, query, chunks)
+    body = _answer_body(history, query, chunks, patient_contexts)
     if body is None:
         return None, "disabled"
     try:
@@ -556,10 +679,17 @@ def compose_answer_result(
 
 
 def compose_answer(
-    history: list[dict], query: str, chunks: list[dict], *, timeout: float | None = None
+    history: list[dict],
+    query: str,
+    chunks: list[dict],
+    *,
+    timeout: float | None = None,
+    patient_contexts: list[dict] | None = None,
 ) -> str | None:
     """Текст ответа модели или None (обёртка над compose_answer_result)."""
-    return compose_answer_result(history, query, chunks, timeout=timeout)[0]
+    return compose_answer_result(
+        history, query, chunks, timeout=timeout, patient_contexts=patient_contexts
+    )[0]
 
 
 def stream_error_reason(exc: BaseException) -> str:
@@ -583,7 +713,12 @@ def stream_error_reason(exc: BaseException) -> str:
 
 
 async def compose_answer_stream(
-    history: list[dict], query: str, chunks: list[dict], *, timeout: float | None = None
+    history: list[dict],
+    query: str,
+    chunks: list[dict],
+    *,
+    timeout: float | None = None,
+    patient_contexts: list[dict] | None = None,
 ) -> AsyncIterator[str]:
     """Токены ответа по сниппетам из OpenAI-совместимого `stream: true`.
 
@@ -591,13 +726,16 @@ async def compose_answer_stream(
     транспорта или невалидный SSE пробрасываются вызывающему: `services.agent`
     тогда отдаёт детерминированный build_rag_answer целиком.
 
+    patient_contexts — те же маскированные карты, что у batch-ответа: тело
+    запроса собирает общий _answer_body, поэтому поток видит ровно тот же блок.
+
     Обрыв потока без терминального чанка (`finish_reason`/`[DONE]`) — это не
     завершённый ответ: шлюз или прокси мог закрыть соединение посреди
     генерации, и частичный текст нельзя отдавать как ответ ИИ. Такой EOF
     поднимает `TruncatedAnswer`, как и `finish_reason=length` от апстрима.
     """
     finished = False
-    body = _answer_body(history, query, chunks)
+    body = _answer_body(history, query, chunks, patient_contexts)
     if body is None:
         return
     body["stream"] = True

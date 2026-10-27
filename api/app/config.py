@@ -108,6 +108,12 @@ class Settings(BaseSettings):
     # CC_ASSISTANT_LLM_API_KEY: Bearer-токен OpenAI-совместимого шлюза (omniroute).
     # Пусто → заголовок Authorization не отправляется (llama-server без ключа).
     assistant_llm_api_key: str = ""
+    # CC_ASSISTANT_LLM_PATIENT_CONTEXT: отдавать ли LLM обезличенную карту
+    # выбранного пациента (FR-17, docs/07 §7). true — карта уходит блоком
+    # «Карта пациента (обезлично)» вместе со сниппетами; false — прежнее
+    # поведение (модель видит только сниппеты). Карта идёт уже после
+    # scrub_for_llm: ФИО → [ПАЦИЕНТ], дневник маскирован, patient_id не уходит.
+    assistant_llm_patient_context: bool = True
     # CC_ASSISTANT_THREAD_LIMIT: потолок одновременных прогонов RAG-агента на
     # процесс. У агента свой лимитер (services.assistant_chat.AGENT_LIMITER), а не
     # общий пул AnyIO на 40 потоков: всплеск ассистента ждёт на лимитере, оставляя

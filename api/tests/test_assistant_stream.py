@@ -175,3 +175,76 @@ def test_stream_empty_agent_answer_is_domain_error(client, monkeypatch):
     assert [e["event"] for e in events] == ["meta", "error"]
     assert events[1]["data"]["code"] == "ASSISTANT_NO_ANSWER"
     assert events[1]["data"]["status"] == 500
+
+
+def test_stream_body_carries_anonymized_patient_card(monkeypatch):
+    """Поток шлёт тот же блок карты, что batch: без ФИО, с маской [ПАЦИЕНТ]."""
+    monkeypatch.setattr(settings, "assistant_llm_url", "http://llm.test/v1")
+    monkeypatch.setattr(settings, "assistant_llm_api_key", "")
+    seen: list[dict] = []
+
+    class Resp:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_lines(self):
+            for line in (
+                'data: {"choices":[{"delta":{"content":"Балл 17 [П1]"}}]}',
+                'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+                "data: [DONE]",
+            ):
+                yield line
+
+    class Client:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def stream(self, method, url, *, json, headers):
+            seen.append(json)
+            return Resp()
+
+    monkeypatch.setattr(llm_router.httpx, "AsyncClient", Client)
+    card = {
+        "patient_id": "p-1",
+        "fio": "Петрова Анна Сергеевна",
+        "age": 41,
+        "prescribed_scales": ["PHQ-9"],
+        "last_assessment": {
+            "total_score": 17,
+            "severity": "умеренная",
+            "triage": "YELLOW",
+            "computed_at": "2026-10-20T09:00:00Z",
+        },
+        "trend": {"moving_avg": [17.0], "delta_7": 2},
+        "open_escalations": [],
+        "recent_diary": [],
+    }
+
+    async def collect():
+        return [
+            piece
+            async for piece in llm_router.compose_answer_stream(
+                [], "PHQ-9?", list(CHUNKS), patient_contexts=[card]
+            )
+        ]
+
+    assert "".join(asyncio.run(collect())) == "Балл 17 [П1]"
+    prompt = seen[0]["messages"][1]["content"]
+    assert "Карта пациента (обезлично):" in prompt
+    assert "П1: пациент: [ПАЦИЕНТ]" in prompt
+    assert "последняя оценка: 17 (умеренная)" in prompt
+    sent = json.dumps(seen[0], ensure_ascii=False)
+    assert "Петрова" not in sent
+    assert "p-1" not in sent

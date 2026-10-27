@@ -292,28 +292,115 @@ def test_no_chunks_never_calls_llm(monkeypatch):
     assert answer["refusal_code"] == REDLINE_EMPTY
 
 
-def test_patient_card_not_sent_to_llm(monkeypatch):
-    """Карта пациента остаётся локальной: в промпте нет ни ФИО, ни patient_id."""
+PATIENT_ID = "8f14e45f-1111-4a2b-9a3c-1234567890ab"
+# Как patient_context() ВЫГЛЯДИТ до скраба: сырое ФИО + контакты, которых в
+# промпт быть не должно. Карта фикстуры спецкатегории ПДн (docs/07 §7).
+CARD = {
+    "patient_id": PATIENT_ID,
+    "fio": "Иванов Иван Иванович",
+    "age": 34,
+    "phone": "+79991234567",
+    "prescribed_scales": ["PHQ-9", "GAD-7"],
+    "last_assessment": {
+        "total_score": 17,
+        "severity": "умеренная",
+        "triage": "YELLOW",
+        "computed_at": "2026-10-20T09:00:00Z",
+    },
+    "trend": {"moving_avg": [17.0], "delta_7": 2, "delta_30": 4, "slope": 0.3},
+    "open_escalations": [{"kind": "SUICIDE_RISK"}],
+    "recent_diary": [{"content": "[ПАЦИЕНТ]: к вечеру тревога и бессонница"}],
+}
+
+
+def test_patient_card_sent_anonymized_with_scores_and_trend(monkeypatch):
+    """Карта уходит в модель блоком «Карта пациента (обезлично)» без ПДн.
+
+    Реальное тело запроса к LLM (перехват urlopen): шкалы, последняя оценка,
+    триаж, тренд, эскалации и дневник — есть; ФИО, телефон, patient_id — нет,
+    вместо ФИО стоит маска [ПАЦИЕНТ].
+    """
     _enable(monkeypatch)
-    patient_id = "8f14e45f-1111-4a2b-9a3c-1234567890ab"
-    ctx = {
-        "patient_id": patient_id,
-        "fio": "Иванов Иван Иванович",
-        "prescribed_scale": "PHQ-9",
-        "last_assessment": {"total_score": 17, "severity": "умеренная", "triage": "YELLOW",
-                            "computed_at": "2026-10-20T09:00:00Z"},
-        "trend": {"moving_avg": [17.0], "delta_7": 2, "delta_30": 4, "slope": 0.3},
-        "open_escalations": [],
-        "recent_diary": [],
-    }
-    bodies = _fake_chat(monkeypatch, "Порог 10 баллов [1].")
-    answer = _answer(monkeypatch, patient_contexts=[ctx])
-    assert answer["answer"] == "Порог 10 баллов [1]."
+    bodies = _fake_chat(monkeypatch, "Умеренная депрессия, балл 17 [П1]. Порог 10 [1].")
+    answer = _answer(monkeypatch, patient_contexts=[CARD])
+
+    prompt = bodies[0]["body"]["messages"][1]["content"]
+    assert "Карта пациента (обезлично):" in prompt
+    assert "П1: пациент: [ПАЦИЕНТ]" in prompt
+    assert "возраст: 34" in prompt
+    assert "шкалы: PHQ-9, GAD-7" in prompt
+    assert "последняя оценка: 17 (умеренная) от 2026-10-20" in prompt
+    assert "триаж: YELLOW" in prompt
+    assert "тренд: среднее 17.0, дельта 7д 2, дельта 30д 4, наклон 0.3" in prompt
+    assert "открытые эскалации: 1 (SUICIDE_RISK)" in prompt
+    assert "дневник: [ПАЦИЕНТ]: к вечеру тревога и бессонница" in prompt
+    # Системный промпт объясняет модель, как ссылаться на карту.
+    system = bodies[0]["body"]["messages"][0]["content"]
+    assert "[П1]" in system and "Карта пациента" in system
+    # ПДн и внутренний id в запрос не попадают ни в каком виде.
     sent = json.dumps(bodies[0]["body"], ensure_ascii=False)
-    assert "Иванов" not in sent
-    assert patient_id not in sent
-    assert "Пациент" not in bodies[0]["body"]["messages"][1]["content"]
-    # Цитаты — только реальные фрагменты КБ: карты в LLM-ответ не подмешиваются.
+    for pii in ("Иванов", "Иван", "+79991234567", PATIENT_ID):
+        assert pii not in sent
+    # Сниппетная ссылка [1] остаётся сниппетной, [П1] добавляет карту в конец.
+    assert [c["guideline_id"] for c in answer["citations"]] == [
+        "who-mhgap-phq9",
+        f"patient:{PATIENT_ID}",
+    ]
+
+
+def test_patient_reference_becomes_patient_citation(monkeypatch):
+    """Ссылка [П1] даёт citation topic=ПАЦИЕНТ при answer_kind="llm"."""
+    _enable(monkeypatch)
+    _fake_chat(monkeypatch, "Балл 17 — умеренная депрессия [П1]; порог 10 [1].")
+    answer = _answer(monkeypatch, patient_contexts=[CARD])
+
+    assert answer["answer_kind"] == "llm"
+    assert answer["answer"] == "Балл 17 — умеренная депрессия [П1]; порог 10 [1]."
+    assert [c["guideline_id"] for c in answer["citations"]] == [
+        "who-mhgap-phq9",
+        f"patient:{PATIENT_ID}",
+    ]
+    card = answer["citations"][1]
+    assert card["topic"] == "ПАЦИЕНТ"
+    assert card["source_title"] == "Карта пациента"
+    assert answer["fragments"] == []  # карта — не фрагмент КБ
+
+
+def test_patient_only_answer_without_snippets_falls_back(monkeypatch):
+    """Карта без сниппетов до модели не доходит: детерминированный ответ."""
+    _enable(monkeypatch)
+    _no_network(monkeypatch)
+    answer = _answer(monkeypatch, chunks=[], patient_contexts=[CARD])
+
+    assert answer["answer_kind"] == "fragments"
+    assert [c["guideline_id"] for c in answer["citations"]] == [f"patient:{PATIENT_ID}"]
+    assert answer["citations"][0]["topic"] == "ПАЦИЕНТ"
+
+
+def test_body_without_patients_is_unchanged(monkeypatch):
+    """Без пациентов тело запроса байт-в-байт как прежде — блока нет."""
+    _enable(monkeypatch)
+    bodies = _fake_chat(monkeypatch, "Порог 10 баллов [1].")
+    payload = [{"text": c.text, "source_title": c.source_title} for c in CHUNKS]
+    llm_router.compose_answer([], QUERY, payload)
+
+    sent = bodies[0]["body"]
+    prompt = sent["messages"][1]["content"]
+    assert "Карта пациента (обезлично):" not in prompt
+    assert sent == llm_router._answer_body([], QUERY, payload)
+
+
+def test_flag_off_keeps_patient_card_out_of_prompt(monkeypatch):
+    """CC_ASSISTANT_LLM_PATIENT_CONTEXT=false → прежнее поведение и цитаты."""
+    _enable(monkeypatch)
+    monkeypatch.setattr(settings, "assistant_llm_patient_context", False)
+    bodies = _fake_chat(monkeypatch, "Балл 17 — умеренная депрессия [П1]; порог 10 [1].")
+    answer = _answer(monkeypatch, patient_contexts=[CARD])
+
+    prompt = bodies[0]["body"]["messages"][1]["content"]
+    assert "Карта пациента (обезлично):" not in prompt
+    assert "[ПАЦИЕНТ]" not in prompt
+    # Ссылка на невидимую карту — выдумка: citation по ней не собирается.
     assert [c["guideline_id"] for c in answer["citations"]] == ["who-mhgap-phq9"]
 
 
