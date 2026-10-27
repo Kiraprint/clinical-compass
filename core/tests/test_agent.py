@@ -9,6 +9,7 @@ from compass.agent import (
     REDLINE_EMPTY,
     REDLINE_TREATMENT,
     _DOSAGE_PATTERNS,
+    _patient_card_text,
     build_rag_answer,
     detect_redline,
 )
@@ -211,3 +212,42 @@ def test_patient_context_redline_still_refuses():
     """Карта пациента не отменяет красную линию: диагноз не ставится."""
     a = build_rag_answer("поставь диагноз этому пациенту", [chunk()], patient_context=_ctx("1", "X"))
     assert a.refused and a.refusal_code == REDLINE_DIAGNOSIS
+
+
+def test_patient_card_text_prints_scales_list():
+    """API отдаёт prescribed_scales списком; старое поле — совместимый фолбэк."""
+    text = _patient_card_text({"patient_id": "1", "prescribed_scales": ["PHQ-9", "GAD-7"]})
+    assert "PHQ-9, GAD-7" in text
+    legacy = _patient_card_text({"patient_id": "1", "prescribed_scale": "PHQ-9"})
+    assert "PHQ-9" in legacy
+
+
+def test_patient_card_text_facts_sections():
+    """FR-45: факты карточки (препараты, анамнез, НЯ, чат, приёмы) в детерминированном ответе."""
+    text = _patient_card_text({
+        "patient_id": "1",
+        "prescribed_scales": ["PHQ-9"],
+        "medications": [
+            {"title": "Сертралин", "dosage": "50 мг", "status": "active"},
+            {"title": "Флуоксетин", "dosage": "20 мг", "status": "stopped"},
+        ],
+        "anamnesis": {"brief": "Эпизод депрессии в 2024", "updated_at": "2026-09-01"},
+        "adverse_events": [
+            {"event_text": "Головная боль", "severity": "mild", "suspected_drug": "Сертралин"},
+        ],
+        "chat_insights": [{"kind": "symptom", "text": "Бессонница"}],
+        "visits": [{"visited_at": "2026-09-25T10:00:00", "visit_type": "in_person", "notes": "Разбор НЯ"}],
+    })
+    assert "Препараты: Сертралин 50 мг (active); Флуоксетин 20 мг (stopped)." in text
+    assert "Анамнез: Эпизод депрессии в 2024." in text
+    assert "Нежелательные реакции: Головная боль (mild, подозреваемый препарат: Сертралин)." in text
+    assert "Факты из чата: symptom: Бессонница." in text
+    assert "Приёмы: 2026-09-25 in_person: Разбор НЯ." in text
+
+
+def test_patient_card_text_without_new_fields():
+    """Старый контекст (только шкала/оценка) не падает и не печатает пустых разделов."""
+    text = _patient_card_text({"patient_id": "1", "fio": "Иван П.", "prescribed_scales": ["PHQ-9"]})
+    assert "Пациент: Иван П." in text
+    for section in ("Препараты:", "Анамнез:", "Нежелательные реакции:", "Факты из чата:", "Приёмы:"):
+        assert section not in text

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.dialects.postgresql import aggregate_order_by, distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,7 +17,7 @@ from compass.scales import ALL_SCALES
 from compass.trend import trends
 
 from app.errors import Problem
-from app.models import AdverseEvent, Answer, Assessment, ChatMessage, CheckinSession, ClinicianRoster, Consent, DiaryEntry, Escalation, PatientAnamnesis, Prescription, Run, User, Visit
+from app.models import AdverseEvent, Answer, Assessment, ChatMessage, CheckinSession, ClinicianRoster, Consent, DiaryEntry, Escalation, PatientAnamnesis, PatientMedication, Prescription, Run, User, Visit
 
 from . import adherence as adherence_service
 from . import diary as diary_service
@@ -504,6 +505,178 @@ async def report(db: AsyncSession, clinician_id, patient_id, ip: str | None = No
     return card
 
 
+# Карта пациента в ассистенте (FR-50, docs/07 §7.1): что уходит в промпт LLM.
+PATIENT_CONTEXT_MEDS = 10           # назначений в карте: сначала active
+PATIENT_CONTEXT_NOTES_CHARS = 200   # заметка/текст события/факта/приёма
+PATIENT_CONTEXT_ANAMNESIS_CHARS = 1200
+PATIENT_CONTEXT_ADVERSE = 3
+PATIENT_CONTEXT_INSIGHTS = 5
+PATIENT_CONTEXT_VISITS = 3
+PATIENT_CONTEXT_DIARY_CHARS = 400   # запись дневника: свободный текст, уже в промпте отдельно
+PATIENT_CONTEXT_CHARS = 6000        # бюджет всей карты после сериализации
+
+
+def _clip_field(value, limit: int):
+    """Обрезка свободного поля карты: длинный текст не вытесняет остальные факты."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if len(text) <= limit else text[:limit].rstrip()
+
+
+async def _card_medications(db: AsyncSession, patient_id) -> list[dict]:
+    """Назначения для карты ассистента: active первыми, дальше — по свежести.
+
+    title/dosage/notes — EncryptedText, поэтому строки читаются ORM (расшифровка
+    на слое типов), а не json_agg: иначе в промпт ушёл бы шифротекст.
+    """
+    rows = (await db.scalars(
+        select(PatientMedication)
+        .where(PatientMedication.patient_id == patient_id)
+        .order_by(
+            case((PatientMedication.status == "active", 0), else_=1),
+            PatientMedication.created_at.desc(),
+            PatientMedication.id.desc(),
+        )
+        .limit(PATIENT_CONTEXT_MEDS)
+    )).all()
+    return [
+        {
+            "title": m.title,
+            "dosage": m.dosage,
+            "status": m.status,
+            "started_on": m.started_on.isoformat() if m.started_on else None,
+            "times_per_day": m.times_per_day,
+            "notes": _clip_field(m.notes, PATIENT_CONTEXT_NOTES_CHARS),
+        }
+        for m in rows
+    ]
+
+
+async def _card_visits(db: AsyncSession, patient_id) -> list[dict]:
+    """Последние приёмы для карты ассистента (notes — EncryptedText)."""
+    rows = (await db.scalars(
+        select(Visit)
+        .where(Visit.patient_id == patient_id)
+        .order_by(Visit.visited_at.desc(), Visit.created_at.desc())
+        .limit(PATIENT_CONTEXT_VISITS)
+    )).all()
+    return [
+        {
+            "visited_at": v.visited_at.isoformat(),
+            "visit_type": v.visit_type,
+            "notes": _clip_field(v.notes, PATIENT_CONTEXT_NOTES_CHARS),
+        }
+        for v in rows
+    ]
+
+
+def _patient_extras(card: dict, medications: list[dict], visits: list[dict]) -> dict:
+    """Клинические факты карточки врача, которых раньше не было в контексте.
+
+    Берутся из уже собранной карты (`_patient_card`): chat_insights — только
+    принятые врачом, adverse_events — по свежести. Новых гейтов нет: roster и
+    активное согласие проверены вызывающим patient_context().
+    """
+    anamnesis = card.get("anamnesis") or {}
+    brief = _clip_field(anamnesis.get("brief"), PATIENT_CONTEXT_ANAMNESIS_CHARS)
+    return {
+        "medications": medications,
+        "anamnesis": (
+            {"brief": brief, "updated_at": anamnesis.get("updated_at")} if brief else None
+        ),
+        "adverse_events": [
+            {
+                "event_text": _clip_field(e.get("event_text"), PATIENT_CONTEXT_NOTES_CHARS),
+                "severity": e.get("severity"),
+                "onset_date": e.get("onset_date"),
+                "suspected_drug": _clip_field(
+                    e.get("suspected_drug"), PATIENT_CONTEXT_NOTES_CHARS
+                ),
+                "action_taken": e.get("action_taken"),
+            }
+            for e in (card.get("adverse_events") or [])[:PATIENT_CONTEXT_ADVERSE]
+        ],
+        "chat_insights": [
+            {
+                "kind": i.get("kind"),
+                "text": _clip_field(i.get("text"), PATIENT_CONTEXT_NOTES_CHARS),
+            }
+            for i in (card.get("chat_insights") or [])[:PATIENT_CONTEXT_INSIGHTS]
+        ],
+        "visits": visits,
+    }
+
+
+# Порядок обрезки: сначала длинные тексты, потом хвосты списков — начало факта
+# остаётся видно даже когда в бюджет влезает только оно. Дневник обрезается
+# первым по объёму: он уже отдан ассистенту отдельным разделом и не должен
+# вытеснять препараты и анамнез своим свободным текстом.
+# (назначения, факты чата, НЯ, приёмы, анамнез, прочие тексты, дневник)
+_CARD_SHRINK_STEPS = (
+    (PATIENT_CONTEXT_MEDS, PATIENT_CONTEXT_INSIGHTS, PATIENT_CONTEXT_ADVERSE,
+     PATIENT_CONTEXT_VISITS, PATIENT_CONTEXT_ANAMNESIS_CHARS, PATIENT_CONTEXT_NOTES_CHARS,
+     PATIENT_CONTEXT_DIARY_CHARS),
+    (PATIENT_CONTEXT_MEDS, PATIENT_CONTEXT_INSIGHTS, PATIENT_CONTEXT_ADVERSE,
+     PATIENT_CONTEXT_VISITS, 600, 120, 300),
+    (6, 3, 2, 2, 600, 120, 200),
+    (4, 2, 1, 1, 300, 60, 120),
+    (2, 1, 1, 1, 150, 40, 60),
+    (1, 1, 1, 1, 100, 20, 20),
+)
+
+
+def _shrink_card(ctx: dict, step: tuple) -> dict:
+    meds_n, insights_n, adverse_n, visits_n, brief_chars, text_chars, diary_chars = step
+    anamnesis = ctx.get("anamnesis")
+    return {
+        **ctx,
+        "recent_diary": [
+            {**d, "content": _clip_field(d.get("content"), diary_chars)}
+            for d in (ctx.get("recent_diary") or [])
+        ],
+        "medications": [
+            {
+                **m,
+                "title": _clip_field(m.get("title"), text_chars),
+                "dosage": _clip_field(m.get("dosage"), text_chars),
+                "notes": _clip_field(m.get("notes"), text_chars),
+            }
+            for m in (ctx.get("medications") or [])[:meds_n]
+        ],
+        "anamnesis": (
+            {**anamnesis, "brief": _clip_field(anamnesis.get("brief"), brief_chars)}
+            if anamnesis
+            else None
+        ),
+        "adverse_events": [
+            {
+                **e,
+                "event_text": _clip_field(e.get("event_text"), text_chars),
+                "suspected_drug": _clip_field(e.get("suspected_drug"), text_chars),
+            }
+            for e in (ctx.get("adverse_events") or [])[:adverse_n]
+        ],
+        "chat_insights": [
+            {**i, "text": _clip_field(i.get("text"), text_chars)}
+            for i in (ctx.get("chat_insights") or [])[:insights_n]
+        ],
+        "visits": [
+            {**v, "notes": _clip_field(v.get("notes"), text_chars)}
+            for v in (ctx.get("visits") or [])[:visits_n]
+        ],
+    }
+
+
+def _fit_patient_context(ctx: dict) -> dict:
+    """Обрезка карты до PATIENT_CONTEXT_CHARS: по полям и хвостам списков, не по JSON."""
+    for step in _CARD_SHRINK_STEPS:
+        ctx = _shrink_card(ctx, step)
+        if len(json.dumps(ctx, ensure_ascii=False, default=str)) <= PATIENT_CONTEXT_CHARS:
+            break
+    return ctx
+
+
 async def patient_context(db: AsyncSession, clinician_id, patient_id, ip: str | None = None) -> dict:
     """Компактный контекст пациента для ИИ-ассистента врача (docs/07 §7).
 
@@ -519,7 +692,9 @@ async def patient_context(db: AsyncSession, clinician_id, patient_id, ip: str | 
         raise Problem(403, "CONSENT_REQUIRED", "Нет активного согласия пациента — карта недоступна (152-ФЗ)")
     card = await _patient_card(db, patient_id)
     await audit_record(db, clinician_id, "ASK_ASSISTANT_WITH_PATIENT", "patient", str(patient_id), ip=ip)
-    return {
+    medications = await _card_medications(db, patient_id)
+    visits = await _card_visits(db, patient_id)
+    context = {
         "patient_id": card["patient_id"],
         "fio": card["fio"],
         # docs/07 §7: возраст — единственный демографический факт карты; пола в
@@ -531,7 +706,12 @@ async def patient_context(db: AsyncSession, clinician_id, patient_id, ip: str | 
         "routing": card["routing"],
         "open_escalations": card["open_escalations"],
         "recent_diary": card["diary"][:3],
+        # FR-50: клинические факты карточки врача (препараты, анамнез, НЯ, факты
+        # из чата, приёмы). Аудит выше — до сбора текстов, чтобы отказ записи
+        # аудита не оставлял расширенную карту собранной «на всякий случай».
+        **_patient_extras(card, medications, visits),
     }
+    return _fit_patient_context(context)
 
 
 async def create_adverse_event(
