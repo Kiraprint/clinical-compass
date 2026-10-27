@@ -55,6 +55,7 @@ from models import (
     MAX_DOCUMENTS,
     MAX_NAMES,
     MAX_SEGMENTS,
+    MAX_SEGMENTS_CHARS,
     ASRBusy,
     MAX_TEXTS,
     ASRDisabled,
@@ -262,6 +263,10 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
     # asr_max_mb() не бросает — кривой env даёт дефолт с предупреждением.
     limits = dict(_BODY_LIMITS)
     limits["/v1/transcribe"] = asr_max_mb() * 1024 * 1024 + 64 * 1024
+    # Диаризация получает то же аудио и JSON-массив сегментов: без своего лимита
+    # multipart-парсер материализовал бы `segments` целиком до проверки
+    # MAX_SEGMENTS. 4 МиБ хватает на 8000 сегментов с запасом.
+    limits["/v1/diarize"] = asr_max_mb() * 1024 * 1024 + 4 * 1024 * 1024
 
     @app.middleware("http")
     async def _limit_body(request: Request, call_next):  # noqa: ANN001 — сигнатура Starlette
@@ -410,6 +415,8 @@ def create_app(registry: Registry | None = None, *, start_warmup: bool = True) -
                 f"тип {media_type or 'unknown'!r} не поддерживается: "
                 "нужен audio/webm|ogg|wav|mpeg|mp4|m4a",
             )
+        if len(segments) > MAX_SEGMENTS_CHARS:
+            raise ApiError(413, "payload_too_large", "segments: слишком длинный JSON")
         try:
             parsed = json.loads(segments)
         except ValueError as exc:

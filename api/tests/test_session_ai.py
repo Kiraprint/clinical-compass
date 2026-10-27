@@ -1210,3 +1210,33 @@ def test_diarization_failure_keeps_text(client, monkeypatch):
     assert body["diarized"] is False
     assert all(segment["speaker"] is None for segment in body["segments"])
     assert body["segments"], "текст должен остаться"
+
+def test_audio_replaced_during_diarization_is_not_transcribed(client, monkeypatch):
+    """Перезапись аудио во время второго этапа: старая расшифровка не «готовится»."""
+    _enable(monkeypatch)
+    gate = threading.Event()
+    _fake_ml(monkeypatch, diarize_gate=gate, diarized=True)
+    ctx = _ctx(client, "replace")
+    session = _session(client, ctx)
+    sid = session["id"]
+    assert _upload(client, ctx, sid).status_code == 201
+    assert client.post(f"{BASE}/sessions/{sid}/transcribe", headers=ctx["doctor"]).status_code == 202
+
+    # Ждём, пока первый этап отработает и диаризация встанет на гейт.
+    deadline = time.time() + 10
+    while time.time() < deadline and not client.get(
+        f"{BASE}/sessions/{sid}/transcript", headers=ctx["doctor"]
+    ).status_code == 200:
+        time.sleep(0.02)
+    assert client.get(f"{BASE}/sessions/{sid}/transcript", headers=ctx["doctor"]).status_code == 200
+
+    # Врач записал заново: аудио и статус заменяются, старая расшифровка исчезает.
+    assert _upload(client, ctx, sid).status_code == 201
+    assert _detail(client, ctx["doctor"], sid)["ai_status"] == "recording"
+    gate.set()
+
+    time.sleep(0.5)
+    # Второй этап не должен ни вернуть «расшифровка готова», ни записать артефакт.
+    detail = _detail(client, ctx["doctor"], sid)
+    assert detail["ai_status"] == "recording", detail
+    assert client.get(f"{BASE}/sessions/{sid}/transcript", headers=ctx["doctor"]).status_code == 404

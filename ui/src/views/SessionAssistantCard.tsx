@@ -1057,7 +1057,10 @@ export default function SessionAssistantCard({
             Показать расшифровку
           </button>
         )}
-        {(aiError || err || (aiStatus === "transcribing" && !polling)) && (
+        {(aiError ||
+          err ||
+          (aiStatus === "transcribing" && !polling) ||
+          (aiStatus === "diarizing" && !polling)) && (
           <button type="button" className="ghost" onClick={() => void refreshState()} disabled={busy !== ""}>
             Обновить состояние
           </button>
@@ -1068,9 +1071,11 @@ export default function SessionAssistantCard({
         <p className="small muted">
           {aiStatus === "transcribed"
             ? "Запись загружена, расшифровка готова."
-            : aiStatus === "transcribing"
-              ? "Запись загружена, идёт расшифровка."
-              : "Запись загружена — расшифровка запускается автоматически."}
+            : aiStatus === "diarizing"
+              ? "Запись загружена, текст расшифровки готов — определяем спикеров."
+              : aiStatus === "transcribing"
+                ? "Запись загружена, идёт расшифровка."
+                : "Запись загружена — расшифровка запускается автоматически."}
         </p>
       )}
 

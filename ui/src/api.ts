@@ -489,7 +489,14 @@ export interface NeedsReview {
   /** Уточнение для `section='llm_output'`: какой ключ модели отброшен. */
   key?: string;
 }
-export type AiStatus = "none" | "recording" | "transcribing" | "transcribed" | "failed";
+/** `diarizing` — текст уже готов, догоняют только метки спикеров (docs/18 §4.3). */
+export type AiStatus =
+  | "none"
+  | "recording"
+  | "transcribing"
+  | "diarizing"
+  | "transcribed"
+  | "failed";
 /** §4.2 SessionDetail: сессия + подпись + передача (свежие после каждой мутации). */
 export interface SessionDetail extends ClinicalSession {
   ai_error: string | null;

@@ -984,23 +984,22 @@ async def _save_transcript(
     return transcript.id
 
 
-async def _manual_roles(factory, session_id: uuid.UUID) -> dict[str, str]:
-    """Роли, выставленные врачом вручную (их не перетирает диаризация)."""
-    async with factory() as db:
-        row = await _transcript_row(db, session_id)
-        if row is None or not row.speaker_roles or row.speaker_roles_assumed:
-            return {}
-        return dict(row.speaker_roles)
-
-
 async def _finish_transcription(
-    factory, session_id: uuid.UUID, *, error: str | None = None
-) -> None:
-    """Закрыть расшифровку без меток спикеров (диаризация выключена/упала)."""
+    factory, session_id: uuid.UUID, audio_id, *, error: str | None = None
+) -> bool:
+    """Закрыть расшифровку без меток спикеров (диаризация выключена/упала).
+
+    `False` — аудио успели перезаписать: расшифровка устарела, статус не трогаем
+    и автодрафт по ней запускать нельзя.
+    """
     async with factory() as db:
         session = await db.get(ClinicalSession, session_id)
         if session is None:
-            return
+            return False
+        latest = await _audio_artifact(db, session.id)
+        if latest is None or latest.id != audio_id:
+            log.info("Расшифровка сессии %s устарела: аудио перезаписано", session_id)
+            return False
         session.ai_status = "transcribed"
         session.ai_error = error
         session.ai_started_at = None
@@ -1012,6 +1011,7 @@ async def _finish_transcription(
             str(session.id),
         )
         await db.commit()
+        return True
 
 
 async def _pipeline(session_id: uuid.UUID) -> None:
@@ -1082,7 +1082,12 @@ async def _pipeline(session_id: uuid.UUID) -> None:
         # Сбой второго этапа не отменяет текст: врач получает расшифровку без
         # меток, а не ошибку.
         diarization: dict | None = None
-        duration = float(result.get("duration_s") or 0.0)
+        try:
+            duration = float(result.get("duration_s") or 0.0)
+            if duration < 0 or duration != duration:  # NaN/отрицательное — мусор
+                duration = 0.0
+        except (TypeError, ValueError):
+            duration = 0.0
         try:
             diarization = await anyio.to_thread.run_sync(
                 lambda: ml_client.diarize_file(
@@ -1107,12 +1112,8 @@ async def _pipeline(session_id: uuid.UUID) -> None:
         if diarization and diarization.get("diarized") and len(labels) == len(masked):
             for segment, label in zip(masked, labels):
                 segment["speaker"] = label
+            # Роли по умолчанию: врач переставит их PATCH'ем, когда увидит метки.
             roles, assumed = _default_speaker_roles(diarization, masked)
-            # Роли, назначенные врачом вручную, не перетираем: пока шла
-            # диаризация, он мог прочитать текст и выставить их PATCH'ем.
-            manual = await _manual_roles(factory, session_id)
-            if manual:
-                roles, assumed = manual, False
             _apply_roles(masked, roles)
             await _save_transcript(
                 factory,
@@ -1135,13 +1136,16 @@ async def _pipeline(session_id: uuid.UUID) -> None:
                     len(labels),
                     len(masked),
                 )
-            await _finish_transcription(
+            finished = await _finish_transcription(
                 factory,
                 session_id,
+                audio_id,
                 # Сбой запроса к сайдкару — «спикеры не определены» честно; простое
                 # отсутствие весов (diarize=false) ошибкой не считается.
                 error="DIARIZATION_INTERRUPTED" if diarization is None else None,
             )
+            if not finished:
+                return
     finally:
         # Открытый текст аудио живёт только на время работы с сайдкаром.
         await anyio.to_thread.run_sync(lambda: plain_path.unlink(missing_ok=True))
