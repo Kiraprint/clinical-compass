@@ -14,7 +14,8 @@ import secrets
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -89,6 +90,15 @@ async def create(
     ip: str | None = None,
 ) -> tuple[PatientInvite, str]:
     """Создать приглашение; возвращает (строку, токен). Токен не хранится."""
+    # Просроченные непринятые строки удаляем: они не видны в списке (list_pending
+    # фильтрует по expires_at), поэтому иначе они навсегда занимали бы лимит и
+    # врач упирался бы в «отзовите лишние», не видя, что отзывать.
+    await db.execute(
+        delete(PatientInvite).where(
+            PatientInvite.accepted_at.is_(None),
+            PatientInvite.expires_at <= datetime.now(timezone.utc),
+        )
+    )
     if await _pending_count(db, clinician_id) >= MAX_PENDING:
         raise Problem(
             409, "INVITE_LIMIT", "Слишком много непринятых приглашений — отзовите лишние"
@@ -111,14 +121,25 @@ async def create(
 
 
 async def get_owned(
-    db: AsyncSession, clinician_id: uuid.UUID, invite_id: uuid.UUID | str
+    db: AsyncSession,
+    clinician_id: uuid.UUID,
+    invite_id: uuid.UUID | str,
+    *,
+    lock: bool = False,
 ) -> PatientInvite:
-    """Приглашение владельца-врача; чужое и несуществующее — одинаковый 404."""
+    """Приглашение владельца-врача; чужое и несуществующее — одинаковый 404.
+
+    `lock=True` — `FOR UPDATE`: перевыпуск и отзыв не должны гоняться с
+    активацией той же строки.
+    """
     try:
         invite_uuid = uuid.UUID(str(invite_id))
     except ValueError:
         raise Problem(404, "INVITE_NOT_FOUND", "Приглашение не найдено") from None
-    invite = await db.get(PatientInvite, invite_uuid)
+    stmt = select(PatientInvite).where(PatientInvite.id == invite_uuid)
+    if lock:
+        stmt = stmt.with_for_update().execution_options(populate_existing=True)
+    invite = await db.scalar(stmt)
     if invite is None or invite.clinician_id != clinician_id:
         raise Problem(404, "INVITE_NOT_FOUND", "Приглашение не найдено")
     return invite
@@ -128,7 +149,7 @@ async def reissue(
     db: AsyncSession, clinician_id: uuid.UUID, invite_id: uuid.UUID | str, ip: str | None = None
 ) -> tuple[PatientInvite, str]:
     """Новый токен вместо старого: ссылку нельзя показать повторно из БД."""
-    invite = await get_owned(db, clinician_id, invite_id)
+    invite = await get_owned(db, clinician_id, invite_id, lock=True)
     if invite.accepted_at is not None:
         raise Problem(409, "INVITE_ACCEPTED", "Приглашение уже принято")
 
@@ -147,7 +168,7 @@ async def reissue(
 async def revoke(
     db: AsyncSession, clinician_id: uuid.UUID, invite_id: uuid.UUID | str, ip: str | None = None
 ) -> None:
-    invite = await get_owned(db, clinician_id, invite_id)
+    invite = await get_owned(db, clinician_id, invite_id, lock=True)
     if invite.accepted_at is not None:
         raise Problem(409, "INVITE_ACCEPTED", "Приглашение уже принято")
     await db.delete(invite)
@@ -212,11 +233,26 @@ async def accept(
         password_hash=password_hash,
         role="PATIENT",
     )
-    db.add(user)
-    await db.flush()
+    # Savepoint: между проверкой и вставкой адрес мог занять параллельный
+    # запрос (`ix_users_email`), и без перехвата это был бы 500 вместо 409.
+    try:
+        async with db.begin_nested():
+            db.add(user)
+            await db.flush()
+    except IntegrityError:
+        raise Problem(
+            409, "EMAIL_TAKEN", "Этот адрес уже занят: войдите или восстановите пароль"
+        ) from None
     db.add(ClinicianRoster(clinician_id=invite.clinician_id, patient_id=user.id))
     invite.accepted_at = datetime.now(timezone.utc)
     invite.accepted_patient_id = user.id
+    # Карта перенесена в аккаунт — в приглашении ПДн больше не нужны. Так
+    # отзыв согласия пациента не оставляет ФИО/телефон/дату рождения в
+    # строке, которую `_destroy_patient_pdn` не трогает.
+    invite.fio = None
+    invite.phone = None
+    invite.birth_date = None
+    invite.email = None
     await audit.record(db, user.id, "INVITE_ACCEPT", "patient_invite", str(invite.id), ip)
     await db.commit()
     return user

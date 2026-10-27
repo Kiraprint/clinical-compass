@@ -64,6 +64,13 @@ async def _actions(session: AsyncSession) -> list[str]:
     return list(rows)
 
 
+async def _invite_row(session: AsyncSession, invite_id: str):
+    invite = await session.get(PatientInvite, invite_id)
+    if invite is None:
+        return None
+    return (invite.fio, invite.phone, invite.birth_date, invite.email)
+
+
 async def _expire(session: AsyncSession, invite_id: str) -> None:
     await session.execute(
         update(PatientInvite)
@@ -217,6 +224,47 @@ def test_invalid_fields_422(client):
         json={"fio": "X", "email": "no-at-sign"},
         headers=h,
     ).status_code == 422
+
+
+def test_expired_invites_do_not_pin_the_limit(client):
+    """Просроченные строки не занимают лимит и вычищаются при создании.
+
+    Раньше они копились невидимыми: лимит 200 «занят», а в списке пусто —
+    врач видел «отзовите лишние», не имея что отзывать.
+    """
+    h, _ = _clinician(client, "l")
+    first = _create(client, h)
+    run_async(_expire, first["id"])
+    assert client.get("/api/v1/clinician/patients/invites", headers=h).json()["items"] == []
+    # Создание проходит и попутно удаляет просроченную строку.
+    fresh = _create(client, h, fio="Новый пациент")
+    assert client.get("/api/v1/clinician/patients/invites", headers=h).json()["items"][0][
+        "id"
+    ] == fresh["id"]
+    assert run_async(_invite_row, first["id"]) is None
+
+
+def test_accept_requires_email_when_card_has_none(client):
+    """Карта без e-mail: пациент обязан его указать — иначе логина нет."""
+    h, _ = _clinician(client, "m")
+    invite = _create(client, h)  # без e-mail
+    resp = client.post(
+        f"/api/v1/auth/invite/{invite['token']}/accept", json={"password": PASS}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "EMAIL_REQUIRED"
+
+
+def test_accepted_invite_keeps_no_pii(client):
+    """После активации карта в приглашении обнулена: ПДн живут только в аккаунте."""
+    h, _ = _clinician(client, "n")
+    invite = _create(client, h, phone="89261234567", birth_date="1980-01-02")
+    _accept(client, invite["token"], email="pii-clean@test.ru")
+    row = run_async(_invite_row, invite["id"])
+    assert row is not None
+    assert row[0] is None and row[1] is None and row[2] is None and row[3] is None
+    user, _ = run_async(_patient, "pii-clean@test.ru")
+    assert user.phone == "+79261234567"  # данные переехали в аккаунт
 
 
 def test_invite_limit_409(client):

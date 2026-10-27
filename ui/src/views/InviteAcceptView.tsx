@@ -46,6 +46,7 @@ export default function InviteAcceptView() {
         password,
       });
       api.invalidate();
+      setToken(data.access_token);
       setRefreshToken(data.refresh_token);
       localStorage.setItem("cc_role", data.role);
       localStorage.setItem("cc_email", email.trim() || info?.email || "");

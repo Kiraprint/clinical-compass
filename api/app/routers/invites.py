@@ -137,9 +137,10 @@ async def accept_invite(
     Строку приглашения держим под FOR UPDATE: два одновременных клика по
     одной ссылке иначе создали бы два аккаунта на одну карту.
     """
-    invite = await invites_service.load(db, token, lock=True)
-    # argon2id — десятки миллисекунд и 64 МиБ: считаем в потоке, не на loop.
+    # argon2id — десятки миллисекунд и 64 МиБ: считаем в потоке, не на loop,
+    # и ДО блокировки строки, чтобы не держать FOR UPDATE на время хеширования.
     password_hash = await anyio.to_thread.run_sync(security.hash_password, body.password)
+    invite = await invites_service.load(db, token, lock=True)
     user = await invites_service.accept(
         db, invite, email=body.email, password_hash=password_hash, ip=_ip(request)
     )

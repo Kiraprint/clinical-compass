@@ -360,12 +360,7 @@ async def login_otp(body: LoginOtpBody, request: Request, response: Response,
         await db.commit()
         raise Problem(422, "CODE_INVALID", "Код недействителен или истёк")
     await audit.record(db, user.id, "LOGIN_OTP_OK", "user", str(user.id), client)
-    jti = await _issue_jti(db, user.id)
-    await db.commit()
-    access = security.create_access_token(user.id, user.role)
-    refresh = security.create_refresh_token(user.id, jti)
-    _set_auth_cookies(response, access, refresh)
-    return {"access_token": access, "refresh_token": refresh, "role": user.role}
+    return await issue_session(db, user, response)
 
 async def _send_reset_code(user_id: uuid.UUID, email: str, code: str, client: str | None) -> None:
     """Доставка письма сброса ПОСЛЕ ответа: сбой не меняет статус и тайминг."""
