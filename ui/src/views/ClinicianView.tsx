@@ -22,6 +22,7 @@ import {
   ScaleCatalog,
   Visit,
 } from "../api";
+import { applyChatMessage } from "../chats";
 import { describeRegimeMismatch, formatTimesPerDay, parseIntakeFrequency, resolveTimesPerDay } from "../dosage";
 import TrendChart from "../TrendChart";
 import { useEscapeClose } from "../keys";
@@ -1213,19 +1214,7 @@ export default function ClinicianView() {
 
   // Отправка сообщения врача: превью диалога обновляем из ответа, без GET списка.
   const patchChat = (patientId: string, message: PatientChatMessage) => {
-    setChats((prev) =>
-      prev.map((c) =>
-        c.patient_id === patientId
-          ? {
-              ...c,
-              last_at: message.created_at,
-              last_sender: "CLINICIAN",
-              preview: message.content.slice(0, 120),
-              message_count: c.message_count + 1,
-            }
-          : c,
-      ),
-    );
+    setChats((prev) => applyChatMessage(prev, roster, patientId, message));
   };
 
   const nav = (

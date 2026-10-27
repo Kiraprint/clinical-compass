@@ -48,11 +48,18 @@ test.describe("Чат врач ↔ пациент", () => {
     await expect(
       page.getByRole("heading", { name: "Переписка с пациентами" }),
     ).toBeVisible();
+    // Пациент без переписки уже виден в списке и в шапке — по имени из ростера.
+    const chatItem = page.locator(".chat-item", { hasText: patReg.email }).first();
+    await expect(chatItem).toBeVisible();
+    await expect(chatItem).toContainText("Нет сообщений");
+    await expect(page.locator(".chat-title")).toHaveText(patReg.email);
 
     const docMsg = `Привет, как вы себя чувствуете? ${Date.now()}`;
     await page.getByLabel("Сообщение пациенту").fill(docMsg);
     await page.getByRole("button", { name: "Отправить" }).click();
     await expect(page.locator(".bubble", { hasText: docMsg })).toBeVisible();
+    // Строка списка обновилась из ответа сервера — без кнопки «Обновить».
+    await expect(chatItem).toContainText(docMsg);
 
     // Пациент (отдельный контекст) видит сообщение врача и отвечает.
     const ctx2 = await browser.newContext();
