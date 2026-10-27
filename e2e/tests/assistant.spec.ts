@@ -49,8 +49,10 @@ test.describe("ИИ-ассистент врача", () => {
     await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
     await openNewThread(page);
 
-    // Чип пациента из ротстера врача → карта попадает в контекст треда.
-    await page.getByTitle("Добавить в контекст").first().click();
+    // Пациент из ротстера врача — через @-выпадашку (прежний список чипов убран).
+    await page.getByLabel("Добавить пациента в контекст").fill("@");
+    await page.getByRole("option").first().click();
+    await expect(page.locator(".chips .chip").first()).toBeVisible();
     await page.getByLabel("Вопрос").fill("Какая динамика пациента по шкале PHQ-9?");
     await page.getByRole("button", { name: "Спросить" }).click();
     // 30 с: ответ идёт через LLM-шлюз, 15 с не хватало на медленном ответе.
@@ -166,6 +168,152 @@ test("поток: ответ остаётся при сбое загрузки �
   await expect(page.getByText(savedAnswer, { exact: true })).toHaveCount(1);
   await expect(page.getByText(savedQuestion, { exact: true })).toHaveCount(1);
   await expect(page.locator(".bubble", { hasText: "Думаю…" })).toHaveCount(0);
+});
+
+test("ответ без ИИ-формулировки: плашка, фрагменты и единственный блок источников", async ({ page }) => {
+  // Контракт PR-A: answer_kind=fragments + fragments + llm_reason=timeout.
+  const threadId = "e2e-fragments-thread";
+  const longText = "Фрагмент про PHQ-9 и динамику шкалы. ".repeat(30);
+  const detail = {
+    id: threadId,
+    title: "Деградированный ответ",
+    patient_ids: [],
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    message_count: 2,
+    messages: [
+      {
+        id: "e2e-frag-q",
+        role: "CLINICIAN",
+        content: "Какая динамика по PHQ-9?",
+        citations: [],
+        topic: null,
+        created_at: new Date().toISOString(),
+      },
+      {
+        id: "e2e-frag-a",
+        role: "ASSISTANT",
+        content: "— Фрагмент 1\n— Фрагмент 2\n\nИсточники: 1. «Клинические рекомендации: депрессия»",
+        citations: [
+          {
+            source_title: "Клинические рекомендации: депрессия",
+            guideline_id: "g1",
+            topic: "ШКАЛЫ",
+            score: 0.91,
+          },
+          { source_title: "Гайдлайн по тревоге", guideline_id: "g2", topic: "ТРЕВОГА", score: 0.72 },
+        ],
+        topic: "ШКАЛЫ",
+        created_at: new Date().toISOString(),
+        answer_kind: "fragments",
+        llm_reason: "timeout",
+        fragments: [
+          { n: 1, source_title: "Клинические рекомендации: депрессия", text: longText },
+          { n: 2, source_title: "Гайдлайн по тревоге", text: "Короткий второй фрагмент." },
+        ],
+      },
+    ],
+  };
+
+  await page.route("**/api/v1/assistant/threads", async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [
+          {
+            id: threadId,
+            title: "Деградированный ответ",
+            patient_ids: [],
+            created_at: detail.created_at,
+            updated_at: detail.updated_at,
+            message_count: 2,
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/api/v1/assistant/threads/*", async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(detail),
+    });
+  });
+
+  await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
+  await page.getByRole("button", { name: "Чаты" }).click();
+  await page.getByRole("tab", { name: "Ассистент" }).click();
+
+  const bubble = page.locator(".bubble", { hasText: "Ассистент" }).first();
+  const banner = bubble.locator(".answer-degraded");
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText("ИИ-формулировка недоступна");
+  await expect(banner).toContainText("не уложилась");
+  // timeout → отдельная подсказка про медленную модель.
+  await expect(banner.locator(".answer-degraded-hint")).toContainText("слишком медленная");
+  // Сырой текст ответа вместо фрагментов не показываем.
+  await expect(bubble.locator(".assistant-answer")).toHaveCount(0);
+
+  const details = bubble.locator(".answer-fragments");
+  await expect(details.locator("summary")).toContainText("Фрагменты базы знаний (2)");
+  await details.locator("summary").click();
+  await expect(details.locator(".fragment-source")).toHaveCount(2);
+  await expect(details.locator(".fragment-source").first()).toContainText(
+    "1 · Клинические рекомендации: депрессия",
+  );
+  await expect(details.locator(".fragment-text").first()).toContainText("PHQ-9");
+  // Длинный текст обрезан (~400 символов + многоточие).
+  const shown = await details.locator(".fragment-text").first().innerText();
+  expect(shown.length).toBeLessThanOrEqual(401);
+  expect(shown.endsWith("…")).toBe(true);
+
+  // Хвост «Источники:» срезан из текста — источники ровно один раз, из цитат.
+  await expect(page.getByText("Источники:", { exact: true })).toHaveCount(1);
+  await expect(page.getByText(/Источники: 1\./)).toHaveCount(0);
+});
+
+test("пациент добавляется @-выпадашкой и уходит в PATCH треда", async ({ page }) => {
+  let patchThreadId = "";
+  let patchBody: { patient_ids?: string[] } | null = null;
+  await page.route("**/api/v1/assistant/threads/*", async (route) => {
+    const req = route.request();
+    if (req.method() !== "PATCH") return route.continue();
+    patchThreadId = new URL(req.url()).pathname.split("/").pop() ?? "";
+    patchBody = req.postDataJSON() as { patient_ids?: string[] };
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: patchThreadId,
+        title: "E2E @-чипсы",
+        patient_ids: patchBody?.patient_ids ?? [],
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        message_count: 0,
+      }),
+    });
+  });
+
+  await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
+  await openNewThread(page);
+
+  const picker = page.getByLabel("Добавить пациента в контекст");
+  await expect(picker).toBeVisible();
+  await picker.fill("@");
+  const options = page.getByRole("option");
+  await expect(options.first()).toBeVisible();
+  const label = (await options.first().innerText()).trim();
+  // Выбор с клавиатуры: Enter берёт подсвеченный первый вариант.
+  await picker.press("Enter");
+
+  await expect(page.locator(".chips .chip", { hasText: label })).toBeVisible();
+  await expect(picker).toHaveValue("");
+  await expect(options).toHaveCount(0);
+  expect(patchThreadId).not.toBe("");
+  expect(patchBody?.patient_ids).toHaveLength(1);
 });
 
 test("FR-47: Ctrl+Enter в композере отправляет вопрос", async ({ page }) => {

@@ -1678,7 +1678,24 @@ export interface AssistantCitation {
   topic: string;
   score: number;
 }
-export interface AssistantAnswer {
+/** Как получен ответ: сформулирован моделью или собран из фрагментов базы знаний. */
+export type AssistantAnswerKind = "llm" | "fragments";
+/** Почему модель не сформулировала ответ (null — признак не применим). */
+export type AssistantLlmReason = "ok" | "disabled" | "timeout" | "empty" | "http_error" | null;
+/** Фрагмент базы знаний детерминированного ответа; n — тот же номер, что [n] в тексте. */
+export interface AssistantFragment {
+  n: number;
+  source_title: string;
+  text: string;
+}
+/** Контракт PR-A: старый сервер эти поля не отдаёт — все опциональны. */
+export interface AssistantAnswerMeta {
+  answer_kind?: AssistantAnswerKind;
+  llm_reason?: AssistantLlmReason;
+  /** [] когда answer_kind === "llm". */
+  fragments?: AssistantFragment[];
+}
+export interface AssistantAnswer extends AssistantAnswerMeta {
   answer: string;
   grounded: boolean;
   refused: boolean;
@@ -1694,7 +1711,7 @@ export interface AssistantThread {
   updated_at: string | null;
   message_count: number;
 }
-export interface AssistantThreadMessage {
+export interface AssistantThreadMessage extends AssistantAnswerMeta {
   id: string;
   role: "CLINICIAN" | "ASSISTANT";
   content: string;
@@ -1705,7 +1722,7 @@ export interface AssistantThreadMessage {
 export interface AssistantThreadDetail extends AssistantThread {
   messages: AssistantThreadMessage[];
 }
-export interface AssistantThreadAnswer {
+export interface AssistantThreadAnswer extends AssistantAnswerMeta {
   answer: string;
   citations: AssistantCitation[];
   topic: string | null;
