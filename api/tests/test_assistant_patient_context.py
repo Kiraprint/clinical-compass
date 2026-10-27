@@ -249,3 +249,29 @@ def test_empty_sections_are_not_printed():
 
     for section in ("препараты:", "анамнез:", "нежелательные реакции:", "факты из чата:", "визиты:"):
         assert section not in line
+
+
+def test_diary_entries_carry_dates():
+    """Дата записи дневника печатается: без неё модель говорит «дат в карте нет»."""
+    line = llm_router._patient_line(
+        1,
+        {
+            "fio": FIO,
+            "recent_diary": [
+                {"content": "Болит голова", "created_at": "2026-10-27T09:15:00+00:00"},
+                {"content": "Стало лучше"},
+            ],
+        },
+    )
+
+    assert "2026-10-27: Болит голова" in line
+    assert "| Стало лучше" in line, "запись без даты печатается без префикса"
+
+
+def test_prompt_sends_patient_questions_to_card():
+    """Правила 4 и 12: не пересказывать отсутствующее, отвечать по карте."""
+    prompt = llm_router._ANSWER_SYSTEM_PROMPT
+
+    assert "не додумывай.\n12." in prompt, "правило 11 и 12 не должны склеиваться"
+    assert "отвечай в первую очередь по карте" in prompt
+    assert "не перечисляй, чего в них нет" in prompt

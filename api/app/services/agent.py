@@ -288,6 +288,20 @@ def _strip_patient_citations(text: str, sent: int) -> str:
     return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
+_MARKER_REPEAT_RE = re.compile(r"(\[(?:П?\d{1,3})\])(?:\s*\1)+")
+
+
+def _collapse_marker_repeats(text: str) -> str:
+    """`[2][2]` и `[П1] [П1]` → один маркер.
+
+    Модель дублирует ссылку, когда в сниппетах несколько чанков одного
+    гайдлайна; в citations это одна запись (`by_guideline`), поэтому в тексте
+    повтор читается как «источник №2, №2». Склеиваем только соседние
+    одинаковые маркеры, порядок разных (`[1][2]`) не трогаем.
+    """
+    return _MARKER_REPEAT_RE.sub(r"\1", text)
+
+
 def _finalize_llm_answer(
     text: str | None,
     chunks: list[RAGChunk],
@@ -327,7 +341,7 @@ def _finalize_llm_answer(
         logger.info("LLM-ответ без валидных ссылок — детерминированный ответ")
         return None
     # [Пn] вне реально отправленных карт — выдумка: вырезаем, как [n] вне окна.
-    text = _strip_patient_citations(text, len(sent_cards))
+    text = _collapse_marker_repeats(_strip_patient_citations(text, len(sent_cards)))
     citations = [
         Citation(
             source_title=c.source_title,

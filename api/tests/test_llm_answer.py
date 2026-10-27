@@ -525,3 +525,13 @@ def test_markers_beyond_citation_cap_are_dropped(monkeypatch):
     answer = _answer(monkeypatch, chunks=chunks)
     assert len(answer["citations"]) == 3
     assert answer["answer"] == "А [1] Б [2] В [3] Г Д."
+
+
+def test_duplicate_markers_collapse_to_one(monkeypatch):
+    """`[2][2]` склеивается: citation по гайдлайну одна, повтор читался как «№2, №2»."""
+    _enable(monkeypatch)
+    _fake_chat(monkeypatch, "Порог 10 баллов [1][1], тяжёлая тревога [2].")
+
+    answer = _answer(monkeypatch)
+
+    assert answer["answer"] == "Порог 10 баллов [1], тяжёлая тревога [2]."
