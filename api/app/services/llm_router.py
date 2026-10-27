@@ -564,7 +564,13 @@ async def compose_answer_stream(
     Отдаёт только `delta.content`; пустые служебные чанки пропускает. Ошибка
     транспорта или невалидный SSE пробрасываются вызывающему: `services.agent`
     тогда отдаёт детерминированный build_rag_answer целиком.
+
+    Обрыв потока без терминального чанка (`finish_reason`/`[DONE]`) — это не
+    завершённый ответ: шлюз или прокси мог закрыть соединение посреди
+    генерации, и частичный текст нельзя отдавать как ответ ИИ. Такой EOF
+    поднимает `TruncatedAnswer`, как и упор в `max_tokens`.
     """
+    finished = False
     body = _answer_body(history, query, chunks)
     if body is None:
         return
@@ -581,6 +587,7 @@ async def compose_answer_stream(
                         continue
                     data = line[5:].strip()
                     if data == "[DONE]":
+                        finished = True
                         break
                     payload = json.loads(data)
                     # Финальный usage-чанк приходит с choices: [] — не ошибка.
@@ -598,6 +605,9 @@ async def compose_answer_stream(
                         # ответ ИИ нельзя, вызывающий уйдёт на фрагменты.
                         raise TruncatedAnswer(f"LLM stream hit max_tokens={body['max_tokens']}")
                     if finish_reason:
+                        finished = True
                         break
     if scope.cancelled_caught:
         raise TimeoutError("LLM stream timed out")
+    if not finished:
+        raise TruncatedAnswer("LLM stream ended without finish_reason/[DONE]")

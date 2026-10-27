@@ -528,3 +528,79 @@ def test_answer_meta_server_default_matches_migration():
         / "b8c9d0e1f2a3_assistant_answer_meta.py"
     ).read_text(encoding="utf-8")
     assert str(column.server_default.arg) in migration
+
+
+def test_stream_eof_without_terminal_chunk_is_truncated(monkeypatch):
+    """Обрыв соединения без finish_reason/[DONE] — недописанный ответ, а не ok."""
+
+    class Resp:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_lines(self):
+            # Прокси закрыл поток посреди генерации: терминального чанка нет.
+            yield 'data: {"choices":[{"delta":{"content":"PHQ-9: 0–4 нет [1], "}}]}'
+            yield 'data: {"choices":[{"delta":{"content":"5–9 лёгкая, 10–14"}}]}'
+
+    class Client:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def stream(self, *args, **kwargs):
+            return Resp()
+
+    monkeypatch.setattr(llm_router.httpx, "AsyncClient", Client)
+    events = _factory_stream(monkeypatch)
+
+    answer = events[-1]["answer"]
+    assert (answer["answer_kind"], answer["llm_reason"]) == ("fragments", "truncated")
+    assert answer["fragments"]
+
+
+def test_stream_truncated_persists_deterministic_answer(client, monkeypatch):
+    """Обрыв потока: в тред пишется детерминированный ответ, а не обрубок модели."""
+    ch, _ = clinician_ctx(client, "truncated-stream@test.ru")
+    tid = client.post(
+        "/api/v1/assistant/threads", json={"title": "Обрыв"}, headers=ch
+    ).json()["id"]
+
+    async def fake_stream(query: str, **kwargs):
+        yield {"delta": "PHQ-9: 0–4 нет [1], 5–9"}
+        yield {"answer": _fake_result(llm_reason="truncated")}
+
+    monkeypatch.setattr(assistant_chat, "_stream_agent", fake_stream)
+    resp = client.post(
+        f"/api/v1/assistant/threads/{tid}/messages/stream",
+        json={"content": "PHQ-9?"},
+        headers=ch,
+    )
+    assert resp.status_code == 200
+    done = next(
+        json.loads(block.split("data: ", 1)[1])
+        for block in resp.text.strip().split("\n\n")
+        if block.startswith("event: done")
+    )
+    assert (done["answer_kind"], done["llm_reason"]) == ("fragments", "truncated")
+
+    detail = client.get(f"/api/v1/assistant/threads/{tid}", headers=ch)
+    assert detail.status_code == 200, detail.text
+    assistant = [m for m in detail.json()["messages"] if m["role"] == "ASSISTANT"]
+    assert len(assistant) == 1
+    stored = assistant[0]
+    # Хранится и показывается ровно детерминированный ответ, а не обрубок токенов.
+    assert stored["content"] == _fake_result()["answer"]
+    assert stored["content"] != "PHQ-9: 0–4 нет [1], 5–9"
+    assert (stored["answer_kind"], stored["llm_reason"]) == ("fragments", "truncated")
+    assert stored["fragments"] == _fake_result()["fragments"]
