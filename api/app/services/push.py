@@ -20,7 +20,8 @@ import uuid
 import anyio
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -232,6 +233,51 @@ async def notify_adverse_event_clinicians(db: AsyncSession, patient_id: uuid.UUI
     return list(rows)
 
 
+async def notify_patient_message(db: AsyncSession, patient_id: uuid.UUID) -> list[uuid.UUID]:
+    """FR-10: сообщение пациента в чате. Одно непрочитанное уведомление на врача.
+
+    Дедуп держит частичный уникальный индекс `notifications_chat_unread`:
+    повторное сообщение до прочтения освежает `created_at`, а не плодит строки.
+    ПДн: текста сообщения нет ни в заголовке, ни в теле. Имя пациента есть в
+    заголовке (как у RED-эскалаций) — значит push-превью на заблокированном
+    экране покажет имя; тело и текст push остаются нейтральными.
+    Push — best-effort, сбой не валит отправку сообщения. Коммитит внешний код.
+    """
+    rows = (await db.scalars(
+        select(ClinicianRoster.clinician_id).where(ClinicianRoster.patient_id == patient_id)
+    )).all()
+    # Отправитель себе уведомление не получает (роль врача у пациента невозможна,
+    # но связь roster с самим пациентом не должна давать петлю).
+    recipients = [cid for cid in rows if cid != patient_id]
+    if not recipients:
+        return []
+    patient = await db.get(User, patient_id)
+    # Только ФИО: логин (e-mail) — тоже идентификатор и попал бы в превью на
+    # заблокированном экране. Пациент без ФИО обозначается нейтрально.
+    patient_name = (patient.fio or "").strip() if patient else ""
+    title = f"Новое сообщение от {patient_name}" if patient_name else "Новое сообщение в чате"
+    body = "Сообщение в чате — откройте переписку"
+    stmt = pg_insert(Notification).values([
+        {
+            "user_id": cid,
+            "kind": "PATIENT_MESSAGE",
+            "title": title,
+            "body": body,
+            "patient_id": patient_id,
+        }
+        for cid in recipients
+    ])
+    await db.execute(
+        stmt.on_conflict_do_update(
+            index_elements=["user_id", "patient_id"],
+            index_where=text("kind = 'PATIENT_MESSAGE' AND read_at IS NULL"),
+            set_={"title": title, "body": body, "created_at": func.now()},
+        )
+    )
+    await push_to_clinicians(db, recipients, title, body)
+    return recipients
+
+
 async def list_notifications(db: AsyncSession, user_id: uuid.UUID, limit: int = 50) -> dict:
     rows = (await db.scalars(
         select(Notification)
@@ -240,9 +286,9 @@ async def list_notifications(db: AsyncSession, user_id: uuid.UUID, limit: int = 
         .limit(limit)
     )).all()
     unread = await db.scalar(
-        select(Notification.id)
+        select(func.count())
+        .select_from(Notification)
         .where(Notification.user_id == user_id, Notification.read_at.is_(None))
-        .limit(1)
     )
     return {
         "items": [
@@ -258,7 +304,7 @@ async def list_notifications(db: AsyncSession, user_id: uuid.UUID, limit: int = 
             }
             for n in rows
         ],
-        "unread": int(unread is not None),
+        "unread": int(unread or 0),
     }
 
 

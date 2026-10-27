@@ -842,3 +842,13 @@ small { color: #8a94a8; }
 }
 .patient-reminder-action { min-height: 44px; padding: 10px 14px; }
 .patient-banner { margin-top: 12px; }
+
+.bell-push {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px solid #e6e9f0;
+}
+.mic-state { margin: 6px 0; }

@@ -426,6 +426,9 @@ export default function SessionAssistantCard({
   const [audio, setAudio] = useState<{ blob: Blob; name: string } | null>(null);
   const [uploaded, setUploaded] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
+  // Явное состояние доступа к микрофону: idle → requesting → granted | denied.
+  // При `denied` кнопка записи бесполезна, остаётся загрузка файла.
+  const [mic, setMic] = useState<"idle" | "requesting" | "granted" | "denied">("idle");
   const [recSec, setRecSec] = useState(0);
   const [busy, setBusy] = useState<
     "" | "consent" | "upload" | "transcribe" | "draft" | "load" | "speakers"
@@ -471,6 +474,35 @@ export default function SessionAssistantCard({
     const tick = setInterval(() => setRecSec((s) => s + 1), 1000);
     return () => clearInterval(tick);
   }, [recording]);
+
+  // Состояние разрешения, где браузер его отдаёт; иначе узнаем при первом запросе.
+  useEffect(() => {
+    const permissions = navigator.permissions;
+    if (!permissions?.query) return;
+    let cancelled = false;
+    let status: PermissionStatus | null = null;
+    const apply = (state: PermissionState) => {
+      if (cancelled) return;
+      if (state === "granted") setMic("granted");
+      else if (state === "denied") setMic("denied");
+      else setMic((cur) => (cur === "granted" ? "granted" : "idle"));
+    };
+    permissions
+      .query({ name: "microphone" as PermissionName })
+      .then((s) => {
+        if (cancelled) return;
+        status = s;
+        apply(s.state);
+        s.onchange = () => apply(s.state);
+      })
+      .catch(() => {
+        // Firefox/Safari не знают `microphone` — состояние выяснится при записи.
+      });
+    return () => {
+      cancelled = true;
+      if (status) status.onchange = null;
+    };
+  }, []);
 
   const loadTranscript = useCallback(async () => {
     try {
@@ -578,9 +610,11 @@ export default function SessionAssistantCard({
       return;
     }
     let granted = false;
+    setMic("requesting");
     try {
       const media = await navigator.mediaDevices.getUserMedia({ audio: true });
       granted = true;
+      setMic("granted");
       stream.current = media;
       chunks.current = [];
       mime.current = codec;
@@ -602,16 +636,34 @@ export default function SessionAssistantCard({
       recorder.current = recorderInstance;
       setRecSec(0);
       setRecording(true);
-    } catch {
+    } catch (e: unknown) {
       // Микрофон могли отдать, а рекордер (кодек) — нет: поток всё равно отпускаем,
       // иначе индикатор записи горит, а следующий `getUserMedia` теряет первый поток.
       releaseStream();
       recorder.current = null;
       setRecording(false);
+      if (granted) {
+        setErr("Браузер не смог начать запись — загрузите файл записи.");
+        return;
+      }
+      // `denied` — только реальный запрет. Отсутствие устройства или занятый
+      // микрофон не должны показывать «разрешите доступ»: инструкция была бы ложной.
+      const name = e instanceof DOMException ? e.name : "";
+      if (name === "NotAllowedError" || name === "PermissionDeniedError" || name === "SecurityError") {
+        setMic("denied");
+        setErr(
+          "Микрофон запрещён. Разрешите доступ к нему в настройках сайта " +
+            "(значок замка в адресной строке) или загрузите файл записи.",
+        );
+        return;
+      }
+      setMic("idle");
       setErr(
-        granted
-          ? "Браузер не смог начать запись — загрузите файл записи."
-          : "Браузер не даёт доступ к микрофону — загрузите файл записи.",
+        name === "NotFoundError" || name === "DevicesNotFoundError"
+          ? "Микрофон не найден — подключите его или загрузите файл записи."
+          : name === "NotReadableError" || name === "TrackStartError"
+            ? "Микрофон занят другим приложением — освободите его или загрузите файл записи."
+            : "Не удалось включить микрофон — загрузите файл записи.",
       );
     }
   };
@@ -829,14 +881,36 @@ export default function SessionAssistantCard({
       {finished && <p className="small muted">Приём завершён — запись недоступна.</p>}
 
       {!finished && (
+        <div className="mic-state" aria-live="polite">
+          {recording ? (
+            <span className="small">Идёт запись ({mmss(recSec)})</span>
+          ) : mic === "denied" ? (
+            <span className="small muted">
+              Микрофон запрещён — разрешите доступ в настройках сайта или загрузите файл записи.
+            </span>
+          ) : mic === "requesting" ? (
+            <span className="small muted">Запрашиваем доступ к микрофону…</span>
+          ) : mic === "granted" ? (
+            <span className="small muted">Микрофон разрешён — можно начинать запись.</span>
+          ) : (
+            <span className="small muted">Чтобы записать приём, разрешите микрофон.</span>
+          )}
+        </div>
+      )}
+
+      {!finished && (
         <div className="row" style={{ marginTop: 8 }}>
           {recording ? (
             <button type="button" className="danger" onClick={stopRecording}>
               Остановить запись ({mmss(recSec)})
             </button>
           ) : (
-            <button type="button" onClick={() => void startRecording()} disabled={!consent}>
-              Начать запись
+            <button
+              type="button"
+              onClick={() => void startRecording()}
+              disabled={!consent || mic === "denied" || mic === "requesting"}
+            >
+              {mic === "granted" ? "Начать запись" : "Разрешить микрофон"}
             </button>
           )}
           <label className="row" style={{ margin: 0 }}>
