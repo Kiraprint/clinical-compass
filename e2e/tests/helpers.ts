@@ -53,6 +53,11 @@ async function standRequiresOtp(page): Promise<boolean | null> {
   return require;
 }
 
+/** Сброс кэша «2FA выключен» — для проверок самого хелпера. */
+export function resetOtpCache(): void {
+  otpDisabled.clear();
+}
+
 export async function login(page, email: string, password: string, totpSecret?: string) {
   await page.goto("/");
   await page.getByRole("button", { name: "Вход" }).click();
