@@ -24,7 +24,7 @@ from langgraph.graph import END, START, StateGraph
 from compass.agent import Citation, RAGAnswer, RAGChunk, build_rag_answer, detect_redline
 
 from app.config import settings
-from app.services.depersonalize import scrub_text
+from app.services.depersonalize import DepersonalizationUnavailable, scrub_text
 
 from app.services import kb as kb_store
 from app.services import llm_router
@@ -273,6 +273,21 @@ def _cited_patients(text: str, patient_contexts: list[dict] | None) -> list[dict
     return found
 
 
+def _strip_patient_citations(text: str, sent: int) -> str:
+    """Убирает `[П<n>]`, указывающие на карты, которых модель не видела.
+
+    Ровно как для сниппетов: видимый маркер обязан указывать на источник из
+    citations, иначе он выдумка — ответ не отбрасываем, просто вырезаем токен.
+    """
+
+    def repl(match: re.Match[str]) -> str:
+        return match.group(0) if 1 <= int(match.group(1)) <= sent else ""
+
+    text = _PATIENT_CITE_RE.sub(repl, text)
+    text = re.sub(r"[ \t]+([.,;:!?)])", r"\1", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
 def _finalize_llm_answer(
     text: str | None,
     chunks: list[RAGChunk],
@@ -306,10 +321,13 @@ def _finalize_llm_answer(
         picked.append(chunk)
         by_guideline[chunk.guideline_id] = len(picked)
         positions[n] = len(picked)
+    sent_cards = llm_router.answer_patients(patient_contexts)
     cards = _cited_patients(text, patient_contexts)
     if not picked and not cards:
-        logger.info("LLM-ответ без валидных ссылок на сниппеты — детерминированный ответ")
+        logger.info("LLM-ответ без валидных ссылок — детерминированный ответ")
         return None
+    # [Пn] вне реально отправленных карт — выдумка: вырезаем, как [n] вне окна.
+    text = _strip_patient_citations(text, len(sent_cards))
     citations = [
         Citation(
             source_title=c.source_title,
@@ -417,11 +435,20 @@ def _llm_patient_contexts(state: AgentState) -> list[dict]:
 
     Источник — `patient_contexts` (тред, FR-21) и/или `patient_context`
     (одиночный запрос). Assistant_chat маскирует их выше по стеку
-    (scrub_for_llm), здесь только защита инварианта: fio без маски — это либо
-    новый путь, забывший скраб, либо отскрабленная строка со снятой маской;
-    в промпт такая карта не уходит, ФИО заменяется на [ПАЦИЕНТ] на месте.
-    patient_id остаётся в памяти (нужен для citation patient:<id>), но в текст
-    карты не попадает — его формирует llm_router._format_patients.
+    (scrub_for_llm), но это единственная точка, через которую карта попадает
+    в промпт, поэтому инвариант держится здесь, а не в вызывающем: каждая
+    карта проходит `scrub_for_llm` (фio → [ПАЦИЕНТ], свободный текст дневника —
+    через общий span-based скраб; числовые поля не трогаются). Повторный скраб
+    идемпотентен: уже замаскированный текст остаётся замаскированным.
+
+    Карты дедуплицируются по `patient_id` (как build_rag_answer): одна и та же
+    карта из `patient_context` и `patient_contexts` не должна стать П1 и П2 и
+    дать две citation на один `patient:<id>`.
+
+    Если скраб в prod-режиме недоступен (DepersonalizationUnavailable), карта
+    не отправляется вовсе: сырой текст в промпт не уходит. `patient_id`
+    остаётся в памяти (нужен для citation), но в текст карты не попадает —
+    его формирует llm_router._format_patients.
     """
     if not settings.assistant_llm_patient_context:
         return []
@@ -429,17 +456,23 @@ def _llm_patient_contexts(state: AgentState) -> list[dict]:
     if state.get("patient_context"):
         cards.insert(0, state["patient_context"])
     out: list[dict] = []
+    seen: set[str] = set()
     for ctx in cards:
         if not ctx:
             continue
-        safe = dict(ctx)
-        fio = str(safe.get("fio") or "").strip()
-        if fio and PATIENT_MASK not in fio:
+        pid = str(ctx.get("patient_id") or "").strip()
+        if pid:
+            if pid in seen:
+                continue
+            seen.add(pid)
+        try:
+            _, safe, _ = scrub_for_llm("", ctx, None)
+        except DepersonalizationUnavailable:
             logger.warning(
-                "карта пациента пришла в LLM без маски ФИО — маскирую перед промптом"
+                "карта пациента не ушла в LLM: деперсонализация недоступна"
             )
-            safe["fio"] = PATIENT_MASK
-        out.append(safe)
+            continue
+        out.append(dict(safe or {}))
     return out
 
 

@@ -397,13 +397,64 @@ def test_body_without_patients_is_unchanged(monkeypatch):
 
 
 def test_patient_reference_outside_sent_cards_gives_no_citation(monkeypatch):
-    """[П2] при одной карте — выдумка: citation карты не появляется."""
+    """[П2] при одной карте — выдумка: citation нет, маркер вырезан."""
     _enable(monkeypatch)
     _fake_chat(monkeypatch, "Балл 17 [П2]; порог 10 [1].")
     answer = _answer(monkeypatch, patient_contexts=[CARD])
 
     assert [c["guideline_id"] for c in answer["citations"]] == ["who-mhgap-phq9"]
-    assert answer["answer"] == "Балл 17 [П2]; порог 10 [1]."
+    assert answer["answer"] == "Балл 17; порог 10 [1]."
+
+
+def test_unresolvable_patient_marker_stripped_without_cards(monkeypatch):
+    """[П9] без карт вообще — маркер вырезан так же, как [n] вне окна."""
+    _enable(monkeypatch)
+    _fake_chat(monkeypatch, "Балл 17 [П9]; порог 10 [1].")
+    answer = _answer(monkeypatch, patient_contexts=None)
+
+    assert answer["answer"] == "Балл 17; порог 10 [1]."
+    assert [c["guideline_id"] for c in answer["citations"]] == ["who-mhgap-phq9"]
+
+
+def test_singular_patient_context_is_scrubbed_in_guard(monkeypatch):
+    """Сырая карта из patient_context: дневник скрабится в guard'е, не в LLM."""
+    _enable(monkeypatch)
+    bodies = _fake_chat(monkeypatch, "Балл 17 [П1]; порог 10 [1].")
+    card = {
+        **CARD,
+        "fio": "Иванов Иван Иванович",
+        "recent_diary": [
+            {"id": "d-1", "content": "звонил +79991234567, просил перезвонить"}
+        ],
+    }
+    answer = _answer(monkeypatch, patient_context=card)
+
+    prompt = bodies[0]["body"]["messages"][1]["content"]
+    assert "П1: пациент: [ПАЦИЕНТ]" in prompt
+    assert "+79991234567" not in prompt
+    assert "[ТЕЛЕФОН]" in prompt
+    assert "Иванов" not in prompt
+    assert [c["guideline_id"] for c in answer["citations"]] == [
+        "who-mhgap-phq9",
+        f"patient:{PATIENT_ID}",
+    ]
+
+
+def test_duplicate_patient_context_is_deduped(monkeypatch):
+    """Одна карта в patient_context и patient_contexts — одна П1 и одна citation."""
+    _enable(monkeypatch)
+    bodies = _fake_chat(monkeypatch, "Балл 17 [П1]; порог 10 [1].")
+    answer = _answer(
+        monkeypatch, patient_context=CARD, patient_contexts=[dict(CARD)]
+    )
+
+    prompt = bodies[0]["body"]["messages"][1]["content"]
+    assert "П1: пациент:" in prompt
+    assert "П2: пациент:" not in prompt
+    assert [c["guideline_id"] for c in answer["citations"]] == [
+        "who-mhgap-phq9",
+        f"patient:{PATIENT_ID}",
+    ]
 
 
 def test_patient_cards_capped_by_answer_patients(monkeypatch):
