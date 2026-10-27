@@ -115,21 +115,26 @@ def _enabled() -> bool:
 
 
 
-def _thinking_kwargs() -> dict:
-    """Отключение «размышлений» модели — для llama.cpp и для шлюзов.
+def _thinking(payload: dict) -> dict:
+    """Отключение «размышлений» модели в теле /chat/completions.
 
-    llama.cpp понимает `chat_template_kwargs.enable_thinking`, а OpenAI-совместимые
-    шлюзы (omniroute и прочие) — `reasoning_effort`. Замер на `home-stable`
-    (роутится в `ds/deepseek-v4-flash`), поток по реальным сниппетам:
-    без ключей — первый токен через 15.3 с и 353 reasoning-токена;
-    `reasoning_effort=low` — ХУЖЕ (26.8 с); `reasoning_effort=none` — 7.2 с и
-    полное отсутствие reasoning-токенов. Поэтому дефолт — `none` (docs/17 §8).
+    Два разных механизма, и оба нужны:
+    * `chat_template_kwargs.enable_thinking` — понимает llama.cpp;
+    * `reasoning_effort` — **полем верхнего уровня**, как в OpenAI API; внутри
+      `chat_template_kwargs` шлюз (omniroute) его не читает, и CoT остаётся.
+
+    Замер с потоком по реальным сниппетам (`home-stable` → `ds/deepseek-v4-flash`):
+    ключ внутри `chat_template_kwargs` — reasoning-контент всё равно идёт
+    (185-378 символов, первый токен 12-25 с); `reasoning_effort=none` верхним
+    уровнем — reasoning ровно 0 символов и первый токен 6.9-17.6 с (разброс —
+    очередь шлюза). `low` не помогает: рассуждение не ограничивается по длине.
+    Значение пустое → ключ не отправляем (llama.cpp его не знает).
     """
-    kwargs: dict = {"enable_thinking": False}
+    payload["chat_template_kwargs"] = {"enable_thinking": False}
     effort = settings.assistant_llm_reasoning_effort.strip()
     if effort:
-        kwargs["reasoning_effort"] = effort
-    return kwargs
+        payload["reasoning_effort"] = effort
+    return payload
 
 def _request(payload: dict, *, timeout: float | None = None) -> dict:
     """POST /chat/completions к OpenAI-совместимому шлюзу.
@@ -159,14 +164,12 @@ def chat_completion(
     Транспорт общий с роутером топиков: таймаут/ключ/URL берутся из settings.
     Ошибки транспорта и невалидный JSON не ловим — их обрабатывает вызывающий.
     """
-    return _request(
-        {
-            "model": settings.assistant_llm_model,
-            "messages": messages,
-            "temperature": temperature,
-        },
-        timeout=timeout,
-    )
+    payload: dict = {
+        "model": settings.assistant_llm_model,
+        "messages": messages,
+        "temperature": temperature,
+    }
+    return _request(_thinking(payload), timeout=timeout)
 
 
 def chat_with_tools(
@@ -189,8 +192,8 @@ def chat_with_tools(
         "model": settings.assistant_llm_model,
         "messages": messages,
         "temperature": temperature,
-        "chat_template_kwargs": _thinking_kwargs(),
     }
+    _thinking(payload)
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
@@ -228,11 +231,9 @@ def route_topics(query: str, *, timeout: float | None = None) -> tuple[str, ...]
             # max_tokens не передаём: reasoning-модели тратят бюджет на thinking
             # до tool_call, и любой наш лимит возвращал finish_reason=length без
             # выбора раздела. Потолок задаёт сам сервер/шлюз по модели.
-            # llama.cpp понимает enable_thinking, OpenAI-совместимые шлюзы —
-            # reasoning_effort: _thinking_kwargs отдаёт оба ключа (docs/17 §8).
-            "chat_template_kwargs": _thinking_kwargs(),
+            # enable_thinking + reasoning_effort верхнего уровня — см. _thinking.
         }
-        body = _request(payload, timeout=timeout)
+        body = _request(_thinking(payload), timeout=timeout)
         msg = body["choices"][0]["message"]
         tool_calls = msg.get("tool_calls") or []
         if not tool_calls:
@@ -351,23 +352,21 @@ def rewrite_followup(history: list[dict], query: str) -> str | None:
     if not formatted:
         return None
     try:
-        body = _request(
-            {
-                "model": settings.assistant_llm_model,
-                "messages": [
-                    {"role": "system", "content": _REWRITE_SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": (
-                            f"История диалога:\n{formatted}\n\n"
-                            f"Последний вопрос: {_clip(query, REWRITE_QUERY_CHARS)}"
-                        ),
-                    },
-                ],
-                "temperature": 0.0,
-                "chat_template_kwargs": _thinking_kwargs(),
-            }
-        )
+        payload: dict = {
+            "model": settings.assistant_llm_model,
+            "messages": [
+                {"role": "system", "content": _REWRITE_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"История диалога:\n{formatted}\n\n"
+                        f"Последний вопрос: {_clip(query, REWRITE_QUERY_CHARS)}"
+                    ),
+                },
+            ],
+            "temperature": 0.0,
+        }
+        body = _request(_thinking(payload))
         rewritten = _clean_rewrite(body["choices"][0]["message"].get("content") or "")
         if rewritten is None:
             logger.warning("assistant LLM вернул пустую переформулировку — исходный вопрос")
@@ -441,7 +440,7 @@ def _answer_body(history: list[dict], query: str, chunks: list[dict]) -> dict | 
         parts.append(f"История диалога:\n{formatted}")
     parts.append(f"Вопрос врача: {_clip(query, REWRITE_QUERY_CHARS)}")
     parts.append(f"Сниппеты базы знаний:\n{snippets}")
-    return {
+    payload: dict = {
         "model": settings.assistant_llm_model,
         "messages": [
             {"role": "system", "content": _ANSWER_SYSTEM_PROMPT},
@@ -453,8 +452,8 @@ def _answer_body(history: list[dict], query: str, chunks: list[dict]) -> dict | 
         # Бюджет обязателен: reasoning-модель иначе тратит его на «размышления»
         # и возвращает finish_reason=length с пустым content (см. config).
         "max_tokens": settings.assistant_llm_answer_max_tokens,
-        "chat_template_kwargs": _thinking_kwargs(),
     }
+    return _thinking(payload)
 
 
 def _llm_headers() -> dict[str, str]:

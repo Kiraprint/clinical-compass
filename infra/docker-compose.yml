@@ -113,9 +113,9 @@ services:
       # ds/deepseek-v4-flash): enable_thinking=false они игнорируют, тратят
       # контекст на «размышления» и отдают finish_reason=length с пустым content.
       CC_ASSISTANT_LLM_ANSWER_MAX_TOKENS: "${CC_ASSISTANT_LLM_ANSWER_MAX_TOKENS:-700}"
-      # reasoning_effort для шлюзов, игнорирующих enable_thinking. none — не
-      # думать: первый токен ответа через 7.2 с против 15.3 с без ключа
-      # (low — хуже, 26.8 с). docs/17 §8.
+      # reasoning_effort ВЕРХНЕГО уровня для шлюзов, игнорирующих enable_thinking.
+      # none — без CoT: reasoning-контента 0 и первый токен 6.9-17.6 с против
+      # 12-25 с с рассуждениями (low хуже — 26.8 с). docs/17 §8.
       CC_ASSISTANT_LLM_REASONING_EFFORT: "${CC_ASSISTANT_LLM_REASONING_EFFORT:-none}"
       # FR-31: анализ переписки (факты-черновики). Требует и LLM URL выше, и флаг;
       # по умолчанию выключен — ПДн переписки в LLM не уходят (docs/10 R23, docs/17).

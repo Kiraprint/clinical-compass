@@ -158,25 +158,25 @@ async def test_stream_skips_llm_when_budget_spent(monkeypatch):
     assert final["llm_reason"] == "timeout"
 
 
-def test_thinking_kwargs_default_disable_reasoning(monkeypatch):
-    """Ответ уходит с reasoning_effort=none: без него reasoning-модель думает 15 с."""
+def test_answer_body_puts_reasoning_effort_top_level(monkeypatch):
+    """`reasoning_effort` — поле верхнего уровня: внутри chat_template_kwargs шлюз его не читает."""
     monkeypatch.setattr(settings, "assistant_llm_reasoning_effort", "none")
     body = llm_router._answer_body([], QUERY, [{"text": "т", "source_title": "s"}])
     assert body is not None
-    assert body["chat_template_kwargs"] == {
-        "enable_thinking": False,
-        "reasoning_effort": "none",
-    }
+    assert body["reasoning_effort"] == "none"
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
 
 
-def test_thinking_kwargs_empty_effort_keeps_only_enable_thinking(monkeypatch):
+def test_empty_reasoning_effort_is_not_sent(monkeypatch):
     """llama.cpp не знает reasoning_effort: пустое значение не отправляем вовсе."""
     monkeypatch.setattr(settings, "assistant_llm_reasoning_effort", "")
-    assert llm_router._thinking_kwargs() == {"enable_thinking": False}
+    payload = llm_router._thinking({})
+    assert "reasoning_effort" not in payload
+    assert payload["chat_template_kwargs"] == {"enable_thinking": False}
 
 
 def test_routing_payload_carries_reasoning_effort(monkeypatch):
-    """Роутинг разделов тоже не должен «думать»: ключ в теле тул-колла."""
+    """Роутинг разделов тоже не должен «думать»: ключ верхнего уровня в теле тул-колла."""
     seen: list[dict] = []
 
     def _capture(payload, *, timeout=None):
@@ -186,5 +186,5 @@ def test_routing_payload_carries_reasoning_effort(monkeypatch):
     monkeypatch.setattr(settings, "assistant_llm_reasoning_effort", "none")
     monkeypatch.setattr(llm_router, "_request", _capture)
     llm_router.route_topics(QUERY)
-    assert seen and seen[0]["chat_template_kwargs"]["reasoning_effort"] == "none"
+    assert seen and seen[0]["reasoning_effort"] == "none"
     assert seen[0]["chat_template_kwargs"]["enable_thinking"] is False
