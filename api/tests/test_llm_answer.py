@@ -118,6 +118,7 @@ def test_compose_answer_sends_numbered_snippets_and_history(monkeypatch):
     assert system["role"] == "system"
     assert "Не ставь диагноз" in system["content"]
     assert "[n]" in system["content"]
+    assert "max_tokens" not in request["body"]
 
 
 def test_compose_answer_caps_history_like_rewrite(monkeypatch):

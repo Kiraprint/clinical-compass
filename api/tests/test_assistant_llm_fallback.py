@@ -184,16 +184,24 @@ def test_no_chunks_is_disabled_and_llm_not_called(monkeypatch):
     assert (empty["answer_kind"], empty["llm_reason"]) == ("refusal", None)
 
 
-def test_max_tokens_is_sent_to_gateway(monkeypatch):
-    """Бюджет генерации уходит в тело запроса: без него reasoning-модель молчит."""
+def test_answer_body_has_no_max_tokens(monkeypatch):
+    """Потолок длины ответа не передаём: наш max_tokens сам обрывал связный
+    ответ, а краткость держит системный промпт, а не поле запроса."""
     bodies = _fake_chat(monkeypatch, reply="Порог 10 [1].")
 
     assert llm_router.compose_answer([], QUERY, [{"text": "т", "source_title": "s"}]) == "Порог 10 [1]."
-    assert bodies[0]["body"]["max_tokens"] == settings.assistant_llm_answer_max_tokens
+    body = bodies[0]["body"]
+    assert "max_tokens" not in body
+    assert "кратко" in body["messages"][0]["content"]
+    # batch и stream собирает одно тело: поток лишь добавляет stream=true.
+    assert llm_router._answer_body([], QUERY, [{"text": "т", "source_title": "s"}]) == body
 
-    monkeypatch.setattr(settings, "assistant_llm_answer_max_tokens", 256)
-    llm_router.compose_answer([], QUERY, [{"text": "т", "source_title": "s"}])
-    assert bodies[1]["body"]["max_tokens"] == 256
+
+def test_long_answer_is_not_clipped():
+    """Длинный ответ не обрезаем: потолка в символах больше нет."""
+    long_answer = " ".join(["Длинное клиническое объяснение по сниппету [1]."] * 120)
+    assert len(long_answer) > 5000
+    assert llm_router.clean_answer(long_answer) == long_answer
 
 
 def test_compose_answer_result_reasons(monkeypatch):
@@ -430,7 +438,7 @@ def test_truncated_answer_is_not_shown_as_llm(monkeypatch):
 
 
 def test_stream_truncated_marks_reason(monkeypatch):
-    """Поток, упёршийся в max_tokens, отдаёт truncated и детерминированный ответ."""
+    """Поток с finish_reason=length от апстрима отдаёт truncated и фрагменты."""
 
     class Resp:
         async def __aenter__(self):

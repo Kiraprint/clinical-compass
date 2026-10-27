@@ -49,7 +49,7 @@ REWRITE_QUERY_CHARS = 800         # обрезка текущего вопрос
 ANSWER_SNIPPETS = 5               # не больше, чем отдаёт поиск (limit=5)
 ANSWER_SNIPPET_CHARS = 700        # обрезка одного сниппета
 ANSWER_SNIPPETS_CHARS = 3500      # обрезка всех сниппетов разом
-ANSWER_MAX_CHARS = 2000           # потолок ответа модели (защита от «простыни»)
+
 
 # Топики корпуса БЗ (docs/08): ключ = имя тулзы, значение = topic в Qdrant.
 # Тулза search_all специально не нужна: model может не вызывать тулзу вовсе
@@ -295,7 +295,9 @@ _ANSWER_SYSTEM_PROMPT = (
     "нужных данных, и перечисли, что удалось найти.\n"
     "5. Не упоминай персональные данные пациентов — их тебе не передают.\n"
     "6. Верни только текст ответа: без markdown-заголовков и служебных "
-    "комментариев."
+    "комментариев.\n"
+    "7. Отвечай кратко: обычно 3–6 предложений; перечисление — только если "
+    "вопрос просит список. Не повторяй сниппеты целиком."
 )
 
 
@@ -427,7 +429,7 @@ def clean_answer(text: str) -> str | None:
     if text.startswith("```"):
         text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
         text = re.sub(r"\s*```$", "", text).strip()
-    return _clip(text, ANSWER_MAX_CHARS) or None
+    return text or None
 
 
 def _answer_body(history: list[dict], query: str, chunks: list[dict]) -> dict | None:
@@ -452,9 +454,6 @@ def _answer_body(history: list[dict], query: str, chunks: list[dict]) -> dict | 
         # 0.2 — связная формулировка, но без «творчества»: факты и
         # ссылки берутся из сниппетов, повторяемость важна для тестов.
         "temperature": 0.2,
-        # Бюджет обязателен: reasoning-модель иначе тратит его на «размышления»
-        # и возвращает finish_reason=length с пустым content (см. config).
-        "max_tokens": settings.assistant_llm_answer_max_tokens,
     }
     return _thinking(payload)
 
@@ -468,7 +467,8 @@ def _llm_headers() -> dict[str, str]:
 
 
 class TruncatedAnswer(Exception):
-    """Модель упёрлась в max_tokens: текст оборван на середине.
+    """Апстрим оборвал генерацию: текст неполный (finish_reason=length или
+    поток закрылся без терминального чанка).
 
     Усечённый клинический ответ нельзя отдавать как ответ ИИ — вызывающий
     деградирует до детерминированной выдачи фрагментов (reason "truncated").
@@ -490,9 +490,11 @@ def compose_answer_result(
     services.agent): ok — текст от модели; disabled — LLM выключен/нет
     сниппетов; timeout — не уложились в assistant_llm_answer_timeout (включая
     connect-timeout шлюза); http_error — шлюз ответил ошибкой/мусором;
-    truncated — модель упёрлась в max_tokens, текст оборван на середине;
+    truncated — апстрим сам оборвал генерацию (finish_reason=length — бюджет
+    шлюза/модели, или EOF без терминального чанка), текст неполный;
     empty — модель вернула пустой текст, в том числе finish_reason=length с
-    пустым content (reasoning-модель съела бюджет на «размышления»). Проверку
+    пустым content (reasoning-модель съела весь лимит генерации на
+    «размышления»). Проверку
     ссылок [n] и сборку citations делает вызывающий: здесь только текст;
     границу номеров даёт answer_snippet_window(chunks).
     """
@@ -545,9 +547,8 @@ def compose_answer_result(
         # Усечённый клинический текст нельзя отдавать как ответ ИИ: обрыв на
         # полуслове врёт о полноте рекомендации. Показываем фрагменты.
         logger.warning(
-            "assistant LLM упёрся в max_tokens=%d (finish_reason=length, %d симв.)"
+            "assistant LLM оборван апстримом (finish_reason=length, %d симв.)"
             " — детерминированный ответ",
-            settings.assistant_llm_answer_max_tokens,
             len(answer),
         )
         return None, "truncated"
@@ -593,7 +594,7 @@ async def compose_answer_stream(
     Обрыв потока без терминального чанка (`finish_reason`/`[DONE]`) — это не
     завершённый ответ: шлюз или прокси мог закрыть соединение посреди
     генерации, и частичный текст нельзя отдавать как ответ ИИ. Такой EOF
-    поднимает `TruncatedAnswer`, как и упор в `max_tokens`.
+    поднимает `TruncatedAnswer`, как и `finish_reason=length` от апстрима.
     """
     finished = False
     body = _answer_body(history, query, chunks)
@@ -627,9 +628,10 @@ async def compose_answer_stream(
                     # Не ждём TCP-закрытия/шлюзового [DONE]: модель уже закончила.
                     finish_reason = choice.get("finish_reason")
                     if finish_reason == "length":
-                        # Бюджет кончился посреди текста: обрыв отдавать как
-                        # ответ ИИ нельзя, вызывающий уйдёт на фрагменты.
-                        raise TruncatedAnswer(f"LLM stream hit max_tokens={body['max_tokens']}")
+                        # Генерацию оборвал апстрим (его собственный лимит):
+                        # обрыв отдавать как ответ ИИ нельзя — вызывающий
+                        # уйдёт на фрагменты.
+                        raise TruncatedAnswer("LLM stream hit finish_reason=length")
                     if finish_reason:
                         finished = True
                         break
