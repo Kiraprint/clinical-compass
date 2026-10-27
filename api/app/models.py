@@ -298,7 +298,7 @@ class Notification(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
-    kind: Mapped[str] = mapped_column(String)  # RED_ESCALATION | REMINDER | ADVERSE_EVENT
+    kind: Mapped[str] = mapped_column(String)  # RED_ESCALATION | REMINDER | ADVERSE_EVENT | PATIENT_MESSAGE
     title: Mapped[str] = mapped_column(String)
     body: Mapped[str] = mapped_column(String)
     patient_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
@@ -314,10 +314,23 @@ class Notification(Base):
 
     __table_args__ = (
         # ADVERSE_EVENT — FR-28: серьёзное НЯ, о котором сообщил пациент.
-        CheckConstraint("kind in ('RED_ESCALATION','REMINDER','ADVERSE_EVENT')", name="notifications_kind"),
+        # PATIENT_MESSAGE — сообщение пациента в чате (FR-10): одно непрочитанное на врача.
+        CheckConstraint(
+            "kind in ('RED_ESCALATION','REMINDER','ADVERSE_EVENT','PATIENT_MESSAGE')",
+            name="notifications_kind",
+        ),
         Index("notifications_user_read", "user_id", "read_at"),
         # Лента уведомлений: user_id + свежие сверху (id — тай-брейк без Sort).
         Index("ix_notifications_user_created", "user_id", desc("created_at"), desc("id")),
+        # Дедуп чата: не более одного непрочитанного уведомления на (врач, пациент).
+        # Повторное сообщение освежает created_at через on_conflict_do_update.
+        Index(
+            "notifications_chat_unread",
+            "user_id",
+            "patient_id",
+            unique=True,
+            postgresql_where=text("kind = 'PATIENT_MESSAGE' AND read_at IS NULL"),
+        ),
     )
 
 class DeviceToken(Base):

@@ -47,14 +47,17 @@ def test_index_migration_roundtrip(engine):
     # Одноколоночные индексы, вошедшие в новый как префикс, удалены — дублей нет.
     assert "ix_notifications_user_id" not in up
     assert "ix_patient_medications_patient_id" not in up
+    # FR-10: частичный уникальный индекс непрочитанных сообщений.
+    assert "notifications_chat_unread" in up
 
+    # Откат последней ревизии (PATIENT_MESSAGE) не трогает индексы b7c9.
     command.downgrade(cfg, "-1")
     down = _indexes()
-    assert "ix_notifications_user_created" not in down
-    assert "ix_patient_medications_patient_status" not in down
-    assert {"ix_notifications_user_id", "ix_patient_medications_patient_id"} <= down
+    assert "notifications_chat_unread" not in down
+    assert {"ix_notifications_user_created", "ix_patient_medications_patient_status"} <= down
 
     command.upgrade(cfg, "head")
     again = _indexes()
     assert {"ix_notifications_user_created", "ix_patient_medications_patient_status"} <= again
+    assert "notifications_chat_unread" in again
     assert "ix_notifications_user_id" not in again

@@ -11,10 +11,15 @@
 
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Assessment, ChatMessage
+from app.services import push
+
+log = logging.getLogger(__name__)
 
 # Спокойный текст без канцелярита и без обещания мгновенного контакта:
 # сообщение сохраняется и попадёт врачу в карту, но это не линия экстренной помощи.
@@ -101,6 +106,14 @@ async def post_message(db: AsyncSession, patient_id, content: str) -> dict:
         )
         db.add(reply)
     await db.commit()
+    # Уведомление врачу — после коммита сообщения, чтобы сбой уведомления/пуша
+    # не откатывал сам факт доставки сообщения пациенту.
+    try:
+        await push.notify_patient_message(db, patient_id)
+        await db.commit()
+    except Exception:  # noqa: BLE001 — уведомление best-effort
+        await db.rollback()
+        log.warning("patient message notify failed", exc_info=True)
     await db.refresh(patient_msg)
     if reply is not None:
         await db.refresh(reply)
