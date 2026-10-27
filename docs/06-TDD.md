@@ -374,8 +374,8 @@
 | `test_session_detail_contains_protocol_and_artifacts` | сессия с протоколом | `GET /sessions/{id}` | `protocol {version,status}`, `artifacts=[]`, `signature/delivery=null` |
 | `test_audit_rows_written_for_write_paths` | запись/старт/правка/finish | — | в `audit_log` есть `APPOINTMENT_CREATE/UPDATE`, `SESSION_START/FINISH`; текста нет |
 | `test_put_creates_draft_and_stores_ciphertext` | `PUT …/protocol` | сырой `SELECT sections_cipher` | `version=1`, `draft`, в БД bytea без plaintext и имени раздела |
-| `test_section_limits_and_icd10` | разделы сверх §5.2 | `PUT …/protocol` | 422 `PROTOCOL_SECTION_TOO_LONG` / `PROTOCOL_ICD10_INVALID`, в теле `fields` с путём поля |
-| `test_approve_requires_mandatory_sections` | заполнены только жалобы | `approve` | 409 `PROTOCOL_NOT_READY` со списком пустых разделов; `fields` = пути незаполненных граф (проверка в `test_session_ai_grounding.py`) |
+| `test_section_limits_and_icd10` | разделы сверх §5.2 | `PUT …/protocol` | 422 `PROTOCOL_SECTION_TOO_LONG` / `PROTOCOL_ICD10_INVALID` (`fields` для этих кодов проверяется в `test_session_ai_grounding.py`) |
+| `test_approve_requires_mandatory_sections` | заполнены только жалобы | `approve` | 409 `PROTOCOL_NOT_READY`: `detail` — русские названия разделов, `fields` — пути незаполненных граф (кроме `passport.visit_at`: он из сессии и только для чтения) |
 | `test_approve_hashes_canonical_json_and_locks` | полный протокол | `approve`, затем `PUT` | `content_sha256` = sha256 канонического JSON; 409 `PROTOCOL_LOCKED` |
 | `test_edit_after_signed_creates_new_version` | версия 1 в статусе `signed` | `PUT…/protocol` | версия 2 `draft`, версия 1 `superseded`, approve новой версии |
 | `test_protocol_access_gates` | чужая сессия; отзыв согласия | `GET/PUT/approve` | 404 `SESSION_NOT_FOUND`; после отзыва 403 `CONSENT_REQUIRED` |

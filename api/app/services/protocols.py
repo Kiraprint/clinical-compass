@@ -521,7 +521,13 @@ async def approve(db: AsyncSession, clinician_id, session_id, ip: str | None = N
             409,
             "PROTOCOL_NOT_READY",
             "Протокол не заполнен",
-            fields={path: "раздел не заполнен" for path, _ in REQUIRED},
+            # `passport.visit_at` берётся из сессии и в редакторе только для чтения:
+            # подсказка «заполните» на нём бессмысленна, поэтому в fields его нет.
+            fields={
+                path: "раздел не заполнен"
+                for path, _ in REQUIRED
+                if path != "passport.visit_at"
+            },
         )
     if row.status in ("approved", "signed", "submitted"):
         return _payload(row)  # идемпотентно: повторный approve не меняет документ
@@ -533,7 +539,11 @@ async def approve(db: AsyncSession, clinician_id, session_id, ip: str | None = N
             "PROTOCOL_NOT_READY",
             "Не заполнены обязательные разделы: "
             + ", ".join(REQUIRED_LABELS.get(path, path) for path in missing),
-            fields={path: "обязательный раздел не заполнен" for path in missing},
+            fields={
+                path: "обязательный раздел не заполнен"
+                for path in missing
+                if path != "passport.visit_at"
+            },
         )
     # `diagnosis_code` досчитывается из разделов: подтверждённая запись не может
     # расходиться с `sections.diagnosis.icd10` (расхождение — 422).

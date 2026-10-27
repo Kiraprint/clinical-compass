@@ -1004,7 +1004,17 @@ export default function SessionAssistantCard({
               {audio.name} · {fmtSize(audio.blob.size)}
             </span>
             {/* Отправка идёт сама; кнопка нужна только если автозапуск сорвался. */}
-            <button type="button" onClick={() => void upload()} disabled={busy !== "" || !consent}>
+            <button
+              type="button"
+              onClick={() => {
+                void (async () => {
+                  // Повтор — тот же путь, что у автозапуска: загрузили → расшифровываем,
+                  // иначе врач остаётся без расшифровки и ищет вторую кнопку.
+                  if (await upload()) await transcribe();
+                })();
+              }}
+              disabled={busy !== "" || !consent}
+            >
               {busy === "upload" ? "Отправляем…" : "Отправить ещё раз"}
             </button>
           </div>

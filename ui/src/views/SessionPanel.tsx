@@ -76,10 +76,12 @@ const errText = (e: unknown): string =>
  * врач видит «нажал — ничего не произошло» (жалоба с приёмки).
  */
 export function fieldAnchorId(path: string): string {
-  const row = /^(treatment|sources)\[(\d+)\]/.exec(path);
-  if (row) return `pf-${row[1]}-${row[2]}`;
+  const row = /^treatment\[(\d+)\]/.exec(path);
+  if (row) return `pf-treatment-${row[1]}`;
   if (path.startsWith("treatment")) return "pf-treatment";
-  if (path === "sources" || path.startsWith("diagnosis.sources")) return "pf-sources";
+  // Источники редактируются одним блоком: и `sources[0].quote`, и `diagnosis.sources`
+  // ведут к нему же — иначе прокрутка уходила бы в несуществующий элемент.
+  if (path.startsWith("sources") || path.startsWith("diagnosis.sources")) return "pf-sources";
   return `pf-${path.replace(/\./g, "-")}`;
 }
 
@@ -625,7 +627,7 @@ export default function SessionPanel({
           : "Протокол подтверждён.",
       );
     } catch (e: unknown) {
-      // 409 PROTOCOL_NOT_READY — список незаполненных разделов в detail.
+      // 409 PROTOCOL_NOT_READY — незаполненные разделы в `fields` (detail — для человека).
       showFailure(e, "Подтверждение не прошло");
     } finally {
       setBusy(false);
@@ -1014,7 +1016,9 @@ export default function SessionPanel({
                   ...(review["diagnosis.syndrome"] ?? []),
                 ]}
               />
-              <FieldError text={errorFor(fieldErrors, "sources")} />
+              <FieldError
+                text={fieldErrors["sources"] ?? fieldErrors["diagnosis.sources"]}
+              />
             </div>
 
             <h3 id="pf-treatment">Лечение</h3>
@@ -1029,7 +1033,13 @@ export default function SessionPanel({
                     <input
                       value={row.drug}
                       maxLength={LIMIT.line}
-                      onChange={(e) => setTreatment(i, "drug", e.target.value)}
+                      aria-invalid={
+                        fieldErrors[`treatment[${i}].drug`] ? true : undefined
+                      }
+                      onChange={(e) => {
+                        clearFieldError(`treatment[${i}].drug`);
+                        setTreatment(i, "drug", e.target.value);
+                      }}
                     />
                   </label>
                   <label>
@@ -1037,7 +1047,13 @@ export default function SessionPanel({
                     <input
                       value={row.dose}
                       maxLength={LIMIT.line}
-                      onChange={(e) => setTreatment(i, "dose", e.target.value)}
+                      aria-invalid={
+                        fieldErrors[`treatment[${i}].dose`] ? true : undefined
+                      }
+                      onChange={(e) => {
+                        clearFieldError(`treatment[${i}].dose`);
+                        setTreatment(i, "dose", e.target.value);
+                      }}
                     />
                   </label>
                   <label>
@@ -1045,7 +1061,13 @@ export default function SessionPanel({
                     <input
                       value={row.schedule}
                       maxLength={LIMIT.line}
-                      onChange={(e) => setTreatment(i, "schedule", e.target.value)}
+                      aria-invalid={
+                        fieldErrors[`treatment[${i}].schedule`] ? true : undefined
+                      }
+                      onChange={(e) => {
+                        clearFieldError(`treatment[${i}].schedule`);
+                        setTreatment(i, "schedule", e.target.value);
+                      }}
                     />
                   </label>
                   <label>
@@ -1053,7 +1075,13 @@ export default function SessionPanel({
                     <input
                       value={row.duration}
                       maxLength={LIMIT.line}
-                      onChange={(e) => setTreatment(i, "duration", e.target.value)}
+                      aria-invalid={
+                        fieldErrors[`treatment[${i}].duration`] ? true : undefined
+                      }
+                      onChange={(e) => {
+                        clearFieldError(`treatment[${i}].duration`);
+                        setTreatment(i, "duration", e.target.value);
+                      }}
                     />
                   </label>
                   <button
