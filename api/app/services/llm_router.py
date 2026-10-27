@@ -197,7 +197,6 @@ def chat_with_tools(
         "messages": messages,
         "temperature": temperature,
     }
-    _thinking(payload)
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
