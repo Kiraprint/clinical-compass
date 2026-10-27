@@ -272,6 +272,28 @@ export interface RegisterResp {
   totp_secret?: string;
   email_verified?: boolean;
 }
+
+// FR-49: приглашение пациента врачом. Ссылка отдаётся ровно один раз (в БД
+// только хеш токена), поэтому список приглашений несёт карту без token/link.
+export interface InviteRow {
+  id: string;
+  fio: string | null;
+  phone: string | null;
+  birth_date: string | null;
+  email: string | null;
+  expires_at: string;
+  created_at: string | null;
+}
+export interface InviteCreated extends InviteRow {
+  token: string;
+  link: string;
+}
+export interface InviteInfo {
+  fio: string | null;
+  email: string | null;
+  clinician_fio: string | null;
+  expires_at: string;
+}
 /** GET /auth/me — кто я и подтверждён ли адрес (баннер, FR-48 v2). */
 export interface AuthMe {
   id: string;
@@ -579,6 +601,31 @@ export const api = {
   authMe: () => req<AuthMe>("/api/v1/auth/me"),
   requestEmailVerify: verb<ResetRequestResp>("POST")("/api/v1/auth/email/verify/request"),
   verifyEmail: verb<VerifyEmailResp>("POST")("/api/v1/auth/email/verify"),
+  // FR-49: приглашение пациента врачом — ссылка вместо ручного /admin/roster.
+  authInvite: (token: string) => req<InviteInfo>(`/api/v1/auth/invite/${token}`),
+  authInviteAccept: (token: string, data: { email?: string; password: string }) =>
+    req<LoginResp>(`/api/v1/auth/invite/${token}/accept`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  clinicianInvites: () =>
+    req<{ items: InviteRow[] }>("/api/v1/clinician/patients/invites"),
+  createInvite: (data: {
+    fio?: string;
+    phone?: string;
+    birth_date?: string;
+    email?: string;
+  }) =>
+    req<InviteCreated>("/api/v1/clinician/patients/invites", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  reissueInvite: (id: string) =>
+    req<InviteCreated>(`/api/v1/clinician/patients/invites/${id}/reissue`, {
+      method: "POST",
+    }),
+  revokeInvite: (id: string) =>
+    req<void>(`/api/v1/clinician/patients/invites/${id}`, { method: "DELETE" }),
   // F4: отзыв refresh-токена на сервере (best-effort, не блокирует UI).
   // F9: web-режим — refresh_token в cookie, body пустой; native — из localStorage.
   logout: () => {

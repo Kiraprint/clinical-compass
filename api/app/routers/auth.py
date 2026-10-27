@@ -323,6 +323,15 @@ async def login(body: LoginBody, request: Request, response: Response, db: Async
         if not user.totp_secret or not body.otp or not security.verify_totp(user.totp_secret, body.otp):
             await arecord_rate_hit((client, email))
             raise Problem(401, "UNAUTHORIZED", "Требуется корректный код 2FA")
+    return await issue_session(db, user, response)
+
+
+async def issue_session(db: AsyncSession, user: User, response: Response) -> dict:
+    """Выдать access/refresh-токены и cookies (общий хвост входа).
+
+    Используется паролем, вторым шагом по коду из письма и активацией
+    приглашения (FR-49): у всех трёх сценариев один и тот же контракт ответа.
+    """
     jti = await _issue_jti(db, user.id)
     await db.commit()
     access = security.create_access_token(user.id, user.role)

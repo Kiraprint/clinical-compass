@@ -876,3 +876,51 @@ small { color: #8a94a8; }
   .email-verify-form button { min-height: 40px; font-size: 16px; }
   .email-verify-form input { flex: 1 1 120px; width: auto; }
 }
+
+/* FR-49: приглашение пациента — панель врача и публичная страница активации. */
+.invite-panel .collapse-summary { cursor: pointer; }
+.invite-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px 12px;
+  align-items: end;
+  margin: 10px 0;
+}
+.invite-form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.invite-form input { margin: 0; }
+.invite-form button { min-height: 40px; }
+.invite-link { margin-top: 8px; }
+.invite-link-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.invite-link-row input { flex: 1 1 260px; min-width: 0; margin: 0; font-family: monospace; font-size: 13px; }
+.invite-pending { margin-top: 14px; }
+.invite-pending h3 { font-size: 14px; margin: 0 0 6px; }
+.invite-pending-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid #e6eaf1;
+  font-size: 13px;
+}
+.invite-pending-actions { display: flex; gap: 6px; }
+.invite-pending-actions button { min-height: 33px; }
+
+.invite-view {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 12px;
+  background: #f4f7fb;
+}
+.invite-card { width: 100%; max-width: 420px; display: flex; flex-direction: column; gap: 10px; }
+.invite-card h1 { font-size: 20px; margin: 0 0 4px; }
+.invite-card label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.invite-card input { margin: 0; }
+.invite-card button { min-height: 44px; }
+@media (max-width: 700px) {
+  .invite-card input { font-size: 16px; }
+  .invite-pending-actions button { min-height: 40px; }
+}

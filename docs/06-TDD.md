@@ -133,6 +133,11 @@
 | email_verify_delivery_failure | SMTP настроен, `send_code` бросает `MailUnavailable` | 202 `{sent:false}`, строка `EMAIL_VERIFY_DELIVERY_FAILED`, `auth_codes` пуст (недоставленный код не коммитится), повтор сразу — снова 202, а не 429 |
 | email_verify_resend_retires | код из письма при регистрации → повторный `request` | прошлый код → 422 `CODE_INVALID`, свежий → 200 `{email_verified:true}` |
 | auth_me_requires_token | GET /auth/me без токена / с токеном | 401 без токена; `{id, email, role, email_verified:false}` у свежей учётки |
+| invite_create_and_mask | врач создаёт приглашение, список | 201 с `token` и `link`, телефон в ответе замаскирован (`+7•••123-45-67`), в списке `token`/`link` отсутствуют |
+| invite_accept_creates_roster | публичные GET+accept по токену | 200 карта; accept 201 выдаёт сессию, создаёт `users` (PATIENT, ФИО/телефон перенесены) и `clinician_roster`; повтор GET/accept → 410, аудит `INVITE_CREATE`,`INVITE_ACCEPT` |
+| invite_one_shot_and_limits | просрочка, чужой адрес, лимит | `expires_at` в прошлом → 410; занятый e-mail → 409 `EMAIL_TAKEN`; неизвестный токен → 404; >200 непринятых → 409 `INVITE_LIMIT` |
+| invite_reissue_and_revoke | перевыпуск/отзыв владельцем | новый токен жив, старый → 404; отзыв → 204 и пустой список; чужая карта у другого врача → 404 на reissue/revoke; принятая → 409 `INVITE_ACCEPTED` |
+| invites_e2e_link_flow (e2e) | врач создаёт ссылку → пациент активирует в чистом контексте | кабинет пациента с экраном согласия, ссылка одноразовая, пациент появляется в реестре врача |
 | llm_router_* | LLM-роутер раздела: tool_call search_<раздел> → topic, off→None, ошибка/таймаут/неизвестная тулза/без тулзы → None (fallback все разделы) |
 | `rewrite_followup_*` (FR-21) | LLM-переформулировка уточняющего вопроса треда: первая строка ответа без кавычек/префикса, no URL → None без вызова, пустая история → None без вызова, ошибка/таймаут/пустой ответ → None, обрезка истории 8×800≤3000 с конца | самодостаточный запрос либо None (= поиск по исходному вопросу), ответ не ломается |
 | consent_gating | PATIENT без согласия → POST /screenings | 403 CONSENT_REQUIRED; после /consent → 201 |

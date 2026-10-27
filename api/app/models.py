@@ -1268,3 +1268,45 @@ class EmiasDelivery(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), onupdate=text("now()")
     )
+
+class PatientInvite(Base):
+    """FR-49: приглашение пациента врачом — карта до появления аккаунта.
+
+    Врач заводит карту (ФИО, телефон, дата рождения, опционально e-mail) и
+    получает одноразовую ссылку `/invite/<token>`. Пациент открывает её,
+    задаёт пароль (e-mail — свой, если врач его не знал), и только тогда
+    создаётся `users`-строка и запись `clinician_roster`. Поэтому до активации
+    в `users` нет «полупустого» аккаунта с выдуманным адресом.
+
+    Токен хранится только хешем (`sha256(token:CC_DATA_KEY)`), как коды из
+    писем: утечка БД не даёт войти в чужую карту. Показать ссылку повторно
+    нельзя — вместо этого врач перевыпускает токен.
+    """
+
+    __tablename__ = "patient_invites"
+    __table_args__ = (
+        Index("patient_invites_clinician", "clinician_id", "accepted_at"),
+        Index("patient_invites_expires", "expires_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    clinician_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(CHAR(64), unique=True)
+    # Карта, которую заполнил врач. Телефон — ПДн, поэтому EncryptedText.
+    fio: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    phone: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
+    birth_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Адрес, если врач его знает; иначе пациент вводит свой при активации.
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    accepted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    accepted_patient_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
