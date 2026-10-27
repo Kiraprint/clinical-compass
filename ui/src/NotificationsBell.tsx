@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Capacitor } from "@capacitor/core";
 import { api, NotificationItem } from "./api";
 import { useEscapeClose } from "./keys";
+import { enableWebPush, pushChannelState, PushChannelState } from "./push";
 
 export default function NotificationsBell() {
   const [items, setItems] = useState<NotificationItem[]>([]);
@@ -9,6 +10,8 @@ export default function NotificationsBell() {
   const [open, setOpen] = useState(false);
   const [error, setError] = useState("");
   const [fcm, setFcm] = useState<null | { window_active: boolean; remaining_seconds: number }>(null);
+  const [push, setPush] = useState<PushChannelState | null>(null);
+  const [pushBusy, setPushBusy] = useState(false);
   const box = useRef<HTMLDivElement>(null);
 
   const load = async () => {
@@ -33,15 +36,29 @@ export default function NotificationsBell() {
     }
   };
 
+  const loadPush = async () => {
+    if (Capacitor.isNativePlatform()) return;
+    try {
+      setPush(await pushChannelState());
+    } catch {
+      // состояние недоступно — блок канала не рисуем
+    }
+  };
+
   useEffect(() => {
     load();
     loadFcm();
+    loadPush();
     const t = setInterval(() => {
       load();
       loadFcm();
     }, 30000);
     return () => clearInterval(t);
   }, []);
+
+  useEffect(() => {
+    if (open) void loadPush();
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -63,6 +80,16 @@ export default function NotificationsBell() {
       setUnread(0);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // Жест пользователя: браузер спрашивает разрешение только отсюда.
+  const onEnablePush = async () => {
+    setPushBusy(true);
+    try {
+      setPush(await enableWebPush());
+    } finally {
+      setPushBusy(false);
     }
   };
 
@@ -90,15 +117,55 @@ export default function NotificationsBell() {
               Прочитать все
             </button>
           </div>
+          {!Capacitor.isNativePlatform() && push && (
+            <div className="bell-push" aria-live="polite">
+              {push.permission === "unsupported" && (
+                <span className="small muted">
+                  Push-уведомления недоступны: браузер не поддерживает их на этом сайте (нужен HTTPS).
+                </span>
+              )}
+              {push.permission === "granted" && push.subscribed && (
+                <span className="small muted">Уведомления включены</span>
+              )}
+              {push.permission === "granted" && !push.subscribed && (
+                <button className="ghost" disabled={pushBusy} onClick={() => void onEnablePush()}>
+                  Подключить уведомления
+                </button>
+              )}
+              {push.permission === "default" && (
+                <>
+                  <span className="small muted">Браузерные уведомления не включены.</span>
+                  <button className="ghost" disabled={pushBusy} onClick={() => void onEnablePush()}>
+                    Включить уведомления
+                  </button>
+                </>
+              )}
+              {push.permission === "denied" && (
+                <span className="small muted">
+                  Уведомления заблокированы в браузере — разрешите их в настройках сайта.
+                </span>
+              )}
+            </div>
+          )}
           {error && <p className="error">{error}</p>}
           {items.length === 0 && <p style={{ color: "#5a6478", padding: 8 }}>Нет уведомлений</p>}
           {items.map((n) => (
             <div
               key={n.id}
               className={`bell-item ${n.read ? "" : "unread"}`}
-              title={n.patient_id ? "Открыть карточку пациента" : undefined}
+              title={
+                n.kind === "PATIENT_MESSAGE"
+                  ? "Открыть переписку с пациентом"
+                  : n.patient_id
+                    ? "Открыть карточку пациента"
+                    : undefined
+              }
               onClick={() => {
-                if (n.patient_id) {
+                if (n.kind === "PATIENT_MESSAGE" && n.patient_id) {
+                  // Deep-link уже поддерживает ClinicianView (FR-29).
+                  window.location.hash = `chats=patient:${n.patient_id}`;
+                  setOpen(false);
+                } else if (n.patient_id) {
                   window.location.hash = "patient=" + n.patient_id;
                   setOpen(false);
                 }

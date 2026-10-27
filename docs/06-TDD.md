@@ -182,6 +182,9 @@
 | red_escalation_notifies_rostered_clinician | RED-скрининг пациента из roster | у врача в roster создано Notification (kind=RED_ESCALATION, unread=1) |
 | red_escalation_no_roster_no_notification | RED-скрининг пациента без roster | врач не получает уведомление (items пусто) |
 | notifications_mark_read_individual | POST /me/notifications/read {ids} | уведомление помечено прочитанным, unread=0 |
+| patient_message_notifies_rostered_clinician_without_text | POST /chat/thread пациента из roster | у врача Notification kind=PATIENT_MESSAGE, patient_id, read=false; текст сообщения не попадает в title/body; у пациента уведомлений нет |
+| patient_messages_dedup_until_read | два сообщения до прочтения, затем read и третье | одна строка на (врач, пациент), `created_at` освежён; после read новое сообщение создаёт новую строку, `unread=1` |
+| unread_counts_real_number | сообщения двух пациентов одному врачу | `unread=2` (реальный `count(*)`, не 0/1) |
 | push_subscribe_unsubscribe | VAPID-ключ, подписка/отписка по endpoint | подписка апсерт по endpoint; чужая подписка не удаляется; без токена 401 |
 | fcm_device_token_register_delete | POST/DELETE /push/device-token | апсерт по токену; чужой токен не удаляется; без токена 401 |
 | `test_compose_vapid_key_is_valid_p256`, `test_vapid_public_key_matches_private`, `test_invalid_vapid_key_raises` | разбор дефолтного VAPID-ключа из `infra/docker-compose.yml`; ключ из env; мусорный ключ | дефолтный ключ — валидный EC P-256; публичный ключ выводится (87 симв., uncompressed point); невалидный → `ValueError` (422 на `/push/vapid-public-key`) |
