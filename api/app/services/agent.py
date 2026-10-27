@@ -288,7 +288,7 @@ def _strip_patient_citations(text: str, sent: int) -> str:
     return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
-_MARKER_REPEAT_RE = re.compile(r"(\[(?:П?\d{1,3})\])(?:\s*\1)+")
+_MARKER_REPEAT_RE = re.compile(r"(\[\s*(?:П\s*\d{1,3}|\d{1,3})\s*\])(?:\s*\1)+")
 
 
 def _collapse_marker_repeats(text: str) -> str:
@@ -297,7 +297,8 @@ def _collapse_marker_repeats(text: str) -> str:
     Модель дублирует ссылку, когда в сниппетах несколько чанков одного
     гайдлайна; в citations это одна запись (`by_guideline`), поэтому в тексте
     повтор читается как «источник №2, №2». Склеиваем только соседние
-    одинаковые маркеры, порядок разных (`[1][2]`) не трогаем.
+    одинаковые маркеры, порядок разных (`[1][2]`) не трогаем. Пробелы внутри
+    маркера (`[П 1]`) допустимы — модель их иногда ставит.
     """
     return _MARKER_REPEAT_RE.sub(r"\1", text)
 
@@ -361,7 +362,9 @@ def _finalize_llm_answer(
             )
         )
     return RAGAnswer(
-        answer=_renumber_citations(text, positions),
+        # Склейка после перенумерации: [1][2] по двум чанкам одного гайдлайна
+        # после _renumber_citations дают [1][1] — их тоже надо свернуть.
+        answer=_collapse_marker_repeats(_renumber_citations(text, positions)),
         citations=tuple(citations),
         grounded=True,
     )

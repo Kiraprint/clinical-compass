@@ -275,3 +275,4 @@ def test_prompt_sends_patient_questions_to_card():
     assert "не додумывай.\n12." in prompt, "правило 11 и 12 не должны склеиваться"
     assert "отвечай в первую очередь по карте" in prompt
     assert "не перечисляй, чего в них нет" in prompt
+    assert "Не пересказывай, чего в сниппетах или карте нет" in prompt, "правило 4"

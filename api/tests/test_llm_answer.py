@@ -191,7 +191,9 @@ def test_citations_capped_and_deduped_by_guideline(monkeypatch):
     ids = [c["guideline_id"] for c in answer["citations"]]
     assert ids == ["who-mhgap-phq9", "who-mhgap-gad7", "triage-green"]
     assert len(ids) == len(set(ids)) <= 3
-    assert answer["answer"] == "Пороги: [1][2][2][3]."
+    # [2] и [3] — два чанка одного гайдлайна: citation одна, значит и маркер
+    # один (`_collapse_marker_repeats`), а не «[2][2]».
+    assert answer["answer"] == "Пороги: [1][2][3]."
 
 
 def test_citation_outside_prompt_window_falls_back(monkeypatch):
@@ -535,3 +537,25 @@ def test_duplicate_markers_collapse_to_one(monkeypatch):
     answer = _answer(monkeypatch)
 
     assert answer["answer"] == "Порог 10 баллов [1], тяжёлая тревога [2]."
+
+
+def test_markers_collapse_after_renumbering(monkeypatch):
+    """[1][2] по двум чанкам одного гайдлайна → одна citation, значит один маркер.
+
+    `_renumber_citations` переводит второй индекс на ту же citation, и в тексте
+    остаётся `[1][1]`; склейка обязана случиться и после перенумерации.
+    """
+    _enable(monkeypatch)
+    twin = RAGChunk(
+        text="PHQ-9: 0–4 нет депрессии.",
+        source_title="Гайдлайн PHQ-9 (копия)",
+        guideline_id=CHUNKS[0].guideline_id,
+        topic="ШКАЛЫ",
+        score=0.6,
+    )
+    _fake_chat(monkeypatch, "Порог 0–4 — нет депрессии [1][2].")
+
+    answer = _answer(monkeypatch, chunks=[CHUNKS[0], twin])
+
+    assert len(answer["citations"]) == 1
+    assert answer["answer"] == "Порог 0–4 — нет депрессии [1]."
