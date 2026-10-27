@@ -122,7 +122,12 @@ async function throwApiError(resp: Response): Promise<never> {
 // отдаётся сразу, обновляется в фоне, экран получает cc:cache-update и
 // перечитывает данные — см. cache.ts). Значение — ответ как есть; компоненты не
 // должны его мутировать (setState всегда заменяет объект целиком).
+//
+// Stale ограничен: старше CACHE_MAX_STALE_MS запись не показывается вовсе, и
+// запрос идёт синхронно. Иначе при затяжном сбое бэкенда экран бесконечно
+// показывал бы клинические данные, которым уже часы, и сбой был бы не виден.
 const CACHE_TTL_MS = 30_000;
+const CACHE_MAX_STALE_MS = 300_000;
 const getCache = new Map<string, { at: number; value: unknown }>();
 // Поколение кэша: любой сброс его увеличивает. GET, начатый до сброса, несёт
 // данные «до действия» и не должен попасть в кэш, даже если ответил позже.
@@ -192,13 +197,15 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
   const key = `GET ${path}`;
   const hit = getCache.get(key);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value as T;
-  if (hit) {
+  if (hit && Date.now() - hit.at < CACHE_MAX_STALE_MS) {
     // Stale-while-revalidate: экран получает закэшированное сразу, обновление
-    // идёт в фоне. Ошибку фонового обновления глотаем — показанное уже валидно,
-    // а запись остаётся stale, и следующий читатель попробует снова.
+    // идёт в фоне. Ошибка фонового обновления не всплывает — показанное ещё в
+    // пределах допустимой давности; если запись переживёт CACHE_MAX_STALE_MS,
+    // следующий читатель уйдёт в синхронный запрос и увидит ошибку.
     fetchShared<T>(path, init, key, true).catch(() => undefined);
     return hit.value as T;
   }
+  // Слишком старая (или отсутствующая) запись: только синхронный запрос.
   return fetchShared<T>(path, init, key);
 }
 

@@ -357,8 +357,9 @@ async def _patient_card(db: AsyncSession, patient_id, clinician_id=None) -> dict
     `clinician_id` добавляет roster-гейт прямо в первый запрос (403 NO_ROSTER).
     """
     # Пациент, roster-гейт, активное согласие, назначенные шкалы и анамнез — один запрос.
-    # Анамнез — LEFT JOIN по unique patient_id (строк ровно 0..1, карточку не размножает);
-    # при отзыве согласия строки анамнеза удаляются, т.е. без согласия джойн даёт NULL.
+    # Анамнез — LEFT JOIN по unique patient_id (строк ровно 0..1, карточку не размножает)
+    # и только при активном согласии: без него джойн обязан дать NULL, иначе строка
+    # спецкатегории ПДн окажется в памяти рядом с отозванным согласием.
     scales = (
         select(func.array_agg(aggregate_order_by(Prescription.scale_code, Prescription.created_at)))
         .where(Prescription.patient_id == patient_id)
@@ -368,7 +369,10 @@ async def _patient_card(db: AsyncSession, patient_id, clinician_id=None) -> dict
         select(User, Consent.id, PatientAnamnesis, scales)
         .select_from(User)
         .outerjoin(Consent, (Consent.user_id == User.id) & Consent.revoked_at.is_(None))
-        .outerjoin(PatientAnamnesis, PatientAnamnesis.patient_id == User.id)
+        .outerjoin(
+            PatientAnamnesis,
+            (PatientAnamnesis.patient_id == User.id) & Consent.id.is_not(None),
+        )
         .where(User.id == patient_id)
     )
     if clinician_id is not None:
