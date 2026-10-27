@@ -109,9 +109,9 @@ async def _row(db: AsyncSession, patient_id) -> PatientAnamnesis | None:
     )
 
 
-async def card_payload(db: AsyncSession, patient_id) -> dict:
-    """Анамнез для карточки врача (report). Roster/consent проверяет report()."""
-    return _payload(await _row(db, patient_id), patient_id)
+def payload_of(row: PatientAnamnesis | None, patient_id) -> dict:
+    """Анамнез по уже загруженной строке: карточка врача читает её первым запросом."""
+    return _payload(row, patient_id)
 
 
 async def get(db: AsyncSession, clinician_id, patient_id) -> dict:

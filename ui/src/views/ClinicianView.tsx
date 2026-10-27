@@ -19,11 +19,13 @@ import {
   PatientMedication,
   RemindersResponse,
   Report,
+  ScaleCatalog,
   Visit,
 } from "../api";
 import { describeRegimeMismatch, formatTimesPerDay, parseIntakeFrequency, resolveTimesPerDay } from "../dosage";
 import TrendChart from "../TrendChart";
 import { useEscapeClose } from "../keys";
+import { useCacheUpdate } from "../cache";
 import ChatsView from "./ChatsView";
 import LibraryView from "./LibraryView";
 import ScheduleView from "./ScheduleView";
@@ -964,6 +966,10 @@ export default function ClinicianView() {
   // Явная перезагрузка карточки и реестра («Повторить», возврат в список):
   // действия внутри карточки патчат локальное состояние из ответа и сюда не пишут.
   const [reportVersion, setReportVersion] = useState(0);
+  // SWR: кэш GET отдаёт истёкшие данные сразу и обновляет их фоном. Догоняем
+  // его событием cc:cache-update — реестр и открытая карточка перечитываются из
+  // уже свежего кэша, второго запроса нет.
+  useCacheUpdate(() => setReportVersion((v) => v + 1), "/api/v1/clinician/patients");
   // Списки, не зависящие от выбранного пациента, перезагружаются только при
   // входе в раздел или явном повторе после ошибки.
   const [listsVersion, setListsVersion] = useState(0);
@@ -1503,19 +1509,30 @@ function ReportView({
   const [visitNotes, setVisitNotes] = useState("");
   const [visitErr, setVisitErr] = useState("");
   const [visitSaved, setVisitSaved] = useState<number | null>(null);
-  // Инициализация пер-пациентских полей из загруженного отчёта. Зависимость — только
-  // пациент: локальный патч отчёта после мутации не должен сбрасывать введённое
-  // и уже показанный результат оценки (компонент пересоздаётся по key при смене).
+  // Каталог шкал — отдельный GET, в report его больше нет (docs/03 §12):
+  // статичен на деплой, поэтому грузится один раз на жизнь модуля api.
+  const [scales, setScales] = useState<ScaleCatalog[]>([]);
+  useEffect(() => {
+    let alive = true;
+    api.clinicianScales()
+      .then((list) => { if (alive) setScales(list); })
+      .catch(() => undefined);  // каталог не гейтит чтение карточки
+    return () => { alive = false; };
+  }, []);
+  // Инициализация пер-пациентских полей из загруженного отчёта. Зависимость —
+  // пациент и каталог: локальный патч отчёта после мутации не должен сбрасывать
+  // введённое и уже показанный результат оценки (компонент пересоздаётся по key
+  // при смене пациента).
   const reportPatientId = report?.patient_id ?? null;
   useEffect(() => {
     if (report) { setPicked(report.prescribed_scales ?? []); setAeList(report.adverse_events ?? []); }
-    const clinicianScale = report?.available_scales.find((s) => s.audience === "CLINICIAN");
+    const clinicianScale = scales.find((s) => s.audience === "CLINICIAN");
     setAssessCode(clinicianScale?.code ?? "");
     setAssessAnswers({});
     setAssessResult(null);
     setAssessErr("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reportPatientId]);
+  }, [reportPatientId, scales]);
 
   // Справочник ГРЛС — один запрос на карточку: им пользуются и форма НЯ,
   // и автодополнение препарата в назначениях (пропсом ниже).
@@ -1591,7 +1608,7 @@ function ReportView({
 
   const submitAssessment = async () => {
     if (!report || !assessCode || assessBusy) return;
-    const scale = report.available_scales.find((s) => s.code === assessCode);
+    const scale = scales.find((s) => s.code === assessCode);
     if (!scale) return;
     setAssessErr("");
     setAssessBusy(true);
@@ -1685,9 +1702,9 @@ function ReportView({
   const omittedItems = lastAudit?.omitted_items ?? [];
   const omittedScale = lastAudit?.omitted_scale ?? null;
   const pendingAeCount = aeList.filter((e) => e.status === "pending").length;
-  const assessScale = report.available_scales.find((s) => s.code === assessCode);
-  const clinicianScales = report.available_scales.filter((s) => s.audience === "CLINICIAN");
-  const patientScales = report.available_scales.filter((s) => s.audience === "PATIENT");
+  const assessScale = scales.find((s) => s.code === assessCode);
+  const clinicianScales = scales.filter((s) => s.audience === "CLINICIAN");
+  const patientScales = scales.filter((s) => s.audience === "PATIENT");
   // Итог в summary свёрнутой карточки: свежая оценка из формы или последняя сохранённая.
   const assessFmt = (score: number, sev: string, at: string) =>
     `${score} · ${sev} · ${new Date(at).toLocaleDateString("ru-RU")}`;

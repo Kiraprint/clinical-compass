@@ -14,7 +14,7 @@ from sqlalchemy import text
 from app.config import settings
 from app.services import llm_router
 
-from .conftest import admin_ctx, clinician_ctx, finish_screening, patient_ctx
+from .conftest import admin_ctx, clinician_ctx, finish_screening, patient_ctx, run_async
 
 PATIENT_NAME = "Иванова Мария Петровна"
 CLINICIAN_NAME = "Смирнов Иван Иванович"
@@ -260,3 +260,25 @@ def test_consent_revoke_deletes_anamnesis(client, monkeypatch, db_session):
         text("select count(*) from patient_anamnesis where patient_id=:p"), {"p": pid}
     ).scalar()
     assert left == 0
+
+
+def test_card_omits_anamnesis_row_without_active_consent(client, monkeypatch, db_session):
+    """Строка анамнеза без активного согласия (аномалия данных) в карточку не попадает.
+
+    Отзыв согласия удаляет анамнез, но карточка обязана не показывать спецкатегорию ПДн,
+    даже если строка почему-то осталась: предикат `Consent.id IS NOT NULL` в джойне.
+    """
+    _enable(monkeypatch)
+    _, pid, c, _ = _pair(client, "nocard")
+    assert client.put(
+        _url(pid), json={"brief": "тревожность", "text": DRAFT}, headers=c
+    ).status_code == 200
+    # Гасим согласие напрямую, строку анамнеза намеренно оставляем.
+    db_session.execute(text("update consents set revoked_at = now() where user_id=:p"), {"p": pid})
+    db_session.commit()
+
+    from app.services import clinician as clinician_service
+
+    card = run_async(clinician_service._patient_card, uuid.UUID(pid))
+    assert card["anamnesis"] is None
+    assert card["contacts"] is None
