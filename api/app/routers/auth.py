@@ -157,9 +157,15 @@ def _code_hash(code: str) -> str:
     """SHA-256(code + CC_DATA_KEY) — как в rate limiter: в БД кода нет."""
     return hashlib.sha256(f"{code}:{settings.data_key}".encode()).hexdigest()
 
-async def _issue_code(db: AsyncSession, user_id: uuid.UUID, purpose: str) -> tuple[str, AuthCode]:
-    """Создать код в текущей транзакции (flush → известен id-challenge)."""
-    code = _new_code()
+async def _issue_code(
+    db: AsyncSession, user_id: uuid.UUID, purpose: str, code: str | None = None
+) -> tuple[str, AuthCode]:
+    """Создать код в текущей транзакции (flush → известен id-challenge).
+
+    `code` передаёт вызывающий, когда письмо уходит ДО записи в БД: код нужен
+    для письма, а строка должна появиться только после успешной отправки.
+    """
+    code = code or _new_code()
     row = AuthCode(
         user_id=user_id,
         purpose=purpose,
@@ -462,9 +468,13 @@ async def email_verify_request(
     `{sent:true}` означает, что письмо действительно ушло, а отказ SMTP —
     `{sent:false}` без съеденной паузы.
     """
+    # Идентичность снимаем до записи в БД: после отката ORM-объект истёк, и
+    # обращение к user.email/user.id в async-контексте даёт MissingGreenlet.
+    uid = user.id
+    email = user.email
     if user.email_verified_at is not None:
         raise Problem(409, "EMAIL_ALREADY_VERIFIED", "Адрес уже подтверждён")
-    key = f"verify:{user.id}"
+    key = f"verify:{uid}"
     if not _cooldown_ok(key):
         raise Problem(429, "CODE_COOLDOWN", "Письмо уже отправлено: подождите минуту")
     if not mailer.configured() and not _demo_codes_allowed():
@@ -473,25 +483,29 @@ async def email_verify_request(
         # не съедаем — письма ведь не было.
         _cooldown_clear(key)
         return {"sent": False}
-    await _retire_codes(db, user.id, "verify")
-    code, _ = await _issue_code(db, user.id, "verify")
-    await db.commit()
-    if not mailer.configured():
-        return {"sent": True, "demo_code": code}
+    code = _new_code()
     # Здесь, в отличие от сброса пароля, отправку ждём: `{sent:true}` обязан
     # означать «письмо ушло». Иначе при отказе SMTP интерфейс врёт, а пауза
     # 60 с съедена. Сброс пароля ждать не может — он не должен выдавать
     # наличие аккаунта ни по статусу, ни по времени ответа.
-    try:
-        await mailer.send_code(user.email, "Подтверждение адреса", code)
-    except mailer.MailUnavailable:
-        logger.warning("FR-48: письмо подтверждения адреса не отправлено (SMTP отказал)")
-        await audit.record(db, user.id, "EMAIL_VERIFY_DELIVERY_FAILED",
-                           "user", str(user.id), _client(request))
-        await db.commit()
-        _cooldown_clear(key)
-        return {"sent": False}
-    return {"sent": True}
+    if mailer.configured():
+        try:
+            await mailer.send_code(email, "Подтверждение адреса", code)
+        except mailer.MailUnavailable:
+            # Письмо не ушло — в auth_codes ничего не пишем: при упавшем канале
+            # клиентский ретрай иначе копит строки до самого TTL.
+            logger.warning("FR-48: письмо подтверждения адреса не отправлено (SMTP отказал)")
+            await audit.record(db, uid, "EMAIL_VERIFY_DELIVERY_FAILED",
+                               "user", str(uid), _client(request))
+            await db.commit()
+            _cooldown_clear(key)
+            return {"sent": False}
+    await _retire_codes(db, uid, "verify")
+    await _issue_code(db, uid, "verify", code)
+    await db.commit()
+    if mailer.configured():
+        return {"sent": True}
+    return {"sent": True, "demo_code": code}
 
 
 @router.post("/email/verify")

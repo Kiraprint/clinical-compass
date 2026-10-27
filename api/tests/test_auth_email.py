@@ -383,16 +383,21 @@ def test_email_verify_code_single_use_and_unknown_code_422(client, engine, monke
     assert reused.json()["code"] == "CODE_INVALID"
 
 
-def test_demo_code_needs_flag_for_verification_too(client, monkeypatch):
+def test_demo_code_needs_flag_for_verification_too(client, engine, monkeypatch):
     """Демо-код подтверждения не выдаётся без явного CC_MAIL_DEMO_CODES."""
     register(client, "verify-nodemo@test.ru", OLD_PASSWORD)
     token = login(client, "verify-nodemo@test.ru", OLD_PASSWORD)["access_token"]
     monkeypatch.setattr(settings, "smtp_host", "")
     monkeypatch.setattr(settings, "smtp_from", "")
     monkeypatch.setattr(settings, "mail_demo_codes", False)
-    resp = _verify_request(client, token)
-    assert resp.status_code == 202
-    assert resp.json() == {"sent": False}
+    for _ in range(2):
+        resp = _verify_request(client, token)
+        assert resp.status_code == 202
+        assert resp.json() == {"sent": False}
+    with engine.connect() as conn:
+        assert conn.scalar(text(
+            "select count(*) from auth_codes where purpose = 'verify'"
+        )) == 0
 
 
 def test_verify_request_reports_smtp_failure_and_does_not_burn_cooldown(
@@ -417,6 +422,11 @@ def test_verify_request_reports_smtp_failure_and_does_not_burn_cooldown(
         assert conn.scalar(text(
             "select count(*) from audit_log where action = 'EMAIL_VERIFY_DELIVERY_FAILED'"
         )) == 2
+        # Недоставленный код не коммитится: ретрай при упавшем канале не копит
+        # мусор в auth_codes (иначе строка живёт до самого TTL).
+        assert conn.scalar(text(
+            "select count(*) from auth_codes where purpose = 'verify'"
+        )) == 0
 
 
 def test_resend_invalidates_previous_verify_code(client, monkeypatch):
