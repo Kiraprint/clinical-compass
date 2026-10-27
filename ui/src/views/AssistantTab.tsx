@@ -23,12 +23,13 @@ const FRAGMENT_TEXT_LIMIT = 400;
 
 /**
  * Хвост «Источники: …» дублирует блок цитат под ответом — срезаем.
- * Бэкенд всегда ставит хвост отдельным абзацем ("\n\n" + "Источники: …",
- * core/compass/agent.py), поэтому inline-упоминание источников в тексте модели
- * не трогаем. Если весь текст свёлся к хвосту — оставляем его как есть,
- * чтобы не получить пустой пузырь.
+ * Бэкенд ставит его последним отдельным абзацем одной строкой
+ * ("\n\n" + "Источники: …", core/compass/agent.py), поэтому матчим одну строку
+ * в конце: абзац «Источники:» посреди текста модели (за ним есть продолжение)
+ * и inline-упоминание источников не трогаем. Если весь текст свёлся к хвосту —
+ * оставляем его как есть, чтобы не получить пустой пузырь.
  */
-const SOURCES_TAIL = /\n\s*\n\s*Источники:[\s\S]*$/;
+const SOURCES_TAIL = /\n\s*\n\s*Источники:[^\n]*\.?\s*$/;
 
 function stripSourcesTail(text: string): string {
   if (!SOURCES_TAIL.test(text)) return text;
@@ -81,7 +82,10 @@ function AssistantAnswerBody({ m }: { m: AssistantThreadMessage }) {
       {degraded && (
         <div className="answer-degraded" role="status">
           <strong>ИИ-формулировка недоступна</strong>
-          {reason ? ` (${reason})` : ""} — ниже найденные фрагменты базы знаний.
+          {reason ? ` (${reason})` : ""}
+          {fragments.length > 0
+            ? " — ниже найденные фрагменты базы знаний."
+            : " — ниже ответ, собранный из найденных данных."}
           {m.llm_reason === "timeout" && (
             <span className="answer-degraded-hint">
               Модель не отвечает или слишком медленная. Ответ собран из базы знаний —
@@ -114,12 +118,13 @@ function AssistantAnswerBody({ m }: { m: AssistantThreadMessage }) {
       {extra.length > 0 && (
         <div className="answer-extra">
           <strong>
-            {patientCard ? "Карта пациента" : "Из ответа"}
-            {patientCard ? "" : ` (${extra.length})`}:
+            {patientCard ? "Карта пациента" : "Из ответа"} ({extra.length}):
           </strong>
           <ul>
             {extra.map((it) => (
-              <li key={it.n}>{it.text}</li>
+              <li key={it.n}>
+                {it.n}. {it.text}
+              </li>
             ))}
           </ul>
         </div>

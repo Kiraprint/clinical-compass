@@ -333,12 +333,78 @@ test("карта пациента видна и в деградированно�
   await expect(bubble.locator(".answer-degraded")).toBeVisible();
   const extra = bubble.locator(".answer-extra");
   await expect(extra).toContainText("КАРТА-МАРКЕР: динамика ухудшилась");
-  await expect(extra.locator("strong")).toHaveText("Карта пациента:");
+  await expect(extra.locator("strong")).toHaveText("Карта пациента (1):");
+  // Номер пункта — тот же, что номер цитаты карты пациента.
+  await expect(extra.locator("li")).toContainText("2. КАРТА-МАРКЕР");
   // Пункт, у которого есть фрагмент, во втором списке не повторяется.
   await expect(extra.locator("li")).toHaveCount(1);
   // Текст с картой не сыплется в <pre> целиком.
   await expect(bubble.locator(".assistant-answer")).toHaveCount(0);
   await expect(page.getByText("Источники:", { exact: true })).toHaveCount(1);
+});
+
+test("абзац «Источники:» в середине ответа не режет текст после него", async ({ page }) => {
+  // Хвост срезается только однострочный и в конце; абзац посреди ответа — часть
+  // текста модели, продолжение обязано остаться.
+  await openStubbedThread(page, "e2e-tail-mid", "Хвост в середине", [
+    { id: "e2e-tail-mid-q", role: "CLINICIAN", content: "Вопрос" },
+    {
+      id: "e2e-tail-mid-a",
+      role: "ASSISTANT",
+      content:
+        "Вступление.\n\nИсточники: см. рекомендации ниже\n\nГЛАВНЫЙ-ВЫВОД: динамика ухудшилась.",
+      answer_kind: "llm",
+      llm_reason: "ok",
+      fragments: [],
+    },
+  ]);
+  const answer = page.locator(".bubble", { hasText: "Ассистент" }).first().locator(".assistant-answer");
+  await expect(answer).toContainText("Вступление.");
+  await expect(answer).toContainText("Источники: см. рекомендации ниже");
+  await expect(answer).toContainText("ГЛАВНЫЙ-ВЫВОД: динамика ухудшилась.");
+});
+
+test("контракт: незнакомый llm_reason — плашка «причина неизвестна»", async ({ page }) => {
+  await openStubbedThread(page, "e2e-unknown-reason", "Незнакомый reason", [
+    { id: "e2e-unkr-q", role: "CLINICIAN", content: "Вопрос" },
+    {
+      id: "e2e-unkr-a",
+      role: "ASSISTANT",
+      content: "1. — Фрагмент\n\nИсточники: «Гайд» (g1).",
+      citations: [{ source_title: "Гайд", guideline_id: "g1", topic: "ШКАЛЫ", score: 0.8 }],
+      answer_kind: "fragments",
+      llm_reason: "rate_limited",
+      fragments: [{ n: 1, source_title: "Гайд", text: "Фрагмент" }],
+    },
+  ]);
+  const banner = page.locator(".bubble", { hasText: "Ассистент" }).first().locator(".answer-degraded");
+  await expect(banner).toContainText("ИИ-формулировка недоступна");
+  await expect(banner).toContainText("(причина неизвестна)");
+  await expect(banner).toContainText("ниже найденные фрагменты базы знаний");
+});
+
+test("контракт: fragments без списка фрагментов — плашка и полный текст", async ({ page }) => {
+  await openStubbedThread(page, "e2e-empty-fragments", "Пустой список фрагментов", [
+    { id: "e2e-ef-q", role: "CLINICIAN", content: "Вопрос" },
+    {
+      id: "e2e-ef-a",
+      role: "ASSISTANT",
+      content: "По базе знаний найдено следующее:\n1. — Полный текст ответа\n\nИсточники: «Гайд» (g1).",
+      citations: [{ source_title: "Гайд", guideline_id: "g1", topic: "ШКАЛЫ", score: 0.8 }],
+      answer_kind: "fragments",
+      llm_reason: "disabled",
+      fragments: [],
+    },
+  ]);
+  const bubble = page.locator(".bubble", { hasText: "Ассистент" }).first();
+  const banner = bubble.locator(".answer-degraded");
+  await expect(banner).toBeVisible();
+  // Обещать фрагменты нечего — плашка нейтральная.
+  await expect(banner).toContainText("ниже ответ, собранный из найденных данных");
+  await expect(banner).not.toContainText("фрагменты базы знаний");
+  await expect(bubble.locator(".answer-fragments")).toHaveCount(0);
+  await expect(bubble.locator(".assistant-answer")).toContainText("Полный текст ответа");
+  await expect(bubble.locator(".assistant-answer")).toContainText("По базе знаний найдено следующее:");
 });
 
 test("контракт: refusal — обычный текст без плашки", async ({ page }) => {
