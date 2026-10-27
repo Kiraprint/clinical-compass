@@ -404,6 +404,8 @@
 | `test_agent_offload_uses_dedicated_limiter` | `AGENT_LIMITER` = `CC_ASSISTANT_THREAD_LIMIT` (8) | offload `_invoke_agent` | `to_thread.run_sync` получает `limiter=AGENT_LIMITER` — общий пул AnyIO не занимается |
 | `test_assistant_ask_deadline_is_503_with_retry_after` (`test_assistant.py`) | медленный агент | POST `/assistant/ask` | 503 `ASSISTANT_TIMEOUT` + `Retry-After: 5`, без traceback — тот же маппинг, что у треда |
 | `test_assistant_ask_validation_code_unchanged` | пустой `query` | POST `/assistant/ask` | прежний код `422 VALIDATION` (коды ошибок не сдвинулись) |
+| `test_report_sql_budget` (`test_clinician.py`) | пациент с ростером и без НЯ, затем с назначением + НЯ | `GET /clinician/patients/{id}/report` под `before_cursor_execute` на `sync_engine` | ровно 11 запросов в обоих случаях (было 12 и 13): анамнез — LEFT JOIN в первом запросе, НЯ — один джойн с назначением и ГРЛС |
+| `test_scales_catalog_exposes_anchors`, `test_scales_catalog_roles_and_report_has_no_catalog` | врач, админ и пациент | `GET /clinician/scales`; `GET .../report` | 7 шкал, `anchors == max_value+1`, HDRS-17 h1=5/h4=3; пациенту 403, у админа 200; в `report` ключа `available_scales` больше нет |
 
 ### 3.3 ML-сайдкар (stub, `ml/tests`)
 
@@ -489,6 +491,14 @@
 `patient-home-priority.spec.ts` — главный экран пациента (FR-45/FR-46): напоминания стоят выше баннера скрининга, их кнопки ≥44px и баннер ниже них на 390×844 (замер `boundingBox`, без скриншотов); «Отметить чек-ин»/«Отметить приём» открывают «Сегодня» с прокруткой к блоку и фокусом на первом ответе, «Перейти к скринингу» — скрининг; вопрос приёма читается как «Сколько таблеток вы приняли?», отметки taken/partial(`half`)/missed сохраняются как выбраны (проверка через `/me/adherence`). Копирайт баннера («Врач назначил скрининг: …») и кнопок приёма затронул локаторы `patient-flows.spec.ts`, `consent-revoke.spec.ts`, `rbac-idor.spec.ts`, `daily-today.spec.ts` — они обновлены вместе со спекой.
 
 e2e-хелперы вынесены в `e2e/tests/helpers.ts` (TOTP RFC 4648 base32 + HMAC-SHA1, `login`, `registerPatient`, `freshPatientEmail`, `totp`).
+
+Кэш GET на фронте (`ui/src/api.ts`) — не «вечная» память, а stale-while-revalidate.
+Инварианты (не кэшируются ошибки и не-GET, полная инвалидация на мутациях согласия
+и logout, `cacheEpoch` против ответов «до действия», дедуп одновременных полётов)
+держит `api.ts`; новый контракт — событие `cc:cache-update`: истёкшая запись
+отдаётся экрану сразу, фоновый GET её обновляет и шлёт событие, `useCacheUpdate`
+(`ui/src/cache.ts`) перечитывает данные конкретных путей (`ClinicianView` — реестр
+и открытая карточка, `PatientView` → «Сегодня» — дневник, приём, чек-ин).
 
 ## 5. Регрессия и CI
 
