@@ -109,10 +109,6 @@ services:
       # Работает как бюджет: таймауты LLM берут min(настроенный, остаток), а при
       # остатке < 1 с LLM не зовётся — ответ деградирует до фрагментов, а не в 503.
       CC_ASSISTANT_DEADLINE_S: "${CC_ASSISTANT_DEADLINE_S:-150}"
-      # Бюджет генерации ответа. Обязателен для reasoning-моделей (home-stable →
-      # ds/deepseek-v4-flash): enable_thinking=false они игнорируют, тратят
-      # контекст на «размышления» и отдают finish_reason=length с пустым content.
-      CC_ASSISTANT_LLM_ANSWER_MAX_TOKENS: "${CC_ASSISTANT_LLM_ANSWER_MAX_TOKENS:-700}"
       # reasoning_effort ВЕРХНЕГО уровня для шлюзов, игнорирующих enable_thinking.
       # none — без CoT: reasoning-контента 0 и первый токен 6.9-17.6 с против
       # 12-25 с с рассуждениями (low хуже — 26.8 с). docs/17 §8.
