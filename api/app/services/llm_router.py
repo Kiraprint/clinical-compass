@@ -114,6 +114,28 @@ def _enabled() -> bool:
     return bool(settings.assistant_llm_url.strip())
 
 
+
+def _thinking(payload: dict) -> dict:
+    """Отключение «размышлений» модели в теле /chat/completions.
+
+    Два разных механизма, и оба нужны:
+    * `chat_template_kwargs.enable_thinking` — понимает llama.cpp;
+    * `reasoning_effort` — **полем верхнего уровня**, как в OpenAI API; внутри
+      `chat_template_kwargs` шлюз (omniroute) его не читает, и CoT остаётся.
+
+    Замер с потоком по реальным сниппетам (`home-stable` → `ds/deepseek-v4-flash`):
+    ключ внутри `chat_template_kwargs` — reasoning-контент всё равно идёт
+    (185-378 символов, первый токен 12-25 с); `reasoning_effort=none` верхним
+    уровнем — reasoning ровно 0 символов и первый токен 6.9-17.6 с (разброс —
+    очередь шлюза). `low` не помогает: рассуждение не ограничивается по длине.
+    Значение пустое → ключ не отправляем (llama.cpp его не знает).
+    """
+    payload["chat_template_kwargs"] = {"enable_thinking": False}
+    effort = settings.assistant_llm_reasoning_effort.strip()
+    if effort:
+        payload["reasoning_effort"] = effort
+    return payload
+
 def _request(payload: dict, *, timeout: float | None = None) -> dict:
     """POST /chat/completions к OpenAI-совместимому шлюзу.
 
@@ -137,19 +159,21 @@ def _request(payload: dict, *, timeout: float | None = None) -> dict:
 def chat_completion(
     messages: list[dict], *, temperature: float = 0.0, timeout: float | None = None
 ) -> dict:
-    """Сырой POST /chat/completions для других LLM-задач (FR-31, docs/17).
+    """Сырой POST /chat/completions для других LLM-задач (FR-31, FR-37, FR-44).
 
     Транспорт общий с роутером топиков: таймаут/ключ/URL берутся из settings.
-    Ошибки транспорта и невалидный JSON не ловим — их обрабатывает вызывающий.
+    Ключи отключения CoT (`_thinking`) сюда НЕ добавляются осознанно: это задачи
+    вне ассистента (анализ переписки, анамнез, диалог по сессии), и менять их
+    промпт-режим этим PR не нужно — иначе `reasoning_effort=none` молча меняет
+    поведение четырёх фич. Ошибки транспорта и невалидный JSON не ловим — их
+    обрабатывает вызывающий.
     """
-    return _request(
-        {
-            "model": settings.assistant_llm_model,
-            "messages": messages,
-            "temperature": temperature,
-        },
-        timeout=timeout,
-    )
+    payload: dict = {
+        "model": settings.assistant_llm_model,
+        "messages": messages,
+        "temperature": temperature,
+    }
+    return _request(payload, timeout=timeout)
 
 
 def chat_with_tools(
@@ -172,18 +196,17 @@ def chat_with_tools(
         "model": settings.assistant_llm_model,
         "messages": messages,
         "temperature": temperature,
-        "chat_template_kwargs": {"enable_thinking": False},
     }
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
-    return _request(payload, timeout=timeout)
+    return _request(_thinking(payload), timeout=timeout)
 
 
 MAX_TOPICS = 2  # больше двух разделов на один вопрос — это уже «поиск по всем»
 
 
-def route_topics(query: str) -> tuple[str, ...]:
+def route_topics(query: str, *, timeout: float | None = None) -> tuple[str, ...]:
     """Выбирает 1–2 темы (ШКАЛЫ/ТРИАЖ/РЕКОМЕНДАЦИИ/ЛЕКАРСТВА/НАУЧНЫЕ-СТАТЬИ).
 
     Пустой кортеж = поиск по всем разделам (LLM выключен/ошибка/вопрос вне
@@ -191,6 +214,9 @@ def route_topics(query: str) -> tuple[str, ...]:
     доказательства» относится и к ЛЕКАРСТВАМ, и к НАУЧНЫМ-СТАТЬЯМ. Оба фильтра
     уходят в Qdrant одним запросом (MatchAny), поэтому лишних поисков нет.
     """
+    # timeout — остаток бюджета прогона (CC_ASSISTANT_DEADLINE_S), не больше
+    # settings.assistant_llm_timeout: роутер и ответ идут последовательно, и
+    # второй вызов обязан уложиться в то, что осталось от дедлайна.
     if not _enabled():
         return ()
     if not query.strip():
@@ -208,10 +234,9 @@ def route_topics(query: str) -> tuple[str, ...]:
             # max_tokens не передаём: reasoning-модели тратят бюджет на thinking
             # до tool_call, и любой наш лимит возвращал finish_reason=length без
             # выбора раздела. Потолок задаёт сам сервер/шлюз по модели.
-            # chat_template_kwargs: llama.cpp понимает флаг, прочие шлюзы игнорируют.
-            "chat_template_kwargs": {"enable_thinking": False},
+            # enable_thinking + reasoning_effort верхнего уровня — см. _thinking.
         }
-        body = _request(payload)
+        body = _request(_thinking(payload), timeout=timeout)
         msg = body["choices"][0]["message"]
         tool_calls = msg.get("tool_calls") or []
         if not tool_calls:
@@ -330,23 +355,21 @@ def rewrite_followup(history: list[dict], query: str) -> str | None:
     if not formatted:
         return None
     try:
-        body = _request(
-            {
-                "model": settings.assistant_llm_model,
-                "messages": [
-                    {"role": "system", "content": _REWRITE_SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": (
-                            f"История диалога:\n{formatted}\n\n"
-                            f"Последний вопрос: {_clip(query, REWRITE_QUERY_CHARS)}"
-                        ),
-                    },
-                ],
-                "temperature": 0.0,
-                "chat_template_kwargs": {"enable_thinking": False},
-            }
-        )
+        payload: dict = {
+            "model": settings.assistant_llm_model,
+            "messages": [
+                {"role": "system", "content": _REWRITE_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"История диалога:\n{formatted}\n\n"
+                        f"Последний вопрос: {_clip(query, REWRITE_QUERY_CHARS)}"
+                    ),
+                },
+            ],
+            "temperature": 0.0,
+        }
+        body = _request(_thinking(payload))
         rewritten = _clean_rewrite(body["choices"][0]["message"].get("content") or "")
         if rewritten is None:
             logger.warning("assistant LLM вернул пустую переформулировку — исходный вопрос")
@@ -420,7 +443,7 @@ def _answer_body(history: list[dict], query: str, chunks: list[dict]) -> dict | 
         parts.append(f"История диалога:\n{formatted}")
     parts.append(f"Вопрос врача: {_clip(query, REWRITE_QUERY_CHARS)}")
     parts.append(f"Сниппеты базы знаний:\n{snippets}")
-    return {
+    payload: dict = {
         "model": settings.assistant_llm_model,
         "messages": [
             {"role": "system", "content": _ANSWER_SYSTEM_PROMPT},
@@ -432,8 +455,8 @@ def _answer_body(history: list[dict], query: str, chunks: list[dict]) -> dict | 
         # Бюджет обязателен: reasoning-модель иначе тратит его на «размышления»
         # и возвращает finish_reason=length с пустым content (см. config).
         "max_tokens": settings.assistant_llm_answer_max_tokens,
-        "chat_template_kwargs": {"enable_thinking": False},
     }
+    return _thinking(payload)
 
 
 def _llm_headers() -> dict[str, str]:
@@ -453,7 +476,7 @@ class TruncatedAnswer(Exception):
 
 
 def compose_answer_result(
-    history: list[dict], query: str, chunks: list[dict]
+    history: list[dict], query: str, chunks: list[dict], *, timeout: float | None = None
 ) -> tuple[str | None, str]:
     """Ответ ассистента по найденным фрагментам и истории диалога (FR-17).
 
@@ -477,7 +500,7 @@ def compose_answer_result(
     if body is None:
         return None, "disabled"
     try:
-        response = _request(body, timeout=settings.assistant_llm_answer_timeout)
+        response = _request(body, timeout=timeout or settings.assistant_llm_answer_timeout)
     except TimeoutError as exc:
         logger.warning(
             "assistant LLM-ответ недоступен (TimeoutError: %s) — детерминированный ответ",
@@ -531,9 +554,11 @@ def compose_answer_result(
     return answer, "ok"
 
 
-def compose_answer(history: list[dict], query: str, chunks: list[dict]) -> str | None:
+def compose_answer(
+    history: list[dict], query: str, chunks: list[dict], *, timeout: float | None = None
+) -> str | None:
     """Текст ответа модели или None (обёртка над compose_answer_result)."""
-    return compose_answer_result(history, query, chunks)[0]
+    return compose_answer_result(history, query, chunks, timeout=timeout)[0]
 
 
 def stream_error_reason(exc: BaseException) -> str:
@@ -557,7 +582,7 @@ def stream_error_reason(exc: BaseException) -> str:
 
 
 async def compose_answer_stream(
-    history: list[dict], query: str, chunks: list[dict]
+    history: list[dict], query: str, chunks: list[dict], *, timeout: float | None = None
 ) -> AsyncIterator[str]:
     """Токены ответа по сниппетам из OpenAI-совместимого `stream: true`.
 
@@ -578,8 +603,9 @@ async def compose_answer_stream(
     url = settings.assistant_llm_url.rstrip("/") + "/chat/completions"
     # httpx read-timeout сбрасывается на каждом чанке, а шлюз может слать
     # keepalive без контента. Дедлайн — на весь поток, как у batch-ответа.
-    with anyio.move_on_after(settings.assistant_llm_answer_timeout) as scope:
-        async with httpx.AsyncClient(timeout=settings.assistant_llm_answer_timeout) as client:
+    budget = timeout or settings.assistant_llm_answer_timeout
+    with anyio.move_on_after(budget) as scope:
+        async with httpx.AsyncClient(timeout=budget) as client:
             async with client.stream("POST", url, json=body, headers=_llm_headers()) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():

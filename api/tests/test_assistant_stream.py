@@ -143,7 +143,7 @@ def test_agent_stream_cleans_markdown_before_done(monkeypatch):
     monkeypatch.setattr(factory, "_state", lambda *a, **kw: {"query": "PHQ-9?", "history": []})
     monkeypatch.setattr(factory, "_retrieve", lambda state: {"chunks": [chunk]})
 
-    async def fake_parts(history, query, chunks):
+    async def fake_parts(history, query, chunks, **kwargs):
         yield "```markdown\n"
         yield "По базе знаний [1].\n"
         yield "```"

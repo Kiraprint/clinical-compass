@@ -419,7 +419,7 @@ GitHub Actions остаются резервным путём, основной 
 #    CC_ASSISTANT_LLM_URL=http://172.17.0.1:20133/v1
 #    CC_ASSISTANT_LLM_MODEL=<id модели, напр. opencode-go/deepseek-v4.1-flash>
 #    CC_ASSISTANT_LLM_API_KEY=<персональный ключ omniroute>
-#    CC_ASSISTANT_LLM_TIMEOUT=30   # модели с reasoning отвечают 4-20 c
+#    CC_ASSISTANT_LLM_TIMEOUT=120  # reasoning-модели: 17-18 с только на tool_call
 #    Порог 172.17.0.1 виден и другим контейнерам хоста, поэтому ключ omniroute
 #    должен быть ограничен по моделям; публикуйте порт только на docker-шлюзе.
 ```

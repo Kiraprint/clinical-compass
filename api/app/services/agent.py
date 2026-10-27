@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import AsyncIterator, Sequence, TypedDict
 
 import anyio
@@ -124,6 +125,27 @@ _CITATION_RE = re.compile(r"\[([^\[\]]{1,40})\]")
 # клинический диапазон шкалы, а не источник.
 _CITE_GROUP_RE = re.compile(r"^[\d\s,;]+$")
 MAX_ANSWER_CITATIONS = 3  # как в build_rag_answer: больше трёх источников — шум
+# Минимальный остаток бюджета прогона, при котором ещё есть смысл звать LLM:
+# меньше секунды — гарантированный таймаут, а платить за него лимитером глупо.
+MIN_LLM_BUDGET = 1.0
+
+
+def _time_left(deadline_at: float | None) -> float | None:
+    """Остаток бюджета прогона (`CC_ASSISTANT_DEADLINE_S`) или None, если дедлайна нет.
+
+    Таймауты LLM берут min(остаток, настроенный таймаут): роутер и ответ идут
+    последовательно, и без этого второй вызов мог бы пережить дедлайн — прогон
+    срубался бы в 503 ASSISTANT_TIMEOUT вместо честной деградации до фрагментов.
+    """
+    if deadline_at is None:
+        return None
+    return max(0.0, deadline_at - time.monotonic())
+
+
+async def _budget_exhausted() -> AsyncIterator[str]:
+    """Пустой поток для исчерпанного бюджета: причина та же, что у таймаута."""
+    raise TimeoutError("прогон исчерпал CC_ASSISTANT_DEADLINE_S")
+    yield ""  # pragma: no cover — форма async-генератора
 
 
 def _cited_indexes(text: str) -> list[int]:
@@ -186,7 +208,7 @@ def _compose_answer(
 
 
 def _compose_answer_result(
-    query: str, history: list[dict], chunks: list[RAGChunk]
+    query: str, history: list[dict], chunks: list[RAGChunk], *, timeout: float | None = None
 ) -> tuple[RAGAnswer | None, str]:
     """То же, что _compose_answer, плюс причина отказа для UI.
 
@@ -195,7 +217,7 @@ def _compose_answer_result(
     (связного проверенного текста нет — берём детерминированный).
     """
     payload = [{"text": c.text, "source_title": c.source_title} for c in chunks]
-    text, reason = llm_router.compose_answer_result(history, query, payload)
+    text, reason = llm_router.compose_answer_result(history, query, payload, timeout=timeout)
     if text is None:
         return None, reason
     answer = _finalize_llm_answer(text, chunks)
@@ -269,6 +291,8 @@ class AgentState(TypedDict, total=False):
     patient_context: dict | None
     patient_contexts: list[dict] | None
     corpus_drugs: list[dict] | None
+    # time.monotonic() дедлайна прогона: бюджет таймаутов LLM, см. _time_left.
+    deadline_at: float | None
     answer: dict
 
 
@@ -478,9 +502,22 @@ class AgentFactory:
         # llm_reason=None — UI не рисует над отказом плашку «ИИ недоступен».
         reason = "disabled"
         if chunks and detect_redline(state["query"]) is None:
-            result, reason = _compose_answer_result(
-                state["query"], state.get("history") or [], chunks
-            )
+            left = _time_left(state.get("deadline_at"))
+            if left is None or left >= MIN_LLM_BUDGET:
+                result, reason = _compose_answer_result(
+                    state["query"],
+                    state.get("history") or [],
+                    chunks,
+                    timeout=(
+                        None
+                        if left is None
+                        else min(left, settings.assistant_llm_answer_timeout)
+                    ),
+                )
+            else:
+                # Бюджет прогона уже израсходован роутингом/поиском: таймаут
+                # неизбежен, поэтому сразу детерминированные фрагменты.
+                reason = "timeout"
         if result is not None:
             return {
                 "answer": _answer_dict(
@@ -525,6 +562,7 @@ class AgentFactory:
         retrieval_query: str | None = None,
         corpus_drugs: list[dict] | None = None,
         history: list[dict] | None = None,
+        deadline_at: float | None = None,
     ) -> dict:
         return self.build().invoke(
             self._state(
@@ -539,6 +577,7 @@ class AgentFactory:
                 retrieval_query=retrieval_query,
                 corpus_drugs=corpus_drugs,
                 history=history,
+                deadline_at=deadline_at,
             )
         )["answer"]
 
@@ -556,6 +595,7 @@ class AgentFactory:
         retrieval_query: str | None = None,
         corpus_drugs: list[dict] | None = None,
         history: list[dict] | None = None,
+        deadline_at: float | None = None,
     ) -> AgentState:
         # Retrieval и роутинг раздела идут по retrieval_query (FR-21):
         # assistant_chat подставляет сюда LLM-переформулировку уточняющего
@@ -570,7 +610,12 @@ class AgentFactory:
         if topic is not None:
             topic_list = (topic,)
         elif not topic_list and detect_redline(query) is None:
-            topic_list = llm_router.route_topics(search_query)
+            left = _time_left(deadline_at)
+            if left is None or left >= MIN_LLM_BUDGET:
+                topic_list = llm_router.route_topics(
+                    search_query,
+                    timeout=None if left is None else min(left, settings.assistant_llm_timeout),
+                )
         topic = topic_list[0] if topic_list else None
         return {
             "query": query,
@@ -589,6 +634,8 @@ class AgentFactory:
             # видны только из allow-list. Вызывающий клинический путь всегда
             # передаёт множество (возможно пустое).
             "allowed_work_ids": allowed_work_ids,
+            # Бюджет прогона для таймаутов LLM (None — вызов вне ассистента).
+            "deadline_at": deadline_at,
         }
 
     async def stream(self, query: str, **kwargs) -> AsyncIterator[dict]:
@@ -609,10 +656,25 @@ class AgentFactory:
         reason = "disabled"
         if chunks and detect_redline(query) is None:
             parts: list[str] = []
+            left = _time_left(state.get("deadline_at"))
             try:
-                async for piece in llm_router.compose_answer_stream(
-                    state.get("history") or [], query, payload
-                ):
+                # Бюджет прогона исчерпан — поток не открываем: TimeoutError из
+                # _budget_exhausted даёт ту же причину `timeout`, что и таймаут.
+                source = (
+                    llm_router.compose_answer_stream(
+                        state.get("history") or [],
+                        query,
+                        payload,
+                        timeout=(
+                            None
+                            if left is None
+                            else min(left, settings.assistant_llm_answer_timeout)
+                        ),
+                    )
+                    if left is None or left >= MIN_LLM_BUDGET
+                    else _budget_exhausted()
+                )
+                async for piece in source:
                     parts.append(piece)
                     yield {"delta": piece}
                 result = _finalize_llm_answer(llm_router.clean_answer("".join(parts)), chunks)

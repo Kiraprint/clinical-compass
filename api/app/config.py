@@ -91,17 +91,26 @@ class Settings(BaseSettings):
     # только очищенный от ПДн запрос и выбирает тулзу search_<раздел> (docs/12).
     assistant_llm_url: str = ""
     assistant_llm_model: str = "local"  # CC_ASSISTANT_LLM_MODEL: имя модели на сервере
-    assistant_llm_timeout: float = 10.0  # CC_ASSISTANT_LLM_TIMEOUT: сек на выбор тулзы
+    # CC_ASSISTANT_LLM_TIMEOUT: сек на выбор тулзы роутером. Reasoning-модели
+    # (home-stable → ds/deepseek-v4-flash) тратят 17-18 с только на tool_call и
+    # игнорируют enable_thinking=false — 10 с гарантировали fallback (docs/17 §8).
+    assistant_llm_timeout: float = 120.0
     # CC_ASSISTANT_LLM_ANSWER_TIMEOUT: сек на генерацию ответа по сниппетам.
-    # Больше роутера: модель пишет связный текст, а не один tool_call. Таймаут →
-    # детерминированный build_rag_answer, не ошибка API.
-    assistant_llm_answer_timeout: float = 25.0
+    # Замер того же шлюза: 44-82 с (reasoning съедает 350-1300 токенов бюджета),
+    # поэтому 25 с давали детерминированный build_rag_answer вместо ответа.
+    # Таймаут → answer_kind="fragments", llm_reason="timeout", не ошибка API.
+    assistant_llm_answer_timeout: float = 120.0
     # CC_ASSISTANT_LLM_ANSWER_MAX_TOKENS: бюджет генерации ответа по сниппетам
     # (max_tokens). Reasoning-модели (например, home-stable → ds/deepseek-v4-flash)
     # игнорируют chat_template_kwargs.enable_thinking=false и съедают бюджет
     # «на размышления»: без явного max_tokens ответ приходит с
     # finish_reason=length и пустым content. 700 хватает на 3–5 фрагментов.
     assistant_llm_answer_max_tokens: int = Field(default=700, ge=64)
+    # CC_ASSISTANT_LLM_REASONING_EFFORT: `reasoning_effort` **верхнего уровня**
+    # (внутри chat_template_kwargs шлюзы его не читают). `none` — без CoT:
+    # reasoning-контента 0 символов и первый токен 6.9-17.6 с против 12-25 с и
+    # 185-378 символов рассуждений; `low` хуже (26.8 с) — docs/17 §8.
+    assistant_llm_reasoning_effort: str = "none"
     # CC_ASSISTANT_LLM_API_KEY: Bearer-токен OpenAI-совместимого шлюза (omniroute).
     # Пусто → заголовок Authorization не отправляется (llama-server без ключа).
     assistant_llm_api_key: str = ""
@@ -112,7 +121,7 @@ class Settings(BaseSettings):
     assistant_thread_limit: int = Field(default=8, ge=1)
     # CC_ASSISTANT_DEADLINE_S: дедлайн на весь прогон агента — ожидание лимитера +
     # retrieval + LLM. По истечении — 503 ASSISTANT_TIMEOUT (Retry-After: 5).
-    assistant_deadline_s: float = Field(default=60.0, gt=0)
+    assistant_deadline_s: float = Field(default=150.0, gt=0)
     # FR-31: анализ переписки с пациентом (факты-черновики). Выключен по умолчанию.
     # Требует и этот флаг, и CC_ASSISTANT_LLM_URL: текст переписки уходит в LLM
     # только при явном включении и (рекомендуется) локальной модели — docs/17, docs/10.

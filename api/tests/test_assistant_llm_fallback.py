@@ -217,7 +217,7 @@ def test_compose_answer_result_reasons(monkeypatch):
 def test_stream_timeout_marks_reason(monkeypatch):
     """Поток: обрыв по таймауту → последнее событие несёт llm_reason=timeout."""
 
-    async def boom(history, query, chunks):
+    async def boom(history, query, chunks, **kwargs):
         raise TimeoutError("timed out")
         yield ""  # pragma: no cover — генератор должен быть асинхронным
 
@@ -236,7 +236,7 @@ def test_stream_timeout_marks_reason(monkeypatch):
 def test_stream_happy_path_marks_ok(monkeypatch):
     """Поток: связный ответ со ссылкой → answer_kind=llm, llm_reason=ok."""
 
-    async def pieces(history, query, chunks):
+    async def pieces(history, query, chunks, **kwargs):
         yield "Порог умеренной "
         yield "депрессии — 10 [1]."
 
@@ -252,7 +252,7 @@ def test_stream_happy_path_marks_ok(monkeypatch):
 def test_stream_empty_output_marks_empty(monkeypatch):
     """Поток: модель ничего не написала → empty и фрагменты."""
 
-    async def nothing(history, query, chunks):
+    async def nothing(history, query, chunks, **kwargs):
         return
         yield ""  # pragma: no cover
 
