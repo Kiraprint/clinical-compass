@@ -20,6 +20,7 @@ import {
   Questionnaire,
   Timeline,
 } from "../api";
+import { useCacheUpdate } from "../cache";
 import { PARTIAL_SHARE } from "../dosage";
 
 type Tab =
@@ -663,6 +664,12 @@ function TodayTab({
   useEffect(() => {
     load().catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)));
   }, []);
+
+  // SWR: дневник, приём и чек-ин уже показаны из кэша, а api.ts обновил его
+  // фоном — перечитываем ровно эти три пути (попадание в кэш, не новый запрос).
+  useCacheUpdate(() => {
+    load().catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)));
+  }, ["/api/v1/diary", "/api/v1/me/adherence", "/api/v1/checkins/today"]);
 
   // FR-45: переход из напоминания — прокручиваем к блоку и ставим фокус на
   // первый ответ, чтобы пациенту не пришлось искать кнопку.

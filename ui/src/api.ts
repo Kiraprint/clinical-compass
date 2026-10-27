@@ -1,6 +1,8 @@
 // Типизированный HTTP-клиент. Контракты — docs/04 §3.
 import { createParser } from "eventsource-parser";
 
+import { CACHE_UPDATE_EVENT } from "./cache";
+
 // Пустой BASE = same-origin (веб, nginx-прокси). Для нативной сборки (Capacitor)
 // хост задаётся на этапе сборки через VITE_API_BASE (см. mobile/ и release-android).
 const BASE: string = import.meta.env.VITE_API_BASE ?? "";
@@ -116,8 +118,9 @@ async function throwApiError(resp: Response): Promise<never> {
 // --- Кэш GET -----------------------------------------------------------------
 // Новые экраны делают при возврате те же GET, что и при первом входе: без кэша это
 // заметный «мигающий» экран и лишний RTT. Кэш тонкий: ключ method+path, TTL 30 c,
-// дедуп одновременных одинаковых GET, никакого фонового рефетча (истёкшая запись
-// просто перезапрашивается при чтении). Значение — ответ как есть; компоненты не
+// дедуп одновременных одинаковых GET, stale-while-revalidate (истёкшая запись
+// отдаётся сразу, обновляется в фоне, экран получает cc:cache-update и
+// перечитывает данные — см. cache.ts). Значение — ответ как есть; компоненты не
 // должны его мутировать (setState всегда заменяет объект целиком).
 const CACHE_TTL_MS = 30_000;
 const getCache = new Map<string, { at: number; value: unknown }>();
@@ -189,14 +192,37 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
   const key = `GET ${path}`;
   const hit = getCache.get(key);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value as T;
+  if (hit) {
+    // Stale-while-revalidate: экран получает закэшированное сразу, обновление
+    // идёт в фоне. Ошибку фонового обновления глотаем — показанное уже валидно,
+    // а запись остаётся stale, и следующий читатель попробует снова.
+    fetchShared<T>(path, init, key, true).catch(() => undefined);
+    return hit.value as T;
+  }
+  return fetchShared<T>(path, init, key);
+}
+
+/**
+ * Один полёт на ключ: общий promise, успешный ответ — в кэш.
+ *
+ * `notify` — обновление случилось ради того, кто уже получил stale-значение:
+ * после записи шлём `cc:cache-update`, экран перечитывает данные (это попадание
+ * в кэш, а не второй запрос). Кэшируется ТОЛЬКО успешный ответ: send() бросает
+ * ApiError на любой !ok, поэтому 401/403/404/5xx до getCache.set не доходят.
+ */
+function fetchShared<T>(path: string, init: RequestInit, key: string, notify = false): Promise<T> {
   const pending = getInflight.get(key);
-  if (pending) return pending as Promise<T>;
-  // Кэшируется ТОЛЬКО успешный ответ: send() бросает ApiError на любой !ok
-  // (401/403/404/5xx), поэтому такие ответы до getCache.set не доходят.
+  if (pending) {
+    // Чужой полёт: свою заявку на уведомление вешаем на него, не дублируя запрос.
+    if (notify) pending.then(() => emitCacheUpdate(path), () => undefined);
+    return pending as Promise<T>;
+  }
   const epoch = cacheEpoch;
   const request = send<T>(path, init)
     .then((value) => {
-      if (cacheEpoch === epoch) getCache.set(key, { at: Date.now(), value });
+      if (cacheEpoch !== epoch) return value;  // ответ описывает состояние «до» сброса
+      getCache.set(key, { at: Date.now(), value });
+      if (notify) emitCacheUpdate(path);
       return value;
     })
     // Удаляем только свою запись: сброс кэша мог уже выкинуть её, а параллельный
@@ -206,6 +232,12 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
     });
   getInflight.set(key, request);
   return request;
+}
+
+/** Фоновая ревалидация готова: экраны с этим путём перечитывают данные. */
+function emitCacheUpdate(path: string) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(CACHE_UPDATE_EVENT, { detail: { path } }));
 }
 
 /** Файл (PDF протокола): тело — как есть, имя — из Content-Disposition. */
@@ -502,6 +534,21 @@ export type AppointmentPatchBody = {
   location?: string | null;
 };
 
+// Каталог шкал статичен на деплой: грузим один раз и держим обещание на модуль.
+// Ошибку не кешируем — следующий вызов повторит запрос.
+let scalesPromise: Promise<ScaleCatalog[]> | null = null;
+function scaleCatalog(): Promise<ScaleCatalog[]> {
+  if (scalesPromise === null) {
+    scalesPromise = req<{ scales: ScaleCatalog[] }>("/api/v1/clinician/scales")
+      .then((r) => r.scales)
+      .catch((err: unknown) => {
+        scalesPromise = null;
+        throw err;
+      });
+  }
+  return scalesPromise;
+}
+
 export const api = {
   register: verb<RegisterResp>("POST")("/api/v1/auth/register"),
   login: verb<LoginResult>("POST")("/api/v1/auth/login"),
@@ -596,6 +643,8 @@ export const api = {
     req<{ items: PatientCard[] }>(`/api/v1/clinician/patients${triage ? `?triage=${triage}` : ""}`),
   clinicianReport: (patientId: string) =>
     req<Report>(`/api/v1/clinician/patients/${patientId}/report`),
+  // Каталог шкал: отдельный GET, один раз на модуль (в report его нет).
+  clinicianScales: () => scaleCatalog(),
   // FR-22: контакты пациента. Врач — roster+consent, пациент — только свои.
   clinicianContacts: (patientId: string) =>
     req<PatientContacts>(`/api/v1/clinician/patients/${patientId}/contacts`),
@@ -1429,6 +1478,14 @@ export interface EmiasSummary {
   medications: EmiasMedication[];
 }
 
+/** Каталог шкал (GET /clinician/scales): статичен на деплой, в report не входит. */
+export interface ScaleCatalog {
+  code: string;
+  title: string;
+  audience: "PATIENT" | "CLINICIAN";
+  items: { key: string; text: string; max_value: number; anchors: string[] }[];
+}
+
 export interface Report {
   patient_id: string;
   email: string;
@@ -1467,10 +1524,6 @@ export interface Report {
   };
   adverse_events: ClinicianAdverseEvent[];
   diary: { id: string; content: string; mood: number | null; mood_scale: MoodScale; created_at: string }[];
-  available_scales: {
-    code: string; title: string; audience: "PATIENT" | "CLINICIAN";
-    items: { key: string; text: string; max_value: number; anchors: string[] }[];
-  }[];
   open_escalations: { id: string; kind: string; notified_at: string | null; checkin_session_id?: string | null }[];
   // docs/16 §3: ответы чек-ина, состояние риска и основания включённых модулей.
   checkin: {
