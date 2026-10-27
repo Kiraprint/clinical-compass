@@ -174,6 +174,10 @@ async def _set_patients(db: AsyncSession, thread_id, patient_ids: list[uuid.UUID
     )
     for pid in patient_ids:
         db.add(AssistantThreadPatient(thread_id=thread_id, patient_id=pid))
+    # Сессия живёт с autoflush=False, а `_patient_ids` читает строки сразу после
+    # этой записи в том же ходе: без явного flush новые пациенты треда не видны,
+    # карты получаются пустыми и ассистент отвечает «данных о пациенте нет».
+    await db.flush()
 
 def _title(value: str | None) -> str:
     title = (value or "").strip()
