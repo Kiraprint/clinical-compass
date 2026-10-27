@@ -183,7 +183,7 @@ def chat_with_tools(
 MAX_TOPICS = 2  # больше двух разделов на один вопрос — это уже «поиск по всем»
 
 
-def route_topics(query: str) -> tuple[str, ...]:
+def route_topics(query: str, *, timeout: float | None = None) -> tuple[str, ...]:
     """Выбирает 1–2 темы (ШКАЛЫ/ТРИАЖ/РЕКОМЕНДАЦИИ/ЛЕКАРСТВА/НАУЧНЫЕ-СТАТЬИ).
 
     Пустой кортеж = поиск по всем разделам (LLM выключен/ошибка/вопрос вне
@@ -191,6 +191,9 @@ def route_topics(query: str) -> tuple[str, ...]:
     доказательства» относится и к ЛЕКАРСТВАМ, и к НАУЧНЫМ-СТАТЬЯМ. Оба фильтра
     уходят в Qdrant одним запросом (MatchAny), поэтому лишних поисков нет.
     """
+    # timeout — остаток бюджета прогона (CC_ASSISTANT_DEADLINE_S), не больше
+    # settings.assistant_llm_timeout: роутер и ответ идут последовательно, и
+    # второй вызов обязан уложиться в то, что осталось от дедлайна.
     if not _enabled():
         return ()
     if not query.strip():
@@ -211,7 +214,7 @@ def route_topics(query: str) -> tuple[str, ...]:
             # chat_template_kwargs: llama.cpp понимает флаг, прочие шлюзы игнорируют.
             "chat_template_kwargs": {"enable_thinking": False},
         }
-        body = _request(payload)
+        body = _request(payload, timeout=timeout)
         msg = body["choices"][0]["message"]
         tool_calls = msg.get("tool_calls") or []
         if not tool_calls:
@@ -453,7 +456,7 @@ class TruncatedAnswer(Exception):
 
 
 def compose_answer_result(
-    history: list[dict], query: str, chunks: list[dict]
+    history: list[dict], query: str, chunks: list[dict], *, timeout: float | None = None
 ) -> tuple[str | None, str]:
     """Ответ ассистента по найденным фрагментам и истории диалога (FR-17).
 
@@ -477,7 +480,7 @@ def compose_answer_result(
     if body is None:
         return None, "disabled"
     try:
-        response = _request(body, timeout=settings.assistant_llm_answer_timeout)
+        response = _request(body, timeout=timeout or settings.assistant_llm_answer_timeout)
     except TimeoutError as exc:
         logger.warning(
             "assistant LLM-ответ недоступен (TimeoutError: %s) — детерминированный ответ",
@@ -531,9 +534,11 @@ def compose_answer_result(
     return answer, "ok"
 
 
-def compose_answer(history: list[dict], query: str, chunks: list[dict]) -> str | None:
+def compose_answer(
+    history: list[dict], query: str, chunks: list[dict], *, timeout: float | None = None
+) -> str | None:
     """Текст ответа модели или None (обёртка над compose_answer_result)."""
-    return compose_answer_result(history, query, chunks)[0]
+    return compose_answer_result(history, query, chunks, timeout=timeout)[0]
 
 
 def stream_error_reason(exc: BaseException) -> str:
@@ -557,7 +562,7 @@ def stream_error_reason(exc: BaseException) -> str:
 
 
 async def compose_answer_stream(
-    history: list[dict], query: str, chunks: list[dict]
+    history: list[dict], query: str, chunks: list[dict], *, timeout: float | None = None
 ) -> AsyncIterator[str]:
     """Токены ответа по сниппетам из OpenAI-совместимого `stream: true`.
 
@@ -578,8 +583,9 @@ async def compose_answer_stream(
     url = settings.assistant_llm_url.rstrip("/") + "/chat/completions"
     # httpx read-timeout сбрасывается на каждом чанке, а шлюз может слать
     # keepalive без контента. Дедлайн — на весь поток, как у batch-ответа.
-    with anyio.move_on_after(settings.assistant_llm_answer_timeout) as scope:
-        async with httpx.AsyncClient(timeout=settings.assistant_llm_answer_timeout) as client:
+    budget = timeout or settings.assistant_llm_answer_timeout
+    with anyio.move_on_after(budget) as scope:
+        async with httpx.AsyncClient(timeout=budget) as client:
             async with client.stream("POST", url, json=body, headers=_llm_headers()) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():

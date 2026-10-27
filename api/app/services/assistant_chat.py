@@ -17,6 +17,7 @@ Red line, отказ и цитаты считаются по исходному 
 
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import dataclass
 from typing import AsyncIterator
@@ -77,9 +78,13 @@ async def _invoke_agent(query: str, **kwargs) -> dict:
     """
     factory = shared_factory()
     result: dict | None = None
+    # budget — тот же дедлайн, что ограничивает прогон: agent берёт его для
+    # таймаутов LLM (роутер и ответ идут последовательно внутри прогона).
     with anyio.move_on_after(settings.assistant_deadline_s) as scope:
         result = await anyio.to_thread.run_sync(
-            lambda: factory.invoke(query, **kwargs),
+            lambda: factory.invoke(
+                query, deadline_at=time.monotonic() + settings.assistant_deadline_s, **kwargs
+            ),
             abandon_on_cancel=True,
             limiter=AGENT_LIMITER,
         )
@@ -109,9 +114,10 @@ class _Turn:
 async def _stream_agent(query: str, **kwargs) -> AsyncIterator[dict]:
     """То же, что _invoke_agent, но токенами; лимитер держится весь поток."""
     factory = shared_factory()
+    budget = time.monotonic() + settings.assistant_deadline_s
     with anyio.move_on_after(settings.assistant_deadline_s) as scope:
         async with AGENT_LIMITER:
-            async for item in factory.stream(query, **kwargs):
+            async for item in factory.stream(query, deadline_at=budget, **kwargs):
                 yield item
     if scope.cancelled_caught:
         raise _timeout()

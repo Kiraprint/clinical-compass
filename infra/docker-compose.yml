@@ -106,8 +106,8 @@ services:
       # Таймаут генерации ответа по сниппетам (FR-17): сбой → детерминированный ответ.
       CC_ASSISTANT_LLM_ANSWER_TIMEOUT: "${CC_ASSISTANT_LLM_ANSWER_TIMEOUT:-120}"
       # Дедлайн всего прогона агента (лимитер + retrieval + оба вызова LLM).
-      # Обязан быть больше суммы таймаутов, иначе 90-секундный LLM недостижим:
-      # прогон срубается на CC_ASSISTANT_DEADLINE_S → 503 ASSISTANT_TIMEOUT.
+      # Работает как бюджет: таймауты LLM берут min(настроенный, остаток), а при
+      # остатке < 1 с LLM не зовётся — ответ деградирует до фрагментов, а не в 503.
       CC_ASSISTANT_DEADLINE_S: "${CC_ASSISTANT_DEADLINE_S:-150}"
       # Бюджет генерации ответа. Обязателен для reasoning-моделей (home-stable →
       # ds/deepseek-v4-flash): enable_thinking=false они игнорируют, тратят
