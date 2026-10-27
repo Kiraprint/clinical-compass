@@ -9,6 +9,7 @@ patient_id в промпт не попадает.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import date, datetime, timezone
 
@@ -16,7 +17,15 @@ import pytest
 
 from app import db
 from app.config import settings
-from app.models import AdverseEvent, ChatInsight, PatientAnamnesis, PatientMedication, User, Visit
+from app.models import (
+    AdverseEvent,
+    ChatInsight,
+    DiaryEntry,
+    PatientAnamnesis,
+    PatientMedication,
+    User,
+    Visit,
+)
 from app.services import assistant_chat, clinician, llm_router
 
 from .conftest import admin_ctx, clinician_ctx, patient_ctx
@@ -135,6 +144,42 @@ def test_patient_context_without_facts_has_empty_sections(client, acall):
     assert ctx["visits"] == []
 
 
+def test_card_budget_holds_with_long_diary(client, card_patient, acall):
+    """6000-символьный потолок держится даже при трёх записях дневника по 4000 символов."""
+    _, cid, pid = card_patient
+    with db.SyncSessionLocal() as s:
+        pid_uuid = uuid.UUID(pid)
+        for _ in range(3):
+            s.add(DiaryEntry(patient_id=pid_uuid, content="д" * 4000, mood=2, mood_scale="0-4"))
+        s.commit()
+
+    ctx = acall(_context, uuid.UUID(cid), uuid.UUID(pid))
+
+    serialized = json.dumps(ctx, ensure_ascii=False, default=str)
+    assert len(serialized) <= clinician.PATIENT_CONTEXT_CHARS
+    # Факты карточки не вытесняются дневником: они сокращаются последними.
+    assert ctx["medications"]
+    assert ctx["anamnesis"]["brief"]
+    assert all(len(d["content"]) <= clinician.PATIENT_CONTEXT_DIARY_CHARS for d in ctx["recent_diary"])
+
+
+def test_full_card_keeps_fact_sections_in_prompt(client, card_patient, acall):
+    """При полной карте (длинный дневник + все разделы) факты переживают обрезку строки."""
+    _, cid, pid = card_patient
+    with db.SyncSessionLocal() as s:
+        pid_uuid = uuid.UUID(pid)
+        for _ in range(3):
+            s.add(DiaryEntry(patient_id=pid_uuid, content="д" * 4000, mood=2, mood_scale="0-4"))
+        s.commit()
+
+    ctx = acall(_context, uuid.UUID(cid), uuid.UUID(pid))
+    line = llm_router._patient_line(1, ctx)
+
+    assert len(line) <= llm_router.PATIENT_CARD_CHARS
+    for section in ("препараты:", "анамнез:", "нежелательные реакции:", "факты из чата:", "визиты:"):
+        assert section in line
+
+
 def test_prompt_body_contains_facts_and_masks_fio(client, card_patient, acall, monkeypatch):
     """В теле запроса к LLM есть препарат и анамнез, ФИО — маска, patient_id нет."""
     _, cid, pid = card_patient
@@ -168,7 +213,7 @@ def test_anamnesis_is_clipped_in_prompt(card_patient):
 
     assert "анамнез: " in line
     assert len(line) <= llm_router.PATIENT_CARD_CHARS
-    anamnesis_part = line.split("анамнез: ", 1)[1]
+    anamnesis_part = line.split("анамнез: ", 1)[1].split("; дневник:")[0]
     assert len(anamnesis_part) <= llm_router.PATIENT_ANAMNESIS_CHARS
 
 

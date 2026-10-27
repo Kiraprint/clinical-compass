@@ -512,6 +512,7 @@ PATIENT_CONTEXT_ANAMNESIS_CHARS = 1200
 PATIENT_CONTEXT_ADVERSE = 3
 PATIENT_CONTEXT_INSIGHTS = 5
 PATIENT_CONTEXT_VISITS = 3
+PATIENT_CONTEXT_DIARY_CHARS = 400   # запись дневника: свободный текст, уже в промпте отдельно
 PATIENT_CONTEXT_CHARS = 6000        # бюджет всей карты после сериализации
 
 
@@ -608,24 +609,32 @@ def _patient_extras(card: dict, medications: list[dict], visits: list[dict]) -> 
 
 
 # Порядок обрезки: сначала длинные тексты, потом хвосты списков — начало факта
-# остаётся видно даже когда в бюджет влезает только оно.
-# (медицинские назначения, факты чата, НЯ, приёмы, анамнез, прочие тексты)
+# остаётся видно даже когда в бюджет влезает только оно. Дневник обрезается
+# первым по объёму: он уже отдан ассистенту отдельным разделом и не должен
+# вытеснять препараты и анамнез своим свободным текстом.
+# (назначения, факты чата, НЯ, приёмы, анамнез, прочие тексты, дневник)
 _CARD_SHRINK_STEPS = (
     (PATIENT_CONTEXT_MEDS, PATIENT_CONTEXT_INSIGHTS, PATIENT_CONTEXT_ADVERSE,
-     PATIENT_CONTEXT_VISITS, PATIENT_CONTEXT_ANAMNESIS_CHARS, PATIENT_CONTEXT_NOTES_CHARS),
+     PATIENT_CONTEXT_VISITS, PATIENT_CONTEXT_ANAMNESIS_CHARS, PATIENT_CONTEXT_NOTES_CHARS,
+     PATIENT_CONTEXT_DIARY_CHARS),
     (PATIENT_CONTEXT_MEDS, PATIENT_CONTEXT_INSIGHTS, PATIENT_CONTEXT_ADVERSE,
-     PATIENT_CONTEXT_VISITS, 600, 120),
-    (6, 3, 2, 2, 600, 120),
-    (4, 2, 1, 1, 300, 60),
-    (2, 1, 1, 1, 150, 40),
+     PATIENT_CONTEXT_VISITS, 600, 120, 300),
+    (6, 3, 2, 2, 600, 120, 200),
+    (4, 2, 1, 1, 300, 60, 120),
+    (2, 1, 1, 1, 150, 40, 60),
+    (1, 1, 1, 1, 100, 20, 20),
 )
 
 
 def _shrink_card(ctx: dict, step: tuple) -> dict:
-    meds_n, insights_n, adverse_n, visits_n, brief_chars, text_chars = step
+    meds_n, insights_n, adverse_n, visits_n, brief_chars, text_chars, diary_chars = step
     anamnesis = ctx.get("anamnesis")
     return {
         **ctx,
+        "recent_diary": [
+            {**d, "content": _clip_field(d.get("content"), diary_chars)}
+            for d in (ctx.get("recent_diary") or [])
+        ],
         "medications": [
             {
                 **m,

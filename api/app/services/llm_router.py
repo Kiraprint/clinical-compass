@@ -590,8 +590,10 @@ def _patient_line(index: int, ctx: dict) -> str:
         for d in diary
         if str(d.get("content") or "").strip()
     ]
-    bits.append(f"дневник: {' | '.join(entries) if entries else '—'}")
+    # Факты карточки идут до дневника: бюджет карты при переполнении срезает
+    # хвост строки, и свободный текст дневника не должен вытеснять препараты.
     bits.extend(_patient_fact_bits(ctx))
+    bits.append(f"дневник: {' | '.join(entries) if entries else '—'}")
     return f"П{index}: " + "; ".join(bits)
 
 
