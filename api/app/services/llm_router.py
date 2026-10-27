@@ -444,6 +444,14 @@ def _llm_headers() -> dict[str, str]:
     return headers
 
 
+class TruncatedAnswer(Exception):
+    """Модель упёрлась в max_tokens: текст оборван на середине.
+
+    Усечённый клинический ответ нельзя отдавать как ответ ИИ — вызывающий
+    деградирует до детерминированной выдачи фрагментов (reason "truncated").
+    """
+
+
 def compose_answer_result(
     history: list[dict], query: str, chunks: list[dict]
 ) -> tuple[str | None, str]:
@@ -457,12 +465,13 @@ def compose_answer_result(
 
     Второй элемент пары — причина для UI (`answer_kind`/`llm_reason` в
     services.agent): ok — текст от модели; disabled — LLM выключен/нет
-    сниппетов; timeout — не уложились в assistant_llm_answer_timeout;
-    http_error — шлюз ответил ошибкой/мусором; empty — модель вернула пустой
-    текст, в том числе finish_reason=length с пустым content (reasoning-модель
-    съела бюджет на «размышления»). Проверку ссылок [n] и сборку citations
-    делает вызывающий: здесь только текст; границу номеров даёт
-    answer_snippet_window(chunks).
+    сниппетов; timeout — не уложились в assistant_llm_answer_timeout (включая
+    connect-timeout шлюза); http_error — шлюз ответил ошибкой/мусором;
+    truncated — модель упёрлась в max_tokens, текст оборван на середине;
+    empty — модель вернула пустой текст, в том числе finish_reason=length с
+    пустым content (reasoning-модель съела бюджет на «размышления»). Проверку
+    ссылок [n] и сборку citations делает вызывающий: здесь только текст;
+    границу номеров даёт answer_snippet_window(chunks).
     """
     body = _answer_body(history, query, chunks)
     if body is None:
@@ -475,7 +484,17 @@ def compose_answer_result(
             exc,
         )
         return None, "timeout"
-    except (urllib.error.URLError, json.JSONDecodeError, ValueError, TypeError) as exc:
+    except urllib.error.URLError as exc:
+        # connect-timeout urllib заворачивает в URLError(reason=TimeoutError),
+        # read-timeout приходит голым TimeoutError (ветка выше): для UI это
+        # одна причина — "timeout", а не http_error.
+        reason = stream_error_reason(exc)
+        logger.warning(
+            "assistant LLM-ответ недоступен (URLError: %s) — детерминированный ответ",
+            exc.reason,
+        )
+        return None, reason
+    except (json.JSONDecodeError, ValueError, TypeError) as exc:
         logger.warning(
             "assistant LLM-ответ недоступен (%s: %s) — детерминированный ответ",
             type(exc).__name__,
@@ -499,6 +518,16 @@ def compose_answer_result(
             finish_reason,
         )
         return None, "empty"
+    if finish_reason == "length":
+        # Усечённый клинический текст нельзя отдавать как ответ ИИ: обрыв на
+        # полуслове врёт о полноте рекомендации. Показываем фрагменты.
+        logger.warning(
+            "assistant LLM упёрся в max_tokens=%d (finish_reason=length, %d симв.)"
+            " — детерминированный ответ",
+            settings.assistant_llm_answer_max_tokens,
+            len(answer),
+        )
+        return None, "truncated"
     return answer, "ok"
 
 
@@ -508,9 +537,22 @@ def compose_answer(history: list[dict], query: str, chunks: list[dict]) -> str |
 
 
 def stream_error_reason(exc: BaseException) -> str:
-    """Причина отказа потока LLM — тот же словарь, что у compose_answer_result."""
-    if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
-        return "timeout"
+    """Причина отказа LLM — тот же словарь, что у compose_answer_result.
+
+    timeout|truncated|http_error. urllib прячет таймауты в
+    `URLError.reason` (connect-timeout) — разворачиваем вложенную причину,
+    иначе в логах и UI такой отказ выглядел бы как ошибка шлюза.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, TruncatedAnswer):
+            return "truncated"
+        if isinstance(cur, (TimeoutError, httpx.TimeoutException)):
+            return "timeout"
+        nested = cur.reason if isinstance(cur, urllib.error.URLError) else None
+        cur = nested if isinstance(nested, BaseException) else None
     return "http_error"
 
 
@@ -550,7 +592,12 @@ async def compose_answer_stream(
                     if piece:
                         yield piece
                     # Не ждём TCP-закрытия/шлюзового [DONE]: модель уже закончила.
-                    if choice.get("finish_reason"):
+                    finish_reason = choice.get("finish_reason")
+                    if finish_reason == "length":
+                        # Бюджет кончился посреди текста: обрыв отдавать как
+                        # ответ ИИ нельзя, вызывающий уйдёт на фрагменты.
+                        raise TruncatedAnswer(f"LLM stream hit max_tokens={body['max_tokens']}")
+                    if finish_reason:
                         break
     if scope.cancelled_caught:
         raise TimeoutError("LLM stream timed out")

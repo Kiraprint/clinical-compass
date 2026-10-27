@@ -751,7 +751,9 @@ class AssistantMessage(Base):
     content: Mapped[str] = mapped_column(EncryptedText)
     citations: Mapped[list] = mapped_column(JSONB, default=list)
     topic: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    answer_meta: Mapped[dict] = mapped_column(JSONB, default=dict)
+    answer_meta: Mapped[dict] = mapped_column(
+        JSONB, default=dict, server_default=text("'{}'::jsonb")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)
 class EmiasLink(Base):
     """Связка локального пациента с пациентом ЕМИАС (FR-25).

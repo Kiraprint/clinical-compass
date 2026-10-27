@@ -302,9 +302,11 @@ def _answer_dict(
     """Контракт ответа ассистента: текст, цитаты и признак «ИИ не сработал».
 
     answer_kind="llm" — текст написан моделью; "fragments" — детерминированная
-    выдача фрагментов, llm_reason объясняет, почему (disabled|timeout|empty|
-    http_error). fragments заполняются только для "fragments" и совпадают с
-    citations по номерам.
+    выдача фрагментов, llm_reason объясняет, почему (disabled|timeout|
+    truncated|empty|http_error); "refusal" — прямой отказ (red line / нет
+    данных), llm_reason=None: плашка «ИИ-формулировка недоступна» над отказом
+    врёт, а фрагментов у отказа нет. fragments заполняются только для
+    "fragments" и совпадают с citations по номерам.
     """
     return {
         "answer": result.answer,
@@ -325,6 +327,26 @@ def _answer_dict(
             for c in result.citations
         ],
     }
+
+
+def _fallback_answer(
+    state: AgentState, chunks: list[RAGChunk], result: RAGAnswer, reason: str
+) -> dict:
+    """Детерминированный ответ: отказ без плашки ИИ, иначе выдача фрагментов.
+
+    Отказ — это red line (`refused`) ИЛИ «в КБ нет данных» (`refusal_code`, у
+    которого исторически `refused=False`, чтобы не путать с красной линией).
+    У отказа фрагментов нет и причины отказа LLM нет: модели не звали.
+    """
+    if result.refused or result.refusal_code:
+        return _answer_dict(state, result, answer_kind="refusal", llm_reason=None)
+    return _answer_dict(
+        state,
+        result,
+        answer_kind="fragments",
+        llm_reason=reason,
+        fragments=_fragments(chunks, result.citations),
+    )
 
 
 class AgentFactory:
@@ -451,8 +473,9 @@ class AgentFactory:
         # только карта пациента» остаются детерминированными: карта и ПДн в
         # промпт не уходят, а отказ обязан быть воспроизводимым.
         result: RAGAnswer | None = None
-        # disabled — LLM не звали вовсе (нет сниппетов или red line): UI должен
-        # показать фрагменты, а не выдавать детерминированный текст за ответ ИИ.
+        # LLM не зовём для red line и пустых находок: отказ обязан быть
+        # воспроизводимым. Такой ответ уходит как answer_kind="refusal",
+        # llm_reason=None — UI не рисует над отказом плашку «ИИ недоступен».
         reason = "disabled"
         if chunks and detect_redline(state["query"]) is None:
             result, reason = _compose_answer_result(
@@ -470,15 +493,7 @@ class AgentFactory:
             patient_context=state.get("patient_context"),
             patient_contexts=state.get("patient_contexts"),
         )
-        return {
-            "answer": _answer_dict(
-                state,
-                fallback,
-                answer_kind="fragments",
-                llm_reason=reason,
-                fragments=_fragments(chunks, fallback.citations),
-            )
-        }
+        return {"answer": _fallback_answer(state, chunks, fallback, reason)}
 
     def build(self):
         """Граф retrieve → answer.
@@ -588,6 +603,9 @@ class AgentFactory:
         chunks = state.get("chunks") or []
         payload = [{"text": c.text, "source_title": c.source_title} for c in chunks]
         result: RAGAnswer | None = None
+        # Отказной ветки у потока нет: red line и пустые находки до LLM не
+        # доходят (chunks пуст ⇒ не зовём), а отказ при неудаче LLM собирает
+        # тот же _fallback_answer, что и batch.
         reason = "disabled"
         if chunks and detect_redline(query) is None:
             parts: list[str] = []
@@ -621,15 +639,7 @@ class AgentFactory:
             patient_context=state.get("patient_context"),
             patient_contexts=state.get("patient_contexts"),
         )
-        yield {
-            "answer": _answer_dict(
-                state,
-                fallback,
-                answer_kind="fragments",
-                llm_reason=reason,
-                fragments=_fragments(chunks, fallback.citations),
-            )
-        }
+        yield {"answer": _fallback_answer(state, chunks, fallback, reason)}
 
 
 # --- Разделяемые клиенты процесса -------------------------------------------

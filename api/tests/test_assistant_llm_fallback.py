@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -166,17 +168,20 @@ def test_answer_without_valid_citations_is_empty(monkeypatch):
 
 
 def test_no_chunks_is_disabled_and_llm_not_called(monkeypatch):
-    """Нет сниппетов → LLM не зовём, reason=disabled."""
+    """Нет сниппетов → LLM не зовём: ответ по карте disabled, а без неё — отказ."""
 
     def boom(*args, **kwargs):
         raise AssertionError("LLM не должен вызываться без сниппетов")
 
     monkeypatch.setattr(urllib.request, "urlopen", boom)
-    out = _answer(chunks=[])
+    # Карта пациента есть, находок в КБ нет: детерминированный ответ по карте.
+    card = _answer(chunks=[], patient_contexts=[{"patient_id": "p-1", "fio": "Иванов"}])
+    assert (card["answer_kind"], card["llm_reason"]) == ("fragments", "disabled")
+    assert card["fragments"] == []
 
-    assert out["answer_kind"] == "fragments"
-    assert out["llm_reason"] == "disabled"
-    assert out["fragments"] == []
+    # Ни карты, ни находок — отказа не выдавать фрагментами (см. refusal-тесты).
+    empty = _answer(chunks=[])
+    assert (empty["answer_kind"], empty["llm_reason"]) == ("refusal", None)
 
 
 def test_max_tokens_is_sent_to_gateway(monkeypatch):
@@ -392,3 +397,134 @@ def test_fragments_align_with_citations_for_duplicates_and_patient_card(monkeypa
     assert [c["source_title"] for c in out["citations"][:2]] == [
         f["source_title"] for f in out["fragments"]
     ]
+
+
+def test_connect_timeout_is_timeout_not_http_error(monkeypatch):
+    """URLError(reason=TimeoutError) — connect-timeout шлюза, не ошибка ответа."""
+    _fake_chat(monkeypatch, raise_exc=urllib.error.URLError(TimeoutError("timed out")))
+    out = _answer()
+    assert (out["answer_kind"], out["llm_reason"]) == ("fragments", "timeout")
+    assert out["fragments"]
+    # socket.timeout — алиас TimeoutError; вложенность в URLError не важна.
+    assert (
+        llm_router.stream_error_reason(urllib.error.URLError(socket.timeout("timed out")))
+        == "timeout"
+    )
+    # Отказ соединения таймаутом не считается.
+    refused = urllib.error.URLError(ConnectionRefusedError("refused"))
+    assert llm_router.stream_error_reason(refused) == "http_error"
+
+
+def test_truncated_answer_is_not_shown_as_llm(monkeypatch):
+    """finish_reason=length с непустым текстом — обрыв, а не ответ ИИ."""
+    _fake_chat(
+        monkeypatch,
+        reply="PHQ-9: 0–4 нет депрессии, 5–9 лёгкая, 10–14 [1]. При баллах выше",
+        finish_reason="length",
+    )
+    out = _answer()
+
+    assert (out["answer_kind"], out["llm_reason"]) == ("fragments", "truncated")
+    assert out["fragments"] and out["fragments"][0]["n"] == 1
+    assert "При баллах выше" not in out["answer"]
+
+
+def test_stream_truncated_marks_reason(monkeypatch):
+    """Поток, упёршийся в max_tokens, отдаёт truncated и детерминированный ответ."""
+
+    class Resp:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_lines(self):
+            yield 'data: {"choices":[{"delta":{"content":"PHQ-9: 0–4 [1], 5–9"}}]}'
+            yield 'data: {"choices":[{"delta":{},"finish_reason":"length"}]}'
+
+    class Client:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def stream(self, *args, **kwargs):
+            return Resp()
+
+    monkeypatch.setattr(llm_router.httpx, "AsyncClient", Client)
+    events = _factory_stream(monkeypatch)
+
+    assert events[0] == {"delta": "PHQ-9: 0–4 [1], 5–9"}
+    answer = events[-1]["answer"]
+    assert (answer["answer_kind"], answer["llm_reason"]) == ("fragments", "truncated")
+    assert answer["fragments"]
+
+
+def test_refusal_is_its_own_answer_kind(monkeypatch):
+    """Отказ — это answer_kind=refusal без плашки «ИИ недоступен», а не fragments."""
+    bodies = _fake_chat(monkeypatch, reply="— PHQ-9: 10–14 умеренная [1].")
+    out = _answer(chunks=[])
+
+    # NO_KB_DATA — отказ без красной линии: refusal_code есть, refused=False.
+    assert out["refusal_code"] == "NO_KB_DATA"
+    assert (out["answer_kind"], out["llm_reason"]) == ("refusal", None)
+    assert out["fragments"] == []
+    assert bodies == [], "LLM не звали — вопрос не покрыт КБ"
+
+
+def test_redline_refusal_has_no_llm_reason(monkeypatch):
+    """Red line отвечается отказом, даже если КБ что-то нашла."""
+    bodies = _fake_chat(monkeypatch, reply="— PHQ-9: 10–14 умеренная [1].")
+    out = _answer(query="Какую дозу сертралина принимать?")
+
+    assert out["refused"] is True
+    assert (out["answer_kind"], out["llm_reason"]) == ("refusal", None)
+    assert out["fragments"] == []
+    assert bodies == []
+
+
+def test_stream_refusal_has_no_llm_reason(monkeypatch):
+    """Поток на пустой выдаче тоже отдаёт refusal, а не fragments/disabled."""
+    _fake_chat(monkeypatch, reply="— PHQ-9: 10–14 умеренная [1].")
+    answer = _factory_stream(monkeypatch, chunks=[])[-1]["answer"]
+
+    assert answer["refusal_code"] == "NO_KB_DATA"
+    assert (answer["answer_kind"], answer["llm_reason"]) == ("refusal", None)
+    assert answer["fragments"] == []
+
+
+def test_docs_claim_nginx_fix_only_via_ui_pr():
+    """Утверждение о proxy_buffering off честно: правка приходит из PR #116."""
+    root = Path(__file__).resolve().parents[2]
+    docs = (root / "docs" / "03-архитектура.md").read_text(encoding="utf-8")
+    bullet = next(line for line in docs.splitlines() if "proxy_buffering off" in line)
+    assert "ui/nginx.conf" in bullet and "#116" in bullet
+
+    router = (root / "api" / "app" / "routers" / "assistant.py").read_text(encoding="utf-8")
+    assert "ui/nginx.conf" in router and "PR #116" in router
+    assert "proxy_buffering off в ui/nginx.conf" not in router
+
+
+def test_answer_meta_server_default_matches_migration():
+    """server_default модели и миграции совпадают — иначе дрейф схемы."""
+    from app.models import AssistantMessage
+
+    column = AssistantMessage.__table__.c.answer_meta
+    assert column.server_default is not None
+    assert str(column.server_default.arg) == "'{}'::jsonb"
+
+    migration = (
+        Path(__file__).resolve().parents[1]
+        / "alembic"
+        / "versions"
+        / "b8c9d0e1f2a3_assistant_answer_meta.py"
+    ).read_text(encoding="utf-8")
+    assert str(column.server_default.arg) in migration
