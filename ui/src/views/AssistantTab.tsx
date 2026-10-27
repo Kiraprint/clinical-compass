@@ -17,28 +17,65 @@ const LLM_REASON_TEXT: Record<string, string> = {
   timeout: "модель не уложилась в отведённое время",
   empty: "модель вернула пустой ответ",
   http_error: "шлюз модели вернул ошибку",
+  truncated: "ответ модели оборван по лимиту длины",
 };
 const FRAGMENT_TEXT_LIMIT = 400;
 
 /**
  * Хвост «Источники: …» дублирует блок цитат под ответом — срезаем.
- * Хвост начинается с новой строки или с пробела в конце ответа; пустой ответ
- * без текста тоже может состоять из одного хвоста. Регистр — как в
- * детерминированном build_rag_answer.
+ * Бэкенд всегда ставит хвост отдельным абзацем ("\n\n" + "Источники: …",
+ * core/compass/agent.py), поэтому inline-упоминание источников в тексте модели
+ * не трогаем. Если весь текст свёлся к хвосту — оставляем его как есть,
+ * чтобы не получить пустой пузырь.
  */
+const SOURCES_TAIL = /\n\s*\n\s*Источники:[\s\S]*$/;
+
 function stripSourcesTail(text: string): string {
-  return text.replace(/(?:^|\s+)Источники:[\s\S]*$/, "").trim();
+  if (!SOURCES_TAIL.test(text)) return text;
+  const rest = text.replace(SOURCES_TAIL, "").trim();
+  // Весь ответ свёлся к хвосту — показать его лучше, чем пустой пузырь.
+  return rest || text;
+}
+
+type AnswerItem = { n: number; text: string };
+
+/**
+ * Нумерованные пункты детерминированного ответа («N. — текст»); шапка и хвост
+ * источников отброшены. Номер пункта = номер цитаты, поэтому пункты, уже
+ * показанные фрагментами КБ, можно отсеять по n, а карту пациента, которой во
+ * fragments нет (у неё нет чанка), — дорисовать из текста.
+ */
+function parseAnswerItems(content: string): AnswerItem[] {
+  const items: AnswerItem[] = [];
+  for (const line of stripSourcesTail(content).split("\n")) {
+    const m = /^(\d+)\.\s+[—-]?\s*(.+)$/.exec(line.trim());
+    if (m) items.push({ n: Number(m[1]), text: m[2] });
+  }
+  return items;
 }
 
 function AssistantAnswerBody({ m }: { m: AssistantThreadMessage }) {
   const fragments = m.fragments ?? [];
-  const degraded = m.answer_kind === "fragments";
+  // Плашка — только когда сервер назвал причину деградации. Отказ (refusal),
+  // llm_reason=null и незнакомый answer_kind — обычный текст (forward-compat).
+  const degraded =
+    m.answer_kind === "fragments" && Boolean(m.llm_reason) && m.llm_reason !== "ok";
   // Без полей контракта (старый API) текст выводим как раньше — как есть.
   const text = m.answer_kind ? stripSourcesTail(m.content) : m.content;
   const reason =
     m.llm_reason && m.llm_reason !== "ok"
       ? (LLM_REASON_TEXT[m.llm_reason] ?? "причина неизвестна")
       : null;
+  // В fragments нет чанков-цитат (карта пациента — без чанка), поэтому пункты
+  // ответа без своего фрагмента дорисовываем из текста: иначе деградированный
+  // ответ молча теряет карту пациента, которую до PR было видно.
+  const extra =
+    degraded && fragments.length > 0
+      ? parseAnswerItems(m.content).filter(
+          (it) => !fragments.some((f) => f.n === it.n),
+        )
+      : [];
+  const patientCard = m.citations.some((c) => c.topic === "ПАЦИЕНТ");
   return (
     <>
       {degraded && (
@@ -73,6 +110,19 @@ function AssistantAnswerBody({ m }: { m: AssistantThreadMessage }) {
         </details>
       ) : (
         <pre className="assistant-answer">{text}</pre>
+      )}
+      {extra.length > 0 && (
+        <div className="answer-extra">
+          <strong>
+            {patientCard ? "Карта пациента" : "Из ответа"}
+            {patientCard ? "" : ` (${extra.length})`}:
+          </strong>
+          <ul>
+            {extra.map((it) => (
+              <li key={it.n}>{it.text}</li>
+            ))}
+          </ul>
+        </div>
       )}
       {m.citations.length > 0 && (
         <div className="assistant-sources">

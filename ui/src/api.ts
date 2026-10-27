@@ -1678,10 +1678,25 @@ export interface AssistantCitation {
   topic: string;
   score: number;
 }
-/** Как получен ответ: сформулирован моделью или собран из фрагментов базы знаний. */
-export type AssistantAnswerKind = "llm" | "fragments";
-/** Почему модель не сформулировала ответ (null — признак не применим). */
-export type AssistantLlmReason = "ok" | "disabled" | "timeout" | "empty" | "http_error" | null;
+/**
+ * Как получен ответ: сформулирован моделью, собран из фрагментов базы знаний
+ * или представляет собой прямой отказ (red line / нет данных в КБ).
+ * Неизвестное значение UI рендерит как обычный текст.
+ */
+export type AssistantAnswerKind = "llm" | "fragments" | "refusal";
+/**
+ * Почему модель не сформулировала ответ (null — признак не применим, у отказа
+ * всегда null). `truncated` — модель оборвала ответ по лимиту длины
+ * (`finish_reason=length` с непустым текстом): это тоже деградация.
+ */
+export type AssistantLlmReason =
+  | "ok"
+  | "disabled"
+  | "timeout"
+  | "empty"
+  | "http_error"
+  | "truncated"
+  | null;
 /** Фрагмент базы знаний детерминированного ответа; n — тот же номер, что [n] в тексте. */
 export interface AssistantFragment {
   n: number;
