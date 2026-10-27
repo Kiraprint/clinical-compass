@@ -227,8 +227,8 @@ test("черновик ИИ не перезаписывает текст, вве
   });
   await openWalkIn(page, docReg, patReg.id);
 
-  // Карточка ИИ доступна (транскрипт есть), но свёрнута — раскрываем и берём черновик.
-  await page.getByText("ИИ-ассистент").click();
+  // Карточка ИИ доступна (транскрипт есть) и раскрыта по умолчанию — без клика по заголовку.
+  await expect(page.getByText("Спросить ИИ", { exact: false })).toBeVisible();
   const draftButton = page.getByRole("button", { name: "Сформировать черновик протокола" });
   await expect(draftButton).toBeEnabled();
   await draftButton.click();
@@ -260,7 +260,7 @@ test("старый API без полей диаризации не роняет 
   );
   await openWalkIn(page, docReg, patReg.id);
 
-  await page.getByText("ИИ-ассистент").click();
+  await expect(page.getByText("Спросить ИИ", { exact: false })).toBeVisible();
   // Карточка жива: расшифровка видна, метка кластера на месте, плашка честная.
   await expect(page.getByText("Здравствуйте, что вас беспокоит?")).toBeVisible();
   await expect(page.getByText("Говорящий A")).toBeVisible();
