@@ -90,16 +90,7 @@ const POLL_LIMIT_MS = 15 * 60 * 1000;
 // не показан (или закрыт без ответа), и возвращаем кнопку в рабочее состояние.
 const MIC_REQUEST_TIMEOUT_MS = 20_000;
 
-// `Promise.withResolvers` не входит в lib этого проекта (tsconfig target ниже ES2024),
-// поэтому таймаут собирается исполнителем промиса.
-function microphoneTimeout(ms: number): Promise<never> {
-  return new Promise<never>((_, reject) => {
-    window.setTimeout(
-      () => reject(new DOMException("Запрос доступа к микрофону не завершился", "TimeoutError")),
-      ms,
-    );
-  });
-}
+
 
 /** Кодек записи: webm есть не везде (Safari), поэтому первый поддерживаемый. */
 const RECORDER_MIMES = ["audio/webm", "audio/mp4", "audio/ogg"];
@@ -625,17 +616,31 @@ export default function SessionAssistantCard({
       return;
     }
     let granted = false;
+    // Флаги таймаута: победил он или сам запрос — от этого зависит, надо ли гасить
+    // пришедший позже поток. Проверять `stream.current` нельзя: реакция на `pending`
+    // срабатывает раньше присваивания, и победивший поток гасился бы у живого рекордера.
+    let timedOut = false;
+    let micTimer = 0;
     setMic("requesting");
     try {
       // Если браузер так и не показал запрос (или его закрыли без ответа), промис
       // не завершается — состояние «Запрашиваем доступ» зависло бы навсегда.
       const pending = navigator.mediaDevices.getUserMedia({ audio: true });
-      // Разрешение могли выдать уже после таймаута: поток в этом случае не нужен,
-      // но tracks надо освободить, иначе микрофон останется занятым.
-      pending.then((late) => {
-        if (stream.current !== late) late.getTracks().forEach((track) => track.stop());
-      }, () => undefined);
-      const media = await Promise.race([pending, microphoneTimeout(MIC_REQUEST_TIMEOUT_MS)]);
+      const timeout = new Promise<never>((_, reject) => {
+        micTimer = window.setTimeout(() => {
+          timedOut = true;
+          reject(new DOMException("Запрос доступа к микрофону не завершился", "TimeoutError"));
+        }, MIC_REQUEST_TIMEOUT_MS);
+      });
+      pending.then(
+        (late) => {
+          // Разрешили уже после таймаута: поток не нужен, но микрофон нельзя держать занятым.
+          if (timedOut) late.getTracks().forEach((track) => track.stop());
+        },
+        () => undefined,
+      );
+      const media = await Promise.race([pending, timeout]);
+      window.clearTimeout(micTimer);
       granted = true;
       setMic("granted");
       stream.current = media;
@@ -660,6 +665,9 @@ export default function SessionAssistantCard({
       setRecSec(0);
       setRecording(true);
     } catch (e: unknown) {
+      // Таймер таймаута не должен переживать неудачную попытку: его отклонение
+      // прилетело бы в уже завершённый `race` и держало бы замыкание живым.
+      window.clearTimeout(micTimer);
       // Микрофон могли отдать, а рекордер (кодек) — нет: поток всё равно отпускаем,
       // иначе индикатор записи горит, а следующий `getUserMedia` теряет первый поток.
       releaseStream();
