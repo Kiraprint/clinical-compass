@@ -378,16 +378,48 @@ def test_patient_only_answer_without_snippets_falls_back(monkeypatch):
 
 
 def test_body_without_patients_is_unchanged(monkeypatch):
-    """Без пациентов тело запроса байт-в-байт как прежде — блока нет."""
+    """Без пациентов тело запроса прежнее: ни блока карты, ни лишних ключей."""
     _enable(monkeypatch)
     bodies = _fake_chat(monkeypatch, "Порог 10 баллов [1].")
     payload = [{"text": c.text, "source_title": c.source_title} for c in CHUNKS]
     llm_router.compose_answer([], QUERY, payload)
 
     sent = bodies[0]["body"]
-    prompt = sent["messages"][1]["content"]
-    assert "Карта пациента (обезлично):" not in prompt
-    assert sent == llm_router._answer_body([], QUERY, payload)
+    # Снимок тела: пользовательское сообщение — ровно вопрос и нумерованные
+    # сниппеты, без «Карта пациента»; набор ключей тела не расширился.
+    assert sent["messages"][1]["content"] == (
+        f"Вопрос врача: {QUERY}\n\n"
+        "Сниппеты базы знаний:\n"
+        f"[1] Гайдлайн PHQ-9: {CHUNKS[0].text}\n"
+        f"[2] Гайдлайн GAD-7: {CHUNKS[1].text}"
+    )
+    assert "Карта пациента" not in sent["messages"][1]["content"]
+
+
+def test_patient_reference_outside_sent_cards_gives_no_citation(monkeypatch):
+    """[П2] при одной карте — выдумка: citation карты не появляется."""
+    _enable(monkeypatch)
+    _fake_chat(monkeypatch, "Балл 17 [П2]; порог 10 [1].")
+    answer = _answer(monkeypatch, patient_contexts=[CARD])
+
+    assert [c["guideline_id"] for c in answer["citations"]] == ["who-mhgap-phq9"]
+    assert answer["answer"] == "Балл 17 [П2]; порог 10 [1]."
+
+
+def test_patient_cards_capped_by_answer_patients(monkeypatch):
+    """Карт в промпте не больше ANSWER_PATIENTS; 4-я невидима — citation нет."""
+    _enable(monkeypatch)
+    cards = [
+        {**CARD, "patient_id": f"p-{i}", "fio": "[ПАЦИЕНТ]"} for i in range(1, 5)
+    ]
+    bodies = _fake_chat(monkeypatch, "Четвёртая карта [П4]; порог 10 [1].")
+    answer = _answer(monkeypatch, patient_contexts=cards)
+
+    prompt = bodies[0]["body"]["messages"][1]["content"]
+    assert "П3: пациент:" in prompt
+    assert "П4: пациент:" not in prompt
+    assert "patient:p-4" not in [c["guideline_id"] for c in answer["citations"]]
+    assert [c["guideline_id"] for c in answer["citations"]] == ["who-mhgap-phq9"]
 
 
 def test_flag_off_keeps_patient_card_out_of_prompt(monkeypatch):

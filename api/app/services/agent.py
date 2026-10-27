@@ -256,20 +256,20 @@ def compose_grounded_answer(
     return _compose_answer(query, history, chunks)
 
 
-def _cited_patients(text: str, patient_contexts: list[dict] | None) -> list[int]:
-    """Номера карт, на которые сослался LLM ([П1], [П2]), по первому упоминанию.
+def _cited_patients(text: str, patient_contexts: list[dict] | None) -> list[dict]:
+    """Карты, на которые сослался LLM ([П1], [П2]), по первому упоминанию.
 
-    Граница — answer_patient_window: карта, не влезшая в промпт (лимит или
-    бюджет символов), модели не видна, и ссылка на неё — выдумка.
+    Граница — answer_patients: карта, не влезшая в промпт (ANSWER_PATIENTS или
+    бюджет символов), модели не видна, и ссылка на неё — выдумка. Индекс берём
+    из того же списка отправленных карт, а не из входного, чтобы «дырка» в
+    видоизменённом списке не дала citation на чужой patient:<id>.
     """
-    if not patient_contexts:
-        return []
-    window = llm_router.answer_patient_window(patient_contexts)
-    found: list[int] = []
+    cards = llm_router.answer_patients(patient_contexts)
+    found: list[dict] = []
     for token in _PATIENT_CITE_RE.findall(text):
         n = int(token)
-        if 1 <= n <= window and n not in found:
-            found.append(n)
+        if 1 <= n <= len(cards) and cards[n - 1] not in found:
+            found.append(cards[n - 1])
     return found
 
 
@@ -319,8 +319,7 @@ def _finalize_llm_answer(
         )
         for c in picked
     ]
-    for n in cards:
-        ctx = (patient_contexts or [])[n - 1]
+    for ctx in cards:
         citations.append(
             Citation(
                 source_title="Карта пациента",
