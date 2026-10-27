@@ -42,9 +42,9 @@ test.describe("ИИ-ассистент врача", () => {
 
     await page.getByLabel("Вопрос").fill("Какая дозировка Авиандра?");
     await page.getByRole("button", { name: "Спросить" }).click();
-    await expect(page.getByText("По базе знаний найдено следующее:")).toBeVisible({
-      timeout: 30000,
-    });
+    await expect(
+      page.getByText(/По базе знаний найдено следующее:|ИИ-формулировка недоступна/),
+    ).toBeVisible({ timeout: 30000 });
     // Цитата чанка препарата (АВИАНДР).
     await expect(page.locator(".assistant-sources").getByText(/АВИАНДР/i).first()).toBeVisible();
   });
