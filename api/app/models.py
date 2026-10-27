@@ -33,6 +33,11 @@ class User(Base):
     # (обоснование — docs/02 §5).
     phone: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
     birth_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # FR-48 (v2): адрес подтверждён кодом из письма. NULL — не подтверждён:
+    # это только метка для баннера, вход и данные она не блокирует (docs/03 §15).
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Шкалы скрининга назначаются врачом (roster) через таблицу prescriptions —
     # пациент выбирает только из назначенного множества (см. services/screening.py).
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
@@ -551,15 +556,16 @@ class RefreshToken(Base):
 
 
 class AuthCode(Base):
-    """FR-48: одноразовый код e-mail (сброс пароля, подтверждение входа).
+    """FR-48: одноразовый код e-mail (сброс пароля, подтверждение входа, адрес).
 
     Код живёт только в письме: в БД — SHA-256(code + CC_DATA_KEY), журнал не
     видит ни кода, ни адреса. `attempts` ограничивает перебор, `consumed_at`
     делает код одноразовым, `expires_at` — TTL 10 минут (docs/03 §15).
+    `verify` — подтверждение адреса при регистрации (баннер, без блокировки).
     """
     __tablename__ = "auth_codes"
     __table_args__ = (
-        CheckConstraint("purpose in ('reset','login')", name="auth_codes_purpose"),
+        CheckConstraint("purpose in ('reset','login','verify')", name="auth_codes_purpose"),
         Index("auth_codes_user_purpose", "user_id", "purpose", text("created_at DESC")),
     )
 
@@ -567,7 +573,7 @@ class AuthCode(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
-    purpose: Mapped[str] = mapped_column(String(16))  # reset | login
+    purpose: Mapped[str] = mapped_column(String(16))  # reset | login | verify
     code_hash: Mapped[str] = mapped_column(String(64))  # sha256(code + pepper)
     attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

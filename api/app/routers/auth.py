@@ -25,6 +25,7 @@ from app.errors import Problem
 from app.models import AuthCode, RefreshToken, User
 from app.ratelimit import acheck_rate, arecord_rate_hit
 from app.services import audit, mailer
+from app.deps import get_current_user
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -73,8 +74,12 @@ class LoginOtpBody(BaseModel):
 
 @router.get("/config")
 def auth_config():
-    """Публичная конфигурация входа (без токена): CC_REQUIRE_OTP для UI."""
-    return {"require_otp": settings.require_otp}
+    """Публичная конфигурация входа (без токена): CC_REQUIRE_OTP и канал почты.
+
+    `mail` нужен интерфейсу, чтобы не показывать «подтвердите адрес» там, где
+    письма физически не отправляются (демо-стенд без SMTP, e2e).
+    """
+    return {"require_otp": settings.require_otp, "mail": mailer.configured()}
 
 def _set_auth_cookies(response: Response, access: str, refresh: str) -> None:
     """F9: httpOnly cookies для access+refresh токенов.
@@ -152,9 +157,15 @@ def _code_hash(code: str) -> str:
     """SHA-256(code + CC_DATA_KEY) — как в rate limiter: в БД кода нет."""
     return hashlib.sha256(f"{code}:{settings.data_key}".encode()).hexdigest()
 
-async def _issue_code(db: AsyncSession, user_id: uuid.UUID, purpose: str) -> tuple[str, AuthCode]:
-    """Создать код в текущей транзакции (flush → известен id-challenge)."""
-    code = _new_code()
+async def _issue_code(
+    db: AsyncSession, user_id: uuid.UUID, purpose: str, code: str | None = None
+) -> tuple[str, AuthCode]:
+    """Создать код в текущей транзакции (flush → известен id-challenge).
+
+    `code` передаёт вызывающий, когда письмо уходит ДО записи в БД: код нужен
+    для письма, а строка должна появиться только после успешной отправки.
+    """
+    code = code or _new_code()
     row = AuthCode(
         user_id=user_id,
         purpose=purpose,
@@ -164,6 +175,24 @@ async def _issue_code(db: AsyncSession, user_id: uuid.UUID, purpose: str) -> tup
     db.add(row)
     await db.flush()
     return code, row
+
+
+async def _retire_codes(db: AsyncSession, user_id: uuid.UUID, purpose: str) -> None:
+    """Погасить живые коды того же назначения перед выпуском нового.
+
+    Повторная отправка обесценивает предыдущее письмо: иначе в ящике лежат два
+    кода, а проверяется только последний, и «старый» выглядит рабочим.
+    """
+    rows = await db.scalars(
+        select(AuthCode).where(
+            AuthCode.user_id == user_id,
+            AuthCode.purpose == purpose,
+            AuthCode.consumed_at.is_(None),
+        )
+    )
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        row.consumed_at = now
 
 async def _latest_code(db: AsyncSession, user_id: uuid.UUID, purpose: str) -> AuthCode | None:
     return await db.scalar(
@@ -203,7 +232,12 @@ async def _deliver_code(email: str, subject: str, code: str) -> dict:
     return {}
 
 @router.post("/register", status_code=201)
-async def register(body: RegisterBody, request: Request, db: AsyncSession = Depends(get_db)):
+async def register(
+    body: RegisterBody,
+    request: Request,
+    background: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
     """Регистрация пользователя.
 
     NEW-1 (HIGH): публичная регистрация привилегированных ролей (CLINICIAN/ADMIN)
@@ -230,10 +264,25 @@ async def register(body: RegisterBody, request: Request, db: AsyncSession = Depe
         totp_secret = security.generate_totp_secret()
         user.totp_secret = totp_secret
     db.add(user)
+    await db.flush()  # нужен id для кода подтверждения адреса
+    # FR-48 (v2): подтверждение адреса — мягкое. Код выпускаем только когда
+    # канал настроен; без SMTP не плодим коды, которые некому отправить.
+    verify_code: str | None = None
+    if mailer.configured():
+        verify_code, _ = await _issue_code(db, user.id, "verify")
     await db.commit()
-    resp: dict = {"id": str(user.id), "email": user.email, "role": user.role}
+    resp: dict = {
+        "id": str(user.id),
+        "email": user.email,
+        "role": user.role,
+        "email_verified": False,
+    }
     if totp_secret:
         resp["totp_secret"] = totp_secret
+    if verify_code:
+        # Письмо — после ответа: сбой SMTP не отменяет регистрацию (мягкая
+        # проверка), а ожидание чужого сервера не держит запрос.
+        background.add_task(_send_verify_code, user.id, email, verify_code, _client(request))
     return resp
 
 @router.post("/login")
@@ -375,6 +424,109 @@ async def password_reset(body: PasswordResetBody, request: Request,
     await audit.record(db, user.id, "PASSWORD_RESET", "user", str(user.id), _client(request))
     await db.commit()
     return Response(status_code=204)
+
+async def _send_verify_code(user_id: uuid.UUID, email: str, code: str, client: str | None) -> None:
+    """Подтверждение адреса: письмо после ответа, мягкая семантика."""
+    try:
+        await mailer.send_code(email, "Подтверждение адреса", code)
+    except mailer.MailUnavailable:
+        logger.warning("FR-48: письмо подтверждения адреса не отправлено (SMTP недоступен)")
+        if db_module.AsyncSessionLocal is None:
+            return
+        async with db_module.AsyncSessionLocal() as session:
+            await audit.record(session, None, "EMAIL_VERIFY_DELIVERY_FAILED",
+                               "user", str(user_id), client)
+            await session.commit()
+
+
+class VerifyEmailBody(BaseModel):
+    code: str = Field(min_length=4, max_length=12)
+
+
+@router.get("/me")
+async def me(user: User = Depends(get_current_user)):
+    """Кто я: роль, адрес и признак подтверждения адреса (для баннера)."""
+    return {
+        "id": str(user.id),
+        "email": user.email,
+        "role": user.role,
+        "email_verified": user.email_verified_at is not None,
+    }
+
+
+@router.post("/email/verify/request", status_code=202)
+async def email_verify_request(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Повторное письмо с кодом подтверждения адреса.
+
+    409 — адрес уже подтверждён, 429 — пауза 60 с между письмами. Код
+    подтверждения не участвует в аутентификации, поэтому демо-режим отдаёт
+    `demo_code` так же, как сброс пароля (стенды без SMTP). Отправку ждём:
+    `{sent:true}` означает, что письмо действительно ушло, а отказ SMTP —
+    `{sent:false}` без съеденной паузы.
+    """
+    # Идентичность снимаем до записи в БД: после отката ORM-объект истёк, и
+    # обращение к user.email/user.id в async-контексте даёт MissingGreenlet.
+    uid = user.id
+    email = user.email
+    if user.email_verified_at is not None:
+        raise Problem(409, "EMAIL_ALREADY_VERIFIED", "Адрес уже подтверждён")
+    key = f"verify:{uid}"
+    if not _cooldown_ok(key):
+        raise Problem(429, "CODE_COOLDOWN", "Письмо уже отправлено: подождите минуту")
+    if not mailer.configured() and not _demo_codes_allowed():
+        # Отправлять некуда и демо-режим не разрешён: код не выпускаем вовсе
+        # (иначе в auth_codes копятся коды, которые никто не увидит) и паузу
+        # не съедаем — письма ведь не было.
+        _cooldown_clear(key)
+        return {"sent": False}
+    code = _new_code()
+    # Здесь, в отличие от сброса пароля, отправку ждём: `{sent:true}` обязан
+    # означать «письмо ушло». Иначе при отказе SMTP интерфейс врёт, а пауза
+    # 60 с съедена. Сброс пароля ждать не может — он не должен выдавать
+    # наличие аккаунта ни по статусу, ни по времени ответа.
+    if mailer.configured():
+        try:
+            await mailer.send_code(email, "Подтверждение адреса", code)
+        except mailer.MailUnavailable:
+            # Письмо не ушло — в auth_codes ничего не пишем: при упавшем канале
+            # клиентский ретрай иначе копит строки до самого TTL.
+            logger.warning("FR-48: письмо подтверждения адреса не отправлено (SMTP отказал)")
+            await audit.record(db, uid, "EMAIL_VERIFY_DELIVERY_FAILED",
+                               "user", str(uid), _client(request))
+            await db.commit()
+            _cooldown_clear(key)
+            return {"sent": False}
+    await _retire_codes(db, uid, "verify")
+    await _issue_code(db, uid, "verify", code)
+    await db.commit()
+    if mailer.configured():
+        return {"sent": True}
+    return {"sent": True, "demo_code": code}
+
+
+@router.post("/email/verify")
+async def email_verify(
+    body: VerifyEmailBody,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Подтвердить адрес кодом из письма. Код одноразовый, TTL 10 минут."""
+    if user.email_verified_at is not None:
+        raise Problem(409, "EMAIL_ALREADY_VERIFIED", "Адрес уже подтверждён")
+    row = await _latest_code(db, user.id, "verify")
+    if row is None or not _verify_code_row(row, body.code.strip()):
+        await audit.record(db, user.id, "EMAIL_VERIFY_FAILED", "user", str(user.id), _client(request))
+        await db.commit()
+        raise Problem(422, "CODE_INVALID", "Код недействителен или истёк")
+    user.email_verified_at = datetime.now(timezone.utc)
+    await audit.record(db, user.id, "EMAIL_VERIFIED", "user", str(user.id), _client(request))
+    await db.commit()
+    return {"email_verified": True}
 
 def _refresh_delta():
     return timedelta(days=settings.refresh_ttl_days)

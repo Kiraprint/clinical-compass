@@ -5,6 +5,7 @@ import PatientView from "./views/PatientView";
 import ClinicianView from "./views/ClinicianView";
 import AdminView from "./views/AdminView";
 import NotificationsBell from "./NotificationsBell";
+import EmailVerifyBanner from "./EmailVerifyBanner";
 import { initPush } from "./push";
 
 type Session = { role: string; email: string };
@@ -431,6 +432,7 @@ export default function App() {
           </button>
         </div>
       </header>
+      <EmailVerifyBanner key={session.email} />
       <main>
         {session.role === "PATIENT" && <PatientView onLogout={logout} />}
         {session.role === "CLINICIAN" && <ClinicianView />}

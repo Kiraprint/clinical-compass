@@ -270,6 +270,17 @@ export interface RegisterResp {
   email: string;
   role: string;
   totp_secret?: string;
+  email_verified?: boolean;
+}
+/** GET /auth/me — кто я и подтверждён ли адрес (баннер, FR-48 v2). */
+export interface AuthMe {
+  id: string;
+  email: string;
+  role: string;
+  email_verified: boolean;
+}
+export interface VerifyEmailResp {
+  email_verified: boolean;
 }
 export interface LoginResp {
   access_token: string;
@@ -289,9 +300,11 @@ export interface ResetRequestResp {
   sent: boolean;
   demo_code?: string;
 }
-/** Публичная конфигурация входа (CC_REQUIRE_OTP) — GET /auth/config. */
+/** Публичная конфигурация входа (CC_REQUIRE_OTP, канал почты) — GET /auth/config. */
 export interface AuthConfig {
   require_otp: boolean;
+  /** false — письма не отправляются (стенд без SMTP): баннер не показываем. */
+  mail?: boolean;
 }
 export interface ScreeningRun {
   run_id: string;
@@ -563,6 +576,9 @@ export const api = {
   requestPasswordReset: verb<ResetRequestResp>("POST")("/api/v1/auth/password/reset-request"),
   resetPassword: verb<void>("POST")("/api/v1/auth/password/reset"),
   authConfig: () => req<AuthConfig>("/api/v1/auth/config"),
+  authMe: () => req<AuthMe>("/api/v1/auth/me"),
+  requestEmailVerify: verb<ResetRequestResp>("POST")("/api/v1/auth/email/verify/request"),
+  verifyEmail: verb<VerifyEmailResp>("POST")("/api/v1/auth/email/verify"),
   // F4: отзыв refresh-токена на сервере (best-effort, не блокирует UI).
   // F9: web-режим — refresh_token в cookie, body пустой; native — из localStorage.
   logout: () => {

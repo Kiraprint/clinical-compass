@@ -10,8 +10,9 @@ from __future__ import annotations
 from sqlalchemy import text
 
 from app.config import settings
+from app.services import mailer
 
-from .conftest import login, register
+from .conftest import auth_header, login, register
 
 OLD_PASSWORD = "Str0ng-Pass!"
 NEW_PASSWORD = "N3w-Pass-123!"
@@ -273,3 +274,175 @@ def test_demo_code_needs_explicit_flag(client, engine, monkeypatch):
     resp = _reset_request(client, "gate@test.ru")
     assert resp.status_code == 202, resp.text
     assert len(resp.json()["demo_code"]) == 6
+
+
+# --- FR-48 (v2): подтверждение адреса (мягкое, баннер) -----------------------
+
+def _me(client, token):
+    return client.get("/api/v1/auth/me", headers=auth_header(token))
+
+
+def _verify_request(client, token):
+    return client.post("/api/v1/auth/email/verify/request", headers=auth_header(token))
+
+
+def _verify(client, token, code):
+    return client.post("/api/v1/auth/email/verify", json={"code": code},
+                       headers=auth_header(token))
+
+
+def test_me_reports_unverified_address_and_requires_token(client):
+    assert client.get("/api/v1/auth/me").status_code == 401
+    register(client, "verify-me@test.ru", OLD_PASSWORD)
+    token = login(client, "verify-me@test.ru", OLD_PASSWORD)["access_token"]
+    body = _me(client, token).json()
+    assert body["email"] == "verify-me@test.ru"
+    assert body["email_verified"] is False
+
+
+def test_register_without_channel_issues_no_code(client, engine):
+    """Без SMTP регистрация не плодит коды, которые некому отправить."""
+    register(client, "verify-off@test.ru", OLD_PASSWORD)
+    assert client.get("/api/v1/auth/config").json()["mail"] is False
+    with engine.connect() as conn:
+        assert conn.scalar(text("select count(*) from auth_codes")) == 0
+
+
+def test_register_sends_verification_email(client, engine, monkeypatch):
+    sent: list[tuple[str, str, str]] = []
+
+    async def fake_send(to: str, subject: str, code: str) -> None:
+        sent.append((to, subject, code))
+
+    monkeypatch.setattr(settings, "smtp_host", "smtp.test")
+    monkeypatch.setattr(settings, "smtp_from", "noreply@test.ru")
+    monkeypatch.setattr("app.services.mailer.send_code", fake_send)
+
+    body = register(client, "verify-on@test.ru", OLD_PASSWORD)
+    assert body["email_verified"] is False
+    assert client.get("/api/v1/auth/config").json()["mail"] is True
+    # BackgroundTasks в TestClient выполняются до возврата из запроса.
+    assert [(to, subject) for to, subject, _ in sent] == [
+        ("verify-on@test.ru", "Подтверждение адреса")
+    ]
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            "select purpose, code_hash from auth_codes where purpose = 'verify'"
+        )).all()
+    assert len(rows) == 1
+    # В БД не код, а хеш: сравниваем с sha256(code + CC_DATA_KEY).
+    assert rows[0][1] != sent[0][2]
+    assert len(rows[0][1]) == 64
+
+
+def test_email_verify_confirms_address(client, monkeypatch):
+    register(client, "verify-ok@test.ru", OLD_PASSWORD)
+    token = login(client, "verify-ok@test.ru", OLD_PASSWORD)["access_token"]
+    monkeypatch.setattr(settings, "smtp_host", "")
+    monkeypatch.setattr(settings, "smtp_from", "")
+    monkeypatch.setattr(settings, "mail_demo_codes", True)
+
+    requested = _verify_request(client, token)
+    assert requested.status_code == 202, requested.text
+    code = requested.json()["demo_code"]
+
+    assert _verify(client, token, "000000" if code != "000000" else "111111").status_code == 422
+    assert _verify(client, token, code).json() == {"email_verified": True}
+    assert _me(client, token).json()["email_verified"] is True
+    # Повтор — 409: адрес уже подтверждён, код второй раз не нужен.
+    assert _verify(client, token, code).status_code == 409
+    assert _verify_request(client, token).status_code == 409
+
+
+def test_email_verify_request_cooldown(client, monkeypatch):
+    register(client, "verify-cool@test.ru", OLD_PASSWORD)
+    token = login(client, "verify-cool@test.ru", OLD_PASSWORD)["access_token"]
+    monkeypatch.setattr(settings, "smtp_host", "")
+    monkeypatch.setattr(settings, "smtp_from", "")
+    monkeypatch.setattr(settings, "mail_demo_codes", True)
+    assert _verify_request(client, token).status_code == 202
+    second = _verify_request(client, token)
+    assert second.status_code == 429
+    assert second.json()["code"] == "CODE_COOLDOWN"
+
+
+def test_email_verify_code_single_use_and_unknown_code_422(client, engine, monkeypatch):
+    register(client, "verify-once@test.ru", OLD_PASSWORD)
+    token = login(client, "verify-once@test.ru", OLD_PASSWORD)["access_token"]
+    monkeypatch.setattr(settings, "smtp_host", "")
+    monkeypatch.setattr(settings, "smtp_from", "")
+    monkeypatch.setattr(settings, "mail_demo_codes", True)
+    code = _verify_request(client, token).json()["demo_code"]
+    assert _verify(client, token, code).status_code == 200
+    # Отмечаем адрес неподтверждённым обратно: старый код уже израсходован.
+    with engine.begin() as conn:
+        conn.execute(text("update users set email_verified_at = null "
+                          "where email = 'verify-once@test.ru'"))
+    reused = _verify(client, token, code)
+    assert reused.status_code == 422
+    assert reused.json()["code"] == "CODE_INVALID"
+
+
+def test_demo_code_needs_flag_for_verification_too(client, engine, monkeypatch):
+    """Демо-код подтверждения не выдаётся без явного CC_MAIL_DEMO_CODES."""
+    register(client, "verify-nodemo@test.ru", OLD_PASSWORD)
+    token = login(client, "verify-nodemo@test.ru", OLD_PASSWORD)["access_token"]
+    monkeypatch.setattr(settings, "smtp_host", "")
+    monkeypatch.setattr(settings, "smtp_from", "")
+    monkeypatch.setattr(settings, "mail_demo_codes", False)
+    for _ in range(2):
+        resp = _verify_request(client, token)
+        assert resp.status_code == 202
+        assert resp.json() == {"sent": False}
+    with engine.connect() as conn:
+        assert conn.scalar(text(
+            "select count(*) from auth_codes where purpose = 'verify'"
+        )) == 0
+
+
+def test_verify_request_reports_smtp_failure_and_does_not_burn_cooldown(
+    client, engine, monkeypatch
+):
+    """`sent:true` обязан означать «письмо ушло»: отказ SMTP — `sent:false`."""
+    register(client, "verify-fail@test.ru", OLD_PASSWORD)
+    token = login(client, "verify-fail@test.ru", OLD_PASSWORD)["access_token"]
+    monkeypatch.setattr(settings, "smtp_host", "smtp.test")
+    monkeypatch.setattr(settings, "smtp_from", "noreply@test.ru")
+
+    async def boom(to: str, subject: str, code: str) -> None:
+        raise mailer.MailUnavailable("down")
+
+    monkeypatch.setattr("app.services.mailer.send_code", boom)
+    first = _verify_request(client, token)
+    assert first.status_code == 202
+    assert first.json() == {"sent": False}
+    # Пауза не съедена: письма не было.
+    assert _verify_request(client, token).status_code == 202
+    with engine.connect() as conn:
+        assert conn.scalar(text(
+            "select count(*) from audit_log where action = 'EMAIL_VERIFY_DELIVERY_FAILED'"
+        )) == 2
+        # Недоставленный код не коммитится: ретрай при упавшем канале не копит
+        # мусор в auth_codes (иначе строка живёт до самого TTL).
+        assert conn.scalar(text(
+            "select count(*) from auth_codes where purpose = 'verify'"
+        )) == 0
+
+
+def test_resend_invalidates_previous_verify_code(client, monkeypatch):
+    """Повторное письмо гасит прошлый код: иначе в ящике два «рабочих» кода."""
+    sent: list[str] = []
+
+    async def fake_send(to: str, subject: str, code: str) -> None:
+        sent.append(code)
+
+    monkeypatch.setattr(settings, "smtp_host", "smtp.test")
+    monkeypatch.setattr(settings, "smtp_from", "noreply@test.ru")
+    monkeypatch.setattr("app.services.mailer.send_code", fake_send)
+    register(client, "verify-resend@test.ru", OLD_PASSWORD)
+    token = login(client, "verify-resend@test.ru", OLD_PASSWORD)["access_token"]
+    assert _verify_request(client, token).json() == {"sent": True}
+    assert len(sent) == 2 and sent[0] != sent[1]
+
+    assert _verify(client, token, sent[0]).status_code == 422
+    assert _verify(client, token, sent[1]).json() == {"email_verified": True}
