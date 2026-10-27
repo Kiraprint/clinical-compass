@@ -137,9 +137,16 @@ async def accept_invite(
     Строку приглашения держим под FOR UPDATE: два одновременных клика по
     одной ссылке иначе создали бы два аккаунта на одну карту.
     """
+    # Порядок важен: сначала ДЕШЁВАЯ проверка токена (один SELECT, 404/410 на
+    # мусор), и только потом argon2. Иначе любой POST на `/auth/invite/<мусор>`
+    # жёг бы 64 МиБ и ~100 мс CPU — публичный эндпоинт без rate-limit'а стал бы
+    # бесплатным способом уронить api.
+    await invites_service.load(db, token)
     # argon2id — десятки миллисекунд и 64 МиБ: считаем в потоке, не на loop,
-    # и ДО блокировки строки, чтобы не держать FOR UPDATE на время хеширования.
+    # и до блокировки строки, чтобы не держать FOR UPDATE на время хеширования.
     password_hash = await anyio.to_thread.run_sync(security.hash_password, body.password)
+    # Перечитываем под FOR UPDATE: пока считался хеш, ссылку могли принять,
+    # перевыпустить или отозвать.
     invite = await invites_service.load(db, token, lock=True)
     user = await invites_service.accept(
         db, invite, email=body.email, password_hash=password_hash, ip=_ip(request)

@@ -267,6 +267,19 @@ def test_accepted_invite_keeps_no_pii(client):
     assert user.phone == "+79261234567"  # данные переехали в аккаунт
 
 
+def test_reissue_revives_expired_invite(client):
+    """Перевыпуск снимает просрочку: срок продлевается, ссылка снова живая."""
+    h, _ = _clinician(client, "o")
+    invite = _create(client, h)
+    run_async(_expire, invite["id"])
+    assert client.get(f"/api/v1/auth/invite/{invite['token']}").status_code == 410
+    resp = client.post(
+        f"/api/v1/clinician/patients/invites/{invite['id']}/reissue", headers=h
+    )
+    assert resp.status_code == 201, resp.text
+    assert client.get(f"/api/v1/auth/invite/{resp.json()['token']}").status_code == 200
+
+
 def test_invite_limit_409(client):
     h, _ = _clinician(client, "k")
     from app.services.invites import MAX_PENDING

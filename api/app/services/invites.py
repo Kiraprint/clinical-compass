@@ -239,7 +239,12 @@ async def accept(
         async with db.begin_nested():
             db.add(user)
             await db.flush()
-    except IntegrityError:
+    except IntegrityError as exc:
+        # Узко: чужое нарушение целостности (не адрес) должно всплыть, а не
+        # превратиться в «адрес занят».
+        constraint = getattr(getattr(exc.orig, "diag", None), "constraint_name", "") or ""
+        if "email" not in constraint:
+            raise
         raise Problem(
             409, "EMAIL_TAKEN", "Этот адрес уже занят: войдите или восстановите пароль"
         ) from None
