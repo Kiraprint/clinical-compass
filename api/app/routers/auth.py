@@ -323,6 +323,15 @@ async def login(body: LoginBody, request: Request, response: Response, db: Async
         if not user.totp_secret or not body.otp or not security.verify_totp(user.totp_secret, body.otp):
             await arecord_rate_hit((client, email))
             raise Problem(401, "UNAUTHORIZED", "Требуется корректный код 2FA")
+    return await issue_session(db, user, response)
+
+
+async def issue_session(db: AsyncSession, user: User, response: Response) -> dict:
+    """Выдать access/refresh-токены и cookies (общий хвост входа).
+
+    Используется паролем, вторым шагом по коду из письма и активацией
+    приглашения (FR-49): у всех трёх сценариев один и тот же контракт ответа.
+    """
     jti = await _issue_jti(db, user.id)
     await db.commit()
     access = security.create_access_token(user.id, user.role)
@@ -351,12 +360,7 @@ async def login_otp(body: LoginOtpBody, request: Request, response: Response,
         await db.commit()
         raise Problem(422, "CODE_INVALID", "Код недействителен или истёк")
     await audit.record(db, user.id, "LOGIN_OTP_OK", "user", str(user.id), client)
-    jti = await _issue_jti(db, user.id)
-    await db.commit()
-    access = security.create_access_token(user.id, user.role)
-    refresh = security.create_refresh_token(user.id, jti)
-    _set_auth_cookies(response, access, refresh)
-    return {"access_token": access, "refresh_token": refresh, "role": user.role}
+    return await issue_session(db, user, response)
 
 async def _send_reset_code(user_id: uuid.UUID, email: str, code: str, client: str | None) -> None:
     """Доставка письма сброса ПОСЛЕ ответа: сбой не меняет статус и тайминг."""

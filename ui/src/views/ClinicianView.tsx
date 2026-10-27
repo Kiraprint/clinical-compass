@@ -28,6 +28,7 @@ import { useEscapeClose } from "../keys";
 import { useCacheUpdate } from "../cache";
 import ChatsView from "./ChatsView";
 import LibraryView from "./LibraryView";
+import InvitePanel from "./InvitePanel";
 import ScheduleView from "./ScheduleView";
 
 // Текст ошибки для пользователя: ApiError несёт серверный detail.
@@ -1396,6 +1397,7 @@ export default function ClinicianView() {
           больше открытых эскалаций и более свежая оценка.
         </p>
         <AdverseQueueAlert items={pendingAe} />
+        <InvitePanel />
         <div className="card">
           <h2>Мои пациенты{cardsError ? "" : ` (${cards.length})`}</h2>
           {cardsError ? (
