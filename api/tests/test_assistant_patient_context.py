@@ -163,16 +163,42 @@ def test_card_budget_holds_with_long_diary(client, card_patient, acall):
     assert all(len(d["content"]) <= clinician.PATIENT_CONTEXT_DIARY_CHARS for d in ctx["recent_diary"])
 
 
-def test_full_card_keeps_fact_sections_in_prompt(client, card_patient, acall):
-    """При полной карте (длинный дневник + все разделы) факты переживают обрезку строки."""
-    _, cid, pid = card_patient
-    with db.SyncSessionLocal() as s:
-        pid_uuid = uuid.UUID(pid)
-        for _ in range(3):
-            s.add(DiaryEntry(patient_id=pid_uuid, content="д" * 4000, mood=2, mood_scale="0-4"))
-        s.commit()
+def test_full_card_keeps_fact_sections_in_prompt():
+    """Раздел не исчезает целиком, даже когда все потолки разделов упираются в лимит.
 
-    ctx = acall(_context, uuid.UUID(cid), uuid.UUID(pid))
+    Сумма потолков (500+600+300+300+300) больше PATIENT_CARD_CHARS: без общего
+    бюджета `_clip` срезал бы «визиты» как хвост строки.
+    """
+    long = "а" * 4000
+    ctx = {
+        "fio": FIO,
+        "age": 34,
+        "prescribed_scales": ["PHQ-9"],
+        "last_assessment": {"total_score": 18, "severity": "SEVERE", "triage": "RED",
+                            "computed_at": "2026-10-01T00:00:00"},
+        "trend": {"moving_avg": [10.0, 18.0], "delta_7": 8.0, "delta_30": 3.0, "slope": 1.2},
+        "open_escalations": [{"kind": "SUICIDAL"}, {"kind": "WORSENING"}],
+        "recent_diary": [{"content": long, "mood": 2, "sleep_h": 3} for _ in range(3)],
+        "medications": [
+            {"title": "Сертралин", "dosage": "50 мг", "status": "active",
+             "times_per_day": 2, "started_on": "2026-09-01", "notes": "н" * 200}
+            for _ in range(10)
+        ],
+        "anamnesis": {"brief": "а" * 1200, "updated_at": "2026-09-01T00:00:00"},
+        "adverse_events": [
+            {"event_text": "я" * 200, "severity": "mild", "onset_date": "2026-09-20",
+             "suspected_drug": "Сертралин", "action_taken": "monitoring"}
+            for _ in range(3)
+        ],
+        "chat_insights": [
+            {"kind": "symptom", "text": "ф" * 200} for _ in range(5)
+        ],
+        "visits": [
+            {"visited_at": "2026-09-25T10:00:00", "visit_type": "in_person", "notes": "п" * 200}
+            for _ in range(3)
+        ],
+    }
+
     line = llm_router._patient_line(1, ctx)
 
     assert len(line) <= llm_router.PATIENT_CARD_CHARS

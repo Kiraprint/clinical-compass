@@ -66,6 +66,9 @@ PATIENT_MEDS_CHARS = 500
 PATIENT_AE_CHARS = 300
 PATIENT_INSIGHTS_CHARS = 300
 PATIENT_VISITS_CHARS = 300
+# Минимум на раздел при перераспределении общего бюджета: заголовок и начало
+# текста — модель должна видеть, что раздел в карте есть.
+_SECTION_MIN_CHARS = 40
 PATIENT_CARD_HEADER = "Карта пациента (обезлично):"
 # Маска ФИО: то же значение, что кладёт scrub_for_llm (services.agent).
 PATIENT_MASK = "[ПАЦИЕНТ]"
@@ -458,12 +461,33 @@ def answer_snippet_window(chunks: list[dict]) -> int:
 
 # Свободный текст разделов расширенной карты (FR-50). Печатается одной строкой
 # на раздел: модель отвечает списком, а не пересказом карточки.
-def _patient_fact_bits(ctx: dict) -> list[str]:
+def _fit_sections(sections: list[str], budget: int | None) -> list[str]:
+    """Ужимает разделы карты под общий бюджет, не выбрасывая ни один заголовок.
+
+    Сумма потолков разделов (500+600+300+300+300) больше `PATIENT_CARD_CHARS`:
+    если каждый раздел упрётся в свой потолок, хвостовой `_clip` срезал бы
+    «визиты» целиком. Поэтому остаток бюджета делится пропорционально длинам —
+    раздел остаётся виден, теряя только хвост текста.
+    """
+    if budget is None:
+        return sections
+    total = sum(len(section) for section in sections)
+    if total <= budget:
+        return sections
+    fitted = []
+    for section in sections:
+        share = max(_SECTION_MIN_CHARS, int(budget * len(section) / total))
+        fitted.append(_clip(section, share))
+    return fitted
+
+
+def _patient_fact_bits(ctx: dict, budget: int | None = None) -> list[str]:
     """Разделы карты пациента: препараты, анамнез, НЯ, факты из чата, приёмы.
 
     Пустой раздел не печатается вовсе: строка «препараты: —» сказала бы модели,
     что препаратов нет, хотя врач их просто не внёс — а ассистент обязан
     различать «нет данных» и «нет в карте» (правило 11 системного промпта).
+    `budget` — сколько символов осталось на все разделы в строке карты.
     """
     bits: list[str] = []
 
@@ -536,7 +560,7 @@ def _patient_fact_bits(ctx: dict) -> list[str]:
                 item += f": {notes}"
             items.append(item)
         bits.append(f"визиты: {_clip(' | '.join(items), PATIENT_VISITS_CHARS)}")
-    return bits
+    return _fit_sections(bits, budget)
 
 
 def _patient_line(index: int, ctx: dict) -> str:
@@ -592,8 +616,13 @@ def _patient_line(index: int, ctx: dict) -> str:
     ]
     # Факты карточки идут до дневника: бюджет карты при переполнении срезает
     # хвост строки, и свободный текст дневника не должен вытеснять препараты.
-    bits.extend(_patient_fact_bits(ctx))
-    bits.append(f"дневник: {' | '.join(entries) if entries else '—'}")
+    # Разделам достаётся то, что осталось после базы и дневника.
+    diary_text = f"дневник: {' | '.join(entries) if entries else '—'}"
+    prefix = f"П{index}: " + "; ".join(bits)
+    # Запас на разделители "; " между разделами (их не больше пяти) и запись дневника.
+    budget = PATIENT_CARD_CHARS - len(prefix) - len(diary_text) - 12
+    bits.extend(_patient_fact_bits(ctx, max(0, budget)))
+    bits.append(diary_text)
     return f"П{index}: " + "; ".join(bits)
 
 
