@@ -10,6 +10,7 @@ from __future__ import annotations
 from sqlalchemy import text
 
 from app.config import settings
+from app.services import mailer
 
 from .conftest import auth_header, login, register
 
@@ -392,3 +393,46 @@ def test_demo_code_needs_flag_for_verification_too(client, monkeypatch):
     resp = _verify_request(client, token)
     assert resp.status_code == 202
     assert resp.json() == {"sent": False}
+
+
+def test_verify_request_reports_smtp_failure_and_does_not_burn_cooldown(
+    client, engine, monkeypatch
+):
+    """`sent:true` обязан означать «письмо ушло»: отказ SMTP — `sent:false`."""
+    register(client, "verify-fail@test.ru", OLD_PASSWORD)
+    token = login(client, "verify-fail@test.ru", OLD_PASSWORD)["access_token"]
+    monkeypatch.setattr(settings, "smtp_host", "smtp.test")
+    monkeypatch.setattr(settings, "smtp_from", "noreply@test.ru")
+
+    async def boom(to: str, subject: str, code: str) -> None:
+        raise mailer.MailUnavailable("down")
+
+    monkeypatch.setattr("app.services.mailer.send_code", boom)
+    first = _verify_request(client, token)
+    assert first.status_code == 202
+    assert first.json() == {"sent": False}
+    # Пауза не съедена: письма не было.
+    assert _verify_request(client, token).status_code == 202
+    with engine.connect() as conn:
+        assert conn.scalar(text(
+            "select count(*) from audit_log where action = 'EMAIL_VERIFY_DELIVERY_FAILED'"
+        )) == 2
+
+
+def test_resend_invalidates_previous_verify_code(client, monkeypatch):
+    """Повторное письмо гасит прошлый код: иначе в ящике два «рабочих» кода."""
+    sent: list[str] = []
+
+    async def fake_send(to: str, subject: str, code: str) -> None:
+        sent.append(code)
+
+    monkeypatch.setattr(settings, "smtp_host", "smtp.test")
+    monkeypatch.setattr(settings, "smtp_from", "noreply@test.ru")
+    monkeypatch.setattr("app.services.mailer.send_code", fake_send)
+    register(client, "verify-resend@test.ru", OLD_PASSWORD)
+    token = login(client, "verify-resend@test.ru", OLD_PASSWORD)["access_token"]
+    assert _verify_request(client, token).json() == {"sent": True}
+    assert len(sent) == 2 and sent[0] != sent[1]
+
+    assert _verify(client, token, sent[0]).status_code == 422
+    assert _verify(client, token, sent[1]).json() == {"email_verified": True}

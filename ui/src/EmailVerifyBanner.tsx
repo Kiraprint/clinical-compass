@@ -14,10 +14,8 @@ export default function EmailVerifyBanner() {
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
   const [sent, setSent] = useState("");
-  const [demoCode, setDemoCode] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -40,8 +38,8 @@ export default function EmailVerifyBanner() {
     setErr("");
     try {
       const r = await api.requestEmailVerify();
-      setDemoCode(r.demo_code ?? "");
-      setSent(r.sent ? `Письмо отправлено на ${email}` : "Отправка писем не настроена");
+      // `sent:false` — канал не настроен или SMTP отказал: не обещаем письмо.
+      setSent(r.sent ? `Письмо отправлено на ${email}` : "Письмо отправить не удалось");
     } catch (e) {
       const apiErr = e instanceof ApiError ? e : null;
       setErr(
@@ -59,7 +57,6 @@ export default function EmailVerifyBanner() {
     setErr("");
     try {
       await api.verifyEmail({ code: code.trim() });
-      setDone(true);
       setVisible(false);
     } catch (e) {
       const apiErr = e instanceof ApiError ? e : null;
@@ -101,10 +98,8 @@ export default function EmailVerifyBanner() {
           Отправить код
         </button>
       </div>
-      {demoCode && <div className="email-verify-hint">Демо-стенд, код: {demoCode}</div>}
-      {sent && !demoCode && <div className="email-verify-hint">{sent}</div>}
+      {sent && <div className="email-verify-hint">{sent}</div>}
       {err && <div className="email-verify-err">{err}</div>}
-      {done && <div className="email-verify-hint">Адрес подтверждён.</div>}
     </div>
   );
 }
