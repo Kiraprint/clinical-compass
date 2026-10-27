@@ -100,11 +100,15 @@ services:
       CC_ASSISTANT_LLM_MODEL: "${CC_ASSISTANT_LLM_MODEL:-local}"
       CC_ASSISTANT_LLM_API_KEY: "${CC_ASSISTANT_LLM_API_KEY:-}"
       # Таймауты с запасом под reasoning-модели: home-stable (→ ds/deepseek-v4-flash)
-      # на роутинг тратит 17-18 с, на ответ 25-26 с, поэтому 10/25 с гарантированно
-      # уводили ассистента в fallback. Замеры — docs/17 §8.
-      CC_ASSISTANT_LLM_TIMEOUT: "${CC_ASSISTANT_LLM_TIMEOUT:-90}"
+      # тратит 17-18 с на роутинг и 44-82 с на ответ по сниппетам, а 10/25 с
+      # гарантировали fallback на детерминированные фрагменты. Замеры — docs/17 §8.
+      CC_ASSISTANT_LLM_TIMEOUT: "${CC_ASSISTANT_LLM_TIMEOUT:-120}"
       # Таймаут генерации ответа по сниппетам (FR-17): сбой → детерминированный ответ.
-      CC_ASSISTANT_LLM_ANSWER_TIMEOUT: "${CC_ASSISTANT_LLM_ANSWER_TIMEOUT:-90}"
+      CC_ASSISTANT_LLM_ANSWER_TIMEOUT: "${CC_ASSISTANT_LLM_ANSWER_TIMEOUT:-120}"
+      # Дедлайн всего прогона агента (лимитер + retrieval + оба вызова LLM).
+      # Обязан быть больше суммы таймаутов, иначе 90-секундный LLM недостижим:
+      # прогон срубается на CC_ASSISTANT_DEADLINE_S → 503 ASSISTANT_TIMEOUT.
+      CC_ASSISTANT_DEADLINE_S: "${CC_ASSISTANT_DEADLINE_S:-150}"
       # Бюджет генерации ответа. Обязателен для reasoning-моделей (home-stable →
       # ds/deepseek-v4-flash): enable_thinking=false они игнорируют, тратят
       # контекст на «размышления» и отдают finish_reason=length с пустым content.
