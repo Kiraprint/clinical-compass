@@ -16,7 +16,7 @@ from compass.scales import ALL_SCALES
 from compass.trend import trends
 
 from app.errors import Problem
-from app.models import AdverseEvent, Answer, Assessment, ChatMessage, CheckinSession, ClinicianRoster, Consent, DiaryEntry, Escalation, Prescription, Run, User, Visit
+from app.models import AdverseEvent, Answer, Assessment, ChatMessage, CheckinSession, ClinicianRoster, Consent, DiaryEntry, Escalation, PatientAnamnesis, Prescription, Run, User, Visit
 
 from . import adherence as adherence_service
 from . import diary as diary_service
@@ -57,6 +57,27 @@ async def require_patient_consent(db: AsyncSession, patient_id) -> None:
     )
     if active is None:
         raise Problem(403, "CONSENT_REQUIRED", "Нет активного согласия пациента — данные недоступны (152-ФЗ)")
+
+
+def available_scales_payload() -> list[dict]:
+    """Каталог шкал (код, тексты пунктов, anchors) отдельным GET, не в report.
+
+    Каталог статичен на деплой и весит ~24 КБ — в карточке пациента он был
+    балластом на каждое открытие (docs/03 §12). Пациентский
+    `GET /questionnaires` не затронут.
+    """
+    return [
+        {
+            "code": s.code,
+            "title": s.title,
+            "audience": s.audience,
+            "items": [
+                {"key": i.key, "text": i.text, "max_value": i.max_value, "anchors": list(i.anchors)}
+                for i in s.items
+            ],
+        }
+        for s in ALL_SCALES.values()
+    ]
 
 
 async def prescribe_scales(db: AsyncSession, clinician_id, patient_id, scale_codes: list[str], ip: str | None = None) -> dict:
@@ -323,13 +344,10 @@ async def _adverse_dicts(db: AsyncSession, events) -> list[dict]:
 
 
 async def _adverse_events_of(db: AsyncSession, patient_id, limit: int = 20) -> list[dict]:
-    rows = (await db.scalars(
-        select(AdverseEvent)
-        .where(AdverseEvent.patient_id == patient_id)
-        .order_by(AdverseEvent.onset_date.desc(), AdverseEvent.created_at.desc())
-        .limit(limit)
-    )).all()
-    return await _adverse_dicts(db, rows)
+    """НЯ врачу одним запросом: события + назначения + справочник ГРЛС (adverse.py)."""
+    from .adverse import events_for_patient  # лениво: adverse импортирует этот модуль
+
+    return await events_for_patient(db, patient_id, limit)
 
 
 async def _patient_card(db: AsyncSession, patient_id, clinician_id=None) -> dict:
@@ -338,16 +356,19 @@ async def _patient_card(db: AsyncSession, patient_id, clinician_id=None) -> dict
     Повторно используется report() и patient_context() ассистента (docs/07 §7).
     `clinician_id` добавляет roster-гейт прямо в первый запрос (403 NO_ROSTER).
     """
-    # Пациент, roster-гейт, активное согласие и назначенные шкалы — один запрос.
+    # Пациент, roster-гейт, активное согласие, назначенные шкалы и анамнез — один запрос.
+    # Анамнез — LEFT JOIN по unique patient_id (строк ровно 0..1, карточку не размножает);
+    # при отзыве согласия строки анамнеза удаляются, т.е. без согласия джойн даёт NULL.
     scales = (
         select(func.array_agg(aggregate_order_by(Prescription.scale_code, Prescription.created_at)))
         .where(Prescription.patient_id == patient_id)
         .scalar_subquery()
     )
     q = (
-        select(User, Consent.id, scales)
+        select(User, Consent.id, PatientAnamnesis, scales)
         .select_from(User)
         .outerjoin(Consent, (Consent.user_id == User.id) & Consent.revoked_at.is_(None))
+        .outerjoin(PatientAnamnesis, PatientAnamnesis.patient_id == User.id)
         .where(User.id == patient_id)
     )
     if clinician_id is not None:
@@ -360,7 +381,7 @@ async def _patient_card(db: AsyncSession, patient_id, clinician_id=None) -> dict
         await _require_roster(db, clinician_id, patient_id)
     if row is None or row[0].role != "PATIENT":
         raise Problem(404, "NOT_FOUND", "Пациент не найден")
-    patient, consent_id, prescribed = row
+    patient, consent_id, anamnesis_row, prescribed = row
     has_consent = consent_id is not None
 
     last, history, timeline, (omitted_items, omitted_scale) = await _card_assessments(db, patient_id)
@@ -435,16 +456,6 @@ async def _patient_card(db: AsyncSession, patient_id, clinician_id=None) -> dict
             }
             for e in diary
         ],
-        "available_scales": [
-            {
-                "code": s.code, "title": s.title, "audience": s.audience,
-                "items": [
-                    {"key": i.key, "text": i.text, "max_value": i.max_value, "anchors": list(i.anchors)}
-                    for i in s.items
-                ],
-            }
-            for s in ALL_SCALES.values()
-        ],
         "open_escalations": [
             {
                 "id": str(e.id),
@@ -464,7 +475,7 @@ async def _patient_card(db: AsyncSession, patient_id, clinician_id=None) -> dict
         "contacts": contacts_payload(patient, masked=True) if has_consent else None,
         # FR-37: анамнез. Подтверждённый текст и вводные — спецкатегория ПДн,
         # отдаются в карточке только при активном согласии (roster — у report()).
-        "anamnesis": await _anamnesis_payload(db, patient_id) if has_consent else None,
+        "anamnesis": _anamnesis_payload(anamnesis_row, patient_id) if has_consent else None,
     }
 
 
@@ -474,11 +485,11 @@ async def _accepted_chat_insights(db: AsyncSession, patient_id) -> list[dict]:
 
     return await chat_insights_service.accepted_for_report(db, patient_id)
 
-async def _anamnesis_payload(db: AsyncSession, patient_id) -> dict:
-    """Ленивый импорт: anamnesis зависит от roster/consent-гейтов этого модуля."""
+def _anamnesis_payload(row: PatientAnamnesis | None, patient_id) -> dict:
+    """Анамнез по строке из первого запроса карточки (без отдельного SELECT)."""
     from . import anamnesis as anamnesis_service
 
-    return await anamnesis_service.card_payload(db, patient_id)
+    return anamnesis_service.payload_of(row, patient_id)
 
 
 async def report(db: AsyncSession, clinician_id, patient_id, ip: str | None = None) -> dict:

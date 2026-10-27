@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import services
 from app.db import get_db
-from app.deps import require_clinician, require_consent
+from app.deps import require_clinician, require_consent, require_roles
 from app.models import User
 
 router = APIRouter(tags=["clinician"])
@@ -50,6 +50,15 @@ async def patients(
     db: AsyncSession = Depends(get_db),
 ):
     return {"items": await services.clinician.list_patients(db, user.id, triage)}
+
+
+@router.get("/clinician/scales")
+async def scales_catalog(user: User = Depends(require_roles("CLINICIAN", "ADMIN"))):
+    """Каталог шкал для карточки врача: статичен на деплой, поэтому отдельный GET.
+
+    Раньше ~24 КБ каталога ехали внутри каждого `GET .../report` (docs/03 §12).
+    """
+    return {"scales": services.clinician.available_scales_payload()}
 
 
 @router.get("/clinician/patients/{patient_id}/report")

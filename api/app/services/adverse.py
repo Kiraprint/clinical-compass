@@ -50,10 +50,12 @@ async def _drug_refs(db: AsyncSession, drug_ids: set[str | None]) -> dict[str, d
     if not ids:
         return {}
     drugs = (await db.scalars(select(Drug).where(Drug.drug_id.in_(ids)))).all()
-    return {
-        d.drug_id: {"drug_id": d.drug_id, "trade_name": d.trade_name, "adverse_events": d.adverse_events}
-        for d in drugs
-    }
+    return {d.drug_id: _drug_ref(d) for d in drugs}
+
+
+def _drug_ref(d: Drug) -> dict:
+    return {"drug_id": d.drug_id, "trade_name": d.trade_name, "adverse_events": d.adverse_events}
+
 
 def _patient_dict(e: AdverseEvent, med_titles: dict[uuid.UUID, str]) -> dict:
     """Событие глазами пациента: без врачебных заметок и справочных текстов."""
@@ -115,6 +117,26 @@ async def patient_event_dicts(db: AsyncSession, events: list[AdverseEvent]) -> l
     """События глазами пациента: 1 запрос названий назначений на весь список."""
     med_titles = await _medication_titles(db, {e.medication_id for e in events})
     return [_patient_dict(e, med_titles) for e in events]
+
+
+async def events_for_patient(db: AsyncSession, patient_id, limit: int = 20) -> list[dict]:
+    """События пациента для карточки врача — одним запросом (было три).
+
+    Назначение и справочник ГРЛС присоединяются джойном, а не батчем по ids:
+    название назначения — EncryptedText, и расшифровка остаётся за слоем типов
+    (json_agg вернул бы шифротекст и потребовал бы ручного pgp_sym_decrypt).
+    """
+    rows = (await db.execute(
+        select(AdverseEvent, PatientMedication.title, Drug)
+        .outerjoin(PatientMedication, PatientMedication.id == AdverseEvent.medication_id)
+        .outerjoin(Drug, Drug.drug_id == AdverseEvent.drug_id)
+        .where(AdverseEvent.patient_id == patient_id)
+        .order_by(AdverseEvent.onset_date.desc(), AdverseEvent.created_at.desc())
+        .limit(limit)
+    )).all()
+    med_titles = {e.medication_id: title for e, title, _ in rows if e.medication_id is not None}
+    drug_refs = {d.drug_id: _drug_ref(d) for _, _, d in rows if d is not None}
+    return [_event_dict(e, None, med_titles, drug_refs) for e, _, _ in rows]
 
 
 async def _validate_medication(

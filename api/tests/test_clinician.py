@@ -6,7 +6,9 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import event
 
 from app import db as db_module
-from app.models import Assessment, AuditLog, ClinicianRoster, Escalation, Run, User
+from app.models import (
+    AdverseEvent, Assessment, AuditLog, ClinicianRoster, Escalation, PatientMedication, Run, User,
+)
 from app.services import clinician as clinician_service
 
 from .conftest import admin_ctx, auth_header, clinician_ctx, finish_screening, patient_ctx, run_async
@@ -71,14 +73,17 @@ def test_report_after_roster_and_audit(client):
     assert any(e["action"] == "READ_REPORT" and e["object_id"] == str(pid) for e in audit)
 
 
-def test_report_exposes_scale_anchors(client):
-    """Карточка врача отдаёт подписи вариантов — HDRS-17 заполняется по якорям, не числами."""
-    _, pid = _with_patient(client, "anch@test.ru")
-    c, cid = clinician_ctx(client, "anchdoc@test.ru")
-    a, _ = admin_ctx(client, "anchadm@test.ru")
-    _grant(client, a, pid, cid)
-    body = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=c).json()
-    scales = {s["code"]: s for s in body["available_scales"]}
+def test_scales_catalog_exposes_anchors(client):
+    """Каталог шкал отдаёт подписи вариантов — HDRS-17 заполняется по якорям, не числами.
+
+    Каталог вынесен из report в GET /clinician/scales (docs/03 §12): он статичен
+    на деплой и не должен ехать в каждое открытие карточки.
+    """
+    c, _ = clinician_ctx(client, "anchdoc@test.ru")
+    resp = client.get("/api/v1/clinician/scales", headers=c)
+    assert resp.status_code == 200, resp.text
+    scales = {s["code"]: s for s in resp.json()["scales"]}
+    assert len(scales) == 7
     assert "HDRS-17" in scales
     for scale in scales.values():
         for item in scale["items"]:
@@ -86,6 +91,18 @@ def test_report_exposes_scale_anchors(client):
     hdrs = {i["key"]: i for i in scales["HDRS-17"]["items"]}
     assert len(hdrs["h1"]["anchors"]) == 5
     assert len(hdrs["h4"]["anchors"]) == 3
+
+
+def test_scales_catalog_roles_and_report_has_no_catalog(client):
+    """Каталог: CLINICIAN/ADMIN; пациенту — 403. В report каталога больше нет."""
+    h, pid = _with_patient(client, "scroles@test.ru")
+    c, cid = clinician_ctx(client, "scrolesdoc@test.ru")
+    a, _ = admin_ctx(client, "scrolesadm@test.ru")
+    _grant(client, a, pid, cid)
+    assert client.get("/api/v1/clinician/scales", headers=h).status_code == 403
+    assert client.get("/api/v1/clinician/scales", headers=a).status_code == 200
+    body = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=c).json()
+    assert "available_scales" not in body
 
 
 def test_clinician_patients_list_and_triage_filter(client):
@@ -765,3 +782,55 @@ def test_report_returns_all_open_escalations(client, db_session):
     report = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=c)
     assert report.status_code == 200, report.text
     assert len(report.json()["open_escalations"]) == 60
+
+
+def test_report_sql_budget(client, db_session):
+    """Счётчик SQL карточки: before_cursor_execute на sync_engine async-движка.
+
+    Замер 2026-10 (docs/03 §12): было 12 запросов на пациента без НЯ и 13 с НЯ;
+    стало 11 в обоих случаях — анамнез ушёл в первый запрос (LEFT JOIN по
+    unique patient_id), НЯ читаются одним джойном с назначением и ГРЛС.
+    Дальше счёт не опускается: diary/escalations/checkins/adherence/chat_insights —
+    списки с EncryptedText, их сворачивание требует json_agg + ручного
+    pgp_sym_decrypt, а это дублирование слоя шифрования.
+    """
+    _, pid = _with_patient(client, "sqln@p.ru")
+    c, cid = clinician_ctx(client, "sqlnc@p.ru")
+    a, _ = admin_ctx(client, "sqlna@p.ru")
+    _grant(client, a, pid, cid)
+
+    statements: list[str] = []
+
+    def _count(conn, cursor, statement, params, context, executemany):
+        statements.append(statement)
+
+    def _measure() -> int:
+        statements.clear()
+        engine = db_module.engine.sync_engine
+        event.listen(engine, "before_cursor_execute", _count)
+        try:
+            resp = client.get(f"/api/v1/clinician/patients/{pid}/report", headers=c)
+        finally:
+            event.remove(engine, "before_cursor_execute", _count)
+        assert resp.status_code == 200, resp.text
+        return len(statements)
+
+    plain = _measure()
+
+    med = PatientMedication(
+        patient_id=uuid.UUID(pid), clinician_id=uuid.UUID(cid), title="Авиандр",
+        status="active", source="clinician", times_per_day=2, started_on=date.today(),
+    )
+    db_session.add(med)
+    db_session.flush()
+    db_session.add(AdverseEvent(
+        patient_id=uuid.UUID(pid), clinician_id=uuid.UUID(cid), event_text="Тошнота",
+        severity="mild", onset_date=date.today(), action_taken="monitoring",
+        reported_by="clinician", status="confirmed", medication_id=med.id,
+    ))
+    db_session.commit()
+    with_adverse = _measure()
+
+    assert plain == 11, statements
+    # НЯ больше не добавляют запросов: назначение и ГРЛС — в том же SELECT.
+    assert with_adverse == plain, statements
