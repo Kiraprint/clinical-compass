@@ -144,21 +144,84 @@ def _no_kb(monkeypatch):
     monkeypatch.setattr(session_ai, "shared_factory", lambda: _NoKb())
 
 
-def _fake_ml(monkeypatch, *, gate: threading.Event | None = None) -> dict:
-    """Подмена расшифровки в сайдкаре; `gate` держит вызов, чтобы увидеть AI_BUSY."""
-    state: dict = {"calls": 0, "entered": threading.Event()}
+def _fake_ml(
+    monkeypatch,
+    *,
+    gate: threading.Event | None = None,
+    diarize_gate: threading.Event | None = None,
+    diarize_error: Exception | None = None,
+    diarized: bool = False,
+) -> dict:
+    """Подмена сайдкара: ASR и диаризация — двумя вызовами (docs/18 §4.3).
 
-    def fake(path, *, filename="audio.bin", mime="application/octet-stream", language="ru"):
+    `gate` держит ASR (проверка AI_BUSY), `diarize_gate` — второй этап
+    (проверка, что текст уже виден врачу, пока спикеры считаются).
+    """
+    state: dict = {
+        "calls": 0,
+        "diarize_calls": 0,
+        "entered": threading.Event(),
+        "diarize_entered": threading.Event(),
+    }
+
+    def fake(
+        path, *, filename="audio.bin", mime="application/octet-stream", language="ru",
+        diarize=True,
+    ):
         state["calls"] += 1
         # Сайдкар получает расшифрованный временный файл 0600, а не буфер в RAM.
         state["data"] = pathlib.Path(path).read_bytes()
         state["mime"] = mime
+        state["diarize_requested"] = diarize
         state["entered"].set()
         if gate is not None:
             assert gate.wait(10), "тест не отпустил расшифровку"
-        return json.loads(json.dumps(ML_RESULT))
+        result = json.loads(json.dumps(ML_RESULT))
+        if not diarize:
+            result["segments"] = [{**seg, "speaker": None} for seg in result["segments"]]
+            result["speakers"] = []
+            result["diarized"] = False
+        return result
+
+    def fake_diarize(
+        path, *, segments, duration_s=0.0, filename="audio.bin",
+        mime="application/octet-stream",
+    ):
+        state["diarize_calls"] += 1
+        state["diarize_entered"].set()
+        if diarize_gate is not None:
+            assert diarize_gate.wait(10), "тест не отпустил диаризацию"
+        if diarize_error is not None:
+            raise diarize_error
+        if not diarized:
+            # По умолчанию весов/разметки нет — как у старого однократного вызова,
+            # где ML_RESULT не содержал `diarized`. Двухэтапные тесты включают явно.
+            return {
+                "segments": [{**seg, "speaker": None} for seg in segments],
+                "speakers": [],
+                "diarized": False,
+                "degraded": True,
+                "reason": "no_weights",
+            }
+        # Сайдкар метит кластеры A/B: в тестах достаточно чередования.
+        prepared = [
+            {**seg, "speaker": ("A" if i % 2 == 0 else "B")} for i, seg in enumerate(segments)
+        ]
+        speakers = [
+            {"id": label, "label": None, "seconds": 0.0, "segments": 0}
+            for label in ("A", "B")
+            if any(seg["speaker"] == label for seg in prepared)
+        ]
+        return {
+            "segments": prepared,
+            "speakers": speakers,
+            "diarized": True,
+            "degraded": False,
+            "reason": None,
+        }
 
     monkeypatch.setattr(ml_client, "transcribe_file", fake)
+    monkeypatch.setattr(ml_client, "diarize_file", fake_diarize)
     return state
 
 
@@ -1092,3 +1155,58 @@ def test_startup_sweep_removes_orphan_artifacts(client, monkeypatch):
     asyncio.run(_sweep_orphan_artifacts())
     assert not orphan.exists()
     assert {p.name for p in audio_dir.glob("*.bin")} == kept, "свип снёс живой артефакт"
+
+# --- два этапа: текст раньше спикеров (docs/18 §4.3) -------------------------
+
+def test_text_is_visible_while_diarizing(client, monkeypatch):
+    """Текст расшифровки отдаётся до меток: врач не ждёт диаризацию."""
+    _enable(monkeypatch)
+    gate = threading.Event()
+    state = _fake_ml(monkeypatch, diarize_gate=gate, diarized=True)
+    ctx = _ctx(client, "twophase")
+    session = _session(client, ctx)
+    assert _upload(client, ctx, session["id"]).status_code == 201
+    assert (
+        client.post(f"{BASE}/sessions/{session['id']}/transcribe", headers=ctx["doctor"]).status_code
+        == 202
+    )
+
+    # Второй этап держится гейтом: значит, первый уже записал текст и статус.
+    assert state["diarize_entered"].wait(10)
+    detail = _wait_ai_status(client, ctx["doctor"], session["id"], {"diarizing"})
+    assert detail["ai_status"] == "diarizing"
+    early = client.get(f"{BASE}/sessions/{session['id']}/transcript", headers=ctx["doctor"])
+    assert early.status_code == 200, early.text
+    body = early.json()
+    assert body["diarized"] is False
+    assert body["segments"], "текст должен быть доступен до диаризации"
+    assert all(segment["speaker"] is None for segment in body["segments"])
+    assert body["segments"][0]["text"], "текст непустой"
+
+    gate.set()
+    final = _wait_ai_status(client, ctx["doctor"], session["id"], {"transcribed"})
+    assert final["ai_status"] == "transcribed"
+    done = client.get(f"{BASE}/sessions/{session['id']}/transcript", headers=ctx["doctor"]).json()
+    assert done["diarized"] is True
+    assert {segment["speaker"] for segment in done["segments"]} == {"A", "B"}
+    # ASR ровно один раз: второй этап только метит готовые сегменты.
+    assert state["calls"] == 1
+    assert state["diarize_calls"] == 1
+
+def test_diarization_failure_keeps_text(client, monkeypatch):
+    """Сбой диаризации не отменяет расшифровку: текст есть, меток нет."""
+    _enable(monkeypatch)
+    _fake_ml(monkeypatch, diarize_error=ml_client.MlUnavailable("сайдкар недоступен"))
+    ctx = _ctx(client, "diarfail")
+    session = _session(client, ctx)
+    assert _upload(client, ctx, session["id"]).status_code == 201
+    assert (
+        client.post(f"{BASE}/sessions/{session['id']}/transcribe", headers=ctx["doctor"]).status_code
+        == 202
+    )
+    detail = _wait_ai_status(client, ctx["doctor"], session["id"], {"transcribed"})
+    assert detail["ai_error"] == "DIARIZATION_INTERRUPTED"
+    body = client.get(f"{BASE}/sessions/{session['id']}/transcript", headers=ctx["doctor"]).json()
+    assert body["diarized"] is False
+    assert all(segment["speaker"] is None for segment in body["segments"])
+    assert body["segments"], "текст должен остаться"

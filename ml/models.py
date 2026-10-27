@@ -34,6 +34,8 @@ MAX_TEXTS = 64
 MAX_DOCUMENTS = 256
 MAX_CHARS = 20_000
 MAX_NAMES = 256
+# Предел сегментов в запросе диаризации: 3 часа речи ≈ 4000–5000 сегментов.
+MAX_SEGMENTS = 8000
 
 # --- ASR (faster-whisper) --------------------------------------------------
 # Лид-решение по research-asr.md: один бэкенд — large-v3-turbo (MIT, VAD и
@@ -861,6 +863,32 @@ class SortformerDiarizer:
 # ---------------------------------------------------------------------------
 
 
+def _apply_diarization(segments: list[dict], diarization: dict) -> list[dict]:
+    """Пометить сегменты спикерами по поворотам диаризации; вернуть итоги по спикерам.
+
+    Разделено с `Registry.diarize`: ASR и диаризация идут двумя независимыми
+    запросами (docs/18 §4.3), а раскраска сегментов должна быть одинаковой.
+    """
+    if not diarization.get("diarized"):
+        return []
+    labels = label_clusters(diarization["turns"])
+    totals: dict[str, dict] = {}
+    assigned = assign_speakers(segments, diarization["turns"])
+    for segment, cluster in zip(segments, assigned):
+        label = labels.get(cluster) if cluster is not None else None
+        segment["speaker"] = label
+        if label is None:
+            continue
+        item = totals.setdefault(
+            label, {"id": label, "label": None, "seconds": 0.0, "segments": 0}
+        )
+        item["seconds"] = round(
+            item["seconds"] + max(0.0, segment["end"] - segment["start"]), 3
+        )
+        item["segments"] += 1
+    return [totals[label] for label in sorted(totals)]
+
+
 class Registry:
     """Держит бэкенды и статус загрузки; потокобезопасен."""
 
@@ -1206,6 +1234,38 @@ class Registry:
             code="diarize_backend_unavailable",
         )
 
+    def diarize(self, source: Any, segments: list[dict], *, duration_s: float = 0.0) -> dict:
+        """Только спикеры: ASR уже сделан отдельным запросом (docs/18 §4.3).
+
+        Второй этап расшифровки: api пишет текст в артефакт сразу после ASR и
+        зовёт этот метод, чтобы добавить метки. Слот ASR занимаем, потому что
+        диаризация держит декодированное аудио в памяти и грузит CPU.
+        """
+        self._require_ready()
+        if not self.diarize_enabled:
+            return {
+                "segments": [dict(segment, speaker=None) for segment in segments],
+                "speakers": [],
+                "diarized": False,
+                "degraded": False,
+                "reason": "disabled",
+            }
+        if not self._asr_slots.acquire(blocking=False):
+            raise ASRBusy()
+        try:
+            prepared = [dict(segment, speaker=None) for segment in segments]
+            result = self._diarize_turns(source, duration_s)
+        finally:
+            self._asr_slots.release()
+        speakers = _apply_diarization(prepared, result)
+        return {
+            "segments": prepared,
+            "speakers": speakers,
+            "diarized": result["diarized"],
+            "degraded": result["degraded"],
+            "reason": result["reason"],
+        }
+
     def _diarize_turns(self, source: Any, duration_s: float) -> dict:
         """Повороты спикеров для транскрипции; никогда не бросает.
 
@@ -1299,24 +1359,7 @@ class Registry:
         finally:
             self._asr_slots.release()
         elapsed = time.perf_counter() - started
-        speakers: list[dict] = []
-        if diarization["diarized"]:
-            labels = label_clusters(diarization["turns"])
-            totals: dict[str, dict] = {}
-            assigned = assign_speakers(segments, diarization["turns"])
-            for segment, cluster in zip(segments, assigned):
-                label = labels.get(cluster) if cluster is not None else None
-                segment["speaker"] = label
-                if label is None:
-                    continue
-                item = totals.setdefault(
-                    label, {"id": label, "label": None, "seconds": 0.0, "segments": 0}
-                )
-                item["seconds"] = round(
-                    item["seconds"] + max(0.0, segment["end"] - segment["start"]), 3
-                )
-                item["segments"] += 1
-            speakers = [totals[label] for label in sorted(totals)]
+        speakers = _apply_diarization(segments, diarization)
         return {
             "model": public_model_name(backend.model_id),
             "device": backend.device,

@@ -542,3 +542,40 @@ def test_405_keeps_allow_header(monkeypatch):
     assert response.status_code == 405, response.text
     assert _detail(response)["code"] == "invalid_request"
     assert "POST" in response.headers.get("allow", "")
+
+# --- второй этап: /v1/diarize (docs/18 §4.3) --------------------------------
+
+def _post_diarize(client: TestClient, segments, *, data: bytes | None = None, **form):
+    return client.post(
+        "/v1/diarize",
+        files={"file": ("session.webm", _audio() if data is None else data, "audio/webm")},
+        data={"segments": segments, **form},
+    )
+
+def test_diarize_endpoint_labels_ready_segments(monkeypatch):
+    app, _ = _app(monkeypatch)
+    segments = [
+        {"start": 0.0, "end": 5.0, "text": "жалобы"},
+        {"start": 5.0, "end": 10.0, "text": "анамнез"},
+        {"start": 10.0, "end": 12.0, "text": "план"},
+    ]
+    with TestClient(app) as client:
+        import json as _json
+
+        response = _post_diarize(client, _json.dumps(segments), duration_s="12")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["diarized"] is True
+    assert [segment["speaker"] for segment in body["segments"]] == ["A", "B", "A"]
+    assert {item["id"] for item in body["speakers"]} == {"A", "B"}
+    assert body["segments"][0]["text"] == "жалобы", "текст не переписывается"
+
+def test_diarize_endpoint_validates_segments(monkeypatch):
+    app, _ = _app(monkeypatch)
+    with TestClient(app) as client:
+        broken = _post_diarize(client, "не json")
+        wrong_shape = _post_diarize(client, '[{"start": 5, "end": 1}]')
+        not_list = _post_diarize(client, '{"start": 0}')
+    assert broken.status_code == 400 and _detail(broken)["code"] == "invalid_request"
+    assert wrong_shape.status_code == 400
+    assert not_list.status_code == 400

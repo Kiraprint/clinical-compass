@@ -269,6 +269,59 @@ def transcribe_file(
         raise MlUnavailable("сайдкар /v1/transcribe: ожидался список segments")
     return result
 
+def diarize_file(
+    path,
+    *,
+    segments: list[dict],
+    duration_s: float = 0.0,
+    filename: str = "audio.bin",
+    mime: str = "application/octet-stream",
+) -> dict:
+    """Второй этап расшифровки: только метки спикеров (docs/18 §4.3).
+
+    ASR и диаризация разделены, чтобы врач видел текст сразу: первый запрос
+    возвращает сегменты, второй — те же сегменты с `speaker`. Аудио нужно то
+    же самое (кластеры считаются по всей записи), сегменты уходят JSON-строкой.
+    Ошибки те же, что у `transcribe_file`: сайдкар недоступен → MlUnavailable.
+    """
+    payload = json.dumps(
+        [{"start": seg["start"], "end": seg["end"]} for seg in segments],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    boundary = uuid.uuid4().hex
+    name = (filename or "audio.bin").replace('"', "") or "audio.bin"
+    prologue = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{name}"\r\n'
+        f"Content-Type: {mime}\r\n\r\n"
+    ).encode("utf-8")
+    epilogue = (
+        f"\r\n--{boundary}\r\n"
+        'Content-Disposition: form-data; name="segments"\r\n\r\n'
+        f"{payload}\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="duration_s"\r\n\r\n'
+        f"{float(duration_s):.3f}\r\n"
+        f"--{boundary}--\r\n"
+    ).encode("utf-8")
+    body = _FileMultipartBody(prologue, path, epilogue)
+    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    try:
+        result = _send(
+            "/v1/diarize",
+            body,
+            headers,
+            timeout=settings.session_ai_timeout,
+            retries=0,
+            content_length=len(body),
+        )
+    finally:
+        body.close()
+    if not isinstance(result.get("segments"), list):
+        raise MlUnavailable("сайдкар /v1/diarize: ожидался список segments")
+    return result
+
 def ping() -> dict:
     """GET /health: статус моделей и устройство. Бросает MlUnavailable."""
     url = _endpoint("/health")
