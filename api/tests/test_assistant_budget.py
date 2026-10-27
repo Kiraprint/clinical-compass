@@ -70,7 +70,7 @@ def test_answer_caps_timeout_by_remaining_budget(monkeypatch):
     """Настроенный таймаут 120 с не должен пережить дедлайн: уходит остаток."""
     seen: list[float | None] = []
 
-    def _capture(_history, _query, _payload, *, timeout=None):
+    def _capture(_history, _query, _payload, *, timeout=None, **_kwargs):
         seen.append(timeout)
         return None, "timeout"
 
@@ -92,7 +92,7 @@ def test_answer_without_deadline_uses_configured_timeout(monkeypatch):
     """Вне ассистента (нет дедлайна) поведение прежнее: таймаут из настроек."""
     seen: list[float | None] = []
 
-    def _capture(_history, _query, _payload, *, timeout=None):
+    def _capture(_history, _query, _payload, *, timeout=None, **_kwargs):
         seen.append(timeout)
         return None, "http_error"
 

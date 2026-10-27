@@ -5,7 +5,9 @@
 `CC_ASSISTANT_LLM_URL`, при сбое или без валидных ссылок отвечает
 детерминированный `build_rag_answer` (docs/03 §1.3), офлайн. Отказные пути
 (красная линия, нет фрагментов, только карта пациента) LLM не касаются.
-Потребляет только открытый не-ПДн корпус: карта пациента в промпт не уходит.
+Потребляет открытый не-ПДн корпус; карта пациента уходит в LLM только
+обезличенной (scrub_for_llm: ФИО → [ПАЦИЕНТ], маскированный дневник) и только
+вместе со сниппетами — docs/07 §7, `CC_ASSISTANT_LLM_PATIENT_CONTEXT`.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from langgraph.graph import END, START, StateGraph
 from compass.agent import Citation, RAGAnswer, RAGChunk, build_rag_answer, detect_redline
 
 from app.config import settings
-from app.services.depersonalize import scrub_text
+from app.services.depersonalize import DepersonalizationUnavailable, scrub_text
 
 from app.services import kb as kb_store
 from app.services import llm_router
@@ -128,6 +130,12 @@ MAX_ANSWER_CITATIONS = 3  # как в build_rag_answer: больше трёх и
 # Минимальный остаток бюджета прогона, при котором ещё есть смысл звать LLM:
 # меньше секунды — гарантированный таймаут, а платить за него лимитером глупо.
 MIN_LLM_BUDGET = 1.0
+# Ссылка модели на карту пациента: [П1], [П2]. Отдельно от _CITATION_RE:
+# латиница/цифры сниппетов и кириллица карты не пересекаются, а группа [Пn]
+# в _CITE_GROUP_RE не проходит — перенумерация сниппетов её не тронет.
+_PATIENT_CITE_RE = re.compile(r"\[П\s*(\d{1,3})\]")
+# Маска ФИО в карте: единственное значение на оба слоя (промпт и карта).
+PATIENT_MASK = llm_router.PATIENT_MASK
 
 
 def _time_left(deadline_at: float | None) -> float | None:
@@ -199,8 +207,9 @@ def _compose_answer(
     окно — выдумка модели. Текст ответа модели в citations не попадает —
     цитаты собираются только из настоящих чанков (номер → chunks[n - 1]), а
     видимые маркеры перенумеровываются в порядок citations (дедуп по
-    guideline_id и лимит сдвигают номера). Карта пациента сюда не передаётся:
-    модель не видит ПДн.
+    guideline_id и лимит сдвигают номера). Карта пациента этой точкой входа не
+    передаётся: диалог по сессии (docs/18 §10) отвечает только по сниппетам, а
+    ассистент врача идёт через _compose_answer_result с маскированными картами.
     """
     payload = [{"text": c.text, "source_title": c.source_title} for c in chunks]
     text = llm_router.compose_answer(history, query, payload)
@@ -208,19 +217,30 @@ def _compose_answer(
 
 
 def _compose_answer_result(
-    query: str, history: list[dict], chunks: list[RAGChunk], *, timeout: float | None = None
+    query: str,
+    history: list[dict],
+    chunks: list[RAGChunk],
+    *,
+    timeout: float | None = None,
+    patient_contexts: list[dict] | None = None,
 ) -> tuple[RAGAnswer | None, str]:
     """То же, что _compose_answer, плюс причина отказа для UI.
 
+    patient_contexts — карты пациентов треда ПОСЛЕ scrub_for_llm
+    (services.assistant_chat._scrub_patient_contexts): модель видит их
+    обезличенный текст, а не ПДн. Пустой/None — тело запроса прежнее.
+
     Причина — `llm_reason` контракта ответа: disabled|timeout|empty|http_error
-    от llm_router; ответ модели без единой валидной ссылки [n] тоже `empty`
-    (связного проверенного текста нет — берём детерминированный).
+    от llm_router; ответ модели без единой валидной ссылки ([n] или [Пn]) тоже
+    `empty` (связного проверенного текста нет — берём детерминированный).
     """
     payload = [{"text": c.text, "source_title": c.source_title} for c in chunks]
-    text, reason = llm_router.compose_answer_result(history, query, payload, timeout=timeout)
+    text, reason = llm_router.compose_answer_result(
+        history, query, payload, timeout=timeout, patient_contexts=patient_contexts
+    )
     if text is None:
         return None, reason
-    answer = _finalize_llm_answer(text, chunks)
+    answer = _finalize_llm_answer(text, chunks, patient_contexts)
     return answer, ("ok" if answer is not None else "empty")
 
 
@@ -236,8 +256,51 @@ def compose_grounded_answer(
     return _compose_answer(query, history, chunks)
 
 
-def _finalize_llm_answer(text: str | None, chunks: list[RAGChunk]) -> RAGAnswer | None:
-    """Проверка ссылок модели и сборка citations; None — брать детерминированный."""
+def _cited_patients(text: str, patient_contexts: list[dict] | None) -> list[dict]:
+    """Карты, на которые сослался LLM ([П1], [П2]), по первому упоминанию.
+
+    Граница — answer_patients: карта, не влезшая в промпт (ANSWER_PATIENTS или
+    бюджет символов), модели не видна, и ссылка на неё — выдумка. Индекс берём
+    из того же списка отправленных карт, а не из входного, чтобы «дырка» в
+    видоизменённом списке не дала citation на чужой patient:<id>.
+    """
+    cards = llm_router.answer_patients(patient_contexts)
+    found: list[dict] = []
+    for token in _PATIENT_CITE_RE.findall(text):
+        n = int(token)
+        if 1 <= n <= len(cards) and cards[n - 1] not in found:
+            found.append(cards[n - 1])
+    return found
+
+
+def _strip_patient_citations(text: str, sent: int) -> str:
+    """Убирает `[П<n>]`, указывающие на карты, которых модель не видела.
+
+    Ровно как для сниппетов: видимый маркер обязан указывать на источник из
+    citations, иначе он выдумка — ответ не отбрасываем, просто вырезаем токен.
+    """
+
+    def repl(match: re.Match[str]) -> str:
+        return match.group(0) if 1 <= int(match.group(1)) <= sent else ""
+
+    text = _PATIENT_CITE_RE.sub(repl, text)
+    text = re.sub(r"[ \t]+([.,;:!?)])", r"\1", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
+def _finalize_llm_answer(
+    text: str | None,
+    chunks: list[RAGChunk],
+    patient_contexts: list[dict] | None = None,
+) -> RAGAnswer | None:
+    """Проверка ссылок модели и сборка citations; None — брать детерминированный.
+
+    Ссылки [n] дают citations сниппетов (как раньше), ссылки [Пn] — citation
+    карты пациента: topic=ПАЦИЕНТ, guideline_id=patient:<id> — ровно как у
+    детерминированного build_rag_answer, чтобы UI-блок «Карта пациента» и
+    счётчик источников работали и при answer_kind="llm". ФИО в source_title не
+    попадает: карта пришла уже обезличенной.
+    """
     if not text:
         return None
     payload = [{"text": c.text, "source_title": c.source_title} for c in chunks]
@@ -258,20 +321,34 @@ def _finalize_llm_answer(text: str | None, chunks: list[RAGChunk]) -> RAGAnswer 
         picked.append(chunk)
         by_guideline[chunk.guideline_id] = len(picked)
         positions[n] = len(picked)
-    if not picked:
-        logger.info("LLM-ответ без валидных ссылок на сниппеты — детерминированный ответ")
+    sent_cards = llm_router.answer_patients(patient_contexts)
+    cards = _cited_patients(text, patient_contexts)
+    if not picked and not cards:
+        logger.info("LLM-ответ без валидных ссылок — детерминированный ответ")
         return None
+    # [Пn] вне реально отправленных карт — выдумка: вырезаем, как [n] вне окна.
+    text = _strip_patient_citations(text, len(sent_cards))
+    citations = [
+        Citation(
+            source_title=c.source_title,
+            guideline_id=c.guideline_id,
+            topic=c.topic,
+            score=round(c.score, 4),
+        )
+        for c in picked
+    ]
+    for ctx in cards:
+        citations.append(
+            Citation(
+                source_title="Карта пациента",
+                guideline_id=f"patient:{ctx.get('patient_id')}",
+                topic="ПАЦИЕНТ",
+                score=1.0,
+            )
+        )
     return RAGAnswer(
         answer=_renumber_citations(text, positions),
-        citations=tuple(
-            Citation(
-                source_title=c.source_title,
-                guideline_id=c.guideline_id,
-                topic=c.topic,
-                score=round(c.score, 4),
-            )
-            for c in picked
-        ),
+        citations=tuple(citations),
         grounded=True,
     )
 
@@ -351,6 +428,52 @@ def _answer_dict(
             for c in result.citations
         ],
     }
+
+
+def _llm_patient_contexts(state: AgentState) -> list[dict]:
+    """Карты пациентов, допустимые в промпт LLM (флаг + страховка маскировки).
+
+    Источник — `patient_contexts` (тред, FR-21) и/или `patient_context`
+    (одиночный запрос). Assistant_chat маскирует их выше по стеку
+    (scrub_for_llm), но это единственная точка, через которую карта попадает
+    в промпт, поэтому инвариант держится здесь, а не в вызывающем: каждая
+    карта проходит `scrub_for_llm` (фio → [ПАЦИЕНТ], свободный текст дневника —
+    через общий span-based скраб; числовые поля не трогаются). Повторный скраб
+    идемпотентен: уже замаскированный текст остаётся замаскированным.
+
+    Карты дедуплицируются по `patient_id` (как build_rag_answer): одна и та же
+    карта из `patient_context` и `patient_contexts` не должна стать П1 и П2 и
+    дать две citation на один `patient:<id>`.
+
+    Если скраб в prod-режиме недоступен (DepersonalizationUnavailable), карта
+    не отправляется вовсе: сырой текст в промпт не уходит. `patient_id`
+    остаётся в памяти (нужен для citation), но в текст карты не попадает —
+    его формирует llm_router._format_patients.
+    """
+    if not settings.assistant_llm_patient_context:
+        return []
+    cards = list(state.get("patient_contexts") or [])
+    if state.get("patient_context"):
+        cards.insert(0, state["patient_context"])
+    out: list[dict] = []
+    seen: set[str] = set()
+    for ctx in cards:
+        if not ctx:
+            continue
+        pid = str(ctx.get("patient_id") or "").strip()
+        if pid:
+            if pid in seen:
+                continue
+            seen.add(pid)
+        try:
+            _, safe, _ = scrub_for_llm("", ctx, None)
+        except DepersonalizationUnavailable:
+            logger.warning(
+                "карта пациента не ушла в LLM: деперсонализация недоступна"
+            )
+            continue
+        out.append(dict(safe or {}))
+    return out
 
 
 def _fallback_answer(
@@ -492,10 +615,11 @@ class AgentFactory:
 
     def _answer(self, state: AgentState) -> AgentState:
         chunks = state.get("chunks") or []
-        # FR-17: связный ответ по сниппетам пишет LLM. Всё, что похоже на
-        # диагноз/терапию (red line), а также случаи «фрагментов нет» и «есть
-        # только карта пациента» остаются детерминированными: карта и ПДн в
-        # промпт не уходят, а отказ обязан быть воспроизводимым.
+        # FR-17: связный ответ по сниппетам (и обезличенной карте пациента)
+        # пишет LLM. Всё, что похоже на диагноз/терапию (red line), а также
+        # «фрагментов нет» и «есть только карта пациента» остаются
+        # детерминированными: отказ обязан быть воспроизводимым, а карта без
+        # сниппетов до модели не доходит (build_rag_answer отвечает по ней сам).
         result: RAGAnswer | None = None
         # LLM не зовём для red line и пустых находок: отказ обязан быть
         # воспроизводимым. Такой ответ уходит как answer_kind="refusal",
@@ -513,6 +637,7 @@ class AgentFactory:
                         if left is None
                         else min(left, settings.assistant_llm_answer_timeout)
                     ),
+                    patient_contexts=_llm_patient_contexts(state),
                 )
             else:
                 # Бюджет прогона уже израсходован роутингом/поиском: таймаут
@@ -660,6 +785,17 @@ class AgentFactory:
             try:
                 # Бюджет прогона исчерпан — поток не открываем: TimeoutError из
                 # _budget_exhausted даёт ту же причину `timeout`, что и таймаут.
+                # Guard карт делает синхронный scrub_for_llm (remote/hybrid
+                # ML-деперсонализация = блокирующий HTTP), поэтому только в
+                # рабочем потоке: в корутине он вешал бы event loop и все
+                # открытые SSE на время скраба каждой карты. abandon_on_cancel
+                # обязателен (как в assistant_chat._invoke_agent): иначе
+                # move_on_after(CC_ASSISTANT_DEADLINE_S) наверху дождётся
+                # зависшего потока и 503 придёт позже контракта; поток
+                # лимитер не держит.
+                patient_contexts = await anyio.to_thread.run_sync(
+                    _llm_patient_contexts, state, abandon_on_cancel=True
+                )
                 source = (
                     llm_router.compose_answer_stream(
                         state.get("history") or [],
@@ -670,6 +806,7 @@ class AgentFactory:
                             if left is None
                             else min(left, settings.assistant_llm_answer_timeout)
                         ),
+                        patient_contexts=patient_contexts,
                     )
                     if left is None or left >= MIN_LLM_BUDGET
                     else _budget_exhausted()
@@ -677,7 +814,9 @@ class AgentFactory:
                 async for piece in source:
                     parts.append(piece)
                     yield {"delta": piece}
-                result = _finalize_llm_answer(llm_router.clean_answer("".join(parts)), chunks)
+                result = _finalize_llm_answer(
+                    llm_router.clean_answer("".join(parts)), chunks, patient_contexts
+                )
                 # Пустой поток или ответ модели без валидных ссылок — тоже `empty`:
                 # UI обязан отличить это от честного ответа ИИ.
                 reason = "ok" if result is not None else "empty"
@@ -765,7 +904,7 @@ def scrub_for_llm(
             # (врач мог открыть карту по id без явного упоминания).
             name_findings = scrub_text(str(fio), names=names or [str(fio)]).findings
             _add(name_findings)
-            masked_ctx["fio"] = "[ПАЦИЕНТ]"
+            masked_ctx["fio"] = PATIENT_MASK
         diary = masked_ctx.get("recent_diary") or []
         masked_diary = []
         for entry in diary:

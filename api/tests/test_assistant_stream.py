@@ -175,3 +175,207 @@ def test_stream_empty_agent_answer_is_domain_error(client, monkeypatch):
     assert [e["event"] for e in events] == ["meta", "error"]
     assert events[1]["data"]["code"] == "ASSISTANT_NO_ANSWER"
     assert events[1]["data"]["status"] == 500
+
+
+def test_stream_body_carries_anonymized_patient_card(monkeypatch):
+    """Поток шлёт тот же блок карты, что batch: без ФИО, с маской [ПАЦИЕНТ]."""
+    monkeypatch.setattr(settings, "assistant_llm_url", "http://llm.test/v1")
+    monkeypatch.setattr(settings, "assistant_llm_api_key", "")
+    seen: list[dict] = []
+
+    class Resp:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_lines(self):
+            for line in (
+                'data: {"choices":[{"delta":{"content":"Балл 17 [П1]"}}]}',
+                'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+                "data: [DONE]",
+            ):
+                yield line
+
+    class Client:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def stream(self, method, url, *, json, headers):
+            seen.append(json)
+            return Resp()
+
+    monkeypatch.setattr(llm_router.httpx, "AsyncClient", Client)
+    card = {
+        "patient_id": "p-1",
+        "fio": "Петрова Анна Сергеевна",
+        "age": 41,
+        "prescribed_scales": ["PHQ-9"],
+        "last_assessment": {
+            "total_score": 17,
+            "severity": "умеренная",
+            "triage": "YELLOW",
+            "computed_at": "2026-10-20T09:00:00Z",
+        },
+        "trend": {"moving_avg": [17.0], "delta_7": 2},
+        "open_escalations": [],
+        "recent_diary": [],
+    }
+
+    async def collect():
+        return [
+            piece
+            async for piece in llm_router.compose_answer_stream(
+                [], "PHQ-9?", list(CHUNKS), patient_contexts=[card]
+            )
+        ]
+
+    assert "".join(asyncio.run(collect())) == "Балл 17 [П1]"
+    prompt = seen[0]["messages"][1]["content"]
+    assert "Карта пациента (обезлично):" in prompt
+    assert "П1: пациент: [ПАЦИЕНТ]" in prompt
+    assert "последняя оценка: 17 (умеренная)" in prompt
+    sent = json.dumps(seen[0], ensure_ascii=False)
+    assert "Петрова" not in sent
+    assert "p-1" not in sent
+
+
+def test_patient_guard_scrubs_off_event_loop(monkeypatch):
+    """Guard карт делает блокирующий скраб — только в рабочем потоке.
+
+    В прод-пути scrub_for_llm ходит в ML-деперсонализацию синхронным HTTP
+    (2 с connect / 5 с read + retry). Если звать его прямо в корутине stream(),
+    встают event loop и все открытые SSE; здесь скраб «спит», а параллельный
+    таск должен продолжать тикать.
+    """
+    import threading
+    import time
+
+    from app.services import agent as agent_mod
+    from app.services.agent import AgentFactory
+
+    threads: list[threading.Thread] = []
+    ticks = 0
+
+    def slow_scrub(query, patient_context, names=None):
+        threads.append(threading.current_thread())
+        if patient_context is not None:
+            time.sleep(0.6)
+        return query, dict(patient_context or {}), {}
+
+    monkeypatch.setattr(agent_mod, "scrub_for_llm", slow_scrub)
+
+    async def fake_stream(history, query, payload, *, timeout=None, **kwargs):
+        yield "Порог 10 [1]."
+
+    monkeypatch.setattr(llm_router, "compose_answer_stream", fake_stream)
+    monkeypatch.setattr(settings, "assistant_llm_patient_context", True)
+
+    from compass.agent import RAGChunk
+
+    chunk = RAGChunk(
+        text="PHQ-9: 10–14 умеренная депрессия.",
+        source_title="Гайдлайн",
+        guideline_id="g-1",
+        topic="SCALES",
+        score=0.9,
+    )
+    factory = AgentFactory(client=None)
+    factory._state = lambda query, **kw: {  # type: ignore[method-assign]
+        "query": query,
+        "history": [],
+        "chunks": [chunk],
+        "topic": None,
+        "patient_contexts": [{"patient_id": "p-1", "fio": "Петрова Анна"}],
+        "deadline_at": None,
+    }
+    factory._retrieve = lambda st: {}  # type: ignore[method-assign]
+
+    async def collect() -> list[dict]:
+        nonlocal ticks
+        stop = asyncio.Event()
+
+        async def ticker() -> None:
+            nonlocal ticks
+            while not stop.is_set():
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        task = asyncio.create_task(ticker())
+        events = [event async for event in factory.stream("PHQ-9?")]
+        stop.set()
+        await task
+        return events
+
+    events = asyncio.run(collect())
+
+    assert len(threads) == 1
+    assert threads[0] is not threading.main_thread()
+    # ~60 тиков за 0.6 с скраба: loop не стоял.
+    assert ticks >= 10
+    assert events[-1]["answer"]["answer_kind"] == "llm"
+
+
+def test_deadline_cancels_hung_scrub_without_waiting(monkeypatch):
+    """move_on_after(дедлайн) срезает зависший скраб карт, а не ждёт поток.
+
+    assistant_chat._stream_agent оборачивает прогон в
+    move_on_after(CC_ASSISTANT_DEADLINE_S). Без abandon_on_cancel=True
+    run_sync дожидается потока: зависший ml_client.mask (до 12 вызовов по
+    2 с connect / 5 с read) даёт 503 позже контракта.
+    """
+    import time
+
+    import anyio
+
+    from app.services import agent as agent_mod
+    from app.services.agent import AgentFactory
+
+    def hung_scrub(query, patient_context, names=None):
+        time.sleep(3.0)
+        return query, dict(patient_context or {}), {}
+
+    monkeypatch.setattr(agent_mod, "scrub_for_llm", hung_scrub)
+    monkeypatch.setattr(settings, "assistant_llm_patient_context", True)
+
+    from compass.agent import RAGChunk
+
+    chunk = RAGChunk(
+        text="PHQ-9: 10–14 умеренная депрессия.",
+        source_title="Гайдлайн",
+        guideline_id="g-1",
+        topic="SCALES",
+        score=0.9,
+    )
+    factory = AgentFactory(client=None)
+    factory._state = lambda query, **kw: {  # type: ignore[method-assign]
+        "query": query,
+        "history": [],
+        "chunks": [chunk],
+        "topic": None,
+        "patient_contexts": [{"patient_id": "p-1", "fio": "Петрова Анна"}],
+        "deadline_at": None,
+    }
+    factory._retrieve = lambda st: {}  # type: ignore[method-assign]
+
+    async def run() -> tuple[bool, float]:
+        started = time.monotonic()
+        with anyio.move_on_after(0.3) as scope:
+            async for _ in factory.stream("PHQ-9?"):
+                pass
+        return scope.cancelled_caught, time.monotonic() - started
+
+    caught, elapsed = anyio.run(run)
+
+    assert caught is True
+    assert elapsed < 2.0
