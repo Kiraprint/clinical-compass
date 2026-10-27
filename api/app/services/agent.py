@@ -867,6 +867,48 @@ __all__ = ["AgentFactory", "AgentState", "qdrant_client", "shared_factory"]
 
 # --- Граница LLM: деперсонализация (docs/12) -------------------------------
 
+# Свободный текст расширенной карты (FR-50): те же ПДн, что в дневнике —
+# название препарата, заметка приёма и анамнез косвенно указывают диагноз.
+_CARD_TEXT_FIELDS: dict[str, tuple[str, ...]] = {
+    "medications": ("title", "dosage", "notes"),
+    "adverse_events": ("event_text", "suspected_drug"),
+    "chat_insights": ("text",),
+    "visits": ("notes",),
+}
+
+
+def _scrub_card_fields(ctx: dict, names: list[str] | None, add) -> dict:
+    """Маскирует свободный текст разделов карты перед промптом (docs/12).
+
+    Через тот же scrub_text, что запрос и дневник: новый путь в промпт не
+    появляется, меняется только набор полей. `add` собирает категории находок.
+    """
+    for key, fields in _CARD_TEXT_FIELDS.items():
+        rows = ctx.get(key)
+        if not isinstance(rows, list):
+            continue
+        masked_rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                masked_rows.append(row)
+                continue
+            item = dict(row)
+            for field in fields:
+                value = item.get(field)
+                if value:
+                    scrubbed = scrub_text(str(value), names=names)
+                    add(scrubbed.findings)
+                    item[field] = scrubbed.text
+            masked_rows.append(item)
+        ctx[key] = masked_rows
+    anamnesis = ctx.get("anamnesis")
+    if isinstance(anamnesis, dict) and anamnesis.get("brief"):
+        scrubbed = scrub_text(str(anamnesis["brief"]), names=names)
+        add(scrubbed.findings)
+        ctx["anamnesis"] = {**anamnesis, "brief": scrubbed.text}
+    return ctx
+
+
 def scrub_for_llm(
     query: str,
     patient_context: dict | None,
@@ -878,8 +920,9 @@ def scrub_for_llm(
     и количество — исходные значения ПДн не покидают процесс.
 
     Маскируются: запрос врача целиком (он может содержать ФИО/телефон/адрес) и
-    свободный текст карты (ФИО, дневниковые записи). Числовые поля (баллы,
-    триаж, тренд) — не ПДн и остаются как есть.
+    свободный текст карты (ФИО, дневниковые записи, а с FR-50 — препараты,
+    анамнез, нежелательные реакции, факты из чата и заметки приёмов). Числовые
+    поля (баллы, триаж, тренд) — не ПДн и остаются как есть.
 
     Текст проходит единый span-based путь services.depersonalize.scrub_text:
     структурные правила + контрольные числа + ML-backend (ФИО/адреса) +
@@ -917,6 +960,7 @@ def scrub_for_llm(
                 masked_diary.append(entry)
         if "recent_diary" in masked_ctx:
             masked_ctx["recent_diary"] = masked_diary
+        masked_ctx = _scrub_card_fields(masked_ctx, names, _add)
 
     report = {"applied": bool(counts), "masked": counts}
     return masked_query.text, masked_ctx, report

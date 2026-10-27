@@ -56,9 +56,16 @@ ANSWER_SNIPPETS_CHARS = 3500      # обрезка всех сниппетов �
 # маскированную карту (fio → [ПАЦИЕНТ], дневник прошёл scrub_for_llm) и
 # ссылается на неё как [П1]. patient_id и ФИО в текст карты не попадают.
 ANSWER_PATIENTS = 3                # не больше карт в промпте (обычно одна)
-PATIENT_CARD_CHARS = 700           # обрезка одной карты
-PATIENT_CARDS_CHARS = 2100         # обрезка всех карт разом
+PATIENT_CARD_CHARS = 1800          # обрезка одной карты (FR-50: факты карточки)
+PATIENT_CARDS_CHARS = 4200         # обрезка всех карт разом
 PATIENT_DIARY_ENTRIES = 3          # последних записей дневника на пациента
+# Разделы расширенной карты (FR-50): бюджет каждого раздела отдельно, чтобы
+# длинный анамнез не вытеснял препараты и нежелательные реакции.
+PATIENT_ANAMNESIS_CHARS = 600
+PATIENT_MEDS_CHARS = 500
+PATIENT_AE_CHARS = 300
+PATIENT_INSIGHTS_CHARS = 300
+PATIENT_VISITS_CHARS = 300
 PATIENT_CARD_HEADER = "Карта пациента (обезлично):"
 # Маска ФИО: то же значение, что кладёт scrub_for_llm (services.agent).
 PATIENT_MASK = "[ПАЦИЕНТ]"
@@ -320,7 +327,10 @@ _ANSWER_SYSTEM_PROMPT = (
     "первый пациент). Ссылку ставь в конце утверждения, взятого из карты.\n"
     "10. Поля, которых нет в карте, не выдумывай: если нужного числа (пол, "
     "возраст, балл, дата) в карте нет, так и скажи; диагноз и дозы не "
-    "назначай даже при наличии карты."
+    "назначай даже при наличии карты.\n"
+    "11. Препараты, анамнез, нежелательные реакции, факты из чата и визиты "
+    "бери из блока карты и ссылайся [Пn]; если такого раздела в карте нет — "
+    "скажи «в карте не заполнено» и не додумывай."
 )
 
 
@@ -446,6 +456,89 @@ def answer_snippet_window(chunks: list[dict]) -> int:
     return _format_snippets(chunks)[1]
 
 
+# Свободный текст разделов расширенной карты (FR-50). Печатается одной строкой
+# на раздел: модель отвечает списком, а не пересказом карточки.
+def _patient_fact_bits(ctx: dict) -> list[str]:
+    """Разделы карты пациента: препараты, анамнез, НЯ, факты из чата, приёмы.
+
+    Пустой раздел не печатается вовсе: строка «препараты: —» сказала бы модели,
+    что препаратов нет, хотя врач их просто не внёс — а ассистент обязан
+    различать «нет данных» и «нет в карте» (правило 11 системного промпта).
+    """
+    bits: list[str] = []
+
+    meds = ctx.get("medications") or []
+    if meds:
+        items = []
+        for m in meds:
+            head = " ".join(
+                part for part in (
+                    " ".join(str(m.get("title") or "").split()) or "—",
+                    " ".join(str(m.get("dosage") or "").split()),
+                ) if part
+            )
+            meta = [str(m.get("status") or "статус не указан")]
+            if m.get("times_per_day"):
+                meta.append(f"{m['times_per_day']} р/сут")
+            if m.get("started_on"):
+                meta.append(f"с {str(m['started_on'])[:10]}")
+            item = f"{head} [{', '.join(meta)}]"
+            notes = " ".join(str(m.get("notes") or "").split())
+            if notes:
+                item += f" — {notes}"
+            items.append(item)
+        bits.append(f"препараты: {_clip(' | '.join(items), PATIENT_MEDS_CHARS)}")
+
+    anamnesis = ctx.get("anamnesis") or {}
+    brief = " ".join(str(anamnesis.get("brief") or "").split())
+    if brief:
+        if anamnesis.get("updated_at"):
+            brief += f" (обновлён {str(anamnesis['updated_at'])[:10]})"
+        bits.append(f"анамнез: {_clip(brief, PATIENT_ANAMNESIS_CHARS)}")
+
+    adverse = ctx.get("adverse_events") or []
+    if adverse:
+        items = []
+        for e in adverse:
+            text = " ".join(str(e.get("event_text") or "").split()) or "—"
+            meta = [str(e.get("severity") or "тяжесть не указана")]
+            if e.get("onset_date"):
+                meta.append(f"от {str(e['onset_date'])[:10]}")
+            if e.get("suspected_drug"):
+                meta.append(f"подозреваемый препарат: {e['suspected_drug']}")
+            if e.get("action_taken"):
+                meta.append(f"действия: {e['action_taken']}")
+            items.append(f"{text} ({', '.join(meta)})")
+        bits.append(f"нежелательные реакции: {_clip(' | '.join(items), PATIENT_AE_CHARS)}")
+
+    insights = ctx.get("chat_insights") or []
+    if insights:
+        items = []
+        for i in insights:
+            text = " ".join(str(i.get("text") or "").split())
+            if text:
+                items.append(f"{i.get('kind') or 'факт'}: {text}")
+        if items:
+            bits.append(f"факты из чата: {_clip(' | '.join(items), PATIENT_INSIGHTS_CHARS)}")
+
+    visits = ctx.get("visits") or []
+    if visits:
+        items = []
+        for v in visits:
+            item = " ".join(
+                part for part in (
+                    str(v.get("visited_at") or "")[:10],
+                    str(v.get("visit_type") or ""),
+                ) if part
+            )
+            notes = " ".join(str(v.get("notes") or "").split())
+            if notes:
+                item += f": {notes}"
+            items.append(item)
+        bits.append(f"визиты: {_clip(' | '.join(items), PATIENT_VISITS_CHARS)}")
+    return bits
+
+
 def _patient_line(index: int, ctx: dict) -> str:
     """Одна карта пациента строкой `П<n>: пациент: [ПАЦИЕНТ]; ...`.
 
@@ -498,6 +591,7 @@ def _patient_line(index: int, ctx: dict) -> str:
         if str(d.get("content") or "").strip()
     ]
     bits.append(f"дневник: {' | '.join(entries) if entries else '—'}")
+    bits.extend(_patient_fact_bits(ctx))
     return f"П{index}: " + "; ".join(bits)
 
 

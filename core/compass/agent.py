@@ -194,6 +194,65 @@ def _refusal_answer(code: str) -> RAGAnswer:
     )
 
 
+def _scales_text(ctx: dict) -> str:
+    """Назначенные шкалы: API отдаёт список `prescribed_scales`, старое поле — строка."""
+    scales = ctx.get("prescribed_scales") or ctx.get("prescribed_scale") or []
+    if isinstance(scales, str):
+        scales = [scales]
+    return ", ".join(str(s) for s in scales) or "—"
+
+
+def _fact_sections(ctx: dict) -> list[str]:
+    """Клинические факты карты (FR-50) свободным текстом; пустые разделы не печатаются."""
+    parts: list[str] = []
+    meds = ctx.get("medications") or []
+    if meds:
+        items = []
+        for m in meds:
+            head = " ".join(
+                part for part in (str(m.get("title") or "—"), str(m.get("dosage") or "")) if part
+            )
+            items.append(f"{head} ({m.get('status') or 'статус не указан'})")
+        parts.append("Препараты: " + "; ".join(items) + ".")
+    anamnesis = ctx.get("anamnesis") or {}
+    brief = " ".join(str(anamnesis.get("brief") or "").split())
+    if brief:
+        parts.append(f"Анамнез: {brief}.")
+    adverse = ctx.get("adverse_events") or []
+    if adverse:
+        items = []
+        for e in adverse:
+            text = " ".join(str(e.get("event_text") or "").split()) or "—"
+            meta = [str(e.get("severity") or "тяжесть не указана")]
+            if e.get("suspected_drug"):
+                meta.append(f"подозреваемый препарат: {e['suspected_drug']}")
+            items.append(f"{text} ({', '.join(meta)})")
+        parts.append("Нежелательные реакции: " + "; ".join(items) + ".")
+    insights = ctx.get("chat_insights") or []
+    if insights:
+        items = [
+            f"{i.get('kind') or 'факт'}: {' '.join(str(i.get('text') or '').split())}"
+            for i in insights
+            if str(i.get("text") or "").strip()
+        ]
+        if items:
+            parts.append("Факты из чата: " + "; ".join(items) + ".")
+    visits = ctx.get("visits") or []
+    if visits:
+        items = []
+        for v in visits:
+            item = " ".join(
+                part for part in (str(v.get("visited_at") or "")[:10], str(v.get("visit_type") or ""))
+                if part
+            )
+            notes = " ".join(str(v.get("notes") or "").split())
+            if notes:
+                item += f": {notes}"
+            items.append(item)
+        parts.append("Приёмы: " + "; ".join(items) + ".")
+    return parts
+
+
 def _patient_card_text(ctx: dict) -> str:
     """Компактная текстовая сводка карты пациента для grounding ответа (чисто, без I/O).
 
@@ -201,12 +260,12 @@ def _patient_card_text(ctx: dict) -> str:
     Используется только как фактическая опора ответа; диагноз/терапию не выводит.
     """
     fio = ctx.get("fio") or "без ФИО"
-    scale = ctx.get("prescribed_scale") or "—"
+    scales = _scales_text(ctx)
     last = ctx.get("last_assessment")
     trend = ctx.get("trend") or {}
     esc = ctx.get("open_escalations") or []
     diary = ctx.get("recent_diary") or []
-    parts = [f"Пациент: {fio}. Назначенная шкала: {scale}."]
+    parts = [f"Пациент: {fio}. Назначенные шкалы: {scales}."]
     if last:
         parts.append(
             f"Последний скрининг: балл {last.get('total_score')}, "
@@ -231,6 +290,7 @@ def _patient_card_text(ctx: dict) -> str:
             "Последние записи дневника: "
             + " | ".join((d.get("content") or "")[:80] for d in diary)
         )
+    parts.extend(_fact_sections(ctx))
     return " ".join(parts)
 
 
