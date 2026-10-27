@@ -418,6 +418,37 @@ test("блоки под ответом свёрнуты: фрагменты, к�
   await expect(sources).toContainText("Карта пациента: Иванов Иван");
 });
 
+test("без цитаты пациента блок называется «Из ответа» и тоже свёрнут", async ({ page }) => {
+  await openStubbedThread(page, "e2e-from-answer", "Пункт из ответа", [
+    { id: "e2e-from-answer-q", role: "CLINICIAN", content: "Что с динамикой?" },
+    {
+      id: "e2e-from-answer-a",
+      role: "ASSISTANT",
+      content:
+        "По базе знаний найдено следующее:\n" +
+        "1. — Фрагмент про PHQ-9\n" +
+        "2. — ОТВЕТ-МАРКЕР: динамика ухудшилась\n" +
+        '\n\nИсточники: «Гайд» (g1).',
+      citations: [{ source_title: "Гайд", guideline_id: "g1", topic: "ШКАЛЫ", score: 0.8 }],
+      topic: "ШКАЛЫ",
+      answer_kind: "fragments",
+      llm_reason: "empty",
+      fragments: [{ n: 1, source_title: "Гайд", text: "Фрагмент про PHQ-9" }],
+    },
+  ]);
+
+  const extra = page
+    .locator(".bubble", { hasText: "Ассистент" })
+    .first()
+    .locator(".answer-extra");
+  // Пациента в цитатах нет (topic !== "ПАЦИЕНТ") → шапка «Из ответа (N)».
+  await expect(extra.locator("summary")).toHaveText("Из ответа (1)");
+  await expect(extra).toHaveJSProperty("open", false);
+  await expect(extra.locator("li")).toBeHidden();
+  await extra.locator("summary").click();
+  await expect(extra.locator("li")).toContainText("2. ОТВЕТ-МАРКЕР");
+});
+
 test("абзац «Источники:» в середине ответа не режет текст после него", async ({ page }) => {
   // Хвост срезается только однострочный и в конце; абзац посреди ответа — часть
   // текста модели, продолжение обязано остаться.

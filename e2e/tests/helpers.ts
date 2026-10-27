@@ -33,21 +33,34 @@ export function totp(secret: string): string {
   return code;
 }
 
+/** CC_REQUIRE_OTP стенда (GET /auth/config), один запрос на origin за прогон. */
+const requireOtp = new Map<string, Promise<boolean>>();
+
+async function standRequiresOtp(page): Promise<boolean> {
+  const origin = new URL(page.url()).origin;
+  let pending = requireOtp.get(origin);
+  if (!pending) {
+    pending = page.request
+      .get(`${origin}/api/v1/auth/config`)
+      .then(async (res) =>
+        res.ok() ? Boolean((await res.json()).require_otp) : true,
+      )
+      // Конфиг недоступен — ведём себя как стенд с 2FA (поле есть всегда).
+      .catch(() => true);
+    requireOtp.set(origin, pending);
+  }
+  return pending;
+}
+
 export async function login(page, email: string, password: string, totpSecret?: string) {
   await page.goto("/");
   await page.getByRole("button", { name: "Вход" }).click();
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Пароль").fill(password);
-  if (totpSecret) {
-    // Поле 2FA рендерится, только когда GET /auth/config вернул require_otp.
-    // На стендах с CC_REQUIRE_OTP=false его нет — входим без кода.
-    const field = page.getByLabel("Код 2FA");
-    try {
-      await field.waitFor({ state: "visible", timeout: 3000 });
-      await field.fill(totp(totpSecret));
-    } catch {
-      // 2FA на стенде отключён.
-    }
+  // App.tsx рендерит «Код 2FA» по require_otp из /auth/config; на стендах с
+  // CC_REQUIRE_OTP=false поля нет — заполнять нечего, код пропускаем.
+  if (totpSecret && (await standRequiresOtp(page))) {
+    await page.getByLabel("Код 2FA").fill(totp(totpSecret));
   }
   await page.getByRole("button", { name: "Войти" }).click();
 }
