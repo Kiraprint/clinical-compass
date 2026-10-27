@@ -3,6 +3,8 @@
 # Контракт: docs/04 §3.1; docs/06 §3.
 import time
 
+from sqlalchemy import text
+
 from .conftest import admin_ctx, auth_header, clinician_ctx, finish_screening, patient_ctx
 
 # q9 (суицидальный пункт PHQ-9) >= 1 → SUICIDAL_IDEATION → RED
@@ -222,3 +224,23 @@ def test_notification_failure_does_not_lose_patient_message(client, monkeypatch)
     thread = client.get("/api/v1/chat/thread", headers=h).json()["items"]
     assert any(text in m["content"] for m in thread), thread
     assert client.get("/api/v1/me/notifications", headers=c).json()["items"] == []
+
+
+def test_patient_message_title_uses_fio_only(client, db_session):
+    """ФИО пациента (обрезанное) — в заголовке; ни e-mail, ни текста сообщения там нет."""
+    h, pid = patient_ctx(client, "pmt@test.ru")
+    c, cid = clinician_ctx(client, "pmtc@test.ru")
+    a, _ = admin_ctx(client, "pmta@test.ru")
+    _grant(client, a, pid, cid)
+    db_session.execute(
+        text("update users set fio = :f where id = :p"),
+        {"f": "  Иванов Иван Иванович  ", "p": pid},
+    )
+    db_session.commit()
+
+    _send_chat(client, h, "текст который не должен утечь")
+
+    n = client.get("/api/v1/me/notifications", headers=c).json()["items"][0]
+    assert n["title"] == "Новое сообщение от Иванов Иван Иванович"
+    assert "pmt@test.ru" not in n["title"] and "pmt@test.ru" not in n["body"]
+    assert "не должен утечь" not in n["body"]
