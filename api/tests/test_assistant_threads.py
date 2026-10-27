@@ -657,3 +657,32 @@ def test_thread_answer_composed_by_llm_from_snippets(client, monkeypatch, kb_col
     assert answer_prompts, "ответ генерировался LLM, а не детерминированно"
     assert "Вопрос врача: Какой порог тяжести у шкалы PHQ-9?" in answer_prompts[0]
     assert "[1]" in answer_prompts[0]
+
+
+def test_first_message_with_patient_ids_uses_card(client, kb_collection):
+    """Пациент, пришедший вместе с первым вопросом, попадает в контекст хода.
+
+    `_set_patients` пишет строки в сессию с autoflush=False, а `_patient_ids`
+    читает их сразу после — без явного flush карты на этом ходе пустые, и
+    ассистент отвечает «данных о пациенте нет» (пользователь выбирал пациента в
+    новом диалоге и не получал его контекста).
+    """
+    ch, (p1, _p2) = _setup(client, "th-first@test.ru")
+    tid = client.post("/api/v1/assistant/threads", json={}, headers=ch).json()["id"]
+
+    body = client.post(
+        f"/api/v1/assistant/threads/{tid}/messages",
+        json={"content": "Какой порог тяжести у шкалы PHQ-9?", "patient_ids": [p1]},
+        headers=ch,
+    ).json()
+
+    patient_cites = [c for c in body["citations"] if c["topic"] == "ПАЦИЕНТ"]
+    assert len(patient_cites) == 1, body["citations"]
+    assert body["skipped_patient_ids"] == []
+    # Пациент сохранён за тредом: следующий вопрос без patient_ids видит ту же карту.
+    again = client.post(
+        f"/api/v1/assistant/threads/{tid}/messages",
+        json={"content": "А что в дневнике?"},
+        headers=ch,
+    ).json()
+    assert any(c["topic"] == "ПАЦИЕНТ" for c in again["citations"]), again["citations"]
