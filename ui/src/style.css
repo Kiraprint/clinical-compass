@@ -93,6 +93,88 @@ small { color: #8a94a8; }
 .assistant-sources { margin-top: 10px; font-size: 13px; color: #3a4356; }
 .assistant-sources ul { margin: 6px 0 0; padding-left: 18px; }
 
+/* Ответ без ИИ-формулировки: плашка причины + фрагменты базы знаний. */
+.answer-degraded {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #fff7e6;
+  border: 1px solid #f0c988;
+  border-left: 4px solid #d9902f;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: #6a4a10;
+}
+.answer-degraded strong { color: #8a5a00; }
+.answer-degraded-hint { font-size: 12px; color: #7a5a12; }
+.answer-fragments { font-size: 13px; color: #3a4356; }
+.answer-fragments summary { cursor: pointer; color: #1b3a8a; }
+/* Свой номер «n ·» уже напечатан в .fragment-source: маркер <ol> не нужен
+   (и разъезжается с n, когда в списке есть пропуски). */
+.answer-fragments ol { margin: 8px 0 0; padding-left: 0; list-style: none; }
+.answer-fragments li { margin-bottom: 10px; }
+.fragment-source { font-weight: 600; color: #1c2333; }
+.fragment-text { margin: 2px 0 0; white-space: pre-wrap; word-break: break-word; }
+/* Пункты ответа без своего фрагмента (карта пациента): видимы сразу. */
+.answer-extra { margin-top: 10px; font-size: 13px; color: #3a4356; }
+.answer-extra strong { color: #1c2333; }
+.answer-extra ul { margin: 6px 0 0; padding-left: 18px; }
+.answer-extra li { margin-bottom: 6px; white-space: pre-wrap; word-break: break-word; }
+
+/* Пациенты треда: чипсы + typeahead по «@». */
+.chip-x {
+  background: none;
+  border: 0;
+  padding: 0 2px;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.chip-x:disabled { cursor: default; color: #8a94a8; }
+.chip-input-wrap { position: relative; max-width: 320px; }
+.chip-input {
+  width: 100%;
+  font-size: 13px;
+  padding: 6px 10px;
+  border: 1px solid #d4d8e3;
+  border-radius: 12px;
+  background: #fff;
+  color: #1c2333;
+}
+.chip-suggest {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: #fff;
+  border: 1px solid #d4d8e3;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(28, 35, 51, 0.14);
+  max-height: 240px;
+  overflow-y: auto;
+}
+.chip-suggest button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 13px;
+  color: #1c2333;
+  cursor: pointer;
+}
+.chip-suggest button.active,
+.chip-suggest button:hover { background: #eef2ff; color: #1b3a8a; }
+
 /* FR-29: экран чатов врача. Корень раздела не даёт странице уехать по X. */
 .chat-view { overflow-x: hidden; }
 .muted { color: #5a6478; }

@@ -13,6 +13,68 @@ async function openNewThread(page: Page) {
   await expect(page.getByLabel("Вопрос")).toBeVisible();
 }
 
+type StubCitation = { source_title: string; guideline_id: string; topic: string; score?: number };
+type StubMessage = {
+  id: string;
+  role: "CLINICIAN" | "ASSISTANT";
+  content: string;
+  citations?: StubCitation[];
+  topic?: string | null;
+  answer_kind?: string;
+  llm_reason?: string | null;
+  fragments?: { n: number; source_title: string; text: string }[];
+};
+
+/**
+ * Стаб треда: список из одного диалога и его деталь, затем вход во вкладку.
+ * Поля контракта PR-A (answer_kind/llm_reason/fragments) передаются как есть —
+ * отсутствие поля = ответ старого API.
+ */
+async function openStubbedThread(
+  page: Page,
+  threadId: string,
+  title: string,
+  messages: StubMessage[],
+) {
+  const now = new Date().toISOString();
+  const detail = {
+    id: threadId,
+    title,
+    patient_ids: [],
+    created_at: now,
+    updated_at: now,
+    message_count: messages.length,
+    messages: messages.map((m) => ({ citations: [], topic: null, created_at: now, ...m })),
+  };
+  await page.route("**/api/v1/assistant/threads", async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [
+          {
+            id: threadId,
+            title,
+            patient_ids: [],
+            created_at: now,
+            updated_at: now,
+            message_count: messages.length,
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/api/v1/assistant/threads/*", async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(detail) });
+  });
+
+  await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
+  await page.getByRole("button", { name: "Чаты" }).click();
+  await page.getByRole("tab", { name: "Ассистент" }).click();
+}
+
 test.describe("ИИ-ассистент врача", () => {
   test("тред отвечает с источниками по базе знаний", async ({ page }) => {
     await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
@@ -21,7 +83,11 @@ test.describe("ИИ-ассистент врача", () => {
     // Справочный запрос → ответ с цитатами.
     await page.getByLabel("Вопрос").fill("Какой порог тяжести у шкалы PHQ-9?");
     await page.getByRole("button", { name: "Спросить" }).click();
-    await expect(page.getByText("По базе знаний найдено следующее:")).toBeVisible();
+    // С PR-A ответ может прийти двумя видами: ИИ-формулировка или
+    // детерминированные фрагменты с плашкой — оба обязаны нести источники.
+    await expect(
+      page.getByText(/По базе знаний найдено следующее:|ИИ-формулировка недоступна/),
+    ).toBeVisible();
     await expect(
       page.locator(".assistant-sources").getByText("Источники:", { exact: true }),
     ).toBeVisible();
@@ -38,9 +104,9 @@ test.describe("ИИ-ассистент врача", () => {
 
     await page.getByLabel("Вопрос").fill("Какая дозировка Авиандра?");
     await page.getByRole("button", { name: "Спросить" }).click();
-    await expect(page.getByText("По базе знаний найдено следующее:")).toBeVisible({
-      timeout: 30000,
-    });
+    await expect(
+      page.getByText(/По базе знаний найдено следующее:|ИИ-формулировка недоступна/),
+    ).toBeVisible({ timeout: 30000 });
     // Цитата чанка препарата (АВИАНДР).
     await expect(page.locator(".assistant-sources").getByText(/АВИАНДР/i).first()).toBeVisible();
   });
@@ -49,8 +115,10 @@ test.describe("ИИ-ассистент врача", () => {
     await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
     await openNewThread(page);
 
-    // Чип пациента из ротстера врача → карта попадает в контекст треда.
-    await page.getByTitle("Добавить в контекст").first().click();
+    // Пациент из ротстера врача — через @-выпадашку (прежний список чипов убран).
+    await page.getByLabel("Добавить пациента в контекст").fill("@");
+    await page.getByRole("option").first().click();
+    await expect(page.locator(".chips .chip").first()).toBeVisible();
     await page.getByLabel("Вопрос").fill("Какая динамика пациента по шкале PHQ-9?");
     await page.getByRole("button", { name: "Спросить" }).click();
     // 30 с: ответ идёт через LLM-шлюз, 15 с не хватало на медленном ответе.
@@ -168,6 +236,315 @@ test("поток: ответ остаётся при сбое загрузки �
   await expect(page.locator(".bubble", { hasText: "Думаю…" })).toHaveCount(0);
 });
 
+test("ответ без ИИ-формулировки: плашка, фрагменты и единственный блок источников", async ({ page }) => {
+  // Контракт PR-A: answer_kind=fragments + fragments + llm_reason=timeout.
+  const longText = "Фрагмент про PHQ-9 и динамику шкалы. ".repeat(30);
+  await openStubbedThread(page, "e2e-fragments-thread", "Деградированный ответ", [
+    {
+      id: "e2e-frag-q",
+      role: "CLINICIAN",
+      content: "Какая динамика по PHQ-9?",
+    },
+    {
+      id: "e2e-frag-a",
+      role: "ASSISTANT",
+      content: "— Фрагмент 1\n— Фрагмент 2\n\nИсточники: 1. «Клинические рекомендации: депрессия»",
+      citations: [
+        {
+          source_title: "Клинические рекомендации: депрессия",
+          guideline_id: "g1",
+          topic: "ШКАЛЫ",
+          score: 0.91,
+        },
+        { source_title: "Гайдлайн по тревоге", guideline_id: "g2", topic: "ТРЕВОГА", score: 0.72 },
+      ],
+      topic: "ШКАЛЫ",
+      answer_kind: "fragments",
+      llm_reason: "timeout",
+      fragments: [
+        { n: 1, source_title: "Клинические рекомендации: депрессия", text: longText },
+        { n: 2, source_title: "Гайдлайн по тревоге", text: "Короткий второй фрагмент." },
+      ],
+    },
+  ]);
+
+  const bubble = page.locator(".bubble", { hasText: "Ассистент" }).first();
+  const banner = bubble.locator(".answer-degraded");
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText("ИИ-формулировка недоступна");
+  await expect(banner).toContainText("не уложилась");
+  // timeout → отдельная подсказка про медленную модель.
+  await expect(banner.locator(".answer-degraded-hint")).toContainText("слишком медленная");
+  // Сырой текст ответа вместо фрагментов не показываем.
+  await expect(bubble.locator(".assistant-answer")).toHaveCount(0);
+
+  const details = bubble.locator(".answer-fragments");
+  await expect(details.locator("summary")).toContainText("Фрагменты базы знаний (2)");
+  await details.locator("summary").click();
+  await expect(details.locator(".fragment-source")).toHaveCount(2);
+  await expect(details.locator(".fragment-source").first()).toContainText(
+    "1 · Клинические рекомендации: депрессия",
+  );
+  await expect(details.locator(".fragment-text").first()).toContainText("PHQ-9");
+  // Длинный текст обрезан (~400 символов + многоточие).
+  const shown = await details.locator(".fragment-text").first().innerText();
+  expect(shown.length).toBeLessThanOrEqual(401);
+  expect(shown.endsWith("…")).toBe(true);
+  // Маркер <ol> не дублирует номер «n ·» (и не разъезжается при пропусках n).
+  expect(
+    await details.locator("ol").evaluate((el) => getComputedStyle(el).listStyleType),
+  ).toBe("none");
+
+  // Хвост «Источники:» срезан из текста — источники ровно один раз, из цитат.
+  await expect(page.getByText("Источники:", { exact: true })).toHaveCount(1);
+  await expect(page.getByText(/Источники: 1\./)).toHaveCount(0);
+});
+
+test("карта пациента видна и в деградированном ответе (её нет во fragments)", async ({ page }) => {
+  // PR-A не кладёт карту пациента во fragments (у неё нет чанка, n идут с дырой),
+  // поэтому пункт ответа без своего фрагмента дорисовывается из текста.
+  await openStubbedThread(page, "e2e-patient-frag", "Ответ с картой пациента", [
+    { id: "e2e-patient-frag-q", role: "CLINICIAN", content: "Что с динамикой?" },
+    {
+      id: "e2e-patient-frag-a",
+      role: "ASSISTANT",
+      content:
+        "По базе знаний и карте пациента найдено следующее:\n" +
+        "1. — Фрагмент про PHQ-9\n" +
+        "2. — КАРТА-МАРКЕР: динамика ухудшилась\n" +
+        '\n\nИсточники: «Гайд» (g1), «Карта пациента: Иванов Иван» (patient:p1).',
+      citations: [
+        { source_title: "Гайд", guideline_id: "g1", topic: "ШКАЛЫ", score: 0.8 },
+        {
+          source_title: "Карта пациента: Иванов Иван",
+          guideline_id: "patient:p1",
+          topic: "ПАЦИЕНТ",
+          score: 1,
+        },
+      ],
+      topic: "ПАЦИЕНТ",
+      answer_kind: "fragments",
+      llm_reason: "empty",
+      fragments: [{ n: 1, source_title: "Гайд", text: "Фрагмент про PHQ-9" }],
+    },
+  ]);
+
+  const bubble = page.locator(".bubble", { hasText: "Ассистент" }).first();
+  await expect(bubble.locator(".answer-degraded")).toBeVisible();
+  const extra = bubble.locator(".answer-extra");
+  await expect(extra).toContainText("КАРТА-МАРКЕР: динамика ухудшилась");
+  await expect(extra.locator("strong")).toHaveText("Карта пациента (1):");
+  // Номер пункта — тот же, что номер цитаты карты пациента.
+  await expect(extra.locator("li")).toContainText("2. КАРТА-МАРКЕР");
+  // Пункт, у которого есть фрагмент, во втором списке не повторяется.
+  await expect(extra.locator("li")).toHaveCount(1);
+  // Текст с картой не сыплется в <pre> целиком.
+  await expect(bubble.locator(".assistant-answer")).toHaveCount(0);
+  await expect(page.getByText("Источники:", { exact: true })).toHaveCount(1);
+});
+
+test("абзац «Источники:» в середине ответа не режет текст после него", async ({ page }) => {
+  // Хвост срезается только однострочный и в конце; абзац посреди ответа — часть
+  // текста модели, продолжение обязано остаться.
+  await openStubbedThread(page, "e2e-tail-mid", "Хвост в середине", [
+    { id: "e2e-tail-mid-q", role: "CLINICIAN", content: "Вопрос" },
+    {
+      id: "e2e-tail-mid-a",
+      role: "ASSISTANT",
+      content:
+        "Вступление.\n\nИсточники: см. рекомендации ниже\n\nГЛАВНЫЙ-ВЫВОД: динамика ухудшилась.",
+      answer_kind: "llm",
+      llm_reason: "ok",
+      fragments: [],
+    },
+  ]);
+  const answer = page.locator(".bubble", { hasText: "Ассистент" }).first().locator(".assistant-answer");
+  await expect(answer).toContainText("Вступление.");
+  await expect(answer).toContainText("Источники: см. рекомендации ниже");
+  await expect(answer).toContainText("ГЛАВНЫЙ-ВЫВОД: динамика ухудшилась.");
+});
+
+test("контракт: незнакомый llm_reason — плашка «причина неизвестна»", async ({ page }) => {
+  await openStubbedThread(page, "e2e-unknown-reason", "Незнакомый reason", [
+    { id: "e2e-unkr-q", role: "CLINICIAN", content: "Вопрос" },
+    {
+      id: "e2e-unkr-a",
+      role: "ASSISTANT",
+      content: "1. — Фрагмент\n\nИсточники: «Гайд» (g1).",
+      citations: [{ source_title: "Гайд", guideline_id: "g1", topic: "ШКАЛЫ", score: 0.8 }],
+      answer_kind: "fragments",
+      llm_reason: "rate_limited",
+      fragments: [{ n: 1, source_title: "Гайд", text: "Фрагмент" }],
+    },
+  ]);
+  const banner = page.locator(".bubble", { hasText: "Ассистент" }).first().locator(".answer-degraded");
+  await expect(banner).toContainText("ИИ-формулировка недоступна");
+  await expect(banner).toContainText("(причина неизвестна)");
+  await expect(banner).toContainText("ниже найденные фрагменты базы знаний");
+});
+
+test("контракт: fragments без списка фрагментов — плашка и полный текст", async ({ page }) => {
+  await openStubbedThread(page, "e2e-empty-fragments", "Пустой список фрагментов", [
+    { id: "e2e-ef-q", role: "CLINICIAN", content: "Вопрос" },
+    {
+      id: "e2e-ef-a",
+      role: "ASSISTANT",
+      content: "По базе знаний найдено следующее:\n1. — Полный текст ответа\n\nИсточники: «Гайд» (g1).",
+      citations: [{ source_title: "Гайд", guideline_id: "g1", topic: "ШКАЛЫ", score: 0.8 }],
+      answer_kind: "fragments",
+      llm_reason: "disabled",
+      fragments: [],
+    },
+  ]);
+  const bubble = page.locator(".bubble", { hasText: "Ассистент" }).first();
+  const banner = bubble.locator(".answer-degraded");
+  await expect(banner).toBeVisible();
+  // Обещать фрагменты нечего — плашка нейтральная.
+  await expect(banner).toContainText("ниже ответ, собранный из найденных данных");
+  await expect(banner).not.toContainText("фрагменты базы знаний");
+  await expect(bubble.locator(".answer-fragments")).toHaveCount(0);
+  await expect(bubble.locator(".assistant-answer")).toContainText("Полный текст ответа");
+  await expect(bubble.locator(".assistant-answer")).toContainText("По базе знаний найдено следующее:");
+});
+
+test("контракт: refusal — обычный текст без плашки", async ({ page }) => {
+  await openStubbedThread(page, "e2e-refusal", "Отказ ассистента", [
+    { id: "e2e-ref-q", role: "CLINICIAN", content: "Поставь диагноз депрессии" },
+    {
+      id: "e2e-ref-a",
+      role: "ASSISTANT",
+      content: "Я не могу поставить диагноз — это вне моих границ.",
+      answer_kind: "refusal",
+      llm_reason: null,
+      fragments: [],
+    },
+  ]);
+
+  const bubble = page.locator(".bubble", { hasText: "Ассистент" }).first();
+  // Отказ — обычный текст: плашки «ИИ-формулировка недоступна» быть не должно.
+  await expect(bubble.locator(".assistant-answer")).toContainText("Я не могу поставить диагноз");
+  await expect(bubble.locator(".answer-degraded")).toHaveCount(0);
+  await expect(bubble.locator(".answer-fragments")).toHaveCount(0);
+});
+
+test("контракт: truncated — плашка про обрыв по лимиту длины", async ({ page }) => {
+  await openStubbedThread(page, "e2e-truncated", "Обрыв ответа", [
+    { id: "e2e-trunc-q", role: "CLINICIAN", content: "Какой порог у PHQ-9?" },
+    {
+      id: "e2e-trunc-a",
+      role: "ASSISTANT",
+      content: "1. — Фрагмент про PHQ-9\n\nИсточники: «Гайд» (g1).",
+      citations: [{ source_title: "Гайд", guideline_id: "g1", topic: "ШКАЛЫ", score: 0.8 }],
+      topic: "ШКАЛЫ",
+      answer_kind: "fragments",
+      llm_reason: "truncated",
+      fragments: [{ n: 1, source_title: "Гайд", text: "Фрагмент про PHQ-9" }],
+    },
+  ]);
+
+  const banner = page.locator(".bubble", { hasText: "Ассистент" }).first().locator(".answer-degraded");
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText("оборван по лимиту длины");
+  // Подсказка про медленную модель — только для timeout.
+  await expect(banner.locator(".answer-degraded-hint")).toHaveCount(0);
+  await expect(page.locator(".answer-fragments summary")).toContainText("Фрагменты базы знаний (1)");
+});
+
+test("контракт: неизвестный answer_kind и текст из одного «Источники:»", async ({ page }) => {
+  // Forward-compatibility: незнакомое значение answer_kind — обычный текст.
+  await openStubbedThread(page, "e2e-unknown-kind", "Незнакомый kind", [
+    { id: "e2e-unk-q", role: "CLINICIAN", content: "Вопрос" },
+    {
+      id: "e2e-unk-a",
+      role: "ASSISTANT",
+      content: "Ответ будущей версии сервера.",
+      answer_kind: "summary_v2",
+      llm_reason: "ok",
+      fragments: [],
+    },
+  ]);
+  const bubble = page.locator(".bubble", { hasText: "Ассистент" }).first();
+  await expect(bubble.locator(".assistant-answer")).toHaveText("Ответ будущей версии сервера.");
+  await expect(bubble.locator(".answer-degraded")).toHaveCount(0);
+});
+
+test("хвост «Источники:»: один бэкендовый формат, без пустого пузыря", async ({ page }) => {
+  // Текст, где «Источники:» — не абзац-хвост, а часть фразы, не режется вовсе.
+  await openStubbedThread(page, "e2e-tail-inline", "Хвост внутри фразы", [
+    { id: "e2e-tail-inline-q", role: "CLINICIAN", content: "Вопрос" },
+    {
+      id: "e2e-tail-inline-a",
+      role: "ASSISTANT",
+      content: "Смотрите Источники: 1. «Гайд» — там подробности.",
+      answer_kind: "llm",
+      llm_reason: "ok",
+      fragments: [],
+    },
+  ]);
+  const bubble = page.locator(".bubble", { hasText: "Ассистент" }).first();
+  await expect(bubble.locator(".assistant-answer")).toHaveText(
+    "Смотрите Источники: 1. «Гайд» — там подробности.",
+  );
+});
+
+test("хвост «Источники:»: ответ целиком из хвоста не даёт пустой пузырь", async ({ page }) => {
+  await openStubbedThread(page, "e2e-tail-only", "Только хвост", [
+    { id: "e2e-tail-only-q", role: "CLINICIAN", content: "Вопрос" },
+    {
+      id: "e2e-tail-only-a",
+      role: "ASSISTANT",
+      content: "Источники: 1. «Только хвост»",
+      citations: [{ source_title: "Только хвост", guideline_id: "g1", topic: "ШКАЛЫ", score: 0.5 }],
+      answer_kind: "llm",
+      llm_reason: "ok",
+      fragments: [],
+    },
+  ]);
+  const bubble = page.locator(".bubble", { hasText: "Ассистент" }).first();
+  await expect(bubble.locator(".assistant-answer")).toContainText("Только хвост");
+});
+
+test("пациент добавляется @-выпадашкой и уходит в PATCH треда", async ({ page }) => {
+  let patchThreadId = "";
+  let patchBody: { patient_ids?: string[] } | null = null;
+  await page.route("**/api/v1/assistant/threads/*", async (route) => {
+    const req = route.request();
+    if (req.method() !== "PATCH") return route.continue();
+    patchThreadId = new URL(req.url()).pathname.split("/").pop() ?? "";
+    patchBody = req.postDataJSON() as { patient_ids?: string[] };
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: patchThreadId,
+        title: "E2E @-чипсы",
+        patient_ids: patchBody?.patient_ids ?? [],
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        message_count: 0,
+      }),
+    });
+  });
+
+  await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
+  await openNewThread(page);
+
+  const picker = page.getByLabel("Добавить пациента в контекст");
+  await expect(picker).toBeVisible();
+  await picker.fill("@");
+  const options = page.getByRole("option");
+  await expect(options.first()).toBeVisible();
+  const label = (await options.first().innerText()).trim();
+  // Выбор с клавиатуры: Enter берёт подсвеченный первый вариант.
+  await picker.press("Enter");
+
+  await expect(page.locator(".chips .chip", { hasText: label })).toBeVisible();
+  await expect(picker).toHaveValue("");
+  await expect(options).toHaveCount(0);
+  expect(patchThreadId).not.toBe("");
+  expect(patchBody?.patient_ids).toHaveLength(1);
+});
+
 test("FR-47: Ctrl+Enter в композере отправляет вопрос", async ({ page }) => {
   await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
   await openNewThread(page);
@@ -185,4 +562,33 @@ test("FR-47: Ctrl+Enter в композере отправляет вопрос"
   // Ответ ассистента появляется (текст зависит от LLM/KB, проверяем наличие).
   const answer = page.locator(".bubble", { hasText: "Ассистент" }).last();
   await expect.poll(async () => (await answer.innerText()).trim().length).toBeGreaterThan(10);
+});
+
+test("ответ ИИ: хвост «Источники:» срезается, источники — один раз", async ({ page }) => {
+  // answer_kind=llm: плашки нет, текст модели показывается, но служебный хвост
+  // «Источники: …» не дублирует блок цитат под ответом.
+  await openStubbedThread(page, "e2e-llm-thread", "Ответ ИИ", [
+    { id: "e2e-llm-q", role: "CLINICIAN", content: "Какой порог тяжести у PHQ-9?" },
+    {
+      id: "e2e-llm-a",
+      role: "ASSISTANT",
+      // Хвост — ровно как его строит бэкенд: отдельным абзацем.
+      content:
+        "Порог тяжёлой депрессии по PHQ-9 — 20 баллов и выше [1].\n\nИсточники: «Гайд по PHQ-9» (g1).",
+      citations: [{ source_title: "Гайд по PHQ-9", guideline_id: "g1", topic: "ШКАЛЫ", score: 0.9 }],
+      topic: "ШКАЛЫ",
+      answer_kind: "llm",
+      llm_reason: "ok",
+      fragments: [],
+    },
+  ]);
+
+  const bubble = page.locator(".bubble", { hasText: "Ассистент" }).first();
+  // Режим ИИ: плашки и списка фрагментов нет, текст — в <pre>.
+  await expect(bubble.locator(".answer-degraded")).toHaveCount(0);
+  await expect(bubble.locator(".answer-fragments")).toHaveCount(0);
+  const text = bubble.locator(".assistant-answer");
+  await expect(text).toContainText("Порог тяжёлой депрессии");
+  await expect(text).not.toContainText("Источники:");
+  await expect(page.getByText("Источники:", { exact: true })).toHaveCount(1);
 });
