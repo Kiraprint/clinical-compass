@@ -288,19 +288,38 @@ def _strip_patient_citations(text: str, sent: int) -> str:
     return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
-_MARKER_REPEAT_RE = re.compile(r"(\[\s*(?:П\s*\d{1,3}|\d{1,3})\s*\])(?:\s*\1)+")
+_MARKER_TOKEN_RE = re.compile(r"\[\s*(П\s*)?(\d{1,3})\s*\]")
 
 
 def _collapse_marker_repeats(text: str) -> str:
-    """`[2][2]` и `[П1] [П1]` → один маркер.
+    """`[2][2]`, `[П1] [П1]`, `[П 1][П1]` → один маркер канонического вида.
 
     Модель дублирует ссылку, когда в сниппетах несколько чанков одного
     гайдлайна; в citations это одна запись (`by_guideline`), поэтому в тексте
-    повтор читается как «источник №2, №2». Склеиваем только соседние
-    одинаковые маркеры, порядок разных (`[1][2]`) не трогаем. Пробелы внутри
-    маркера (`[П 1]`) допустимы — модель их иногда ставит.
+    повтор читается как «источник №2, №2». Склеиваются только соседние маркеры
+    одного вида (сниппет/пациент) с одним номером; всё остальное — `[1][2]`,
+    `[1][П1]`, `[1] и [1]` — не трогается. Сравнение идёт по паре
+    (вид, номер), а не по тексту, поэтому `[П 1]` и `[П1]` — один маркер;
+    внутренние пробелы в скобках нормализуются.
     """
-    return _MARKER_REPEAT_RE.sub(r"\1", text)
+    matches = list(_MARKER_TOKEN_RE.finditer(text))
+    if len(matches) < 2:
+        return text
+    pieces: list[str] = []
+    cursor = 0
+    prev_key: tuple[str, str] | None = None
+    for match in matches:
+        gap = text[cursor : match.start()]
+        key = ("p" if match.group(1) else "n", match.group(2))
+        if key == prev_key and not gap.strip():
+            cursor = match.end()  # соседний дубль выкидываем вместе с пробелом
+            continue
+        pieces.append(gap)
+        pieces.append(f"[П{match.group(2)}]" if match.group(1) else f"[{match.group(2)}]")
+        prev_key = key
+        cursor = match.end()
+    pieces.append(text[cursor:])
+    return "".join(pieces)
 
 
 def _finalize_llm_answer(

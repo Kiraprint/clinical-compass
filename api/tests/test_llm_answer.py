@@ -559,3 +559,22 @@ def test_markers_collapse_after_renumbering(monkeypatch):
 
     assert len(answer["citations"]) == 1
     assert answer["answer"] == "Порог 0–4 — нет депрессии [1]."
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("[П 1] [П 1]", "[П1]"),
+        ("[ 2 ][ 2 ]", "[2]"),
+        ("[П 1][П1]", "[П1]"),
+        ("[1][П1]", "[1][П1]"),
+        ("[1][2]", "[1][2]"),
+        ("[1] и [1]", "[1] и [1]"),
+        ("[2024] — год", "[2024] — год"),
+    ],
+)
+def test_marker_repeat_normalization(raw, expected):
+    """Пробелы внутри маркера не мешают склейке, разные виды — не склеиваются."""
+    from app.services.agent import _collapse_marker_repeats
+
+    assert _collapse_marker_repeats(raw) == expected
