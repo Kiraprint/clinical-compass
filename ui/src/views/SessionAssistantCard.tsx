@@ -90,8 +90,6 @@ const POLL_LIMIT_MS = 15 * 60 * 1000;
 // не показан (или закрыт без ответа), и возвращаем кнопку в рабочее состояние.
 const MIC_REQUEST_TIMEOUT_MS = 20_000;
 
-
-
 /** Кодек записи: webm есть не везде (Safari), поэтому первый поддерживаемый. */
 const RECORDER_MIMES = ["audio/webm", "audio/mp4", "audio/ogg"];
 function pickRecorderMime(): string | null {
