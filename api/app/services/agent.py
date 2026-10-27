@@ -788,9 +788,13 @@ class AgentFactory:
                 # Guard карт делает синхронный scrub_for_llm (remote/hybrid
                 # ML-деперсонализация = блокирующий HTTP), поэтому только в
                 # рабочем потоке: в корутине он вешал бы event loop и все
-                # открытые SSE на время скраба каждой карты.
+                # открытые SSE на время скраба каждой карты. abandon_on_cancel
+                # обязателен (как в assistant_chat._invoke_agent): иначе
+                # move_on_after(CC_ASSISTANT_DEADLINE_S) наверху дождётся
+                # зависшего потока и 503 придёт позже контракта; поток
+                # лимитер не держит.
                 patient_contexts = await anyio.to_thread.run_sync(
-                    _llm_patient_contexts, state
+                    _llm_patient_contexts, state, abandon_on_cancel=True
                 )
                 source = (
                     llm_router.compose_answer_stream(

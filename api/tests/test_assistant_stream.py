@@ -324,3 +324,58 @@ def test_patient_guard_scrubs_off_event_loop(monkeypatch):
     # ~60 тиков за 0.6 с скраба: loop не стоял.
     assert ticks >= 10
     assert events[-1]["answer"]["answer_kind"] == "llm"
+
+
+def test_deadline_cancels_hung_scrub_without_waiting(monkeypatch):
+    """move_on_after(дедлайн) срезает зависший скраб карт, а не ждёт поток.
+
+    assistant_chat._stream_agent оборачивает прогон в
+    move_on_after(CC_ASSISTANT_DEADLINE_S). Без abandon_on_cancel=True
+    run_sync дожидается потока: зависший ml_client.mask (до 12 вызовов по
+    2 с connect / 5 с read) даёт 503 позже контракта.
+    """
+    import time
+
+    import anyio
+
+    from app.services import agent as agent_mod
+    from app.services.agent import AgentFactory
+
+    def hung_scrub(query, patient_context, names=None):
+        time.sleep(3.0)
+        return query, dict(patient_context or {}), {}
+
+    monkeypatch.setattr(agent_mod, "scrub_for_llm", hung_scrub)
+    monkeypatch.setattr(settings, "assistant_llm_patient_context", True)
+
+    from compass.agent import RAGChunk
+
+    chunk = RAGChunk(
+        text="PHQ-9: 10–14 умеренная депрессия.",
+        source_title="Гайдлайн",
+        guideline_id="g-1",
+        topic="SCALES",
+        score=0.9,
+    )
+    factory = AgentFactory(client=None)
+    factory._state = lambda query, **kw: {  # type: ignore[method-assign]
+        "query": query,
+        "history": [],
+        "chunks": [chunk],
+        "topic": None,
+        "patient_contexts": [{"patient_id": "p-1", "fio": "Петрова Анна"}],
+        "deadline_at": None,
+    }
+    factory._retrieve = lambda st: {}  # type: ignore[method-assign]
+
+    async def run() -> tuple[bool, float]:
+        started = time.monotonic()
+        with anyio.move_on_after(0.3) as scope:
+            async for _ in factory.stream("PHQ-9?"):
+                pass
+        return scope.cancelled_caught, time.monotonic() - started
+
+    caught, elapsed = anyio.run(run)
+
+    assert caught is True
+    assert elapsed < 2.0
