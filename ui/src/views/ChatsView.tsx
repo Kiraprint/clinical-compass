@@ -7,6 +7,7 @@ import {
   PatientChat,
   PatientChatMessage,
 } from "../api";
+import { chatName, chatRows } from "../chats";
 import AssistantTab from "./AssistantTab";
 
 const SENDER_LABELS: Record<string, string> = {
@@ -106,6 +107,7 @@ export default function ChatsView({
         <PatientChats
           selected={patientId ?? null}
           chats={chats}
+          roster={roster}
           loaded={chatsLoaded}
           onRefresh={onRefreshChats}
           onChatPatched={onChatPatched}
@@ -119,6 +121,7 @@ export default function ChatsView({
 function PatientChats({
   selected,
   chats,
+  roster,
   loaded,
   onRefresh,
   onChatPatched,
@@ -126,6 +129,7 @@ function PatientChats({
 }: {
   selected: string | null;
   chats: PatientChat[];
+  roster: PatientCard[];
   loaded: boolean;
   onRefresh: () => void;
   onChatPatched: (patientId: string, message: PatientChatMessage) => void;
@@ -246,8 +250,8 @@ function PatientChats({
     };
   }, [selected]);
 
-  const active = chats.find((c) => c.patient_id === selected) ?? null;
-  const activeName = active?.fio ?? "Пациент";
+  const rows = chatRows(chats, roster, selected);
+  const activeName = chatName(chats, roster, selected);
 
   const send = async () => {
     // busy: Enter/Ctrl+Enter не должны дублировать сообщение, пока первое в пути.
@@ -301,7 +305,7 @@ function PatientChats({
                 ↻
               </button>
             </div>
-            {chats.map((c) => (
+            {rows.map((c) => (
               <button
                 key={c.patient_id}
                 className={`chat-item${c.patient_id === selected ? " active" : ""}`}
@@ -311,16 +315,24 @@ function PatientChats({
                   setListOpen(false);
                 }}
               >
-                <span className="chat-item-title">{c.fio ?? "Пациент"}</span>
-                <span className="meta">
-                  {SENDER_LABELS[c.last_sender ?? ""] ?? "—"} · {fmtTime(c.last_at)} ·{" "}
-                  {c.message_count} сообщ.
+                <span className="chat-item-title">
+                  {c.fio ??
+                    roster.find((p) => p.patient_id === c.patient_id)?.email ??
+                    "Пациент"}
                 </span>
+                {c.message_count === 0 ? (
+                  <span className="meta">Нет сообщений</span>
+                ) : (
+                  <span className="meta">
+                    {SENDER_LABELS[c.last_sender ?? ""] ?? "—"} · {fmtTime(c.last_at)} ·{" "}
+                    {c.message_count} сообщ.
+                  </span>
+                )}
                 {c.preview && <span className="preview">{c.preview}</span>}
               </button>
             ))}
             {!loaded && <p className="muted small">Загрузка переписок…</p>}
-            {loaded && chats.length === 0 && (
+            {loaded && rows.length === 0 && (
               <p className="muted small">Переписок пока нет.</p>
             )}
           </div>
