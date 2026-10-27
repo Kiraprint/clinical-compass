@@ -20,9 +20,13 @@ const LLM_REASON_TEXT: Record<string, string> = {
 };
 const FRAGMENT_TEXT_LIMIT = 400;
 
-/** Хвост «Источники: …» дублирует блок цитат под ответом — срезаем. */
+/**
+ * Хвост «Источники: …» дублирует блок цитат под ответом — срезаем.
+ * Хвост может быть и на той же строке, что конец ответа (после пробела),
+ * и с новой строки; регистр — как в детерминированном build_rag_answer.
+ */
 function stripSourcesTail(text: string): string {
-  return text.replace(/\s*\n+Источники:[\s\S]*$/, "").trim();
+  return text.replace(/\s+Источники:[\s\S]*$/, "").trim();
 }
 
 function AssistantAnswerBody({ m }: { m: AssistantThreadMessage }) {

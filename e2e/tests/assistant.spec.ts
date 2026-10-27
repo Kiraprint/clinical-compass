@@ -21,7 +21,11 @@ test.describe("ИИ-ассистент врача", () => {
     // Справочный запрос → ответ с цитатами.
     await page.getByLabel("Вопрос").fill("Какой порог тяжести у шкалы PHQ-9?");
     await page.getByRole("button", { name: "Спросить" }).click();
-    await expect(page.getByText("По базе знаний найдено следующее:")).toBeVisible();
+    // С PR-A ответ может прийти двумя видами: ИИ-формулировка или
+    // детерминированные фрагменты с плашкой — оба обязаны нести источники.
+    await expect(
+      page.getByText(/По базе знаний найдено следующее:|ИИ-формулировка недоступна/),
+    ).toBeVisible();
     await expect(
       page.locator(".assistant-sources").getByText("Источники:", { exact: true }),
     ).toBeVisible();
@@ -333,4 +337,77 @@ test("FR-47: Ctrl+Enter в композере отправляет вопрос"
   // Ответ ассистента появляется (текст зависит от LLM/KB, проверяем наличие).
   const answer = page.locator(".bubble", { hasText: "Ассистент" }).last();
   await expect.poll(async () => (await answer.innerText()).trim().length).toBeGreaterThan(10);
+});
+
+test("ответ ИИ: хвост «Источники:» срезается, источники — один раз", async ({ page }) => {
+  // answer_kind=llm: плашки нет, текст модели показывается, но служебный хвост
+  // «Источники: …» не дублирует блок цитат под ответом.
+  const threadId = "e2e-llm-thread";
+  const detail = {
+    id: threadId,
+    title: "Ответ ИИ",
+    patient_ids: [],
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    message_count: 2,
+    messages: [
+      {
+        id: "e2e-llm-q",
+        role: "CLINICIAN",
+        content: "Какой порог тяжести у PHQ-9?",
+        citations: [],
+        topic: null,
+        created_at: new Date().toISOString(),
+      },
+      {
+        id: "e2e-llm-a",
+        role: "ASSISTANT",
+        content:
+          "Порог тяжёлой депрессии по PHQ-9 — 20 баллов и выше [1]. Источники: 1. «Гайд по PHQ-9»",
+        citations: [{ source_title: "Гайд по PHQ-9", guideline_id: "g1", topic: "ШКАЛЫ", score: 0.9 }],
+        topic: "ШКАЛЫ",
+        created_at: new Date().toISOString(),
+        answer_kind: "llm",
+        llm_reason: "ok",
+        fragments: [],
+      },
+    ],
+  };
+
+  await page.route("**/api/v1/assistant/threads", async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [
+          {
+            id: threadId,
+            title: "Ответ ИИ",
+            patient_ids: [],
+            created_at: detail.created_at,
+            updated_at: detail.updated_at,
+            message_count: 2,
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/api/v1/assistant/threads/*", async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(detail) });
+  });
+
+  await login(page, "doc@compass.demo", DEMO_PASSWORD, DEMO_TOTP);
+  await page.getByRole("button", { name: "Чаты" }).click();
+  await page.getByRole("tab", { name: "Ассистент" }).click();
+
+  const bubble = page.locator(".bubble", { hasText: "Ассистент" }).first();
+  // Режим ИИ: плашки и списка фрагментов нет, текст — в <pre>.
+  await expect(bubble.locator(".answer-degraded")).toHaveCount(0);
+  await expect(bubble.locator(".answer-fragments")).toHaveCount(0);
+  const text = bubble.locator(".assistant-answer");
+  await expect(text).toContainText("Порог тяжёлой депрессии");
+  await expect(text).not.toContainText("Источники:");
+  await expect(page.getByText("Источники:", { exact: true })).toHaveCount(1);
 });
