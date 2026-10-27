@@ -429,6 +429,9 @@ def _answer_body(history: list[dict], query: str, chunks: list[dict]) -> dict | 
         # 0.2 — связная формулировка, но без «творчества»: факты и
         # ссылки берутся из сниппетов, повторяемость важна для тестов.
         "temperature": 0.2,
+        # Бюджет обязателен: reasoning-модель иначе тратит его на «размышления»
+        # и возвращает finish_reason=length с пустым content (см. config).
+        "max_tokens": settings.assistant_llm_answer_max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
     }
 
@@ -441,7 +444,9 @@ def _llm_headers() -> dict[str, str]:
     return headers
 
 
-def compose_answer(history: list[dict], query: str, chunks: list[dict]) -> str | None:
+def compose_answer_result(
+    history: list[dict], query: str, chunks: list[dict]
+) -> tuple[str | None, str]:
     """Ответ ассистента по найденным фрагментам и истории диалога (FR-17).
 
     history — предыдущие реплики треда, query — текущий вопрос (оба уже
@@ -450,26 +455,63 @@ def compose_answer(history: list[dict], query: str, chunks: list[dict]) -> str |
     остаётся локальной; запрос «только по карте» (без находок в КБ) до модели
     не доходит и отвечается детерминированным build_rag_answer.
 
-    None = LLM выключен/недоступен/вернул пусто → детерминированный ответ.
-    Проверку ссылок [n] и сборку citations делает вызывающий (services.agent):
-    здесь только текст; границу номеров даёт answer_snippet_window(chunks).
+    Второй элемент пары — причина для UI (`answer_kind`/`llm_reason` в
+    services.agent): ok — текст от модели; disabled — LLM выключен/нет
+    сниппетов; timeout — не уложились в assistant_llm_answer_timeout;
+    http_error — шлюз ответил ошибкой/мусором; empty — модель вернула пустой
+    текст, в том числе finish_reason=length с пустым content (reasoning-модель
+    съела бюджет на «размышления»). Проверку ссылок [n] и сборку citations
+    делает вызывающий: здесь только текст; границу номеров даёт
+    answer_snippet_window(chunks).
     """
     body = _answer_body(history, query, chunks)
     if body is None:
-        return None
+        return None, "disabled"
     try:
         response = _request(body, timeout=settings.assistant_llm_answer_timeout)
-        answer = clean_answer(response["choices"][0]["message"].get("content") or "")
-        if answer is None:
-            logger.warning("assistant LLM вернул пустой ответ — детерминированный ответ")
-        return answer
-    except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError, ValueError, TypeError) as exc:
+    except TimeoutError as exc:
+        logger.warning(
+            "assistant LLM-ответ недоступен (TimeoutError: %s) — детерминированный ответ",
+            exc,
+        )
+        return None, "timeout"
+    except (urllib.error.URLError, json.JSONDecodeError, ValueError, TypeError) as exc:
         logger.warning(
             "assistant LLM-ответ недоступен (%s: %s) — детерминированный ответ",
             type(exc).__name__,
             exc,
         )
-        return None
+        return None, "http_error"
+    try:
+        choice = response["choices"][0]
+        content = choice["message"].get("content") or ""
+        finish_reason = choice.get("finish_reason")
+    except (KeyError, IndexError, TypeError, AttributeError) as exc:
+        logger.warning(
+            "assistant LLM вернул неожиданный формат ответа (%s) — детерминированный ответ",
+            type(exc).__name__,
+        )
+        return None, "http_error"
+    answer = clean_answer(content)
+    if answer is None:
+        logger.warning(
+            "assistant LLM вернул пустой ответ (finish_reason=%s) — детерминированный ответ",
+            finish_reason,
+        )
+        return None, "empty"
+    return answer, "ok"
+
+
+def compose_answer(history: list[dict], query: str, chunks: list[dict]) -> str | None:
+    """Текст ответа модели или None (обёртка над compose_answer_result)."""
+    return compose_answer_result(history, query, chunks)[0]
+
+
+def stream_error_reason(exc: BaseException) -> str:
+    """Причина отказа потока LLM — тот же словарь, что у compose_answer_result."""
+    if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
+        return "timeout"
+    return "http_error"
 
 
 async def compose_answer_stream(

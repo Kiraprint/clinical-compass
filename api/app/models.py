@@ -731,7 +731,10 @@ class AssistantThreadPatient(Base):
 class AssistantMessage(Base):
     """Сообщение треда: вопрос врача или ответ ассистента. Текст — спецкатегория
     ПДн (может упоминать пациента/симптомы) → EncryptedText. citations —
-    публичные источники KB (не ПДн), topic — раздел БЗ для роутинга.
+    публичные источники KB (не ПДн), topic — раздел БЗ для роутинга,
+    answer_meta — признак «ответ ИИ / детерминированные фрагменты» с причиной
+    и самими фрагментами (публичный текст КБ), чтобы thread-detail отдавал тот
+    же контракт, что и свежий ответ.
     """
 
     __tablename__ = "assistant_messages"
@@ -748,6 +751,7 @@ class AssistantMessage(Base):
     content: Mapped[str] = mapped_column(EncryptedText)
     citations: Mapped[list] = mapped_column(JSONB, default=list)
     topic: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    answer_meta: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)
 class EmiasLink(Base):
     """Связка локального пациента с пациентом ЕМИАС (FR-25).

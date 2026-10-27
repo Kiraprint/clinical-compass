@@ -102,6 +102,10 @@ services:
       CC_ASSISTANT_LLM_TIMEOUT: "${CC_ASSISTANT_LLM_TIMEOUT:-10}"
       # Таймаут генерации ответа по сниппетам (FR-17): сбой → детерминированный ответ.
       CC_ASSISTANT_LLM_ANSWER_TIMEOUT: "${CC_ASSISTANT_LLM_ANSWER_TIMEOUT:-25}"
+      # Бюджет генерации ответа. Обязателен для reasoning-моделей (home-stable →
+      # ds/deepseek-v4-flash): enable_thinking=false они игнорируют, тратят
+      # контекст на «размышления» и отдают finish_reason=length с пустым content.
+      CC_ASSISTANT_LLM_ANSWER_MAX_TOKENS: "${CC_ASSISTANT_LLM_ANSWER_MAX_TOKENS:-700}"
       # FR-31: анализ переписки (факты-черновики). Требует и LLM URL выше, и флаг;
       # по умолчанию выключен — ПДн переписки в LLM не уходят (docs/10 R23, docs/17).
       CC_CHAT_INSIGHTS_ENABLED: "${CC_CHAT_INSIGHTS_ENABLED:-false}"

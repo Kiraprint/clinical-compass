@@ -96,6 +96,12 @@ class Settings(BaseSettings):
     # Больше роутера: модель пишет связный текст, а не один tool_call. Таймаут →
     # детерминированный build_rag_answer, не ошибка API.
     assistant_llm_answer_timeout: float = 25.0
+    # CC_ASSISTANT_LLM_ANSWER_MAX_TOKENS: бюджет генерации ответа по сниппетам
+    # (max_tokens). Reasoning-модели (например, home-stable → ds/deepseek-v4-flash)
+    # игнорируют chat_template_kwargs.enable_thinking=false и съедают бюджет
+    # «на размышления»: без явного max_tokens ответ приходит с
+    # finish_reason=length и пустым content. 700 хватает на 3–5 фрагментов.
+    assistant_llm_answer_max_tokens: int = Field(default=700, ge=64)
     # CC_ASSISTANT_LLM_API_KEY: Bearer-токен OpenAI-совместимого шлюза (omniroute).
     # Пусто → заголовок Authorization не отправляется (llama-server без ключа).
     assistant_llm_api_key: str = ""
