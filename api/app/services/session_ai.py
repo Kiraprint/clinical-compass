@@ -662,11 +662,12 @@ def _on_done(session_id: uuid.UUID, lock_conn, task: asyncio.Task) -> None:
 
 
 async def reap_stale(db: AsyncSession) -> int:
-    """Вернуть в `failed` сессии, застрявшие в `transcribing` (docs/18 §4.3).
+    """Закрыть сессии, застрявшие в `transcribing`/`diarizing` (docs/18 §4.3).
 
     Задача живёт в процессе: рестарт/падение воркера оставляет статус навсегда.
     Реапер срабатывает при старте приложения и перед каждым запуском расшифровки;
-    порог — `CC_SESSION_AI_TIMEOUT × 2`, чтобы не тронуть живую длинную запись.
+    порог — `CC_SESSION_AI_TIMEOUT × REAP_GRACE` (сейчас 3: два запроса к
+    сайдкару плюс маски и запись), чтобы не тронуть живую длинную запись.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(
         seconds=settings.session_ai_timeout * REAP_GRACE
@@ -1115,7 +1116,7 @@ async def _pipeline(session_id: uuid.UUID) -> None:
             # Роли по умолчанию: врач переставит их PATCH'ем, когда увидит метки.
             roles, assumed = _default_speaker_roles(diarization, masked)
             _apply_roles(masked, roles)
-            await _save_transcript(
+            saved = await _save_transcript(
                 factory,
                 session_id,
                 audio_id,
@@ -1128,6 +1129,10 @@ async def _pipeline(session_id: uuid.UUID) -> None:
                 roles_assumed=assumed,
                 status="transcribed",
             )
+            # Аудио перезаписали, пока считались спикеры: результат устарел,
+            # автодрафт по нему запускать нельзя.
+            if saved is None:
+                return
         else:
             if diarization and diarization.get("diarized"):
                 log.warning(

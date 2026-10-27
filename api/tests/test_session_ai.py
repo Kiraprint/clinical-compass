@@ -1235,8 +1235,14 @@ def test_audio_replaced_during_diarization_is_not_transcribed(client, monkeypatc
     assert _detail(client, ctx["doctor"], sid)["ai_status"] == "recording"
     gate.set()
 
-    time.sleep(0.5)
-    # Второй этап не должен ни вернуть «расшифровка готова», ни записать артефакт.
-    detail = _detail(client, ctx["doctor"], sid)
-    assert detail["ai_status"] == "recording", detail
-    assert client.get(f"{BASE}/sessions/{sid}/transcript", headers=ctx["doctor"]).status_code == 404
+    # Ждём хвост второго этапа, а не фиксированную паузу: статус не должен
+    # смениться на «готово» ни в один момент, и артефакт не должен появиться.
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        detail = _detail(client, ctx["doctor"], sid)
+        assert detail["ai_status"] == "recording", detail
+        assert (
+            client.get(f"{BASE}/sessions/{sid}/transcript", headers=ctx["doctor"]).status_code
+            == 404
+        )
+        time.sleep(0.05)
