@@ -416,6 +416,14 @@ test("блоки под ответом свёрнуты: фрагменты, к�
   await sources.locator("summary").click();
   await expect(sources.locator("li").first()).toBeVisible();
   await expect(sources).toContainText("Карта пациента: Иванов Иван");
+
+  // Клавиатура: summary — нативная кнопка details, Enter и Space переключают.
+  await sources.locator("summary").press("Enter");
+  await expect(sources).toHaveJSProperty("open", false);
+  await expect(sources.locator("li").first()).toBeHidden();
+  await sources.locator("summary").press(" ");
+  await expect(sources).toHaveJSProperty("open", true);
+  await expect(sources.locator("li").first()).toBeVisible();
 });
 
 test("без цитаты пациента блок называется «Из ответа» и тоже свёрнут", async ({ page }) => {

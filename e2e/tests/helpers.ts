@@ -33,23 +33,24 @@ export function totp(secret: string): string {
   return code;
 }
 
-/** CC_REQUIRE_OTP стенда (GET /auth/config), один запрос на origin за прогон. */
-const requireOtp = new Map<string, Promise<boolean>>();
+/**
+ * CC_REQUIRE_OTP стенда (GET /auth/config). Кэшируем только успешный
+ * «2FA выключен»: транзиентная 500 не залипает на весь прогон — следующий
+ * логин повторит запрос. `null` — конфиг недоступен.
+ */
+const otpDisabled = new Map<string, boolean>();
 
-async function standRequiresOtp(page): Promise<boolean> {
+async function standRequiresOtp(page): Promise<boolean | null> {
   const origin = new URL(page.url()).origin;
-  let pending = requireOtp.get(origin);
-  if (!pending) {
-    pending = page.request
-      .get(`${origin}/api/v1/auth/config`)
-      .then(async (res) =>
-        res.ok() ? Boolean((await res.json()).require_otp) : true,
-      )
-      // Конфиг недоступен — ведём себя как стенд с 2FA (поле есть всегда).
-      .catch(() => true);
-    requireOtp.set(origin, pending);
-  }
-  return pending;
+  if (otpDisabled.get(origin)) return false;
+  const require = await page.request
+    .get(`${origin}/api/v1/auth/config`)
+    .then(async (res) =>
+      res.ok() ? Boolean((await res.json()).require_otp) : null,
+    )
+    .catch(() => null);
+  if (require === false) otpDisabled.set(origin, true);
+  return require;
 }
 
 export async function login(page, email: string, password: string, totpSecret?: string) {
@@ -59,8 +60,20 @@ export async function login(page, email: string, password: string, totpSecret?: 
   await page.getByLabel("Пароль").fill(password);
   // App.tsx рендерит «Код 2FA» по require_otp из /auth/config; на стендах с
   // CC_REQUIRE_OTP=false поля нет — заполнять нечего, код пропускаем.
-  if (totpSecret && (await standRequiresOtp(page))) {
-    await page.getByLabel("Код 2FA").fill(totp(totpSecret));
+  if (totpSecret) {
+    const required = await standRequiresOtp(page);
+    if (required !== false) {
+      // true — 2FA включён; null — конфиг не ответил, поле ждём недолго
+      // (стенд без 2FA его не рендерит, и логин не должен висеть на нём).
+      const field = page.getByLabel("Код 2FA");
+      try {
+        await field.waitFor({ state: "visible", timeout: required ? 10_000 : 3_000 });
+        await field.fill(totp(totpSecret));
+      } catch (e) {
+        // С включённым 2FA отсутствие поля — реальная поломка формы, не глотаем.
+        if (required) throw e;
+      }
+    }
   }
   await page.getByRole("button", { name: "Войти" }).click();
 }
