@@ -38,4 +38,11 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- FR-39: запись приёма через MediaRecorder в WebView (docs/18 §4.3).
+         Capacitor BridgeWebChromeClient сам запрашивает оба разрешения у пользователя. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Android 13+: FCM-пуши не приходят без runtime-разрешения
+         (запрашивает @capacitor/push-notifications). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 </manifest>
