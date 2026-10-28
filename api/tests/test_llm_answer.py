@@ -578,3 +578,23 @@ def test_marker_repeat_normalization(raw, expected):
     from app.services.agent import _collapse_marker_repeats
 
     assert _collapse_marker_repeats(raw) == expected
+
+
+def test_patient_markers_collapse_in_answer(monkeypatch):
+    """`[ П1] [ П1]` в ответе модели: один маркер и одна citation карты.
+
+    Карта проходит `_strip_patient_citations`/`_cited_patients` по тем же
+    пробельным правилам, что и склейка, иначе маркер нормализуется, но
+    перестаёт считаться ссылкой на карту (и ответ уходит в фолбэк).
+    """
+    _enable(monkeypatch)
+    _fake_chat(monkeypatch, "Шкалы PHQ-9 и HADS [ П1] [ П1].")
+
+    answer = _answer(
+        monkeypatch,
+        patient_contexts=[{"patient_id": "p-1", "fio": "[ПАЦИЕНТ]", "age": 34}],
+    )
+
+    assert answer["answer"] == "Шкалы PHQ-9 и HADS [П1]."
+    patients = [c for c in answer["citations"] if c["topic"] == "ПАЦИЕНТ"]
+    assert len(patients) == 1 and patients[0]["guideline_id"] == "patient:p-1"
