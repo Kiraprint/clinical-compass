@@ -191,7 +191,9 @@ def test_citations_capped_and_deduped_by_guideline(monkeypatch):
     ids = [c["guideline_id"] for c in answer["citations"]]
     assert ids == ["who-mhgap-phq9", "who-mhgap-gad7", "triage-green"]
     assert len(ids) == len(set(ids)) <= 3
-    assert answer["answer"] == "Пороги: [1][2][2][3]."
+    # [2] и [3] — два чанка одного гайдлайна: citation одна, значит и маркер
+    # один (`_collapse_marker_repeats`), а не «[2][2]».
+    assert answer["answer"] == "Пороги: [1][2][3]."
 
 
 def test_citation_outside_prompt_window_falls_back(monkeypatch):
@@ -525,3 +527,74 @@ def test_markers_beyond_citation_cap_are_dropped(monkeypatch):
     answer = _answer(monkeypatch, chunks=chunks)
     assert len(answer["citations"]) == 3
     assert answer["answer"] == "А [1] Б [2] В [3] Г Д."
+
+
+def test_duplicate_markers_collapse_to_one(monkeypatch):
+    """`[2][2]` склеивается: citation по гайдлайну одна, повтор читался как «№2, №2»."""
+    _enable(monkeypatch)
+    _fake_chat(monkeypatch, "Порог 10 баллов [1][1], тяжёлая тревога [2].")
+
+    answer = _answer(monkeypatch)
+
+    assert answer["answer"] == "Порог 10 баллов [1], тяжёлая тревога [2]."
+
+
+def test_markers_collapse_after_renumbering(monkeypatch):
+    """[1][2] по двум чанкам одного гайдлайна → одна citation, значит один маркер.
+
+    `_renumber_citations` переводит второй индекс на ту же citation, и в тексте
+    остаётся `[1][1]`; склейка обязана случиться и после перенумерации.
+    """
+    _enable(monkeypatch)
+    twin = RAGChunk(
+        text="PHQ-9: 0–4 нет депрессии.",
+        source_title="Гайдлайн PHQ-9 (копия)",
+        guideline_id=CHUNKS[0].guideline_id,
+        topic="ШКАЛЫ",
+        score=0.6,
+    )
+    _fake_chat(monkeypatch, "Порог 0–4 — нет депрессии [1][2].")
+
+    answer = _answer(monkeypatch, chunks=[CHUNKS[0], twin])
+
+    assert len(answer["citations"]) == 1
+    assert answer["answer"] == "Порог 0–4 — нет депрессии [1]."
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("[П 1] [П 1]", "[П1]"),
+        ("[ 2 ][ 2 ]", "[2]"),
+        ("[П 1][П1]", "[П1]"),
+        ("[1][П1]", "[1][П1]"),
+        ("[1][2]", "[1][2]"),
+        ("[1] и [1]", "[1] и [1]"),
+        ("[2024] — год", "[2024] — год"),
+    ],
+)
+def test_marker_repeat_normalization(raw, expected):
+    """Пробелы внутри маркера не мешают склейке, разные виды — не склеиваются."""
+    from app.services.agent import _collapse_marker_repeats
+
+    assert _collapse_marker_repeats(raw) == expected
+
+
+def test_patient_markers_collapse_in_answer(monkeypatch):
+    """`[ П1 ] [П1 ]` в ответе модели: один маркер и одна citation карты.
+
+    Карта проходит `_strip_patient_citations`/`_cited_patients` по тем же
+    пробельным правилам, что и склейка, иначе маркер нормализуется, но
+    перестаёт считаться ссылкой на карту (и ответ уходит в фолбэк).
+    """
+    _enable(monkeypatch)
+    _fake_chat(monkeypatch, "Шкалы PHQ-9 и HADS [ П1 ] [П1 ].")
+
+    answer = _answer(
+        monkeypatch,
+        patient_contexts=[{"patient_id": "p-1", "fio": "[ПАЦИЕНТ]", "age": 34}],
+    )
+
+    assert answer["answer"] == "Шкалы PHQ-9 и HADS [П1]."
+    patients = [c for c in answer["citations"] if c["topic"] == "ПАЦИЕНТ"]
+    assert len(patients) == 1 and patients[0]["guideline_id"] == "patient:p-1"

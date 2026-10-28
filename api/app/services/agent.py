@@ -133,7 +133,10 @@ MIN_LLM_BUDGET = 1.0
 # Ссылка модели на карту пациента: [П1], [П2]. Отдельно от _CITATION_RE:
 # латиница/цифры сниппетов и кириллица карты не пересекаются, а группа [Пn]
 # в _CITE_GROUP_RE не проходит — перенумерация сниппетов её не тронет.
-_PATIENT_CITE_RE = re.compile(r"\[П\s*(\d{1,3})\]")
+# Пробелы внутри скобок допускаются (`[П 1]`, `[ П1]`, `[П1 ]`) ровно в той же
+# грамматике, что у `_MARKER_TOKEN_RE`: иначе нормализация склеила бы маркер,
+# который затем не пройдёт проверку выдуманных ссылок.
+_PATIENT_CITE_RE = re.compile(r"\[\s*П\s*(\d{1,3})\s*\]")
 # Маска ФИО в карте: единственное значение на оба слоя (промпт и карта).
 PATIENT_MASK = llm_router.PATIENT_MASK
 
@@ -288,6 +291,40 @@ def _strip_patient_citations(text: str, sent: int) -> str:
     return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
+_MARKER_TOKEN_RE = re.compile(r"\[\s*(П\s*)?(\d{1,3})\s*\]")
+
+
+def _collapse_marker_repeats(text: str) -> str:
+    """`[2][2]`, `[П1] [П1]`, `[П 1][П1]` → один маркер канонического вида.
+
+    Модель дублирует ссылку, когда в сниппетах несколько чанков одного
+    гайдлайна; в citations это одна запись (`by_guideline`), поэтому в тексте
+    повтор читается как «источник №2, №2». Склеиваются только соседние маркеры
+    одного вида (сниппет/пациент) с одним номером; всё остальное — `[1][2]`,
+    `[1][П1]`, `[1] и [1]` — не трогается. Сравнение идёт по паре
+    (вид, номер), а не по тексту, поэтому `[П 1]` и `[П1]` — один маркер;
+    внутренние пробелы в скобках нормализуются.
+    """
+    matches = list(_MARKER_TOKEN_RE.finditer(text))
+    if len(matches) < 2:
+        return text
+    pieces: list[str] = []
+    cursor = 0
+    prev_key: tuple[str, str] | None = None
+    for match in matches:
+        gap = text[cursor : match.start()]
+        key = ("p" if match.group(1) else "n", match.group(2))
+        if key == prev_key and not gap.strip():
+            cursor = match.end()  # соседний дубль выкидываем вместе с пробелом
+            continue
+        pieces.append(gap)
+        pieces.append(f"[П{match.group(2)}]" if match.group(1) else f"[{match.group(2)}]")
+        prev_key = key
+        cursor = match.end()
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
 def _finalize_llm_answer(
     text: str | None,
     chunks: list[RAGChunk],
@@ -327,7 +364,7 @@ def _finalize_llm_answer(
         logger.info("LLM-ответ без валидных ссылок — детерминированный ответ")
         return None
     # [Пn] вне реально отправленных карт — выдумка: вырезаем, как [n] вне окна.
-    text = _strip_patient_citations(text, len(sent_cards))
+    text = _collapse_marker_repeats(_strip_patient_citations(text, len(sent_cards)))
     citations = [
         Citation(
             source_title=c.source_title,
@@ -347,7 +384,9 @@ def _finalize_llm_answer(
             )
         )
     return RAGAnswer(
-        answer=_renumber_citations(text, positions),
+        # Склейка после перенумерации: [1][2] по двум чанкам одного гайдлайна
+        # после _renumber_citations дают [1][1] — их тоже надо свернуть.
+        answer=_collapse_marker_repeats(_renumber_citations(text, positions)),
         citations=tuple(citations),
         grounded=True,
     )
