@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import threading
 import time
 
@@ -1246,3 +1247,17 @@ def test_audio_replaced_during_diarization_is_not_transcribed(client, monkeypatc
             == 404
         )
         time.sleep(0.05)
+
+
+def test_nginx_proxy_allows_audio_upload_ceiling():
+    """Прокси не должен отбивать запись 413 раньше API.
+
+    Дефолт nginx — 1 МБ: webm 128 кбит/с даёт ~19 МБ на 20 минут, поэтому
+    загрузка длинного приёма до API просто не доходила (409 AUDIO_MISSING при
+    уже «успешной» отправке из браузера).
+    """
+    root = pathlib.Path(__file__).resolve().parents[2]
+    conf = (root / "ui" / "nginx.conf").read_text(encoding="utf-8")
+    match = re.search(r"client_max_body_size\s+(\d+)m;", conf)
+    assert match, "в ui/nginx.conf нет client_max_body_size — nginx отобьёт запись 413"
+    assert int(match.group(1)) >= settings.session_audio_max_mb
