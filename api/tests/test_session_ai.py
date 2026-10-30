@@ -1258,6 +1258,15 @@ def test_nginx_proxy_allows_audio_upload_ceiling():
     """
     root = pathlib.Path(__file__).resolve().parents[2]
     conf = (root / "ui" / "nginx.conf").read_text(encoding="utf-8")
-    match = re.search(r"client_max_body_size\s+(\d+)m;", conf)
-    assert match, "в ui/nginx.conf нет client_max_body_size — nginx отобьёт запись 413"
-    assert int(match.group(1)) >= settings.session_audio_max_mb
+    block = re.search(r"location\s+/api/\s*\{(.*?)^  \}", conf, re.S | re.M)
+    assert block, "в ui/nginx.conf нет блока location /api/"
+    # Берём последнее значение внутри блока: вложенный location перекрывает
+    # серверный, поэтому проверять серверный лимит бессмысленно.
+    values = re.findall(r"client_max_body_size\s+(\d+)([kKmMgG]?)\s*;", block.group(1))
+    assert values, "в location /api/ ui/nginx.conf нет client_max_body_size — nginx отобьёт запись 413"
+    amount, unit = values[-1]
+    multiplier = {"": 1, "k": 1 << 10, "m": 1 << 20, "g": 1 << 30}[unit.lower()]
+    ceiling = int(amount) * multiplier
+    assert ceiling >= settings.session_audio_max_mb * (1 << 20), (
+        f"потолок прокси {ceiling} Б меньше CC_SESSION_AUDIO_MAX_MB={settings.session_audio_max_mb} МБ"
+    )
